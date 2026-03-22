@@ -28,9 +28,6 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: rivers-darwin-aarch64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            artifact: rivers-darwin-x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: rivers-windows-x86_64
@@ -44,8 +41,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross (Linux aarch64)
+      - name: Install cross
         if: matrix.cross
+        shell: bash
         run: |
           curl -sSfL https://github.com/cross-rs/cross/releases/latest/download/cross-x86_64-unknown-linux-gnu.tar.gz \
             | tar xzf - -C "$HOME/.cargo/bin"
@@ -66,6 +64,7 @@ jobs:
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
+        shell: bash
         env:
           BUILD_TARGET: ${{ matrix.target }}
           ARTIFACT_NAME: ${{ matrix.artifact }}
@@ -88,13 +87,16 @@ jobs:
         shell: pwsh
         run: |
           $VERSION = $env:GITHUB_REF_NAME
-          $DIR = "rivers-${VERSION}-${{ matrix.artifact }}"
-          New-Item -ItemType Directory -Force -Path "$DIR/bin", "$DIR/config"
+          $ARTIFACT = "${{ matrix.artifact }}"
+          $DIR = "rivers-${VERSION}-${ARTIFACT}"
+          New-Item -ItemType Directory -Force -Path "$DIR\bin", "$DIR\config"
+          $TARGET = "${{ matrix.target }}"
           foreach ($bin in @("riversd", "riversctl", "rivers-lockbox", "riverpackage")) {
-            Copy-Item "target/${{ matrix.target }}/release/${bin}.exe" "$DIR/bin/"
+            Copy-Item "target\${TARGET}\release\${bin}.exe" "$DIR\bin\"
           }
-          Copy-Item "packaging/config/riversd.toml" "$DIR/config/"
-          Copy-Item "LICENSE", "README.md" "$DIR/"
+          Copy-Item "packaging\config\riversd.toml" "$DIR\config\"
+          Copy-Item "LICENSE" "$DIR\"
+          Copy-Item "README.md" "$DIR\"
           Compress-Archive -Path "$DIR" -DestinationPath "${DIR}.zip"
           echo "ASSET=${DIR}.zip" >> $env:GITHUB_ENV
 
@@ -117,6 +119,7 @@ jobs:
           name: rivers-linux-x86_64
 
       - name: Build .deb packages (base, lib, plugins)
+        shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           ARCH="amd64"
@@ -127,7 +130,8 @@ jobs:
           mkdir -p "${BASE}/DEBIAN" "${BASE}/usr/bin" "${BASE}/etc/rivers" \
                    "${BASE}/lib/systemd/system" "${BASE}/var/lib/rivers" \
                    "${BASE}/var/log/rivers" "${BASE}/var/lib/rivers/lockbox"
-          cat > "${BASE}/DEBIAN/control" << CTRL
+
+          cat > "${BASE}/DEBIAN/control" <<EOF
           Package: rivers
           Version: ${VERSION}
           Architecture: ${ARCH}
@@ -136,24 +140,26 @@ jobs:
           Recommends: rivers-plugins
           Section: net
           Priority: optional
-          Description: Rivers application server — declarative API framework
-           Rivers is a declarative app-service framework written in Rust.
-          CTRL
+          Description: Rivers application server
+           Declarative app-service framework in Rust.
+          EOF
+          # dpkg requires no leading whitespace in control fields
+          sed -i 's/^          //' "${BASE}/DEBIAN/control"
+
           cp packaging/debian/postinst "${BASE}/DEBIAN/"
           cp packaging/debian/prerm "${BASE}/DEBIAN/"
           cp packaging/debian/conffiles "${BASE}/DEBIAN/"
           chmod 755 "${BASE}/DEBIAN/postinst" "${BASE}/DEBIAN/prerm"
-          cp rivers-*/bin/riversd rivers-*/bin/riversctl \
-             rivers-*/bin/rivers-lockbox rivers-*/bin/riverpackage "${BASE}/usr/bin/"
+          cp rivers-*/bin/* "${BASE}/usr/bin/"
           chmod 755 "${BASE}/usr/bin/"*
           cp packaging/config/riversd.toml "${BASE}/etc/rivers/"
           cp packaging/systemd/riversd.service "${BASE}/lib/systemd/system/"
-          dpkg-deb --build "$BASE"
+          dpkg-deb --build --root-owner-group "$BASE"
 
           # ── rivers-lib ──
           LIB="rivers-lib_${VERSION}_${ARCH}"
           mkdir -p "${LIB}/DEBIAN" "${LIB}/usr/lib/rivers"
-          cat > "${LIB}/DEBIAN/control" << CTRL
+          cat > "${LIB}/DEBIAN/control" <<EOF
           Package: rivers-lib
           Version: ${VERSION}
           Architecture: ${ARCH}
@@ -161,15 +167,14 @@ jobs:
           Section: libs
           Priority: optional
           Description: Rivers shared libraries and engines
-          CTRL
-          # Note: dynamic libs would be collected from a dynamic build
-          # For CI, this is a placeholder — populate from dynamic build artifacts
-          dpkg-deb --build "$LIB"
+          EOF
+          sed -i 's/^          //' "${LIB}/DEBIAN/control"
+          dpkg-deb --build --root-owner-group "$LIB"
 
           # ── rivers-plugins ──
           PLUG="rivers-plugins_${VERSION}_${ARCH}"
           mkdir -p "${PLUG}/DEBIAN" "${PLUG}/usr/lib/rivers/plugins"
-          cat > "${PLUG}/DEBIAN/control" << CTRL
+          cat > "${PLUG}/DEBIAN/control" <<EOF
           Package: rivers-plugins
           Version: ${VERSION}
           Architecture: ${ARCH}
@@ -178,8 +183,9 @@ jobs:
           Section: libs
           Priority: optional
           Description: Rivers datasource driver plugins
-          CTRL
-          dpkg-deb --build "$PLUG"
+          EOF
+          sed -i 's/^          //' "${PLUG}/DEBIAN/control"
+          dpkg-deb --build --root-owner-group "$PLUG"
 
       - name: Upload .deb packages
         uses: actions/upload-artifact@v4
@@ -191,12 +197,11 @@ jobs:
   package-rpm:
     needs: build
     runs-on: ubuntu-latest
-    container: fedora:latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Install rpmbuild
-        run: dnf install -y rpm-build
+        run: sudo apt-get update && sudo apt-get install -y rpm
 
       - name: Download Linux x86_64 build
         uses: actions/download-artifact@v4
@@ -204,27 +209,73 @@ jobs:
           name: rivers-linux-x86_64
 
       - name: Build .rpm packages (base, lib, plugins)
+        shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           tar xzf rivers-*.tar.gz
 
-          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS,BUILDROOT}
-          BR="rpmbuild/BUILDROOT/rivers-${VERSION}-0.x86_64"
-          mkdir -p "${BR}/usr/bin" "${BR}/etc/rivers" \
-                   "${BR}/usr/lib/systemd/system" \
-                   "${BR}/usr/lib64/rivers" "${BR}/usr/lib64/rivers/plugins" \
-                   "${BR}/var/lib/rivers" "${BR}/var/log/rivers" \
-                   "${BR}/var/lib/rivers/lockbox"
-          cp rivers-*/bin/* "${BR}/usr/bin/"
-          chmod 755 "${BR}/usr/bin/"*
-          cp packaging/config/riversd.toml "${BR}/etc/rivers/"
-          cp packaging/systemd/riversd.service "${BR}/usr/lib/systemd/system/"
+          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 
-          cp packaging/rpm/rivers.spec rpmbuild/SPECS/
+          # Create a simple binary-only spec that packages pre-built binaries
+          cat > rpmbuild/SPECS/rivers.spec <<'SPEC'
+          Name:       rivers
+          Version:    %{pkg_version}
+          Release:    0%{?dist}
+          Summary:    Declarative app-service framework in Rust
+          License:    Apache-2.0
+          URL:        https://github.com/pcastone/rivers
+
+          %description
+          Rivers is a declarative app-service framework written in Rust.
+
+          # ── Base package ──
+          %install
+          install -D -m 0755 %{_sourcedir}/riversd       %{buildroot}%{_bindir}/riversd
+          install -D -m 0755 %{_sourcedir}/riversctl      %{buildroot}%{_bindir}/riversctl
+          install -D -m 0755 %{_sourcedir}/rivers-lockbox %{buildroot}%{_bindir}/rivers-lockbox
+          install -D -m 0755 %{_sourcedir}/riverpackage   %{buildroot}%{_bindir}/riverpackage
+          install -D -m 0640 %{_sourcedir}/riversd.toml   %{buildroot}%{_sysconfdir}/rivers/riversd.toml
+          install -D -m 0644 %{_sourcedir}/riversd.service %{buildroot}%{_unitdir}/riversd.service
+          install -d -m 0755 %{buildroot}%{_sharedstatedir}/rivers
+          install -d -m 0755 %{buildroot}%{_localstatedir}/log/rivers
+          install -d -m 0700 %{buildroot}%{_sharedstatedir}/rivers/lockbox
+
+          %files
+          %{_bindir}/riversd
+          %{_bindir}/riversctl
+          %{_bindir}/rivers-lockbox
+          %{_bindir}/riverpackage
+          %config(noreplace) %{_sysconfdir}/rivers/riversd.toml
+          %{_unitdir}/riversd.service
+          %dir %{_sharedstatedir}/rivers
+          %dir %{_localstatedir}/log/rivers
+          %dir %{_sharedstatedir}/rivers/lockbox
+
+          %pre
+          getent group rivers > /dev/null 2>&1 || groupadd -r rivers
+          getent passwd rivers > /dev/null 2>&1 || useradd -r -g rivers -d /var/lib/rivers -s /sbin/nologin rivers
+
+          %post
+          %systemd_post riversd.service
+
+          %preun
+          %systemd_preun riversd.service
+
+          %postun
+          %systemd_postun_with_restart riversd.service
+          SPEC
+          # Strip leading whitespace from spec
+          sed -i 's/^          //' rpmbuild/SPECS/rivers.spec
+
+          # Copy sources
+          mkdir -p rpmbuild/SOURCES
+          cp rivers-*/bin/* rpmbuild/SOURCES/
+          cp packaging/config/riversd.toml rpmbuild/SOURCES/
+          cp packaging/systemd/riversd.service rpmbuild/SOURCES/
+
           rpmbuild --define "_topdir $(pwd)/rpmbuild" \
-                   --define "version ${VERSION}" \
-                   --define "release 0" \
-                   -bb rpmbuild/SPECS/rivers.spec || true
+                   --define "pkg_version ${VERSION}" \
+                   -bb rpmbuild/SPECS/rivers.spec
 
           find rpmbuild/RPMS -name '*.rpm' -exec cp {} . \;
 
@@ -237,6 +288,7 @@ jobs:
   # ── GitHub Release ────────────────────────────────────────────────
   release:
     needs: [build, package-deb, package-rpm]
+    if: always() && needs.build.result != 'failure'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
