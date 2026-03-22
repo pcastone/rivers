@@ -235,7 +235,7 @@ jobs:
           install -D -m 0755 %{_sourcedir}/rivers-lockbox %{buildroot}%{_bindir}/rivers-lockbox
           install -D -m 0755 %{_sourcedir}/riverpackage   %{buildroot}%{_bindir}/riverpackage
           install -D -m 0640 %{_sourcedir}/riversd.toml   %{buildroot}%{_sysconfdir}/rivers/riversd.toml
-          install -D -m 0644 %{_sourcedir}/riversd.service %{buildroot}%{_unitdir}/riversd.service
+          install -D -m 0644 %{_sourcedir}/riversd.service %{buildroot}/usr/lib/systemd/system/riversd.service
           install -d -m 0755 %{buildroot}%{_sharedstatedir}/rivers
           install -d -m 0755 %{buildroot}%{_localstatedir}/log/rivers
           install -d -m 0700 %{buildroot}%{_sharedstatedir}/rivers/lockbox
@@ -246,7 +246,7 @@ jobs:
           %{_bindir}/rivers-lockbox
           %{_bindir}/riverpackage
           %config(noreplace) %{_sysconfdir}/rivers/riversd.toml
-          %{_unitdir}/riversd.service
+          /usr/lib/systemd/system/riversd.service
           %dir %{_sharedstatedir}/rivers
           %dir %{_localstatedir}/log/rivers
           %dir %{_sharedstatedir}/rivers/lockbox
@@ -256,13 +256,15 @@ jobs:
           getent passwd rivers > /dev/null 2>&1 || useradd -r -g rivers -d /var/lib/rivers -s /sbin/nologin rivers
 
           %post
-          %systemd_post riversd.service
+          systemctl daemon-reload 2>/dev/null || true
+          systemctl enable riversd.service 2>/dev/null || true
 
           %preun
-          %systemd_preun riversd.service
+          systemctl stop riversd.service 2>/dev/null || true
+          systemctl disable riversd.service 2>/dev/null || true
 
           %postun
-          %systemd_postun_with_restart riversd.service
+          systemctl daemon-reload 2>/dev/null || true
           SPEC
           # Strip leading whitespace from spec
           sed -i 's/^          //' rpmbuild/SPECS/rivers.spec
