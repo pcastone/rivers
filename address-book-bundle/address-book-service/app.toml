@@ -1,0 +1,169 @@
+# ─────────────────────────────────────────────
+# Datasource
+# ─────────────────────────────────────────────
+
+[data.datasources.contacts]
+name       = "contacts"
+driver     = "faker"
+nopassword = true
+
+[data.datasources.contacts.config]
+locale                = "en_US"
+seed                  = 42
+max_records_per_query = 500
+
+# ─────────────────────────────────────────────
+# DataViews
+# ─────────────────────────────────────────────
+
+[data.dataviews.list_contacts]
+name          = "list_contacts"
+datasource    = "contacts"
+query         = "schemas/contact.schema.json"
+return_schema = "schemas/contact.schema.json"
+
+[data.dataviews.list_contacts.caching]
+ttl_seconds = 60
+
+[[data.dataviews.list_contacts.parameters]]
+name     = "limit"
+type     = "integer"
+required = false
+default  = 20
+
+[[data.dataviews.list_contacts.parameters]]
+name     = "offset"
+type     = "integer"
+required = false
+default  = 0
+
+# ─────────────────────────
+
+[data.dataviews.get_contact]
+name          = "get_contact"
+datasource    = "contacts"
+query         = "schemas/contact.schema.json"
+return_schema = "schemas/contact.schema.json"
+
+[data.dataviews.get_contact.caching]
+ttl_seconds = 300
+
+[[data.dataviews.get_contact.parameters]]
+name     = "id"
+type     = "uuid"
+required = true
+
+# ─────────────────────────
+
+[data.dataviews.search_contacts]
+name          = "search_contacts"
+datasource    = "contacts"
+query         = "schemas/contact.schema.json"
+return_schema = "schemas/contact.schema.json"
+
+[data.dataviews.search_contacts.caching]
+ttl_seconds = 30
+
+[[data.dataviews.search_contacts.parameters]]
+name     = "q"
+type     = "string"
+required = true
+
+[[data.dataviews.search_contacts.parameters]]
+name     = "limit"
+type     = "integer"
+required = false
+default  = 20
+
+# ─────────────────────────
+
+[data.dataviews.contacts_by_city]
+name          = "contacts_by_city"
+datasource    = "contacts"
+query         = "schemas/contact.schema.json"
+return_schema = "schemas/contact.schema.json"
+
+[data.dataviews.contacts_by_city.caching]
+ttl_seconds = 120
+
+[[data.dataviews.contacts_by_city.parameters]]
+name     = "city"
+type     = "string"
+required = true
+
+[[data.dataviews.contacts_by_city.parameters]]
+name     = "limit"
+type     = "integer"
+required = false
+default  = 20
+
+# ─────────────────────────────────────────────
+# Views
+# ─────────────────────────────────────────────
+
+[api.views.list_contacts]
+path            = "contacts"
+method          = "GET"
+view_type       = "Rest"
+response_format = "envelope"
+auth            = "none"
+
+[api.views.list_contacts.handler]
+type     = "dataview"
+dataview = "list_contacts"
+
+[api.views.list_contacts.parameter_mapping.query]
+limit  = "limit"
+offset = "offset"
+
+# ─────────────────────────
+
+[api.views.get_contact]
+path            = "contacts/{id}"
+method          = "GET"
+view_type       = "Rest"
+response_format = "envelope"
+auth            = "none"
+
+[api.views.get_contact.handler]
+type     = "dataview"
+dataview = "get_contact"
+
+[api.views.get_contact.parameter_mapping.path]
+id = "id"
+
+# ─────────────────────────
+
+[api.views.search_contacts]
+path            = "contacts/search"
+method          = "GET"
+view_type       = "Rest"
+response_format = "envelope"
+auth            = "none"
+
+[api.views.search_contacts.handler]
+type     = "dataview"
+dataview = "search_contacts"
+
+[api.views.search_contacts.parameter_mapping.query]
+q     = "q"
+limit = "limit"
+
+# ─────────────────────────
+
+[api.views.contacts_by_city]
+path            = "contacts/city/{city}"
+method          = "GET"
+view_type       = "Rest"
+response_format = "envelope"
+auth            = "none"
+
+[api.views.contacts_by_city.handler]
+type     = "dataview"
+dataview = "contacts_by_city"
+
+[api.views.contacts_by_city.parameter_mapping.path]
+city = "city"
+
+[api.views.contacts_by_city.parameter_mapping.query]
+limit = "limit"

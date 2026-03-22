@@ -1,0 +1,16 @@
+bundleName    = "test-drivers"
+bundleVersion = "1.0.0"
+source        = "local://test-drivers-bundle"
+apps          = [
+    "postgres-service",
+    "mysql-service",
+    "redis-service",
+    "mongo-service",
+    "elastic-service",
+    "kafka-service",
+    "rabbitmq-service",
+    "nats-service",
+    "cassandra-service",
+    "couchdb-service",
+    "ldap-service",
+]

@@ -1,0 +1,7 @@
+appName     = "kafka-service"
+description = "Test Kafka driver — consume from order/inventory/user topics"
+version     = "1.0.0"
+type        = "app-service"
+appId       = "d1a2b3c4-0006-4000-a000-000000000006"
+entryPoint  = "kafka"
+source      = "local://test-drivers-bundle/kafka-service"

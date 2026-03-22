@@ -1,0 +1,6 @@
+[[datasources]]
+name       = "mysql"
+driver     = "mysql"
+x-type     = "mysql"
+nopassword = true
+required   = true

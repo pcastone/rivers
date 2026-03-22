@@ -1,0 +1,19 @@
+{
+  "type": "object",
+  "description": "Address book contact record",
+  "fields": [
+    { "name": "id",         "type": "uuid",     "faker": "datatype.uuid",          "required": true  },
+    { "name": "first_name", "type": "string",   "faker": "name.firstName",         "required": true  },
+    { "name": "last_name",  "type": "string",   "faker": "name.lastName",          "required": true  },
+    { "name": "email",      "type": "email",    "faker": "internet.email",         "required": true  },
+    { "name": "phone",      "type": "phone",    "faker": "phone.number",           "required": false },
+    { "name": "company",    "type": "string",   "faker": "company.name",           "required": false },
+    { "name": "street",     "type": "string",   "faker": "location.streetAddress", "required": false },
+    { "name": "city",       "type": "string",   "faker": "location.city",          "required": false },
+    { "name": "state",      "type": "string",   "faker": "location.state",         "required": false },
+    { "name": "zip",        "type": "string",   "faker": "location.zipCode",       "required": false },
+    { "name": "country",    "type": "string",   "faker": "location.country",       "required": false },
+    { "name": "avatar_url", "type": "string",   "faker": "image.avatar",           "required": false },
+    { "name": "created_at", "type": "datetime", "faker": "date.past",              "required": true  }
+  ]
+}

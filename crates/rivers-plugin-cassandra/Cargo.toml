@@ -1,0 +1,22 @@
+[package]
+name = "rivers-plugin-cassandra"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rivers-driver-sdk = { path = "../rivers-driver-sdk" }
+async-trait = { workspace = true }
+scylla = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

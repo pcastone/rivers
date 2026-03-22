@@ -1,0 +1,70 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Disk images and installers
+*.dmg
+*.iso
+*.pkg
+
+# Build outputs
+target/
+build/
+dist/
+out/
+
+# Dependencies
+node_modules/
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/*.log
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Git worktrees
+.worktrees/
+
+# Claude Code
+.claude/
+CLAUDE.md
+docs/sensitive.md
+
+# Archives
+*.zip
+
+# Release binaries (built artifacts, not source)
+release/*/bin/
+release/*/lib/
+release/*/plugins/
+release/dynamic/
+
+# Scratch / temp work
+scratch/
+data/
+
+# Test keystores and fixtures
+test/
+crates/rivers-core/test
+
+# Internal docs (lab topology, scratch notes)
+docs/arch/test-infrastructure.md
+docs/dreams/
+docs/test-plan.md
+todo/gutter.md

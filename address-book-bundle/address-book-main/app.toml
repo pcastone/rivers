@@ -1,0 +1,9 @@
+# ─────────────────────────────────────────────
+# SPA Config
+# ─────────────────────────────────────────────
+
+[static_files]
+enabled      = true
+root         = "libraries/spa"
+index_file   = "index.html"
+spa_fallback = true

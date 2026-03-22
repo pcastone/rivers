@@ -1,0 +1,263 @@
+# ─────────────────────────────────────────────
+# Datasource — PostgreSQL
+# ─────────────────────────────────────────────
+
+[data.datasources.pg]
+name     = "pg"
+driver   = "postgres"
+host     = "localhost"
+port     = 5432
+database = "rivers"
+username = "rivers"
+nopassword = false
+credentials_source = "lockbox://postgres-test"
+
+
+# ─────────────────────────────────────────────
+# DataViews
+# ─────────────────────────────────────────────
+
+[data.dataviews.list_customers]
+name       = "list_customers"
+datasource = "pg"
+query      = "SELECT id, name, email, city, country FROM customers ORDER BY id LIMIT $1 OFFSET $2"
+
+[[data.dataviews.list_customers.parameters]]
+name     = "limit"
+type     = "integer"
+required = false
+default  = 20
+
+[[data.dataviews.list_customers.parameters]]
+name     = "offset"
+type     = "integer"
+required = false
+default  = 0
+
+[data.dataviews.get_customer]
+name       = "get_customer"
+datasource = "pg"
+query      = "SELECT id, name, email, city, country, created_at FROM customers WHERE id = $1"
+
+[[data.dataviews.get_customer.parameters]]
+name     = "id"
+type     = "integer"
+required = true
+
+[data.dataviews.list_products]
+name       = "list_products"
+datasource = "pg"
+query      = "SELECT id, name, sku, price, category, in_stock FROM products ORDER BY id"
+
+[data.dataviews.products_by_category]
+name       = "products_by_category"
+datasource = "pg"
+query      = "SELECT id, name, sku, price FROM products WHERE category = $1 ORDER BY price"
+
+[[data.dataviews.products_by_category.parameters]]
+name     = "category"
+type     = "string"
+required = true
+
+[data.dataviews.list_orders]
+name       = "list_orders"
+datasource = "pg"
+query      = "SELECT o.id, c.name as customer, p.name as product, o.quantity, o.total, o.status FROM orders o JOIN customers c ON o.customer_id = c.id JOIN products p ON o.product_id = p.id ORDER BY o.id"
+
+[data.dataviews.orders_by_status]
+name       = "orders_by_status"
+datasource = "pg"
+query      = "SELECT o.id, c.name as customer, p.name as product, o.total, o.status FROM orders o JOIN customers c ON o.customer_id = c.id JOIN products p ON o.product_id = p.id WHERE o.status = $1"
+
+[[data.dataviews.orders_by_status.parameters]]
+name     = "status"
+type     = "string"
+required = true
+
+# ─────────────────────────────────────────────
+# Write DataViews
+# ─────────────────────────────────────────────
+
+[data.dataviews.insert_customer]
+name       = "insert_customer"
+datasource = "pg"
+query      = "INSERT INTO customers (city, country, email, name) VALUES ($1, $2, $3, $4) RETURNING id, name, email, city, country"
+
+[[data.dataviews.insert_customer.parameters]]
+name = "city"
+type = "string"
+required = false
+default = "Unknown"
+
+[[data.dataviews.insert_customer.parameters]]
+name = "country"
+type = "string"
+required = false
+default = "US"
+
+[[data.dataviews.insert_customer.parameters]]
+name = "email"
+type = "string"
+required = true
+
+[[data.dataviews.insert_customer.parameters]]
+name = "name"
+type = "string"
+required = true
+
+[data.dataviews.update_customer]
+name       = "update_customer"
+datasource = "pg"
+query      = "UPDATE customers SET city = $1, name = $3 WHERE id = $2"
+
+[[data.dataviews.update_customer.parameters]]
+name = "city"
+type = "string"
+required = true
+
+[[data.dataviews.update_customer.parameters]]
+name = "id"
+type = "integer"
+required = true
+
+[[data.dataviews.update_customer.parameters]]
+name = "name"
+type = "string"
+required = true
+
+[data.dataviews.delete_customer]
+name       = "delete_customer"
+datasource = "pg"
+query      = "DELETE FROM customers WHERE id = $1"
+
+[[data.dataviews.delete_customer.parameters]]
+name = "id"
+type = "integer"
+required = true
+
+# ─────────────────────────────────────────────
+# Views
+# ─────────────────────────────────────────────
+
+[api.views.list_customers]
+path       = "customers"
+method     = "GET"
+view_type  = "Rest"
+auth       = "none"
+
+[api.views.list_customers.handler]
+type     = "dataview"
+dataview = "list_customers"
+
+[api.views.list_customers.parameter_mapping.query]
+limit  = "limit"
+offset = "offset"
+
+[api.views.get_customer]
+path       = "customers/{id}"
+method     = "GET"
+view_type  = "Rest"
+auth       = "none"
+
+[api.views.get_customer.handler]
+type     = "dataview"
+dataview = "get_customer"
+
+[api.views.get_customer.parameter_mapping.path]
+id = "id"
+
+[api.views.list_products]
+path       = "products"
+method     = "GET"
+view_type  = "Rest"
+auth       = "none"
+
+[api.views.list_products.handler]
+type     = "dataview"
+dataview = "list_products"
+
+[api.views.products_by_category]
+path       = "products/category/{category}"
+method     = "GET"
+view_type  = "Rest"
+auth       = "none"
+
+[api.views.products_by_category.handler]
+type     = "dataview"
+dataview = "products_by_category"
+
+[api.views.products_by_category.parameter_mapping.path]
+category = "category"
+
+[api.views.list_orders]
+path       = "orders"
+method     = "GET"
+view_type  = "Rest"
+auth       = "none"
+
+[api.views.list_orders.handler]
+type     = "dataview"
+dataview = "list_orders"
+
+[api.views.orders_by_status]
+path       = "orders/status/{status}"
+method     = "GET"
+view_type  = "Rest"
+auth       = "none"
+
+[api.views.orders_by_status.handler]
+type     = "dataview"
+dataview = "orders_by_status"
+
+[api.views.orders_by_status.parameter_mapping.path]
+status = "status"
+
+# ─────────────────────────────────────────────
+# Write Views
+# ─────────────────────────────────────────────
+
+[api.views.create_customer]
+path       = "customers"
+method     = "POST"
+view_type  = "Rest"
+auth       = "none"
+
+[api.views.create_customer.handler]
+type     = "dataview"
+dataview = "insert_customer"
+
+[api.views.create_customer.parameter_mapping.body]
+name    = "name"
+email   = "email"
+city    = "city"
+country = "country"
+
+[api.views.update_customer]
+path       = "customers/{id}"
+method     = "PUT"
+view_type  = "Rest"
+auth       = "none"
+
+[api.views.update_customer.handler]
+type     = "dataview"
+dataview = "update_customer"
+
+[api.views.update_customer.parameter_mapping.path]
+id = "id"
+
+[api.views.update_customer.parameter_mapping.body]
+name = "name"
+city = "city"
+
+[api.views.delete_customer]
+path       = "customers/{id}"
+method     = "DELETE"
+view_type  = "Rest"
+auth       = "none"
+
+[api.views.delete_customer.handler]
+type     = "dataview"
+dataview = "delete_customer"
+
+[api.views.delete_customer.parameter_mapping.path]
+id = "id"

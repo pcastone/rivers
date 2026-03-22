@@ -1,0 +1,177 @@
+[data.datasources.redis]
+name     = "redis"
+driver   = "redis"
+host     = "localhost"
+port     = 6379
+nopassword = false
+credentials_source = "lockbox://redis-test"
+
+[data.datasources.redis.extra]
+cluster = "true"
+hosts   = "localhost:6379"
+
+
+[data.dataviews.get_session]
+name       = "get_session"
+datasource = "redis"
+query      = "GET session:user:$1"
+
+[[data.dataviews.get_session.parameters]]
+name = "username"
+type = "string"
+required = true
+
+[data.dataviews.get_product]
+name       = "get_product"
+datasource = "redis"
+query      = "HGETALL product:$1"
+
+[[data.dataviews.get_product.parameters]]
+name = "sku"
+type = "string"
+required = true
+
+[data.dataviews.recent_orders]
+name       = "recent_orders"
+datasource = "redis"
+query      = "LRANGE orders:recent 0 -1"
+
+[data.dataviews.categories]
+name       = "categories"
+datasource = "redis"
+query      = "SMEMBERS categories"
+
+[data.dataviews.products_by_price]
+name       = "products_by_price"
+datasource = "redis"
+query      = "ZRANGEBYSCORE products:by_price $1 $2"
+
+[[data.dataviews.products_by_price.parameters]]
+name = "min_price"
+type = "string"
+required = false
+default = "0"
+
+[[data.dataviews.products_by_price.parameters]]
+name = "max_price"
+type = "string"
+required = false
+default = "+inf"
+
+[api.views.get_session]
+path = "session/{username}"
+method = "GET"
+view_type = "Rest"
+auth = "none"
+
+[api.views.get_session.handler]
+type = "dataview"
+dataview = "get_session"
+
+[api.views.get_session.parameter_mapping.path]
+username = "username"
+
+[api.views.get_product]
+path = "product/{sku}"
+method = "GET"
+view_type = "Rest"
+auth = "none"
+
+[api.views.get_product.handler]
+type = "dataview"
+dataview = "get_product"
+
+[api.views.get_product.parameter_mapping.path]
+sku = "sku"
+
+[api.views.recent_orders]
+path = "orders/recent"
+method = "GET"
+view_type = "Rest"
+auth = "none"
+
+[api.views.recent_orders.handler]
+type = "dataview"
+dataview = "recent_orders"
+
+[api.views.categories]
+path = "categories"
+method = "GET"
+view_type = "Rest"
+auth = "none"
+
+[api.views.categories.handler]
+type = "dataview"
+dataview = "categories"
+
+[api.views.products_by_price]
+path = "products/price"
+method = "GET"
+view_type = "Rest"
+auth = "none"
+
+[api.views.products_by_price.handler]
+type = "dataview"
+dataview = "products_by_price"
+
+[api.views.products_by_price.parameter_mapping.query]
+min_price = "min_price"
+max_price = "max_price"
+
+# Write DataViews
+
+[data.dataviews.set_key]
+name       = "set_key"
+datasource = "redis"
+query      = "SET $1 $2"
+
+[[data.dataviews.set_key.parameters]]
+name = "key"
+type = "string"
+required = true
+
+[[data.dataviews.set_key.parameters]]
+name = "value"
+type = "string"
+required = true
+
+[data.dataviews.del_key]
+name       = "del_key"
+datasource = "redis"
+query      = "DEL $1"
+
+[[data.dataviews.del_key.parameters]]
+name = "key"
+type = "string"
+required = true
+
+# Write Views
+
+[api.views.set_key]
+path = "key/{key}"
+method = "PUT"
+view_type = "Rest"
+auth = "none"
+
+[api.views.set_key.handler]
+type = "dataview"
+dataview = "set_key"
+
+[api.views.set_key.parameter_mapping.path]
+key = "key"
+
+[api.views.set_key.parameter_mapping.body]
+value = "value"
+
+[api.views.del_key]
+path = "key/{key}"
+method = "DELETE"
+view_type = "Rest"
+auth = "none"
+
+[api.views.del_key.handler]
+type = "dataview"
+dataview = "del_key"
+
+[api.views.del_key.parameter_mapping.path]
+key = "key"

@@ -1,0 +1,10 @@
+[[datasources]]
+name       = "rabbitmq"
+driver     = "rabbitmq"
+nopassword = true
+required   = true
+
+[datasources.config]
+host     = "localhost"
+port     = 5672
+vhost    = "/"

@@ -1,0 +1,6 @@
+[[datasources]]
+name       = "redis"
+driver     = "redis"
+x-type     = "redis"
+nopassword = true
+required   = true

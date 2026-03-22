@@ -1,0 +1,7 @@
+appName       = "address-book-main"
+description   = "Address book SPA — Svelte frontend with API proxy"
+version       = "1.0.0"
+type          = "app-main"
+appId         = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+entryPoint    = "main"
+source        = "https://github.com/acme/address-book/address-book-main"

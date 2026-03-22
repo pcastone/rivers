@@ -1,0 +1,7 @@
+appName     = "redis-service"
+description = "Test Redis driver — GET, HGETALL, LRANGE, SMEMBERS, ZRANGEBYSCORE"
+version     = "1.0.0"
+type        = "app-service"
+appId       = "d1a2b3c4-0003-4000-a000-000000000003"
+entryPoint  = "redis"
+source      = "local://test-drivers-bundle/redis-service"

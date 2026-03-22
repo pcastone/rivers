@@ -1,0 +1,7 @@
+appName     = "mongo-service"
+description = "Test MongoDB driver — find, aggregate on customers/products/orders"
+version     = "1.0.0"
+type        = "app-service"
+appId       = "d1a2b3c4-0004-4000-a000-000000000004"
+entryPoint  = "mongo"
+source      = "local://test-drivers-bundle/mongo-service"

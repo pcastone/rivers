@@ -1,0 +1,21 @@
+[package]
+name = "rivers-drivers-builtin"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rivers-driver-sdk = { path = "../rivers-driver-sdk" }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio-postgres = { workspace = true }
+mysql_async = { workspace = true }
+rusqlite = { workspace = true }
+redis = { workspace = true }
+async-memcached = { workspace = true }

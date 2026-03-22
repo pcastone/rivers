@@ -1,0 +1,28 @@
+[package]
+name = "riversctl"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "riversctl"
+path = "src/main.rs"
+
+[features]
+default = ["tls", "admin-api"]
+tls = ["rivers-runtime/tls"]
+admin-api = ["reqwest", "ed25519-dalek", "rand", "sha2"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
+rivers-runtime = { path = "../rivers-runtime" }
+
+# Optional: admin API commands (status, deploy, drivers, etc.)
+reqwest = { workspace = true, optional = true }
+ed25519-dalek = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }

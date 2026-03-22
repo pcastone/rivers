@@ -1,0 +1,67 @@
+[data.datasources.kafka]
+name     = "kafka"
+driver   = "kafka"
+nopassword = true
+
+[data.datasources.kafka.config]
+bootstrap_servers = "localhost:9092"
+group_id          = "rivers-test-consumer"
+
+# ─────────────────────────────────────────────
+# MessageConsumer views — Kafka topic consumers
+# These have no HTTP route — they consume from topics.
+# ─────────────────────────────────────────────
+
+[api.views.orders_created]
+view_type = "MessageConsumer"
+auth      = "none"
+
+[api.views.orders_created.handler]
+type = "none"
+
+[api.views.orders_shipped]
+view_type = "MessageConsumer"
+auth      = "none"
+
+[api.views.orders_shipped.handler]
+type = "none"
+
+[api.views.inventory_updated]
+view_type = "MessageConsumer"
+auth      = "none"
+
+[api.views.inventory_updated.handler]
+type = "none"
+
+[api.views.user_events]
+view_type = "MessageConsumer"
+auth      = "none"
+
+[api.views.user_events.handler]
+type = "none"
+
+# ─────────────────────────────────────────────
+# Produce DataViews — publish to Kafka topics
+# ─────────────────────────────────────────────
+
+[data.dataviews.publish_order]
+name       = "publish_order"
+datasource = "kafka"
+query      = "orders.created"
+
+[[data.dataviews.publish_order.parameters]]
+name     = "payload"
+type     = "string"
+required = true
+
+[api.views.orders]
+path     = "orders"
+method   = "POST"
+auth     = "none"
+dataview = "publish_order"
+
+[api.views.orders.handler]
+type = "dataview"
+
+[api.views.orders.parameter_mapping.body]
+payload = "payload"

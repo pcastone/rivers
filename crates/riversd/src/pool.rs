@@ -1,0 +1,676 @@
+//! Per-datasource connection pooling with circuit breaker and health checks.
+//!
+//! Per `rivers-data-layer-spec.md` §5.
+//!
+//! Each datasource gets its own `ConnectionPool`. The pool manages idle
+//! connections, enforces max lifetime, runs periodic health checks, and
+//! integrates a circuit breaker that short-circuits `acquire()` when the
+//! datasource is unresponsive.
+
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use tokio::sync::{Mutex, Notify, RwLock};
+use tracing;
+
+use rivers_runtime::rivers_core::event::Event;
+use rivers_runtime::rivers_core::eventbus::{events, EventBus};
+use rivers_runtime::rivers_driver_sdk::traits::{Connection, ConnectionParams, DatabaseDriver};
+
+// ── PoolError ──────────────────────────────────────────────────────
+
+/// Errors from the connection pool.
+#[derive(Debug, thiserror::Error)]
+pub enum PoolError {
+    #[error("circuit breaker is open for datasource '{datasource}'")]
+    CircuitOpen { datasource: String },
+
+    #[error("connection timeout after {timeout_ms}ms for datasource '{datasource}'")]
+    Timeout { datasource: String, timeout_ms: u64 },
+
+    #[error("pool is draining, no new checkouts for datasource '{datasource}'")]
+    Draining { datasource: String },
+
+    #[error("driver error: {0}")]
+    Driver(#[from] rivers_runtime::rivers_driver_sdk::error::DriverError),
+
+    #[error("pool configuration error: {0}")]
+    Config(String),
+}
+
+// ── PoolConfig ─────────────────────────────────────────────────────
+
+/// Per-datasource pool configuration.
+///
+/// Per spec §5.1.
+#[derive(Debug, Clone)]
+pub struct PoolConfig {
+    /// Maximum number of connections in the pool.
+    pub max_size: usize,
+    /// Minimum number of idle connections to maintain.
+    pub min_idle: usize,
+    /// Timeout for acquiring a connection (ms).
+    pub connection_timeout_ms: u64,
+    /// Idle connections older than this are removed (ms).
+    pub idle_timeout_ms: u64,
+    /// Maximum lifetime of any connection (ms).
+    pub max_lifetime_ms: u64,
+    /// Health check interval (ms).
+    pub health_check_interval_ms: u64,
+    /// Circuit breaker configuration.
+    pub circuit_breaker: CircuitBreakerConfig,
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            max_size: 10,
+            min_idle: 0,
+            connection_timeout_ms: 500,
+            idle_timeout_ms: 30_000,
+            max_lifetime_ms: 300_000,
+            health_check_interval_ms: 5_000,
+            circuit_breaker: CircuitBreakerConfig::default(),
+        }
+    }
+}
+
+/// Validate a pool configuration.
+///
+/// Returns a list of validation errors (empty = valid).
+pub fn validate_pool_config(config: &PoolConfig) -> Vec<String> {
+    let mut errors = Vec::new();
+    if config.max_size == 0 {
+        errors.push("max_size must be at least 1".into());
+    }
+    if config.min_idle > config.max_size {
+        errors.push(format!(
+            "min_idle ({}) must not exceed max_size ({})",
+            config.min_idle, config.max_size
+        ));
+    }
+    if config.connection_timeout_ms == 0 {
+        errors.push("connection_timeout_ms must be greater than 0".into());
+    }
+    if config.idle_timeout_ms == 0 {
+        errors.push("idle_timeout_ms must be greater than 0".into());
+    }
+    if config.max_lifetime_ms == 0 {
+        errors.push("max_lifetime_ms must be greater than 0".into());
+    }
+    if config.health_check_interval_ms == 0 {
+        errors.push("health_check_interval_ms must be greater than 0".into());
+    }
+    errors
+}
+
+// ── CircuitBreakerConfig ───────────────────────────────────────────
+
+/// Circuit breaker configuration.
+///
+/// Per SHAPE-1: windowed failure counting (not consecutive).
+#[derive(Debug, Clone)]
+pub struct CircuitBreakerConfig {
+    /// Whether the circuit breaker is enabled.
+    pub enabled: bool,
+    /// Failures within window before opening the circuit.
+    pub failure_threshold: u32,
+    /// Rolling failure window (ms). Default: 60_000.
+    pub window_ms: u64,
+    /// Time in OPEN state before attempting HALF_OPEN (ms).
+    pub open_timeout_ms: u64,
+    /// Maximum trial calls allowed in HALF_OPEN state.
+    pub half_open_max_trials: u32,
+}
+
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            failure_threshold: 5,
+            window_ms: 60_000,
+            open_timeout_ms: 30_000,
+            half_open_max_trials: 1,
+        }
+    }
+}
+
+// ── CircuitBreaker ─────────────────────────────────────────────────
+
+/// Circuit breaker state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircuitState {
+    Closed,
+    Open,
+    HalfOpen,
+}
+
+/// Circuit breaker state machine with rolling window failure counting.
+///
+/// Per SHAPE-1:
+/// - CLOSED → (failure_threshold failures within window_ms) → OPEN
+/// - OPEN → (open_timeout_ms elapsed) → HALF_OPEN
+/// - HALF_OPEN → (trial succeeds) → CLOSED
+/// - HALF_OPEN → (trial fails) → OPEN
+pub struct CircuitBreaker {
+    config: CircuitBreakerConfig,
+    state: CircuitState,
+    /// Rolling window of failure timestamps.
+    failure_times: VecDeque<Instant>,
+    last_failure_time: Option<Instant>,
+    half_open_trials: u32,
+}
+
+impl CircuitBreaker {
+    pub fn new(config: CircuitBreakerConfig) -> Self {
+        Self {
+            config,
+            state: CircuitState::Closed,
+            failure_times: VecDeque::new(),
+            last_failure_time: None,
+            half_open_trials: 0,
+        }
+    }
+
+    /// Evict failure timestamps outside the rolling window.
+    fn evict_expired(&mut self) {
+        let window = Duration::from_millis(self.config.window_ms);
+        let now = Instant::now();
+        while let Some(&front) = self.failure_times.front() {
+            if now.duration_since(front) >= window {
+                self.failure_times.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Check if a request is allowed through the circuit breaker.
+    pub fn allow_request(&mut self) -> bool {
+        if !self.config.enabled {
+            return true;
+        }
+
+        match self.state {
+            CircuitState::Closed => true,
+            CircuitState::Open => {
+                if let Some(last_failure) = self.last_failure_time {
+                    if last_failure.elapsed()
+                        >= Duration::from_millis(self.config.open_timeout_ms)
+                    {
+                        self.state = CircuitState::HalfOpen;
+                        self.half_open_trials = 0;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            CircuitState::HalfOpen => {
+                self.half_open_trials < self.config.half_open_max_trials
+            }
+        }
+    }
+
+    /// Record a successful operation.
+    pub fn record_success(&mut self) {
+        if !self.config.enabled {
+            return;
+        }
+
+        match self.state {
+            CircuitState::HalfOpen => {
+                self.state = CircuitState::Closed;
+                self.failure_times.clear();
+                self.half_open_trials = 0;
+            }
+            CircuitState::Closed => {
+                // Success doesn't clear window — only expiry does
+            }
+            CircuitState::Open => {
+                self.failure_times.clear();
+            }
+        }
+    }
+
+    /// Record a failed operation. Returns `true` if the circuit just opened.
+    pub fn record_failure(&mut self) -> bool {
+        if !self.config.enabled {
+            return false;
+        }
+
+        let now = Instant::now();
+        self.last_failure_time = Some(now);
+
+        match self.state {
+            CircuitState::Closed => {
+                self.failure_times.push_back(now);
+                self.evict_expired();
+                if self.failure_times.len() >= self.config.failure_threshold as usize {
+                    self.state = CircuitState::Open;
+                    return true;
+                }
+                false
+            }
+            CircuitState::HalfOpen => {
+                self.half_open_trials += 1;
+                self.state = CircuitState::Open;
+                true
+            }
+            CircuitState::Open => false,
+        }
+    }
+
+    /// Get the current state.
+    pub fn state(&self) -> CircuitState {
+        self.state
+    }
+
+    /// Get the number of failures within the current window.
+    pub fn failures_in_window(&mut self) -> u32 {
+        self.evict_expired();
+        self.failure_times.len() as u32
+    }
+}
+
+// ── PoolSnapshot ───────────────────────────────────────────────────
+
+/// Health snapshot for a connection pool.
+///
+/// Per spec §5.4 — accessible via admin `/status` endpoint.
+#[derive(Debug, Clone)]
+pub struct PoolSnapshot {
+    pub datasource_id: String,
+    pub active_connections: usize,
+    pub idle_connections: usize,
+    pub total_connections: usize,
+    pub checkout_count: u64,
+    pub avg_wait_ms: u64,
+    pub max_size: usize,
+    pub min_idle: usize,
+}
+
+// ── PooledConnection ───────────────────────────────────────────────
+
+/// A connection with metadata for pool management.
+struct PooledConnection {
+    conn: Box<dyn Connection>,
+    created_at: Instant,
+    last_used: Instant,
+}
+
+// ── ConnectionPool ─────────────────────────────────────────────────
+
+/// Per-datasource connection pool.
+///
+/// Per spec §5. Manages idle connections, enforces max lifetime and idle
+/// timeout, integrates circuit breaker, and supports health checks.
+pub struct ConnectionPool {
+    datasource_id: String,
+    config: PoolConfig,
+    driver: Arc<dyn DatabaseDriver>,
+    params: ConnectionParams,
+    idle: Mutex<VecDeque<PooledConnection>>,
+    active_count: AtomicU64,
+    checkout_count: AtomicU64,
+    total_wait_ms: AtomicU64,
+    circuit_breaker: Mutex<CircuitBreaker>,
+    event_bus: Arc<EventBus>,
+    draining: AtomicBool,
+    notify: Notify,
+}
+
+impl ConnectionPool {
+    /// Create a new connection pool.
+    pub fn new(
+        datasource_id: impl Into<String>,
+        config: PoolConfig,
+        driver: Arc<dyn DatabaseDriver>,
+        params: ConnectionParams,
+        event_bus: Arc<EventBus>,
+    ) -> Self {
+        let cb_config = config.circuit_breaker.clone();
+        Self {
+            datasource_id: datasource_id.into(),
+            config,
+            driver,
+            params,
+            idle: Mutex::new(VecDeque::new()),
+            active_count: AtomicU64::new(0),
+            checkout_count: AtomicU64::new(0),
+            total_wait_ms: AtomicU64::new(0),
+            circuit_breaker: Mutex::new(CircuitBreaker::new(cb_config)),
+            event_bus,
+            draining: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+
+    /// Acquire a connection from the pool.
+    ///
+    /// 1. Check circuit breaker
+    /// 2. Try to get an idle connection (evicting expired ones)
+    /// 3. If none available and under max_size, create a new one
+    /// 4. If at max_size, wait up to connection_timeout_ms
+    pub async fn acquire(&self) -> Result<Box<dyn Connection>, PoolError> {
+        if self.draining.load(Ordering::Relaxed) {
+            return Err(PoolError::Draining {
+                datasource: self.datasource_id.clone(),
+            });
+        }
+
+        // Check circuit breaker
+        {
+            let mut cb = self.circuit_breaker.lock().await;
+            if !cb.allow_request() {
+                return Err(PoolError::CircuitOpen {
+                    datasource: self.datasource_id.clone(),
+                });
+            }
+        }
+
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(self.config.connection_timeout_ms);
+
+        loop {
+            // Try to get an idle connection
+            if let Some(conn) = self.try_get_idle().await {
+                let wait_ms = start.elapsed().as_millis() as u64;
+                self.checkout_count.fetch_add(1, Ordering::Relaxed);
+                self.total_wait_ms.fetch_add(wait_ms, Ordering::Relaxed);
+                self.active_count.fetch_add(1, Ordering::Relaxed);
+
+                let mut cb = self.circuit_breaker.lock().await;
+                cb.record_success();
+                return Ok(conn);
+            }
+
+            // Try to create a new connection if under max_size
+            let total = self.active_count.load(Ordering::Relaxed) as usize
+                + self.idle.lock().await.len();
+            if total < self.config.max_size {
+                match self.create_connection().await {
+                    Ok(conn) => {
+                        let wait_ms = start.elapsed().as_millis() as u64;
+                        self.checkout_count.fetch_add(1, Ordering::Relaxed);
+                        self.total_wait_ms.fetch_add(wait_ms, Ordering::Relaxed);
+                        self.active_count.fetch_add(1, Ordering::Relaxed);
+
+                        let mut cb = self.circuit_breaker.lock().await;
+                        cb.record_success();
+                        return Ok(conn);
+                    }
+                    Err(e) => {
+                        let mut cb = self.circuit_breaker.lock().await;
+                        let opened = cb.record_failure();
+                        if opened {
+                            let event = Event::new(
+                                events::DATASOURCE_CIRCUIT_OPENED,
+                                serde_json::json!({
+                                    "datasource": self.datasource_id,
+                                }),
+                            );
+                            let _ = self.event_bus.publish(&event).await;
+                        }
+                        return Err(PoolError::Driver(e));
+                    }
+                }
+            }
+
+            // At max_size — wait for a connection to be released
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(PoolError::Timeout {
+                    datasource: self.datasource_id.clone(),
+                    timeout_ms: self.config.connection_timeout_ms,
+                });
+            }
+
+            // Wait for notification or timeout
+            tokio::select! {
+                _ = self.notify.notified() => {
+                    // A connection was released — loop back to try again
+                }
+                _ = tokio::time::sleep(remaining) => {
+                    return Err(PoolError::Timeout {
+                        datasource: self.datasource_id.clone(),
+                        timeout_ms: self.config.connection_timeout_ms,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Release a connection back to the pool.
+    ///
+    /// If the connection has exceeded max_lifetime, it is dropped instead.
+    pub async fn release(&self, conn: Box<dyn Connection>, created_at: Option<Instant>) {
+        self.active_count.fetch_sub(1, Ordering::Relaxed);
+
+        if self.draining.load(Ordering::Relaxed) {
+            // Drop the connection during drain
+            self.notify.notify_waiters();
+            return;
+        }
+
+        let pooled = PooledConnection {
+            conn,
+            created_at: created_at.unwrap_or_else(Instant::now),
+            last_used: Instant::now(),
+        };
+
+        let mut idle = self.idle.lock().await;
+        idle.push_back(pooled);
+
+        // Notify waiters that a connection is available
+        drop(idle);
+        self.notify.notify_one();
+    }
+
+    /// Try to get a valid idle connection, evicting expired ones.
+    async fn try_get_idle(&self) -> Option<Box<dyn Connection>> {
+        let mut idle = self.idle.lock().await;
+        let now = Instant::now();
+
+        while let Some(pooled) = idle.pop_front() {
+            // Check max lifetime
+            if now.duration_since(pooled.created_at)
+                >= Duration::from_millis(self.config.max_lifetime_ms)
+            {
+                continue; // drop expired connection
+            }
+            // Check idle timeout
+            if now.duration_since(pooled.last_used)
+                >= Duration::from_millis(self.config.idle_timeout_ms)
+            {
+                continue; // drop idle-timed-out connection
+            }
+            return Some(pooled.conn);
+        }
+        None
+    }
+
+    /// Create a new connection via the driver.
+    async fn create_connection(
+        &self,
+    ) -> Result<Box<dyn Connection>, rivers_runtime::rivers_driver_sdk::error::DriverError> {
+        self.driver.connect(&self.params).await
+    }
+
+    /// Get a snapshot of pool health.
+    pub async fn snapshot(&self) -> PoolSnapshot {
+        let idle_count = self.idle.lock().await.len();
+        let active = self.active_count.load(Ordering::Relaxed) as usize;
+        let checkouts = self.checkout_count.load(Ordering::Relaxed);
+        let total_wait = self.total_wait_ms.load(Ordering::Relaxed);
+
+        PoolSnapshot {
+            datasource_id: self.datasource_id.clone(),
+            active_connections: active,
+            idle_connections: idle_count,
+            total_connections: active + idle_count,
+            checkout_count: checkouts,
+            avg_wait_ms: if checkouts > 0 {
+                total_wait / checkouts
+            } else {
+                0
+            },
+            max_size: self.config.max_size,
+            min_idle: self.config.min_idle,
+        }
+    }
+
+    /// Run health checks on idle connections.
+    ///
+    /// Pings each idle connection; removes those that fail.
+    /// Emits DatasourceHealthCheckFailed if all idle connections fail.
+    pub async fn health_check(&self) {
+        let mut idle = self.idle.lock().await;
+        let mut healthy = VecDeque::new();
+        let mut failures = 0usize;
+        let total = idle.len();
+
+        while let Some(mut pooled) = idle.pop_front() {
+            match pooled.conn.ping().await {
+                Ok(()) => {
+                    pooled.last_used = Instant::now();
+                    healthy.push_back(pooled);
+                }
+                Err(e) => {
+                    failures += 1;
+                    tracing::warn!(
+                        datasource = %self.datasource_id,
+                        error = %e,
+                        "health check failed, removing connection"
+                    );
+                }
+            }
+        }
+
+        *idle = healthy;
+
+        if failures > 0 && total > 0 && failures == total {
+            drop(idle);
+            let event = Event::new(
+                events::DATASOURCE_HEALTH_CHECK_FAILED,
+                serde_json::json!({
+                    "datasource": self.datasource_id,
+                    "failed": failures,
+                }),
+            );
+            let _ = self.event_bus.publish(&event).await;
+        }
+    }
+
+    /// Start draining the pool — no new checkouts, active connections
+    /// complete their current operations.
+    pub fn start_drain(&self) {
+        self.draining.store(true, Ordering::Relaxed);
+        self.notify.notify_waiters();
+    }
+
+    /// Check if the pool is fully drained (no active connections).
+    pub fn is_drained(&self) -> bool {
+        self.draining.load(Ordering::Relaxed)
+            && self.active_count.load(Ordering::Relaxed) == 0
+    }
+
+    /// Drain the pool, dropping all idle connections.
+    pub async fn drain(&self) {
+        self.start_drain();
+        let mut idle = self.idle.lock().await;
+        idle.clear();
+    }
+
+    /// Get the datasource ID.
+    pub fn datasource_id(&self) -> &str {
+        &self.datasource_id
+    }
+
+    /// Get the pool config.
+    pub fn config(&self) -> &PoolConfig {
+        &self.config
+    }
+}
+
+// ── Health check task ──────────────────────────────────────────────
+
+/// Spawn a background task that runs health checks at the configured interval.
+///
+/// Returns a `JoinHandle` that can be aborted on shutdown.
+pub fn spawn_health_check_task(
+    pool: Arc<ConnectionPool>,
+) -> tokio::task::JoinHandle<()> {
+    let interval_ms = pool.config().health_check_interval_ms;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+        loop {
+            interval.tick().await;
+            if pool.draining.load(Ordering::Relaxed) {
+                return;
+            }
+            pool.health_check().await;
+        }
+    })
+}
+
+// ── Pool Manager ───────────────────────────────────────────────────
+
+/// Manages all connection pools for all datasources.
+///
+/// Per spec §5.3 — each datasource has its own pool.
+pub struct PoolManager {
+    pools: RwLock<Vec<Arc<ConnectionPool>>>,
+}
+
+impl PoolManager {
+    /// Create a new empty pool manager.
+    pub fn new() -> Self {
+        Self {
+            pools: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Add a pool to the manager.
+    pub async fn add_pool(&self, pool: Arc<ConnectionPool>) {
+        let mut pools = self.pools.write().await;
+        pools.push(pool);
+    }
+
+    /// Get a pool by datasource ID.
+    pub async fn get_pool(&self, datasource_id: &str) -> Option<Arc<ConnectionPool>> {
+        let pools = self.pools.read().await;
+        pools
+            .iter()
+            .find(|p| p.datasource_id() == datasource_id)
+            .cloned()
+    }
+
+    /// Get snapshots of all pools.
+    pub async fn snapshots(&self) -> Vec<PoolSnapshot> {
+        let pools = self.pools.read().await;
+        let mut snapshots = Vec::with_capacity(pools.len());
+        for pool in pools.iter() {
+            snapshots.push(pool.snapshot().await);
+        }
+        snapshots
+    }
+
+    /// Drain all pools on shutdown.
+    pub async fn drain_all(&self) {
+        let pools = self.pools.read().await;
+        for pool in pools.iter() {
+            pool.drain().await;
+        }
+    }
+}
+
+impl Default for PoolManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}

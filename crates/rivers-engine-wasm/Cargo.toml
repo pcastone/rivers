@@ -1,0 +1,14 @@
+[package]
+name = "rivers-engine-wasm"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rivers-engine-sdk = { path = "../rivers-engine-sdk" }
+wasmtime = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,16 @@
+[package]
+name = "rivers-plugin-kafka"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+rskafka = { workspace = true }
+rivers-driver-sdk = { path = "../rivers-driver-sdk" }

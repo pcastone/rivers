@@ -1,0 +1,9 @@
+[[datasources]]
+name       = "nats"
+driver     = "nats"
+nopassword = true
+required   = true
+
+[datasources.config]
+host = "localhost"
+port = 4222

@@ -1,0 +1,69 @@
+[data.dataviews.search_users]
+name       = "search_users"
+datasource = "ldap"
+query      = "dc=rivers,dc=test sub (objectClass=*)"
+
+[data.dataviews.add_user]
+name       = "add_user"
+datasource = "ldap"
+operation  = "add"
+
+[[data.dataviews.add_user.parameters]]
+name     = "dn"
+type     = "string"
+required = true
+
+[[data.dataviews.add_user.parameters]]
+name     = "cn"
+type     = "string"
+required = true
+
+[[data.dataviews.add_user.parameters]]
+name     = "sn"
+type     = "string"
+required = true
+
+[data.dataviews.delete_user]
+name       = "delete_user"
+datasource = "ldap"
+operation  = "delete"
+
+[[data.dataviews.delete_user.parameters]]
+name     = "dn"
+type     = "string"
+required = true
+
+[api.views.users]
+path     = "users"
+method   = "GET"
+auth     = "none"
+dataview = "search_users"
+
+[api.views.users.handler]
+type = "dataview"
+
+[api.views.create_user]
+path     = "users"
+method   = "POST"
+auth     = "none"
+dataview = "add_user"
+
+[api.views.create_user.handler]
+type = "dataview"
+
+[api.views.create_user.parameter_mapping.body]
+dn = "dn"
+cn = "cn"
+sn = "sn"
+
+[api.views.remove_user]
+path     = "users/{dn}"
+method   = "DELETE"
+auth     = "none"
+dataview = "delete_user"
+
+[api.views.remove_user.handler]
+type = "dataview"
+
+[api.views.remove_user.parameter_mapping.path]
+dn = "dn"

@@ -1,0 +1,6 @@
+[[datasources]]
+name       = "kafka"
+driver     = "kafka"
+x-type     = "kafka"
+nopassword = true
+required   = true

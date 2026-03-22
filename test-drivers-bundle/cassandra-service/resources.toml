@@ -1,0 +1,6 @@
+[[datasources]]
+name       = "cassandra"
+driver     = "cassandra"
+x-type     = "cassandra"
+nopassword = true
+required   = true

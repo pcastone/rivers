@@ -1,0 +1,184 @@
+[data.datasources.couchdb]
+name     = "couchdb"
+driver   = "couchdb"
+host     = "localhost"
+port     = 5984
+database = "customers"
+username = "rivers"
+nopassword = false
+credentials_source = "lockbox://couchdb-test"
+
+
+# ─────────────────────────────────────────────
+# DataViews
+# ─────────────────────────────────────────────
+
+[data.dataviews.all_customers]
+name       = "all_customers"
+datasource = "couchdb"
+query      = '{"operation":"find","selector": {}}'
+
+[data.dataviews.customers_by_city]
+name       = "customers_by_city"
+datasource = "couchdb"
+query      = '{"operation":"find","selector": {"city": "$1"}}'
+
+[[data.dataviews.customers_by_city.parameters]]
+name = "city"
+type = "string"
+required = true
+
+[data.dataviews.get_customer]
+name       = "get_customer"
+datasource = "couchdb"
+query      = '{"operation":"get"}'
+
+[[data.dataviews.get_customer.parameters]]
+name = "id"
+type = "string"
+required = true
+
+[data.dataviews.customers_by_city_view]
+name       = "customers_by_city_view"
+datasource = "couchdb"
+query      = "by_city/city"
+
+# ─────────────────────────────────────────────
+# Views
+# ─────────────────────────────────────────────
+
+[api.views.all_customers]
+path       = "customers"
+method     = "GET"
+view_type  = "Rest"
+auth       = "none"
+
+[api.views.all_customers.handler]
+type     = "dataview"
+dataview = "all_customers"
+
+[api.views.customers_by_city]
+path       = "customers/city/{city}"
+method     = "GET"
+view_type  = "Rest"
+auth       = "none"
+
+[api.views.customers_by_city.handler]
+type     = "dataview"
+dataview = "customers_by_city"
+
+[api.views.customers_by_city.parameter_mapping.path]
+city = "city"
+
+[api.views.get_customer]
+path       = "customers/{id}"
+method     = "GET"
+view_type  = "Rest"
+auth       = "none"
+
+[api.views.get_customer.handler]
+type     = "dataview"
+dataview = "get_customer"
+
+[api.views.get_customer.parameter_mapping.path]
+id = "id"
+
+# Write DataViews
+
+[data.dataviews.insert_customer]
+name       = "insert_customer"
+datasource = "couchdb"
+query      = '{"operation":"insert"}'
+
+[[data.dataviews.insert_customer.parameters]]
+name = "name"
+type = "string"
+required = true
+
+[[data.dataviews.insert_customer.parameters]]
+name = "email"
+type = "string"
+required = true
+
+[[data.dataviews.insert_customer.parameters]]
+name = "city"
+type = "string"
+required = false
+default = "Unknown"
+
+[data.dataviews.update_customer]
+name       = "update_customer"
+datasource = "couchdb"
+query      = '{"operation":"update"}'
+
+[[data.dataviews.update_customer.parameters]]
+name = "id"
+type = "string"
+required = true
+
+[[data.dataviews.update_customer.parameters]]
+name = "name"
+type = "string"
+required = true
+
+[[data.dataviews.update_customer.parameters]]
+name = "city"
+type = "string"
+required = true
+
+[data.dataviews.delete_customer]
+name       = "delete_customer"
+datasource = "couchdb"
+query      = '{"operation":"delete"}'
+
+[[data.dataviews.delete_customer.parameters]]
+name = "id"
+type = "string"
+required = true
+
+# Write Views
+
+[api.views.create_customer]
+path       = "customers"
+method     = "POST"
+view_type  = "Rest"
+auth       = "none"
+
+[api.views.create_customer.handler]
+type     = "dataview"
+dataview = "insert_customer"
+
+[api.views.create_customer.parameter_mapping.body]
+name  = "name"
+email = "email"
+city  = "city"
+
+[api.views.update_customer]
+path       = "customers/{id}"
+method     = "PUT"
+view_type  = "Rest"
+auth       = "none"
+
+[api.views.update_customer.handler]
+type     = "dataview"
+dataview = "update_customer"
+
+[api.views.update_customer.parameter_mapping.path]
+id = "id"
+
+[api.views.update_customer.parameter_mapping.body]
+name = "name"
+city = "city"
+
+[api.views.delete_customer]
+path       = "customers/{id}"
+method     = "DELETE"
+view_type  = "Rest"
+auth       = "none"
+
+[api.views.delete_customer.handler]
+type     = "dataview"
+dataview = "delete_customer"
+
+[api.views.delete_customer.parameter_mapping.path]
+id = "id"

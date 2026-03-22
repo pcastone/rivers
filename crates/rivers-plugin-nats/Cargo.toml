@@ -1,0 +1,18 @@
+[package]
+name = "rivers-plugin-nats"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+async-nats = { workspace = true }
+bytes = { workspace = true }
+futures-lite = { workspace = true }
+rivers-driver-sdk = { path = "../rivers-driver-sdk" }

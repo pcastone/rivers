@@ -1,0 +1,6 @@
+[[datasources]]
+name       = "es"
+driver     = "elasticsearch"
+x-type     = "elasticsearch"
+nopassword = true
+required   = true

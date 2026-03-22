@@ -1,0 +1,7 @@
+appName       = "address-book-service"
+description   = "Address book REST API — contact management service"
+version       = "1.0.0"
+type          = "app-service"
+appId         = "c7a3e1f0-8b2d-4d6e-9f1a-3c5b7d9e2f4a"
+entryPoint    = "service"
+source        = "https://github.com/acme/address-book/address-book-service"

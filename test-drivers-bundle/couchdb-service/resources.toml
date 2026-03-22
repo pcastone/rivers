@@ -1,0 +1,6 @@
+[[datasources]]
+name       = "couchdb"
+driver     = "couchdb"
+x-type     = "couchdb"
+nopassword = true
+required   = true

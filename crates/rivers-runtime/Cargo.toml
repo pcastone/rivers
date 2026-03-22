@@ -1,0 +1,39 @@
+[package]
+name = "rivers-runtime"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+# Default: rlib for static monolithic builds.
+# The Justfile `build-dynamic` recipe temporarily switches this to ["dylib"]
+# to produce a shared library (librivers_runtime.dylib/.so) that thin
+# binaries and cdylib engines/plugins link against.
+crate-type = ["rlib"]
+
+[features]
+default = []
+drivers = ["rivers-core/drivers"]
+storage-backends = ["rivers-core/storage-backends"]
+lockbox = ["rivers-core/lockbox"]
+tls = ["rivers-core/tls"]
+full = ["drivers", "storage-backends", "lockbox", "tls"]
+
+[dependencies]
+rivers-core = { path = "../rivers-core", default-features = false }
+rivers-core-config = { path = "../rivers-core-config" }
+rivers-driver-sdk = { path = "../rivers-driver-sdk" }
+rivers-engine-sdk = { path = "../rivers-engine-sdk" }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+schemars = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

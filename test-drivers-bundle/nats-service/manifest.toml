@@ -1,0 +1,4 @@
+appName    = "nats-service"
+type       = "service"
+appId      = "d1a2b3c4-0010-4a5b-8c7d-9e0f1a2b3c4d"
+entryPoint = "nats"

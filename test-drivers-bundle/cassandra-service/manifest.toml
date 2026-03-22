@@ -1,0 +1,7 @@
+appName     = "cassandra-service"
+description = "Test Cassandra driver — time-series events, user sessions, counters"
+version     = "1.0.0"
+type        = "app-service"
+appId       = "d1a2b3c4-0007-4000-a000-000000000007"
+entryPoint  = "cassandra"
+source      = "local://test-drivers-bundle/cassandra-service"

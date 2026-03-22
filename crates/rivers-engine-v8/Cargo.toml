@@ -1,0 +1,23 @@
+[package]
+name = "rivers-engine-v8"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rivers-engine-sdk = { path = "../rivers-engine-sdk" }
+v8 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+bcrypt = { workspace = true }
+rand = { workspace = true }
+uuid = { workspace = true }

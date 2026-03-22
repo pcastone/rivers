@@ -1,0 +1,224 @@
+//! Message broker driver contracts.
+//!
+//! Per `rivers-driver-spec.md` §6 and `rivers-data-layer-spec.md` §3.
+//!
+//! Broker drivers are stateless factories like database drivers, but
+//! produce `BrokerProducer` and `BrokerConsumer` instances instead of
+//! `Connection` instances.
+
+use std::collections::HashMap;
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+
+use crate::error::DriverError;
+use crate::traits::ConnectionParams;
+
+// ── Message Types ───────────────────────────────────────────────────
+
+/// Opaque message ID. String-typed for cross-driver compatibility.
+pub type MessageId = String;
+
+/// Opaque receipt for ack/nack operations.
+///
+/// Drivers store their native receipt handle inside.
+/// The bridge passes this back to `ack()` / `nack()` without inspecting it.
+#[derive(Debug, Clone)]
+pub struct MessageReceipt {
+    /// Driver-internal receipt data (delivery tag, stream ID, etc.).
+    pub handle: String,
+}
+
+/// Receipt returned after a successful publish.
+#[derive(Debug, Clone)]
+pub struct PublishReceipt {
+    /// The message ID assigned by the broker, if available.
+    pub id: Option<String>,
+    /// Broker-specific confirmation data.
+    pub metadata: Option<String>,
+}
+
+/// An inbound message received from a broker.
+///
+/// Per spec §3.1.
+#[derive(Debug, Clone)]
+pub struct InboundMessage {
+    /// Unique message ID.
+    pub id: MessageId,
+    /// Queue/topic/subject/stream name.
+    pub destination: String,
+    /// Message payload bytes.
+    pub payload: Vec<u8>,
+    /// Message headers/properties.
+    pub headers: HashMap<String, String>,
+    /// Message timestamp.
+    pub timestamp: DateTime<Utc>,
+    /// Opaque receipt for ack/nack.
+    pub receipt: MessageReceipt,
+    /// Broker-specific metadata envelope.
+    pub metadata: BrokerMetadata,
+}
+
+/// An outbound message to publish to a broker.
+///
+/// Per spec §3.3.
+#[derive(Debug, Clone)]
+pub struct OutboundMessage {
+    /// Target queue/topic/subject/stream.
+    pub destination: String,
+    /// Message payload bytes.
+    pub payload: Vec<u8>,
+    /// Message headers/properties.
+    pub headers: HashMap<String, String>,
+    /// Partition key (Kafka) or subject suffix (NATS).
+    pub key: Option<String>,
+    /// Reply-to address (NATS request/reply).
+    pub reply_to: Option<String>,
+}
+
+// ── BrokerMetadata ──────────────────────────────────────────────────
+
+/// Broker-specific message envelope metadata.
+///
+/// Per spec §3.2. Variant is determined by the driver.
+#[derive(Debug, Clone)]
+pub enum BrokerMetadata {
+    Kafka {
+        partition: i32,
+        offset: i64,
+        consumer_group: String,
+    },
+    Rabbit {
+        delivery_tag: u64,
+        exchange: String,
+        routing_key: String,
+    },
+    Nats {
+        sequence: u64,
+        stream: String,
+        consumer: String,
+    },
+    Redis {
+        stream_id: String,
+        group: String,
+        consumer: String,
+    },
+}
+
+// ── ConsumerConfig ──────────────────────────────────────────────────
+
+/// SDK-level consumer configuration passed to broker driver factory methods.
+///
+/// Per spec §3.7.
+/// Consumer group ID is derived: `{group_prefix}.{app_id}.{datasource_id}.{component}`.
+#[derive(Debug, Clone)]
+pub struct BrokerConsumerConfig {
+    pub group_prefix: String,
+    pub app_id: String,
+    pub datasource_id: String,
+    pub node_id: String,
+    pub reconnect_ms: u64,
+    pub subscriptions: Vec<BrokerSubscription>,
+}
+
+/// A single broker subscription target.
+#[derive(Debug, Clone)]
+pub struct BrokerSubscription {
+    /// Topic/queue/subject/stream name.
+    pub topic: String,
+    /// Event name to publish on the EventBus when a message is received.
+    pub event_name: Option<String>,
+}
+
+// ── FailurePolicy ───────────────────────────────────────────────────
+
+/// Failure disposition after all retries are exhausted.
+///
+/// Per spec §3.8.
+#[derive(Debug, Clone)]
+pub struct FailurePolicy {
+    pub mode: FailureMode,
+    /// Dead-letter or redirect target name.
+    pub destination: Option<String>,
+    /// CodeComponent handlers invoked fire-and-forget before disposition.
+    pub handlers: Vec<FailurePolicyHandler>,
+}
+
+/// What happens when message processing fails.
+///
+/// Per spec §3.8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureMode {
+    /// Route to a dead-letter destination datasource.
+    DeadLetter,
+    /// Return to source broker (requeue).
+    Requeue,
+    /// Publish to a different topic/queue.
+    Redirect,
+    /// Discard silently.
+    Drop,
+}
+
+/// A CodeComponent handler invoked on message failure.
+#[derive(Debug, Clone)]
+pub struct FailurePolicyHandler {
+    /// CodeComponent module path.
+    pub module: String,
+}
+
+// ── Broker Traits ───────────────────────────────────────────────────
+
+/// A named, stateless factory that creates broker producer and consumer instances.
+///
+/// Per spec §3.4.
+/// Broker drivers that also implement `DatabaseDriver` register under both registries.
+#[async_trait]
+pub trait MessageBrokerDriver: Send + Sync {
+    /// Unique name for this broker driver (e.g. "kafka", "rabbitmq", "nats").
+    fn name(&self) -> &str;
+
+    /// Create a new producer instance.
+    async fn create_producer(
+        &self,
+        params: &ConnectionParams,
+        config: &BrokerConsumerConfig,
+    ) -> Result<Box<dyn BrokerProducer>, DriverError>;
+
+    /// Create a new consumer instance.
+    async fn create_consumer(
+        &self,
+        params: &ConnectionParams,
+        config: &BrokerConsumerConfig,
+    ) -> Result<Box<dyn BrokerConsumer>, DriverError>;
+}
+
+/// A continuous consumer that receives messages from a broker.
+///
+/// Per spec §3.5.
+/// Owned by BrokerConsumerBridge — one consumer per datasource subscription.
+#[async_trait]
+pub trait BrokerConsumer: Send + Sync {
+    /// Receive the next message. Blocks until a message is available.
+    async fn receive(&mut self) -> Result<InboundMessage, DriverError>;
+
+    /// Acknowledge successful processing of a message.
+    async fn ack(&mut self, receipt: &MessageReceipt) -> Result<(), DriverError>;
+
+    /// Negatively acknowledge a message (reject/requeue).
+    async fn nack(&mut self, receipt: &MessageReceipt) -> Result<(), DriverError>;
+
+    /// Close the consumer gracefully.
+    async fn close(&mut self) -> Result<(), DriverError>;
+}
+
+/// A producer that publishes messages to a broker.
+///
+/// Per spec §3.6.
+#[async_trait]
+pub trait BrokerProducer: Send + Sync {
+    /// Publish a message. Returns a receipt on success.
+    async fn publish(&mut self, message: OutboundMessage) -> Result<PublishReceipt, DriverError>;
+
+    /// Close the producer gracefully.
+    async fn close(&mut self) -> Result<(), DriverError>;
+}

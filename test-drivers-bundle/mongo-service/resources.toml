@@ -1,0 +1,6 @@
+[[datasources]]
+name       = "mongo"
+driver     = "mongodb"
+x-type     = "mongodb"
+nopassword = true
+required   = true

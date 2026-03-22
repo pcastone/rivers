@@ -1,0 +1,80 @@
+[package]
+name = "riversd"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+default = ["static-engines", "static-plugins", "static-builtin-drivers"]
+static-engines = ["v8", "wasmtime", "bcrypt", "hmac", "base64"]
+static-builtin-drivers = ["rivers-runtime/drivers"]
+static-plugins = [
+    "rivers-plugin-cassandra", "rivers-plugin-couchdb", "rivers-plugin-mongodb",
+    "rivers-plugin-elasticsearch", "rivers-plugin-influxdb", "rivers-plugin-kafka",
+    "rivers-plugin-rabbitmq", "rivers-plugin-nats", "rivers-plugin-redis-streams",
+    "rivers-plugin-ldap",
+]
+
+[dependencies]
+rivers-runtime = { path = "../rivers-runtime", features = ["full"] }
+rivers-engine-sdk = { path = "../rivers-engine-sdk" }
+libloading = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+http = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+toml = { workspace = true }
+ipnet = { workspace = true }
+notify = { workspace = true }
+rcgen = { workspace = true }
+time = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+tokio-rustls = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+async-graphql = { workspace = true }
+async-graphql-axum = { workspace = true }
+tokio-stream = { workspace = true }
+zeroize = { workspace = true }
+percent-encoding = { workspace = true }
+
+# Optional: static engine deps (included with "static-engines" feature)
+v8 = { workspace = true, optional = true }
+wasmtime = { workspace = true, optional = true }
+bcrypt = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+reqwest = { workspace = true }
+
+# Optional: static plugin deps (included with "static-plugins" feature)
+rivers-plugin-cassandra = { path = "../rivers-plugin-cassandra", optional = true }
+rivers-plugin-couchdb = { path = "../rivers-plugin-couchdb", optional = true }
+rivers-plugin-mongodb = { path = "../rivers-plugin-mongodb", optional = true }
+rivers-plugin-elasticsearch = { path = "../rivers-plugin-elasticsearch", optional = true }
+rivers-plugin-influxdb = { path = "../rivers-plugin-influxdb", optional = true }
+rivers-plugin-kafka = { path = "../rivers-plugin-kafka", optional = true }
+rivers-plugin-rabbitmq = { path = "../rivers-plugin-rabbitmq", optional = true }
+rivers-plugin-nats = { path = "../rivers-plugin-nats", optional = true }
+rivers-plugin-redis-streams = { path = "../rivers-plugin-redis-streams", optional = true }
+rivers-plugin-ldap = { path = "../rivers-plugin-ldap", optional = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+tempfile = { workspace = true }
+tower = { workspace = true }

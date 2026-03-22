@@ -1,0 +1,9 @@
+[[datasources]]
+name       = "ldap"
+driver     = "ldap"
+nopassword = true
+required   = true
+
+[datasources.config]
+host = "localhost"
+port = 389

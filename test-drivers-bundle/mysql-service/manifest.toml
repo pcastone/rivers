@@ -1,0 +1,7 @@
+appName     = "mysql-service"
+description = "Test MySQL driver — queries against customers/products/orders"
+version     = "1.0.0"
+type        = "app-service"
+appId       = "d1a2b3c4-0002-4000-a000-000000000002"
+entryPoint  = "mysql"
+source      = "local://test-drivers-bundle/mysql-service"

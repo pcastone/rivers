@@ -1,0 +1,507 @@
+//! In-process EventBus with priority-tiered dispatch.
+//!
+//! Per `rivers-view-layer-spec.md` §11, `rivers-logging-spec.md` §4.
+//!
+//! Four priority tiers control handler execution order:
+//! - **Expect** — awaited first, must complete before request continues
+//! - **Handle** — awaited second, normal blocking handlers
+//! - **Emit** — awaited third, for side-effect emission
+//! - **Observe** — fire-and-forget, spawned as background tasks (LogHandler lives here)
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use tokio::sync::RwLock;
+
+use crate::event::Event;
+
+// ── Event type constants ────────────────────────────────────────────
+
+/// Event type constants for all spec-defined events.
+/// Per `rivers-logging-spec.md` §4 event-to-level mapping.
+pub mod events {
+    // Request lifecycle
+    pub const REQUEST_COMPLETED: &str = "RequestCompleted";
+
+    // DataView
+    pub const DATAVIEW_EXECUTED: &str = "DataViewExecuted";
+    pub const CACHE_INVALIDATION: &str = "CacheInvalidation";
+
+    // WebSocket
+    pub const WEBSOCKET_CONNECTED: &str = "WebSocketConnected";
+    pub const WEBSOCKET_DISCONNECTED: &str = "WebSocketDisconnected";
+    pub const WEBSOCKET_MESSAGE_IN: &str = "WebSocketMessageIn";
+    pub const WEBSOCKET_MESSAGE_OUT: &str = "WebSocketMessageOut";
+
+    // SSE
+    pub const SSE_STREAM_OPENED: &str = "SseStreamOpened";
+    pub const SSE_STREAM_CLOSED: &str = "SseStreamClosed";
+    pub const SSE_EVENT_SENT: &str = "SseEventSent";
+
+    // Driver / Datasource
+    pub const DRIVER_REGISTERED: &str = "DriverRegistered";
+    pub const DATASOURCE_CONNECTED: &str = "DatasourceConnected";
+    pub const DATASOURCE_DISCONNECTED: &str = "DatasourceDisconnected";
+    pub const DATASOURCE_CONNECTION_FAILED: &str = "DatasourceConnectionFailed";
+    pub const DATASOURCE_RECONNECTED: &str = "DatasourceReconnected";
+    pub const DATASOURCE_CIRCUIT_OPENED: &str = "DatasourceCircuitOpened";
+    pub const DATASOURCE_CIRCUIT_CLOSED: &str = "DatasourceCircuitClosed";
+    pub const DATASOURCE_HEALTH_CHECK_FAILED: &str = "DatasourceHealthCheckFailed";
+    pub const CONNECTION_POOL_EXHAUSTED: &str = "ConnectionPoolExhausted";
+
+    // Broker
+    pub const BROKER_CONSUMER_STARTED: &str = "BrokerConsumerStarted";
+    pub const BROKER_CONSUMER_STOPPED: &str = "BrokerConsumerStopped";
+    pub const BROKER_MESSAGE_RECEIVED: &str = "BrokerMessageReceived";
+    pub const BROKER_MESSAGE_PUBLISHED: &str = "BrokerMessagePublished";
+    pub const BROKER_CONSUMER_ERROR: &str = "BrokerConsumerError";
+    pub const CONSUMER_LAG_DETECTED: &str = "ConsumerLagDetected";
+    pub const PARTITION_REBALANCED: &str = "PartitionRebalanced";
+    pub const MESSAGE_FAILED: &str = "MessageFailed";
+
+    // EventBus internal
+    pub const EVENTBUS_TOPIC_PUBLISHED: &str = "EventBusTopicPublished";
+    pub const EVENTBUS_TOPIC_SUBSCRIBED: &str = "EventBusTopicSubscribed";
+    pub const EVENTBUS_TOPIC_UNSUBSCRIBED: &str = "EventBusTopicUnsubscribed";
+
+    // Deployment / Config
+    pub const DEPLOYMENT_STATUS_CHANGED: &str = "DeploymentStatusChanged";
+    pub const CONFIG_FILE_CHANGED: &str = "ConfigFileChanged";
+
+    // Cluster / Security
+    pub const NODE_HEALTH_CHANGED: &str = "NodeHealthChanged";
+
+    // Plugin
+    pub const PLUGIN_LOAD_FAILED: &str = "PluginLoadFailed";
+
+    // Polling
+    pub const POLL_TICK_FAILED: &str = "PollTickFailed";
+    pub const ON_CHANGE_FAILED: &str = "OnChangeFailed";
+    pub const POLL_CHANGE_DETECT_TIMEOUT: &str = "PollChangeDetectTimeout";
+
+    // Internal
+    pub const HANDLER_EXECUTION_FAILED: &str = "HandlerExecutionFailed";
+}
+
+// ── LogLevel mapping ────────────────────────────────────────────────
+
+use crate::event::LogLevel;
+
+/// Map an event type to its default log level.
+/// Per `rivers-logging-spec.md` §4.
+pub fn event_log_level(event_type: &str) -> LogLevel {
+    match event_type {
+        // Error
+        events::DATASOURCE_HEALTH_CHECK_FAILED
+        | events::BROKER_CONSUMER_ERROR
+        | events::PLUGIN_LOAD_FAILED => LogLevel::Error,
+
+        // Warn
+        events::CONNECTION_POOL_EXHAUSTED
+        | events::DATASOURCE_CIRCUIT_OPENED
+        | events::DATASOURCE_DISCONNECTED
+        | events::NODE_HEALTH_CHANGED => LogLevel::Warn,
+
+        // Debug
+        events::EVENTBUS_TOPIC_PUBLISHED => LogLevel::Debug,
+
+        // Info — everything else
+        _ => LogLevel::Info,
+    }
+}
+
+// ── Priority ────────────────────────────────────────────────────────
+
+/// Handler execution priority tier.
+///
+/// Dispatch order: Expect → Handle → Emit → Observe.
+/// Expect, Handle, and Emit handlers are awaited sequentially.
+/// Observe handlers are spawned fire-and-forget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HandlerPriority {
+    Expect = 0,
+    Handle = 1,
+    Emit = 2,
+    Observe = 3,
+}
+
+// ── EventHandler trait ──────────────────────────────────────────────
+
+/// Trait for EventBus subscribers.
+///
+/// Implementations receive events and process them asynchronously.
+/// Errors from Observe-tier handlers are logged but never propagated.
+#[async_trait]
+pub trait EventHandler: Send + Sync {
+    /// Handle an event. Return Ok(()) on success, Err on failure.
+    async fn handle(&self, event: &Event) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Human-readable name for logging/debugging.
+    fn name(&self) -> &str;
+}
+
+// ── Subscription ────────────────────────────────────────────────────
+
+struct Subscription {
+    handler: Arc<dyn EventHandler>,
+    priority: HandlerPriority,
+}
+
+// ── EventBus ────────────────────────────────────────────────────────
+
+/// In-process pub/sub EventBus with priority-tiered dispatch.
+///
+/// - Topics are created on first subscribe (no pre-registration needed).
+/// - `publish()` dispatches to all subscribers of the event's `event_type`.
+/// - Handlers are invoked in priority order:
+///   1. All Expect handlers — awaited sequentially
+///   2. All Handle handlers — awaited sequentially
+///   3. All Emit handlers — awaited sequentially
+///   4. All Observe handlers — spawned as tokio tasks (fire-and-forget)
+pub struct EventBus {
+    topics: Arc<RwLock<HashMap<String, Vec<Subscription>>>>,
+}
+
+impl EventBus {
+    /// Create a new empty EventBus.
+    pub fn new() -> Self {
+        Self {
+            topics: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Subscribe a handler to a topic at the given priority.
+    pub async fn subscribe(
+        &self,
+        topic: impl Into<String>,
+        handler: Arc<dyn EventHandler>,
+        priority: HandlerPriority,
+    ) {
+        let topic = topic.into();
+        let mut topics = self.topics.write().await;
+        let subs = topics.entry(topic).or_default();
+        subs.push(Subscription {
+            handler,
+            priority,
+        });
+        // Keep sorted by priority so dispatch order is deterministic
+        subs.sort_by_key(|s| s.priority);
+    }
+
+    /// Publish an event to all subscribers of its `event_type`.
+    ///
+    /// Dispatch order:
+    /// 1. Expect handlers — awaited sequentially
+    /// 2. Handle handlers — awaited sequentially
+    /// 3. Emit handlers — awaited sequentially
+    /// 4. Observe handlers — spawned fire-and-forget
+    ///
+    /// Errors from Expect/Handle/Emit handlers are collected and returned.
+    /// Errors from Observe handlers are logged via tracing.
+    pub async fn publish(&self, event: &Event) -> Vec<EventBusError> {
+        // Collect subscribers under read lock, then drop lock before dispatching.
+        // This prevents slow Observe handlers (file I/O) from blocking all publishes.
+        let handlers: Vec<(Arc<dyn EventHandler>, HandlerPriority)> = {
+            let topics = self.topics.read().await;
+            let mut collected = Vec::new();
+
+            // Exact topic subscribers
+            if let Some(subs) = topics.get(&event.event_type) {
+                for sub in subs {
+                    collected.push((Arc::clone(&sub.handler), sub.priority));
+                }
+            }
+
+            // Wildcard subscribers (receive all events)
+            if event.event_type != "*" {
+                if let Some(wildcard_subs) = topics.get("*") {
+                    for sub in wildcard_subs {
+                        collected.push((Arc::clone(&sub.handler), sub.priority));
+                    }
+                }
+            }
+
+            // Both exact-topic and wildcard subscriber lists are individually sorted
+            // by priority (maintained by subscribe()). Exact subscribers come first,
+            // wildcards appended after. Since wildcards are typically Observe tier,
+            // the merge order is already correct — no sort needed.
+            collected
+        }; // read lock dropped here
+
+        let mut errors = Vec::new();
+
+        for (handler, priority) in &handlers {
+            match priority {
+                HandlerPriority::Expect | HandlerPriority::Handle | HandlerPriority::Emit => {
+                    if let Err(e) = handler.handle(event).await {
+                        tracing::error!(
+                            handler = handler.name(),
+                            event_type = %event.event_type,
+                            error = %e,
+                            "EventBus handler failed"
+                        );
+                        errors.push(EventBusError {
+                            handler_name: handler.name().to_string(),
+                            event_type: event.event_type.clone(),
+                            error: e.to_string(),
+                        });
+                    }
+                }
+                HandlerPriority::Observe => {
+                    let handler = Arc::clone(handler);
+                    let event_clone = event.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handler.handle(&event_clone).await {
+                            tracing::warn!(
+                                handler = handler.name(),
+                                event_type = %event_clone.event_type,
+                                error = %e,
+                                "Observe-tier handler failed (non-fatal)"
+                            );
+                        }
+                    });
+                }
+            }
+        }
+
+        errors
+    }
+
+    /// Create a broadcast channel bridged to an EventBus topic.
+    ///
+    /// Returns a `broadcast::Sender<Event>` — callers use `sender.subscribe()`
+    /// to get a `Receiver` that yields events from this topic as a stream.
+    /// Used by GraphQL subscriptions to bridge EventBus → async stream.
+    pub async fn subscribe_broadcast(
+        &self,
+        topic: impl Into<String>,
+        capacity: usize,
+    ) -> tokio::sync::broadcast::Sender<crate::event::Event> {
+        let (sender, _) = tokio::sync::broadcast::channel(capacity);
+        let forwarder = Arc::new(BroadcastForwarder { sender: sender.clone() });
+        self.subscribe(topic, forwarder, HandlerPriority::Handle).await;
+        sender
+    }
+
+    /// Return the number of subscribers for a given topic.
+    pub async fn subscriber_count(&self, topic: &str) -> usize {
+        let topics = self.topics.read().await;
+        topics.get(topic).map_or(0, |s| s.len())
+    }
+
+    /// Return all registered topic names.
+    pub async fn topics(&self) -> Vec<String> {
+        let topics = self.topics.read().await;
+        topics.keys().cloned().collect()
+    }
+}
+
+impl Default for EventBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// An error from an Expect, Handle, or Emit handler during publish.
+#[derive(Debug)]
+pub struct EventBusError {
+    pub handler_name: String,
+    pub event_type: String,
+    pub error: String,
+}
+
+// ── Broadcast Forwarder ─────────────────────────────────────────────
+
+/// Internal handler that forwards EventBus events to a broadcast channel.
+///
+/// Created by `subscribe_broadcast()` for GraphQL subscription bridging.
+struct BroadcastForwarder {
+    sender: tokio::sync::broadcast::Sender<crate::event::Event>,
+}
+
+#[async_trait]
+impl EventHandler for BroadcastForwarder {
+    async fn handle(&self, event: &crate::event::Event) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _ = self.sender.send(event.clone());
+        Ok(())
+    }
+    fn name(&self) -> &str {
+        "BroadcastForwarder"
+    }
+}
+
+// ── Cross-node gossip (V2.12 multi-node foundations) ────────────────
+
+/// Configuration for cross-node event gossip.
+///
+/// Per technology-path-spec §12: V2 will support multiple named EventBus
+/// pools. Cross-node gossip forwards events to peer nodes.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct GossipConfig {
+    /// Enable cross-node gossip.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Peer node addresses for gossip protocol.
+    #[serde(default)]
+    pub peers: Vec<String>,
+
+    /// Gossip interval in milliseconds.
+    #[serde(default = "default_gossip_interval")]
+    pub interval_ms: u64,
+}
+
+impl Default for GossipConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            peers: Vec::new(),
+            interval_ms: default_gossip_interval(),
+        }
+    }
+}
+
+fn default_gossip_interval() -> u64 {
+    1000
+}
+
+/// A gossip message carrying an event to a peer node.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GossipMessage {
+    /// The event type to forward.
+    pub event_type: String,
+    /// The event payload.
+    pub payload: serde_json::Value,
+    /// Optional trace ID from the original event.
+    pub trace_id: Option<String>,
+    /// Source node ID.
+    pub source_node: String,
+    /// Timestamp of original event.
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+impl EventBus {
+    /// Forward an event to peer nodes via gossip.
+    ///
+    /// V2 placeholder — logs the intent but does not send.
+    /// Real implementation will use HTTP POST to peer /gossip/receive endpoints.
+    pub async fn gossip_forward(
+        &self,
+        event: &crate::event::Event,
+        peers: &[String],
+        source_node: &str,
+    ) {
+        if peers.is_empty() {
+            return;
+        }
+        let msg = GossipMessage {
+            event_type: event.event_type.clone(),
+            payload: event.payload.clone(),
+            trace_id: event.trace_id.clone(),
+            source_node: source_node.to_string(),
+            timestamp: event.timestamp,
+        };
+        tracing::debug!(
+            target: "rivers.gossip",
+            "would forward event '{}' to {} peers (gossip not yet wired)",
+            msg.event_type,
+            peers.len()
+        );
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn gossip_forward_no_peers_noop() {
+        let bus = EventBus::new();
+        let event = crate::event::Event::new("test.event", serde_json::json!({}));
+        bus.gossip_forward(&event, &[], "node-1").await;
+        // Should not panic
+    }
+
+    #[tokio::test]
+    async fn gossip_forward_with_peers_logs() {
+        let bus = EventBus::new();
+        let event =
+            crate::event::Event::new("test.event", serde_json::json!({"key": "value"}));
+        bus.gossip_forward(&event, &["http://peer1:8080".into()], "node-1")
+            .await;
+        // Should log but not actually send (placeholder)
+    }
+
+    #[test]
+    fn gossip_message_serializes() {
+        let msg = GossipMessage {
+            event_type: "test".into(),
+            payload: serde_json::json!({"x": 1}),
+            trace_id: Some("t-1".into()),
+            source_node: "node-1".into(),
+            timestamp: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("test"));
+    }
+
+    #[test]
+    fn gossip_message_deserializes() {
+        let json = r#"{"event_type":"test","payload":{"x":1},"trace_id":"t-1","source_node":"node-1","timestamp":"2025-01-01T00:00:00Z"}"#;
+        let msg: GossipMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.event_type, "test");
+        assert_eq!(msg.source_node, "node-1");
+    }
+
+    #[test]
+    fn gossip_config_defaults() {
+        let config = GossipConfig::default();
+        assert!(!config.enabled);
+        assert!(config.peers.is_empty());
+        assert_eq!(config.interval_ms, 1000); // matches default_gossip_interval()
+    }
+
+    #[test]
+    fn gossip_config_deserializes_with_defaults() {
+        let toml_str = r#"enabled = true"#;
+        let config: GossipConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.enabled);
+        assert!(config.peers.is_empty());
+        assert_eq!(config.interval_ms, 1000); // from default_gossip_interval
+    }
+
+    // ── BA2: Broadcast subscription tests ────────────────────
+
+    #[tokio::test]
+    async fn subscribe_broadcast_receives_events() {
+        let bus = EventBus::new();
+        let sender = bus.subscribe_broadcast("test.topic", 16).await;
+        let mut rx = sender.subscribe();
+
+        let event = crate::event::Event::new("test.topic", serde_json::json!({"value": 42}));
+        bus.publish(&event).await;
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.event_type, "test.topic");
+        assert_eq!(received.payload["value"], 42);
+    }
+
+    #[tokio::test]
+    async fn subscribe_broadcast_multiple_receivers() {
+        let bus = EventBus::new();
+        let sender = bus.subscribe_broadcast("multi", 16).await;
+        let mut rx1 = sender.subscribe();
+        let mut rx2 = sender.subscribe();
+
+        let event = crate::event::Event::new("multi", serde_json::json!({"msg": "hello"}));
+        bus.publish(&event).await;
+
+        let r1 = rx1.recv().await.unwrap();
+        let r2 = rx2.recv().await.unwrap();
+        assert_eq!(r1.payload["msg"], "hello");
+        assert_eq!(r2.payload["msg"], "hello");
+    }
+}

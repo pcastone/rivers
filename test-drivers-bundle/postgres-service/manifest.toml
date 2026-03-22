@@ -1,0 +1,7 @@
+appName     = "postgres-service"
+description = "Test PostgreSQL driver — queries against customers/products/orders"
+version     = "1.0.0"
+type        = "app-service"
+appId       = "d1a2b3c4-0001-4000-a000-000000000001"
+entryPoint  = "postgres"
+source      = "local://test-drivers-bundle/postgres-service"

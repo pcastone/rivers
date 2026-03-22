@@ -1,0 +1,7 @@
+appName     = "elastic-service"
+description = "Test Elasticsearch driver — search, aggregation on customers/products/logs"
+version     = "1.0.0"
+type        = "app-service"
+appId       = "d1a2b3c4-0005-4000-a000-000000000005"
+entryPoint  = "elastic"
+source      = "local://test-drivers-bundle/elastic-service"

@@ -1,0 +1,167 @@
+[data.datasources.mongo]
+name     = "mongo"
+driver   = "mongodb"
+host     = "localhost"
+port     = 27017
+database = "rivers"
+username = "rivers"
+nopassword = false
+credentials_source = "lockbox://mongo-test"
+
+[data.datasources.mongo.extra]
+replica_set = "rivers-rs"
+auth_source = "admin"
+
+[data.dataviews.list_customers]
+name       = "list_customers"
+datasource = "mongo"
+query      = '{"collection":"customers","operation":"find","filter":{},"sort":{"name":1}}'
+
+[data.dataviews.customers_by_city]
+name       = "customers_by_city"
+datasource = "mongo"
+query      = '{"collection":"customers","operation":"find","filter":{"city":"$1"}}'
+
+[[data.dataviews.customers_by_city.parameters]]
+name = "city"
+type = "string"
+required = true
+
+[data.dataviews.list_products]
+name       = "list_products"
+datasource = "mongo"
+query      = '{"collection":"products","operation":"find","filter":{},"sort":{"price":1}}'
+
+[data.dataviews.products_by_category]
+name       = "products_by_category"
+datasource = "mongo"
+query      = '{"collection":"products","operation":"find","filter":{"category":"$1"}}'
+
+[[data.dataviews.products_by_category.parameters]]
+name = "category"
+type = "string"
+required = true
+
+[data.dataviews.list_orders]
+name       = "list_orders"
+datasource = "mongo"
+query      = '{"collection":"orders","operation":"find","filter":{},"sort":{"total":-1}}'
+
+[api.views.list_customers]
+path = "customers"
+method = "GET"
+view_type = "Rest"
+auth = "none"
+
+[api.views.list_customers.handler]
+type = "dataview"
+dataview = "list_customers"
+
+[api.views.customers_by_city]
+path = "customers/city/{city}"
+method = "GET"
+view_type = "Rest"
+auth = "none"
+
+[api.views.customers_by_city.handler]
+type = "dataview"
+dataview = "customers_by_city"
+
+[api.views.customers_by_city.parameter_mapping.path]
+city = "city"
+
+[api.views.list_products]
+path = "products"
+method = "GET"
+view_type = "Rest"
+auth = "none"
+
+[api.views.list_products.handler]
+type = "dataview"
+dataview = "list_products"
+
+[api.views.products_by_category]
+path = "products/category/{category}"
+method = "GET"
+view_type = "Rest"
+auth = "none"
+
+[api.views.products_by_category.handler]
+type = "dataview"
+dataview = "products_by_category"
+
+[api.views.products_by_category.parameter_mapping.path]
+category = "category"
+
+[api.views.list_orders]
+path = "orders"
+method = "GET"
+view_type = "Rest"
+auth = "none"
+
+[api.views.list_orders.handler]
+type = "dataview"
+dataview = "list_orders"
+
+# Write DataViews
+
+[data.dataviews.insert_customer]
+name       = "insert_customer"
+datasource = "mongo"
+query      = '{"collection":"customers","operation":"insert"}'
+
+[[data.dataviews.insert_customer.parameters]]
+name = "name"
+type = "string"
+required = true
+
+[[data.dataviews.insert_customer.parameters]]
+name = "email"
+type = "string"
+required = true
+
+[[data.dataviews.insert_customer.parameters]]
+name = "city"
+type = "string"
+required = false
+default = "Unknown"
+
+[data.dataviews.delete_customer]
+name       = "delete_customer"
+datasource = "mongo"
+query      = '{"collection":"customers","operation":"delete"}'
+
+[[data.dataviews.delete_customer.parameters]]
+name = "_filter"
+type = "string"
+required = true
+
+# Write Views
+
+[api.views.create_customer]
+path = "customers"
+method = "POST"
+view_type = "Rest"
+auth = "none"
+
+[api.views.create_customer.handler]
+type = "dataview"
+dataview = "insert_customer"
+
+[api.views.create_customer.parameter_mapping.body]
+name = "name"
+email = "email"
+city = "city"
+
+[api.views.delete_customer]
+path = "customers/{email}"
+method = "DELETE"
+view_type = "Rest"
+auth = "none"
+
+[api.views.delete_customer.handler]
+type = "dataview"
+dataview = "delete_customer"
+
+[api.views.delete_customer.parameter_mapping.path]
+email = "_filter"

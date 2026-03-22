@@ -1,0 +1,21 @@
+[package]
+name = "rivers-plugin-mongodb"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+mongodb = { workspace = true }
+tracing = { workspace = true }
+rivers-driver-sdk = { path = "../rivers-driver-sdk" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }

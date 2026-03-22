@@ -1,0 +1,4 @@
+bundleName    = "address-book"
+bundleVersion = "1.0.0"
+source        = "https://github.com/acme/address-book"
+apps          = ["address-book-service", "address-book-main"]

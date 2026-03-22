@@ -1,0 +1,6 @@
+[[datasources]]
+name       = "pg"
+driver     = "postgres"
+x-type     = "postgresql"
+nopassword = true
+required   = true

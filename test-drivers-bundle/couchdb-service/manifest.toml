@@ -1,0 +1,7 @@
+appName     = "couchdb-service"
+description = "Test CouchDB driver — Mango find, views, document CRUD"
+version     = "1.0.0"
+type        = "app-service"
+appId       = "d1a2b3c4-0008-4000-a000-000000000008"
+entryPoint  = "couchdb"
+source      = "local://test-drivers-bundle/couchdb-service"

@@ -1,0 +1,91 @@
+[data.datasources.es]
+name     = "es"
+driver   = "elasticsearch"
+host     = "localhost"
+port     = 9200
+nopassword = true
+
+[data.dataviews.search_customers]
+name       = "search_customers"
+datasource = "es"
+query      = '{"index":"customers","body":{"query":{"match":{"name":"$1"}}}}'
+
+[[data.dataviews.search_customers.parameters]]
+name = "q"
+type = "string"
+required = true
+
+[data.dataviews.search_products]
+name       = "search_products"
+datasource = "es"
+query      = '{"index":"products","body":{"query":{"multi_match":{"query":"$1","fields":["name","description"]}}}}'
+
+[[data.dataviews.search_products.parameters]]
+name = "q"
+type = "string"
+required = true
+
+[data.dataviews.search_logs]
+name       = "search_logs"
+datasource = "es"
+query      = '{"index":"logs","body":{"query":{"match":{"level":"$1"}},"sort":[{"timestamp":"desc"}]}}'
+
+[[data.dataviews.search_logs.parameters]]
+name = "level"
+type = "string"
+required = false
+default = "INFO"
+
+[data.dataviews.all_products]
+name       = "all_products"
+datasource = "es"
+query      = '{"index":"products","body":{"query":{"match_all":{}}}}'
+
+[api.views.search_customers]
+path = "customers/search"
+method = "GET"
+view_type = "Rest"
+auth = "none"
+
+[api.views.search_customers.handler]
+type = "dataview"
+dataview = "search_customers"
+
+[api.views.search_customers.parameter_mapping.query]
+q = "q"
+
+[api.views.search_products]
+path = "products/search"
+method = "GET"
+view_type = "Rest"
+auth = "none"
+
+[api.views.search_products.handler]
+type = "dataview"
+dataview = "search_products"
+
+[api.views.search_products.parameter_mapping.query]
+q = "q"
+
+[api.views.search_logs]
+path = "logs"
+method = "GET"
+view_type = "Rest"
+auth = "none"
+
+[api.views.search_logs.handler]
+type = "dataview"
+dataview = "search_logs"
+
+[api.views.search_logs.parameter_mapping.query]
+level = "level"
+
+[api.views.all_products]
+path = "products"
+method = "GET"
+view_type = "Rest"
+auth = "none"
+
+[api.views.all_products.handler]
+type = "dataview"
+dataview = "all_products"

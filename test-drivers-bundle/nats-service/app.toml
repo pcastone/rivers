@@ -1,0 +1,21 @@
+[data.dataviews.publish_event]
+name       = "publish_event"
+datasource = "nats"
+query      = "events.test"
+
+[[data.dataviews.publish_event.parameters]]
+name     = "payload"
+type     = "string"
+required = true
+
+[api.views.events]
+path     = "events"
+method   = "POST"
+auth     = "none"
+dataview = "publish_event"
+
+[api.views.events.handler]
+type = "dataview"
+
+[api.views.events.parameter_mapping.body]
+payload = "payload"

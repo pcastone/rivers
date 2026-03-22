@@ -1,0 +1,23 @@
+[package]
+name = "rivers-plugin-rabbitmq"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+lapin = { workspace = true }
+futures-lite = { workspace = true }
+rivers-driver-sdk = { path = "../rivers-driver-sdk" }
+
+[dev-dependencies]
+rivers-core = { path = "../rivers-core" }
+age = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }

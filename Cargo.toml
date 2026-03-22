@@ -1,0 +1,98 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rivers-core-config",
+    "crates/rivers-core",
+    "crates/rivers-drivers-builtin",
+    "crates/rivers-storage-backends",
+    "crates/rivers-lockbox-engine",
+    "crates/rivers-driver-sdk",
+    "crates/rivers-runtime",
+    "crates/riversd",
+    "crates/rivers-plugin-mongodb",
+    "crates/rivers-plugin-elasticsearch",
+    "crates/rivers-plugin-kafka",
+    "crates/rivers-plugin-rabbitmq",
+    "crates/rivers-plugin-nats",
+    "crates/rivers-plugin-redis-streams",
+    "crates/rivers-plugin-influxdb",
+    "crates/rivers-plugin-cassandra",
+    "crates/rivers-plugin-couchdb",
+    "crates/rivers-plugin-ldap",
+    "crates/rivers-engine-sdk",
+    "crates/rivers-engine-v8",
+    "crates/rivers-engine-wasm",
+    "crates/rivers-lockbox",
+    "crates/riversctl",
+    "crates/riverpackage",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.50.2"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-appender = "0.2"
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+toml = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+age = { version = "0.11", features = ["armor"] }
+zeroize = { version = "1", features = ["derive"] }
+libloading = "0.8"
+axum = { version = "0.8", features = ["ws"] }
+tower = { version = "0.5", features = ["timeout"] }
+tower-http = { version = "0.6", features = ["compression-full", "set-header", "limit"] }
+http = "1"
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1", "http2"] }
+sha2 = "0.10"
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
+x509-parser = "0.16"
+hmac = "0.12"
+hex = "0.4"
+tempfile = "3"
+ipnet = "2"
+notify = "7"
+rustls = "0.23"
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+redis = { version = "0.27", features = ["tokio-comp", "aio", "cluster-async"] }
+schemars = "0.8"
+async-graphql = "7"
+async-graphql-axum = "7"
+base64 = "0.22"
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4", "with-uuid-1"] }
+mysql_async = { version = "0.34", default-features = false, features = ["default-rustls"] }
+rskafka = "0.6"
+lapin = "2"
+async-nats = "0.38"
+mongodb = "3"
+async-memcached = "0.2"
+scylla = "0.14"
+futures-lite = "2"
+bytes = "1"
+v8 = "130"
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-tungstenite = "0.26"
+ldap3 = "0.11"
+wasmtime = "42"
+bcrypt = "0.15"
+percent-encoding = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
