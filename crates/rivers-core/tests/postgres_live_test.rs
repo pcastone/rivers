@@ -1,6 +1,6 @@
 //! Live integration tests for the PostgreSQL driver.
 //!
-//! Requires a running PostgreSQL instance. Set RIVERS_TEST_PG_HOST (default: localhost).
+//! Requires a running PostgreSQL instance at 192.168.2.209:5432.
 //! Credentials are resolved from a LockBox keystore (see `common/mod.rs`).
 //! If the service is unreachable, tests print SKIP and pass.
 
@@ -12,10 +12,7 @@ use std::time::Duration;
 use rivers_core::drivers::PostgresDriver;
 use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query, QueryValue};
 
-fn pg_host() -> String {
-    std::env::var("RIVERS_TEST_PG_HOST").unwrap_or_else(|_| "localhost".to_string())
-}
-
+const PG_HOST: &str = "192.168.2.209";
 const PG_PORT: u16 = 5432;
 const PG_DB: &str = "postgres";
 const PG_USER: &str = "postgres";
@@ -24,7 +21,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 fn conn_params() -> ConnectionParams {
     let creds = common::TestCredentials::new();
     ConnectionParams {
-        host: pg_host(),
+        host: PG_HOST.into(),
         port: PG_PORT,
         database: PG_DB.into(),
         username: PG_USER.into(),
@@ -36,15 +33,14 @@ fn conn_params() -> ConnectionParams {
 /// Try to connect; returns None (with SKIP message) if unreachable.
 async fn try_connect() -> Option<Box<dyn rivers_driver_sdk::Connection>> {
     let driver = PostgresDriver;
-    let host = pg_host();
     match tokio::time::timeout(TIMEOUT, driver.connect(&conn_params())).await {
         Ok(Ok(conn)) => Some(conn),
         Ok(Err(e)) => {
-            eprintln!("SKIP: PostgreSQL unreachable at {host}:{PG_PORT} — {e}");
+            eprintln!("SKIP: PostgreSQL unreachable at {PG_HOST}:{PG_PORT} — {e}");
             None
         }
         Err(_) => {
-            eprintln!("SKIP: PostgreSQL connection timed out at {host}:{PG_PORT}");
+            eprintln!("SKIP: PostgreSQL connection timed out at {PG_HOST}:{PG_PORT}");
             None
         }
     }

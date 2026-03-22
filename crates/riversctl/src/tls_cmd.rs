@@ -151,7 +151,8 @@ fn cmd_list(config: &ServerConfig) -> Result<(), String> {
     }
 
     // Scan auto-gen files
-    let tls_dir = format!("{data_dir}/tls");
+    let tls_dir = Path::new(data_dir).join("tls");
+    let tls_dir = tls_dir.to_string_lossy().to_string();
     if let Ok(entries) = std::fs::read_dir(&tls_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -173,15 +174,16 @@ fn cmd_expire(config: &ServerConfig, port: Option<u16>) -> Result<(), String> {
             let data_dir = config.data_dir.as_deref().unwrap_or("data");
             let app_id = config.app_id.as_deref().unwrap_or("default");
             let target_port = port.unwrap_or(config.base.port);
+            let tls_base = Path::new(data_dir).join("tls");
             if target_port == config.base.port {
                 (
-                    format!("{data_dir}/tls/auto-{app_id}.crt"),
-                    format!("{data_dir}/tls/auto-{app_id}.key"),
+                    tls_base.join(format!("auto-{app_id}.crt")).to_string_lossy().to_string(),
+                    tls_base.join(format!("auto-{app_id}.key")).to_string_lossy().to_string(),
                 )
             } else if config.base.admin_api.port == Some(target_port) {
                 (
-                    format!("{data_dir}/tls/auto-admin-{app_id}.crt"),
-                    format!("{data_dir}/tls/auto-admin-{app_id}.key"),
+                    tls_base.join(format!("auto-admin-{app_id}.crt")).to_string_lossy().to_string(),
+                    tls_base.join(format!("auto-admin-{app_id}.key")).to_string_lossy().to_string(),
                 )
             } else {
                 return Err(format!("no server configured on port {target_port}"));

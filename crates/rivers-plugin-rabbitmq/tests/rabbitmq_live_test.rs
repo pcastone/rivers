@@ -1,6 +1,6 @@
 //! Live integration test for RabbitMQ plugin against Podman infra.
 //!
-//! Requires: RabbitMQ broker. Set RIVERS_TEST_RABBITMQ_HOST (default: localhost), port 5672.
+//! Requires: RabbitMQ on 192.168.2.228:5672
 //! Credentials are resolved from a LockBox keystore.
 //! Run: cargo test -p rivers-plugin-rabbitmq --test rabbitmq_live_test -- --nocapture
 
@@ -10,10 +10,6 @@ use rivers_driver_sdk::broker::{
 };
 use rivers_driver_sdk::ConnectionParams;
 use rivers_plugin_rabbitmq::RabbitMqDriver;
-
-fn rabbitmq_host() -> String {
-    std::env::var("RIVERS_TEST_RABBITMQ_HOST").unwrap_or_else(|_| "localhost".to_string())
-}
 
 /// Resolve a single credential from a temporary LockBox keystore.
 fn lockbox_resolve(name: &str, value: &str) -> String {
@@ -50,7 +46,7 @@ fn lockbox_resolve(name: &str, value: &str) -> String {
 fn rabbitmq_params() -> ConnectionParams {
     let password = lockbox_resolve("rabbitmq/test", "guest");
     ConnectionParams {
-        host: rabbitmq_host(),
+        host: "192.168.2.228".into(),
         port: 5672,
         database: "/".into(), // vhost
         username: "guest".into(),

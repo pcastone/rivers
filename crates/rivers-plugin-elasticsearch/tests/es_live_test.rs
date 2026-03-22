@@ -1,6 +1,6 @@
 //! Live integration tests for the Elasticsearch driver.
 //!
-//! Requires a running Elasticsearch instance. Set RIVERS_TEST_ES_HOST (default: localhost).
+//! Requires a running Elasticsearch instance at 192.168.2.218:9200.
 //! If the service is unreachable, tests print SKIP and pass.
 
 use std::collections::HashMap;
@@ -9,16 +9,13 @@ use std::time::Duration;
 use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query, QueryValue};
 use rivers_plugin_elasticsearch::ElasticsearchDriver;
 
+const ES_HOST: &str = "192.168.2.218";
 const ES_PORT: u16 = 9200;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-fn es_host() -> String {
-    std::env::var("RIVERS_TEST_ES_HOST").unwrap_or_else(|_| "localhost".to_string())
-}
-
 fn conn_params() -> ConnectionParams {
     ConnectionParams {
-        host: es_host(),
+        host: ES_HOST.into(),
         port: ES_PORT,
         database: "test-index".into(),
         username: "".into(),
@@ -33,13 +30,11 @@ async fn try_connect() -> Option<Box<dyn rivers_driver_sdk::Connection>> {
     match tokio::time::timeout(TIMEOUT, driver.connect(&conn_params())).await {
         Ok(Ok(conn)) => Some(conn),
         Ok(Err(e)) => {
-            let host = es_host();
-            eprintln!("SKIP: Elasticsearch unreachable at {host}:{ES_PORT} — {e}");
+            eprintln!("SKIP: Elasticsearch unreachable at {ES_HOST}:{ES_PORT} — {e}");
             None
         }
         Err(_) => {
-            let host = es_host();
-            eprintln!("SKIP: Elasticsearch connection timed out at {host}:{ES_PORT}");
+            eprintln!("SKIP: Elasticsearch connection timed out at {ES_HOST}:{ES_PORT}");
             None
         }
     }

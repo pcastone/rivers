@@ -1,6 +1,6 @@
 //! Live integration tests for the CouchDB driver.
 //!
-//! Requires a running CouchDB instance. Set RIVERS_TEST_COUCH_HOST (default: localhost).
+//! Requires a running CouchDB instance at 192.168.2.221:5984.
 //! Credentials are resolved from a LockBox keystore.
 //! If the service is unreachable, tests print SKIP and pass.
 
@@ -10,14 +10,11 @@ use std::time::Duration;
 use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query, QueryValue};
 use rivers_plugin_couchdb::CouchDBDriver;
 
+const COUCH_HOST: &str = "192.168.2.221";
 const COUCH_PORT: u16 = 5984;
 const COUCH_DB: &str = "test_rivers";
 const COUCH_USER: &str = "admin";
 const TIMEOUT: Duration = Duration::from_secs(10);
-
-fn couch_host() -> String {
-    std::env::var("RIVERS_TEST_COUCH_HOST").unwrap_or_else(|_| "localhost".to_string())
-}
 
 /// Resolve a single credential from a temporary LockBox keystore.
 fn lockbox_resolve(name: &str, value: &str) -> String {
@@ -54,7 +51,7 @@ fn lockbox_resolve(name: &str, value: &str) -> String {
 fn conn_params() -> ConnectionParams {
     let password = lockbox_resolve("couchdb/test", "admin");
     ConnectionParams {
-        host: couch_host(),
+        host: COUCH_HOST.into(),
         port: COUCH_PORT,
         database: COUCH_DB.into(),
         username: COUCH_USER.into(),
@@ -67,9 +64,8 @@ fn conn_params() -> ConnectionParams {
 /// CouchDB requires the database to be explicitly created.
 async fn ensure_db_exists() -> bool {
     let password = lockbox_resolve("couchdb/test", "admin");
-    let host = couch_host();
     let url = format!(
-        "http://{COUCH_USER}:{password}@{host}:{COUCH_PORT}/{COUCH_DB}"
+        "http://{COUCH_USER}:{password}@{COUCH_HOST}:{COUCH_PORT}/{COUCH_DB}"
     );
     let client = reqwest::Client::new();
 
@@ -89,13 +85,11 @@ async fn try_connect() -> Option<Box<dyn rivers_driver_sdk::Connection>> {
     match tokio::time::timeout(TIMEOUT, driver.connect(&conn_params())).await {
         Ok(Ok(conn)) => Some(conn),
         Ok(Err(e)) => {
-            let host = couch_host();
-            eprintln!("SKIP: CouchDB unreachable at {host}:{COUCH_PORT} — {e}");
+            eprintln!("SKIP: CouchDB unreachable at {COUCH_HOST}:{COUCH_PORT} — {e}");
             None
         }
         Err(_) => {
-            let host = couch_host();
-            eprintln!("SKIP: CouchDB connection timed out at {host}:{COUCH_PORT}");
+            eprintln!("SKIP: CouchDB connection timed out at {COUCH_HOST}:{COUCH_PORT}");
             None
         }
     }

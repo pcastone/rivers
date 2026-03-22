@@ -1,19 +1,15 @@
 //! Live integration test for LDAP plugin against Podman infra.
 //!
-//! Requires: OpenLDAP server. Set RIVERS_TEST_LDAP_HOST (default: localhost), port 389.
+//! Requires: OpenLDAP on 192.168.2.227:389
 //! Run: cargo test -p rivers-plugin-ldap --test ldap_live_test -- --nocapture
 
 use std::collections::HashMap;
 use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query, QueryValue};
 use rivers_plugin_ldap::LdapDriver;
 
-fn ldap_host() -> String {
-    std::env::var("RIVERS_TEST_LDAP_HOST").unwrap_or_else(|_| "localhost".to_string())
-}
-
 fn ldap_params() -> ConnectionParams {
     ConnectionParams {
-        host: ldap_host(),
+        host: "192.168.2.227".into(),
         port: 389,
         database: "".into(),
         username: "".into(),

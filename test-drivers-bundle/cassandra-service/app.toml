@@ -1,7 +1,7 @@
 [data.datasources.cassandra]
 name     = "cassandra"
 driver   = "cassandra"
-host     = "localhost"
+host     = "192.168.2.224"
 port     = 9042
 database = "rivers"
 nopassword = true

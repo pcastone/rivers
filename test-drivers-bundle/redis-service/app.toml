@@ -1,14 +1,14 @@
 [data.datasources.redis]
 name     = "redis"
 driver   = "redis"
-host     = "localhost"
+host     = "192.168.2.206"
 port     = 6379
 nopassword = false
 credentials_source = "lockbox://redis-test"
 
 [data.datasources.redis.extra]
 cluster = "true"
-hosts   = "localhost:6379"
+hosts   = "192.168.2.206:6379,192.168.2.207:6379,192.168.2.208:6379"
 
 
 [data.dataviews.get_session]

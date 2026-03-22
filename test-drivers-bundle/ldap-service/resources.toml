@@ -5,5 +5,5 @@ nopassword = true
 required   = true
 
 [datasources.config]
-host = "localhost"
+host = "192.168.2.227"
 port = 389

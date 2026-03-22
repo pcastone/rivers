@@ -1,0 +1,36 @@
+Source: rivers
+Section: net
+Priority: optional
+Maintainer: Paul Castone <paul.castone@gmail.com>
+Build-Depends: debhelper (>= 12), cargo, rustc (>= 1.75)
+Standards-Version: 4.5.0
+Homepage: https://github.com/pcastone/rivers
+
+Package: rivers
+Architecture: any
+Depends: rivers-lib (= ${binary:Version}), ${shlibs:Depends}, ${misc:Depends}
+Recommends: rivers-plugins
+Description: Rivers application server — declarative API framework
+ Rivers is a declarative app-service framework written in Rust.
+ Define REST APIs, WebSocket, SSE, and GraphQL endpoints using
+ TOML configuration and JSON schemas — no application code required.
+ .
+ This package contains the server binaries, CLI tools, and default
+ configuration.
+
+Package: rivers-lib
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Rivers shared libraries and engines
+ Shared runtime library, V8 JavaScript engine, Wasmtime WASM engine,
+ built-in database drivers, storage backends, and LockBox encryption
+ engine for the Rivers application server.
+
+Package: rivers-plugins
+Architecture: any
+Depends: rivers-lib (= ${binary:Version}), ${shlibs:Depends}, ${misc:Depends}
+Description: Rivers datasource driver plugins
+ Optional datasource driver plugins for Rivers: MongoDB, Elasticsearch,
+ Cassandra, CouchDB, InfluxDB, Kafka, RabbitMQ, NATS, Redis Streams,
+ and LDAP. Each plugin is a self-contained shared library loaded at
+ runtime.

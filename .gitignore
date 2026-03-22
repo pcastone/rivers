@@ -43,8 +43,6 @@ logs/*.log
 
 # Claude Code
 .claude/
-CLAUDE.md
-docs/sensitive.md
 
 # Archives
 *.zip
@@ -62,9 +60,3 @@ data/
 # Test keystores and fixtures
 test/
 crates/rivers-core/test
-
-# Internal docs (lab topology, scratch notes)
-docs/arch/test-infrastructure.md
-docs/dreams/
-docs/test-plan.md
-todo/gutter.md

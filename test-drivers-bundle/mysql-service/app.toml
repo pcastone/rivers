@@ -1,7 +1,7 @@
 [data.datasources.mysql]
 name     = "mysql"
 driver   = "mysql"
-host     = "localhost"
+host     = "192.168.2.215"
 port     = 3306
 database = "rivers"
 username = "rivers"

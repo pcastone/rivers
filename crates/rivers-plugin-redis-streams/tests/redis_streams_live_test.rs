@@ -1,6 +1,6 @@
 //! Live integration tests for the Redis Streams plugin driver.
 //!
-//! Requires a running Redis server. Set RIVERS_TEST_REDIS_HOST (default: localhost).
+//! Requires a running Redis server at 192.168.2.206:6379.
 //! Credentials are resolved from a LockBox keystore.
 //! If the service is unreachable, tests print SKIP and pass.
 //!
@@ -15,12 +15,9 @@ use rivers_driver_sdk::{
 };
 use rivers_plugin_redis_streams::RedisStreamsDriver;
 
+const REDIS_HOST: &str = "192.168.2.206";
 const REDIS_PORT: u16 = 6379;
 const TIMEOUT: Duration = Duration::from_secs(15);
-
-fn redis_host() -> String {
-    std::env::var("RIVERS_TEST_REDIS_HOST").unwrap_or_else(|_| "localhost".to_string())
-}
 
 /// Resolve a single credential from a temporary LockBox keystore.
 fn lockbox_resolve(name: &str, value: &str) -> String {
@@ -58,13 +55,12 @@ fn conn_params() -> ConnectionParams {
     let password = lockbox_resolve("redis-streams/test", "rivers_test");
     let mut options = HashMap::new();
     options.insert("cluster".into(), "true".into());
-    let host = redis_host();
     options.insert(
         "hosts".into(),
-        format!("{host}:6379"),
+        "192.168.2.206:6379,192.168.2.207:6379,192.168.2.208:6379".into(),
     );
     ConnectionParams {
-        host: redis_host(),
+        host: REDIS_HOST.into(),
         port: REDIS_PORT,
         database: "0".into(),
         username: "".into(),
@@ -115,13 +111,11 @@ async fn try_create_producer(
     match tokio::time::timeout(TIMEOUT, driver.create_producer(&conn_params(), &config)).await {
         Ok(Ok(producer)) => Some(producer),
         Ok(Err(e)) => {
-            let host = redis_host();
-            eprintln!("SKIP: Redis unreachable at {host}:{REDIS_PORT} — {e}");
+            eprintln!("SKIP: Redis unreachable at {REDIS_HOST}:{REDIS_PORT} — {e}");
             None
         }
         Err(_) => {
-            let host = redis_host();
-            eprintln!("SKIP: Redis connection timed out at {host}:{REDIS_PORT}");
+            eprintln!("SKIP: Redis connection timed out at {REDIS_HOST}:{REDIS_PORT}");
             None
         }
     }
@@ -149,8 +143,7 @@ async fn redis_streams_produce_consume_roundtrip() {
         Ok(Err(e)) => {
             let msg = format!("{e}");
             if msg.contains("NOAUTH") || msg.contains("Authentication") {
-                let host = redis_host();
-                eprintln!("SKIP: Redis requires authentication at {host}:{REDIS_PORT}");
+                eprintln!("SKIP: Redis requires authentication at {REDIS_HOST}:{REDIS_PORT}");
                 return;
             }
             panic!("publish failed: {e:?}");
@@ -223,9 +216,7 @@ async fn redis_streams_produce_consume_roundtrip() {
 /// Delete a Redis stream for cleanup (uses cluster connection).
 async fn cleanup_stream(stream: &str) {
     let password = lockbox_resolve("redis-streams/test", "rivers_test");
-    let host = redis_host();
-    let host_port = format!("{host}:{REDIS_PORT}");
-    let hosts = [host_port.as_str()];
+    let hosts = ["192.168.2.206:6379", "192.168.2.207:6379", "192.168.2.208:6379"];
     let nodes: Vec<String> = hosts
         .iter()
         .map(|h| {

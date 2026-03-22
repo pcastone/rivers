@@ -39,6 +39,10 @@ async fn main() {
         #[cfg(feature = "admin-api")]
         "health"      => cmd_health(&admin_url).await,
         #[cfg(feature = "admin-api")]
+        "stop"        => cmd_stop(&admin_url).await,
+        #[cfg(feature = "admin-api")]
+        "graceful"    => cmd_graceful(&admin_url).await,
+        #[cfg(feature = "admin-api")]
         "log" => {
             if args.len() < 3 { eprintln!("Usage: riversctl log <levels|set|reset>"); std::process::exit(1); }
             cmd_log(&admin_url, &args[2..]).await
@@ -106,6 +110,8 @@ fn print_usage() {
     eprintln!("  drivers         List registered drivers");
     eprintln!("  datasources     List configured datasources");
     eprintln!("  health          Verbose health check");
+    eprintln!("  stop            Stop riversd immediately (SIGKILL fallback)");
+    eprintln!("  graceful        Stop riversd gracefully — drain in-flight requests (SIGTERM fallback)");
     eprintln!("  log levels      View current log levels");
     eprintln!("  log set <e> <l> Change log level");
     eprintln!("  log reset       Reset to defaults");
@@ -118,13 +124,13 @@ fn print_usage() {
 
 // ── start ────────────────────────────────────────────────────────────────────
 
-/// Locate riversd and replace the current process with it.
-/// All args are passed as a Vec — no shell interpolation.
+/// Locate riversd and launch it.
+/// On Unix, replaces the current process (POSIX exec) so signals pass through naturally.
+/// On Windows, spawns riversd as a child process and waits for it.
 fn cmd_start(args: &[String]) -> Result<(), String> {
     let binary = find_riversd_binary()?;
 
     // Parse riversctl start flags and forward to riversd serve.
-    // Accepted: --config <p>, --log-level <l>, --no-admin-auth, positional <bundle>
     let mut riversd_args: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -162,14 +168,36 @@ fn cmd_start(args: &[String]) -> Result<(), String> {
 
     riversd_args.push("serve".into());
 
-    // Hand off to riversd — replaces this process so signals pass through naturally.
-    // CommandExt::exec passes args as a separate array (no shell involved).
-    use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new(&binary)
-        .args(&riversd_args)
-        .exec();
+    launch_riversd(&binary, &riversd_args)
+}
 
+/// Unix: POSIX exec — replaces the current process so signals pass through naturally.
+/// Uses CommandExt::exec which passes args as a separate array (no shell involved).
+#[cfg(unix)]
+fn launch_riversd(binary: &Path, args: &[String]) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    let err = std::process::Command::new(binary)
+        .args(args)
+        .exec();
     Err(format!("failed to launch {}: {}", binary.display(), err))
+}
+
+/// Windows: spawn riversd as a child and wait — stop/graceful handled via taskkill.
+#[cfg(windows)]
+fn launch_riversd(binary: &Path, args: &[String]) -> Result<(), String> {
+    let status = std::process::Command::new(binary)
+        .args(args)
+        .status()
+        .map_err(|e| format!("failed to launch {}: {}", binary.display(), e))?;
+    if !status.success() {
+        return Err(format!("riversd exited with {}", status));
+    }
+    Ok(())
+}
+
+/// Platform-aware binary name for riversd.
+fn riversd_binary_name() -> &'static str {
+    if cfg!(windows) { "riversd.exe" } else { "riversd" }
 }
 
 /// Find the riversd binary.
@@ -183,10 +211,12 @@ fn find_riversd_binary() -> Result<PathBuf, String> {
         return Err(format!("RIVERS_DAEMON_PATH={path} does not exist or is not a file"));
     }
 
+    let binary_name = riversd_binary_name();
+
     // 2. Sibling to this binary (release layout: bin/riversctl and bin/riversd)
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let sibling = dir.join("riversd");
+            let sibling = dir.join(binary_name);
             if sibling.is_file() {
                 return Ok(sibling);
             }
@@ -194,7 +224,7 @@ fn find_riversd_binary() -> Result<PathBuf, String> {
     }
 
     // 3. PATH
-    if let Some(p) = find_in_path("riversd") {
+    if let Some(p) = find_in_path(binary_name) {
         return Ok(p);
     }
 
@@ -203,8 +233,8 @@ fn find_riversd_binary() -> Result<PathBuf, String> {
 
 fn find_in_path(name: &str) -> Option<PathBuf> {
     let path_var = std::env::var("PATH").ok()?;
-    for dir in path_var.split(':') {
-        let candidate = Path::new(dir).join(name);
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -548,6 +578,152 @@ async fn cmd_health(_url: &str) -> Result<(), String> {
     let main_url = std::env::var("RIVERS_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into());
     let data = admin_get(&main_url, "/health/verbose").await?;
     println!("{}", serde_json::to_string_pretty(&data).unwrap());
+    Ok(())
+}
+
+#[cfg(feature = "admin-api")]
+async fn cmd_stop(url: &str) -> Result<(), String> {
+    let body = serde_json::json!({ "mode": "immediate" });
+    match admin_post(url, "/admin/shutdown", &body).await {
+        Ok(data) => {
+            println!("{}", serde_json::to_string_pretty(&data).unwrap());
+            Ok(())
+        }
+        Err(_) => {
+            eprintln!("Admin API unreachable — falling back to signal");
+            signal_riversd(Signal::Kill)
+        }
+    }
+}
+
+#[cfg(feature = "admin-api")]
+async fn cmd_graceful(url: &str) -> Result<(), String> {
+    let body = serde_json::json!({ "mode": "graceful" });
+    match admin_post(url, "/admin/shutdown", &body).await {
+        Ok(data) => {
+            println!("{}", serde_json::to_string_pretty(&data).unwrap());
+            Ok(())
+        }
+        Err(_) => {
+            eprintln!("Admin API unreachable — falling back to signal");
+            signal_riversd(Signal::Term)
+        }
+    }
+}
+
+enum Signal {
+    Kill,
+    Term,
+}
+
+/// Find the riversd process and send a signal.
+/// Cross-platform: uses `pgrep`/`kill` on Unix, `tasklist`/`taskkill` on Windows.
+fn signal_riversd(sig: Signal) -> Result<(), String> {
+    let pids = find_riversd_pids()?;
+    if pids.is_empty() {
+        return Err("no running riversd process found".into());
+    }
+    for pid in &pids {
+        kill_pid(pid, &sig)?;
+    }
+    Ok(())
+}
+
+/// Discover PIDs of running riversd processes.
+#[cfg(unix)]
+fn find_riversd_pids() -> Result<Vec<String>, String> {
+    let output = std::process::Command::new("pgrep")
+        .arg("-x")
+        .arg("riversd")
+        .output()
+        .map_err(|e| format!("failed to run pgrep: {e}"))?;
+
+    if !output.status.success() {
+        return Ok(vec![]);
+    }
+
+    let pids: Vec<String> = std::str::from_utf8(&output.stdout)
+        .map_err(|e| format!("pgrep output: {e}"))?
+        .trim()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect();
+
+    Ok(pids)
+}
+
+#[cfg(windows)]
+fn find_riversd_pids() -> Result<Vec<String>, String> {
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq riversd.exe", "/FO", "CSV", "/NH"])
+        .output()
+        .map_err(|e| format!("failed to run tasklist: {e}"))?;
+
+    if !output.status.success() {
+        return Ok(vec![]);
+    }
+
+    let stdout = std::str::from_utf8(&output.stdout)
+        .map_err(|e| format!("tasklist output: {e}"))?;
+
+    // CSV format: "riversd.exe","1234","Console","1","12,345 K"
+    let pids: Vec<String> = stdout
+        .lines()
+        .filter(|line| line.contains("riversd.exe"))
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(',').collect();
+            fields.get(1).map(|pid| pid.trim_matches('"').to_string())
+        })
+        .collect();
+
+    Ok(pids)
+}
+
+/// Send a signal to a process by PID.
+#[cfg(unix)]
+fn kill_pid(pid: &str, sig: &Signal) -> Result<(), String> {
+    let signal_name = match sig {
+        Signal::Kill => "KILL",
+        Signal::Term => "TERM",
+    };
+
+    let status = std::process::Command::new("kill")
+        .arg(format!("-{signal_name}"))
+        .arg(pid)
+        .status()
+        .map_err(|e| format!("failed to send signal: {e}"))?;
+
+    if status.success() {
+        println!("Sent SIG{signal_name} to riversd (PID {pid})");
+    } else {
+        eprintln!("Failed to signal PID {pid}");
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn kill_pid(pid: &str, sig: &Signal) -> Result<(), String> {
+    let mut cmd = std::process::Command::new("taskkill");
+    cmd.args(["/PID", pid]);
+
+    // /F = force kill (immediate), omit for graceful
+    if matches!(sig, Signal::Kill) {
+        cmd.arg("/F");
+    }
+
+    let status = cmd.status().map_err(|e| format!("failed to run taskkill: {e}"))?;
+
+    let mode = match sig {
+        Signal::Kill => "force killed",
+        Signal::Term => "stopped",
+    };
+
+    if status.success() {
+        println!("Successfully {mode} riversd (PID {pid})");
+    } else {
+        eprintln!("Failed to stop PID {pid}");
+    }
     Ok(())
 }
 

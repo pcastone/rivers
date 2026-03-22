@@ -1,6 +1,6 @@
 //! Live integration tests for the Redis driver.
 //!
-//! Requires a running Redis instance. Set RIVERS_TEST_REDIS_HOST (default: localhost).
+//! Requires a running Redis instance at 192.168.2.206:6379.
 //! Credentials are resolved from a LockBox keystore (see `common/mod.rs`).
 //! If the service is unreachable or returns cluster MOVED errors, tests SKIP and pass.
 
@@ -12,10 +12,7 @@ use std::time::Duration;
 use rivers_core::drivers::RedisDriver;
 use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query, QueryValue};
 
-fn redis_host() -> String {
-    std::env::var("RIVERS_TEST_REDIS_HOST").unwrap_or_else(|_| "localhost".to_string())
-}
-
+const REDIS_HOST: &str = "192.168.2.206";
 const REDIS_PORT: u16 = 6379;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -23,13 +20,12 @@ fn conn_params() -> ConnectionParams {
     let creds = common::TestCredentials::new();
     let mut options = HashMap::new();
     options.insert("cluster".into(), "true".into());
-    let h = redis_host();
     options.insert(
         "hosts".into(),
-        format!("{h}:6379,{h}:6379,{h}:6379"),
+        "192.168.2.206:6379,192.168.2.207:6379,192.168.2.208:6379".into(),
     );
     ConnectionParams {
-        host: redis_host(),
+        host: REDIS_HOST.into(),
         port: REDIS_PORT,
         database: "0".into(),
         username: "".into(),

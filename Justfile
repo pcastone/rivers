@@ -142,3 +142,25 @@ sizes-dynamic:
     @ls -lh release/dynamic/bin/* 2>/dev/null || echo "  (none)"
     @echo "==> Libraries:"
     @ls -lh release/dynamic/lib/* 2>/dev/null || echo "  (none)"
+
+# ── Packaging ──────────────────────────────────────────────────────
+
+# Build .deb packages (rivers, rivers-lib, rivers-plugins)
+package-deb:
+    ./scripts/build-packages.sh deb
+
+# Build .rpm packages (rivers, rivers-lib, rivers-plugins)
+package-rpm:
+    ./scripts/build-packages.sh rpm
+
+# Build Windows .zip (cross-compiled x86_64)
+package-windows:
+    ./scripts/build-packages.sh windows
+
+# Build portable .tar.gz for current platform
+package-tarball:
+    ./scripts/build-packages.sh tarball
+
+# Build all package formats
+package-all:
+    ./scripts/build-packages.sh all

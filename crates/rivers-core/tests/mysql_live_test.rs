@@ -1,6 +1,6 @@
 //! Live integration tests for the MySQL driver.
 //!
-//! Requires a running MySQL instance. Set RIVERS_TEST_MYSQL_HOST (default: localhost).
+//! Requires a running MySQL instance at 192.168.2.215:3306.
 //! Credentials are resolved from a LockBox keystore (see `common/mod.rs`).
 //! If the service is unreachable, tests print SKIP and pass.
 
@@ -12,10 +12,7 @@ use std::time::Duration;
 use rivers_core::drivers::MysqlDriver;
 use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query, QueryValue};
 
-fn mysql_host() -> String {
-    std::env::var("RIVERS_TEST_MYSQL_HOST").unwrap_or_else(|_| "localhost".to_string())
-}
-
+const MYSQL_HOST: &str = "192.168.2.215";
 const MYSQL_PORT: u16 = 3306;
 const MYSQL_DB: &str = "mysql";
 const MYSQL_USER: &str = "root";
@@ -24,7 +21,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 fn conn_params() -> ConnectionParams {
     let creds = common::TestCredentials::new();
     ConnectionParams {
-        host: mysql_host(),
+        host: MYSQL_HOST.into(),
         port: MYSQL_PORT,
         database: MYSQL_DB.into(),
         username: MYSQL_USER.into(),
@@ -36,15 +33,14 @@ fn conn_params() -> ConnectionParams {
 /// Try to connect; returns None (with SKIP message) if unreachable.
 async fn try_connect() -> Option<Box<dyn rivers_driver_sdk::Connection>> {
     let driver = MysqlDriver;
-    let host = mysql_host();
     match tokio::time::timeout(TIMEOUT, driver.connect(&conn_params())).await {
         Ok(Ok(conn)) => Some(conn),
         Ok(Err(e)) => {
-            eprintln!("SKIP: MySQL unreachable at {host}:{MYSQL_PORT} — {e}");
+            eprintln!("SKIP: MySQL unreachable at {MYSQL_HOST}:{MYSQL_PORT} — {e}");
             None
         }
         Err(_) => {
-            eprintln!("SKIP: MySQL connection timed out at {host}:{MYSQL_PORT}");
+            eprintln!("SKIP: MySQL connection timed out at {MYSQL_HOST}:{MYSQL_PORT}");
             None
         }
     }

@@ -1,7 +1,7 @@
 [data.datasources.couchdb]
 name     = "couchdb"
 driver   = "couchdb"
-host     = "localhost"
+host     = "192.168.2.221"
 port     = 5984
 database = "customers"
 username = "rivers"

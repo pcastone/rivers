@@ -1,7 +1,7 @@
 [data.datasources.es]
 name     = "es"
 driver   = "elasticsearch"
-host     = "localhost"
+host     = "192.168.2.218"
 port     = 9200
 nopassword = true
 

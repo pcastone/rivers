@@ -1,6 +1,6 @@
 //! Live integration test for NATS plugin against Podman infra.
 //!
-//! Requires: NATS server. Set RIVERS_TEST_NATS_HOST (default: localhost), port 4222.
+//! Requires: NATS on 192.168.2.227:4222
 //! Run: cargo test -p rivers-plugin-nats --test nats_live_test -- --nocapture
 
 use std::collections::HashMap;
@@ -10,13 +10,9 @@ use rivers_driver_sdk::broker::{
 use rivers_driver_sdk::ConnectionParams;
 use rivers_plugin_nats::NatsDriver;
 
-fn nats_host() -> String {
-    std::env::var("RIVERS_TEST_NATS_HOST").unwrap_or_else(|_| "localhost".to_string())
-}
-
 fn nats_params() -> ConnectionParams {
     ConnectionParams {
-        host: nats_host(),
+        host: "192.168.2.229".into(),
         port: 4222,
         database: "".into(),
         username: "".into(),

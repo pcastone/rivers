@@ -1,0 +1,33 @@
+[Unit]
+Description=Rivers Application Server
+Documentation=https://github.com/pcastone/rivers/wiki
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rivers
+Group=rivers
+ExecStart=/usr/bin/riversd --config /etc/rivers/riversd.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+WorkingDirectory=/var/lib/rivers
+RuntimeDirectory=rivers
+StateDirectory=rivers
+LogsDirectory=rivers
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/rivers /var/log/rivers
+PrivateTmp=yes
+
+# Limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

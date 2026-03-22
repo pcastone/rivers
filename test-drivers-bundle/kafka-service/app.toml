@@ -4,7 +4,7 @@ driver   = "kafka"
 nopassword = true
 
 [data.datasources.kafka.config]
-bootstrap_servers = "localhost:9092"
+bootstrap_servers = "192.168.2.203:9092,192.168.2.204:9092,192.168.2.205:9092"
 group_id          = "rivers-test-consumer"
 
 # ─────────────────────────────────────────────

@@ -1,11 +1,11 @@
 # ─────────────────────────────────────────────
-# Datasource — PostgreSQL
+# Datasource — PostgreSQL at 192.168.2.209
 # ─────────────────────────────────────────────
 
 [data.datasources.pg]
 name     = "pg"
 driver   = "postgres"
-host     = "localhost"
+host     = "192.168.2.209"
 port     = 5432
 database = "rivers"
 username = "rivers"

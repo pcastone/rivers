@@ -1,0 +1,32 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # Create rivers system user if it doesn't exist
+        if ! getent passwd rivers > /dev/null 2>&1; then
+            adduser --system --group --home /var/lib/rivers \
+                --no-create-home --shell /usr/sbin/nologin rivers
+        fi
+
+        # Create directories
+        install -d -m 0755 -o rivers -g rivers /var/lib/rivers
+        install -d -m 0755 -o rivers -g rivers /var/log/rivers
+        install -d -m 0700 -o rivers -g rivers /var/lib/rivers/lockbox
+
+        # Set ownership on config
+        if [ -d /etc/rivers ]; then
+            chown -R root:rivers /etc/rivers
+            chmod 0750 /etc/rivers
+        fi
+
+        # Enable and start service
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload
+            systemctl enable riversd.service
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

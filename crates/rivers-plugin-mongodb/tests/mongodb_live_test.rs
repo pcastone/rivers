@@ -1,6 +1,6 @@
 //! Live integration tests for the MongoDB driver.
 //!
-//! Requires a running MongoDB instance. Set RIVERS_TEST_MONGO_HOST (default: localhost).
+//! Requires a running MongoDB instance at 192.168.2.212:27017.
 //! If the service is unreachable, tests print SKIP and pass.
 
 use std::collections::HashMap;
@@ -9,17 +9,14 @@ use std::time::Duration;
 use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query, QueryValue};
 use rivers_plugin_mongodb::MongoDriver;
 
+const MONGO_HOST: &str = "192.168.2.212";
 const MONGO_PORT: u16 = 27017;
 const MONGO_DB: &str = "test";
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-fn mongo_host() -> String {
-    std::env::var("RIVERS_TEST_MONGO_HOST").unwrap_or_else(|_| "localhost".to_string())
-}
-
 fn conn_params() -> ConnectionParams {
     ConnectionParams {
-        host: mongo_host(),
+        host: MONGO_HOST.into(),
         port: MONGO_PORT,
         database: MONGO_DB.into(),
         username: "".into(),
@@ -34,13 +31,11 @@ async fn try_connect() -> Option<Box<dyn rivers_driver_sdk::Connection>> {
     match tokio::time::timeout(TIMEOUT, driver.connect(&conn_params())).await {
         Ok(Ok(conn)) => Some(conn),
         Ok(Err(e)) => {
-            let host = mongo_host();
-            eprintln!("SKIP: MongoDB unreachable at {host}:{MONGO_PORT} — {e}");
+            eprintln!("SKIP: MongoDB unreachable at {MONGO_HOST}:{MONGO_PORT} — {e}");
             None
         }
         Err(_) => {
-            let host = mongo_host();
-            eprintln!("SKIP: MongoDB connection timed out at {host}:{MONGO_PORT}");
+            eprintln!("SKIP: MongoDB connection timed out at {MONGO_HOST}:{MONGO_PORT}");
             None
         }
     }

@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|upgrade)
+        if [ -d /run/systemd/system ]; then
+            systemctl stop riversd.service 2>/dev/null || true
+            systemctl disable riversd.service 2>/dev/null || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

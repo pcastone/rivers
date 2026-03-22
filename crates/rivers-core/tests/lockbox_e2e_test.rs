@@ -2,7 +2,7 @@
 //!
 //! Creates a keystore, stores a Redis credential, resolves it via LockBox,
 //! and uses the resolved password to connect to Redis and execute a ping.
-//! Set RIVERS_TEST_REDIS_HOST (default: localhost). If Redis is unreachable the test SKIPs and passes.
+//! If Redis is unreachable the test SKIPs and passes.
 
 mod common;
 
@@ -16,10 +16,7 @@ use rivers_core::lockbox::{
 };
 use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query};
 
-fn redis_host() -> String {
-    std::env::var("RIVERS_TEST_REDIS_HOST").unwrap_or_else(|_| "localhost".to_string())
-}
-
+const REDIS_HOST: &str = "192.168.2.206";
 const REDIS_PORT: u16 = 6379;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -88,9 +85,8 @@ async fn lockbox_credential_resolves_and_connects_redis() {
     assert_eq!(resolved.value, "rivers_test");
 
     // 8. Use the resolved password to connect to Redis
-    let host = redis_host();
     let params = ConnectionParams {
-        host: host.clone(),
+        host: REDIS_HOST.into(),
         port: REDIS_PORT,
         database: "0".into(),
         username: "".into(),
@@ -103,11 +99,11 @@ async fn lockbox_credential_resolves_and_connects_redis() {
     let mut conn = match conn_result {
         Ok(Ok(c)) => c,
         Ok(Err(e)) => {
-            eprintln!("SKIP: Redis unreachable at {host}:{REDIS_PORT} — {e}");
+            eprintln!("SKIP: Redis unreachable at {REDIS_HOST}:{REDIS_PORT} — {e}");
             return;
         }
         Err(_) => {
-            eprintln!("SKIP: Redis timed out at {host}:{REDIS_PORT}");
+            eprintln!("SKIP: Redis timed out at {REDIS_HOST}:{REDIS_PORT}");
             return;
         }
     };

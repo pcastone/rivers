@@ -1,6 +1,6 @@
 //! Live integration test for Kafka plugin against Podman infra.
 //!
-//! Requires: Kafka broker. Set RIVERS_TEST_KAFKA_HOST (default: localhost), port 9092.
+//! Requires: Kafka on 192.168.2.203:9092 (3-broker cluster)
 //! Run: cargo test -p rivers-plugin-kafka --test kafka_live_test -- --nocapture
 
 use std::collections::HashMap;
@@ -10,13 +10,9 @@ use rivers_driver_sdk::broker::{
 use rivers_driver_sdk::ConnectionParams;
 use rivers_plugin_kafka::KafkaDriver;
 
-fn kafka_host() -> String {
-    std::env::var("RIVERS_TEST_KAFKA_HOST").unwrap_or_else(|_| "localhost".to_string())
-}
-
 fn kafka_params() -> ConnectionParams {
     ConnectionParams {
-        host: kafka_host(),
+        host: "192.168.2.203".into(),
         port: 9092,
         database: "".into(),
         username: "".into(),

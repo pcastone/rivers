@@ -1,0 +1,35 @@
+# riversd.toml — Rivers server configuration
+#
+# See: https://github.com/pcastone/rivers/wiki/Configuration-Guide
+#
+# Uncomment bundle_path to load an application bundle at startup:
+# bundle_path = "/var/lib/rivers/bundles/my-app/"
+
+[base]
+host      = "0.0.0.0"
+port      = 8080
+log_level = "info"
+
+[base.logging]
+level           = "info"
+format          = "json"
+local_file_path = "/var/log/rivers/riversd.log"
+
+[base.tls]
+redirect = false
+
+[storage_engine]
+backend = "memory"
+
+# [lockbox]
+# path       = "/var/lib/rivers/lockbox/keystore.rkeystore"
+# key_source = "env"
+# key_env_var = "RIVERS_LOCKBOX_KEY"
+
+# [base.admin_api]
+# enabled = true
+# host    = "127.0.0.1"
+# port    = 9090
+
+# [graphql]
+# enabled = true

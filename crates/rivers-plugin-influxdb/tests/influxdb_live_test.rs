@@ -1,6 +1,6 @@
 //! Live integration tests for the InfluxDB v2 plugin driver.
 //!
-//! Requires a running InfluxDB v2 instance. Set RIVERS_TEST_INFLUX_HOST (default: localhost).
+//! Requires a running InfluxDB v2 instance at 192.168.2.230:8086.
 //! Credentials are resolved from a LockBox keystore.
 //! If the service is unreachable, tests print SKIP and pass.
 //!
@@ -12,15 +12,12 @@ use std::time::Duration;
 use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query, QueryValue};
 use rivers_plugin_influxdb::InfluxDriver;
 
+const INFLUX_HOST: &str = "192.168.2.230";
 const INFLUX_PORT: u16 = 8086;
 const INFLUX_ORG: &str = "rivers";
 const INFLUX_BUCKET: &str = "test";
 const INFLUX_USER: &str = "rivers";
 const TIMEOUT: Duration = Duration::from_secs(10);
-
-fn influx_host() -> String {
-    std::env::var("RIVERS_TEST_INFLUX_HOST").unwrap_or_else(|_| "localhost".to_string())
-}
 
 /// Resolve a single credential from a temporary LockBox keystore.
 fn lockbox_resolve(name: &str, value: &str) -> String {
@@ -59,7 +56,7 @@ fn conn_params() -> ConnectionParams {
     let mut options = HashMap::new();
     options.insert("org".to_string(), INFLUX_ORG.to_string());
     ConnectionParams {
-        host: influx_host(),
+        host: INFLUX_HOST.into(),
         port: INFLUX_PORT,
         database: INFLUX_BUCKET.into(),
         username: INFLUX_USER.into(),
@@ -74,13 +71,11 @@ async fn try_connect() -> Option<Box<dyn rivers_driver_sdk::Connection>> {
     match tokio::time::timeout(TIMEOUT, driver.connect(&conn_params())).await {
         Ok(Ok(conn)) => Some(conn),
         Ok(Err(e)) => {
-            let host = influx_host();
-            eprintln!("SKIP: InfluxDB unreachable at {host}:{INFLUX_PORT} — {e}");
+            eprintln!("SKIP: InfluxDB unreachable at {INFLUX_HOST}:{INFLUX_PORT} — {e}");
             None
         }
         Err(_) => {
-            let host = influx_host();
-            eprintln!("SKIP: InfluxDB connection timed out at {host}:{INFLUX_PORT}");
+            eprintln!("SKIP: InfluxDB connection timed out at {INFLUX_HOST}:{INFLUX_PORT}");
             None
         }
     }
