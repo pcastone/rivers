@@ -7,6 +7,7 @@
 
 mod eventbus;
 mod faker;
+#[cfg(unix)]
 mod memcached;
 mod mysql;
 mod postgres;
@@ -16,6 +17,7 @@ mod sqlite;
 
 pub use self::eventbus::{EventBusConnection, EventBusDriver, EventBusPublisher};
 pub use self::faker::{FakerConnection, FakerDriver};
+#[cfg(unix)]
 pub use self::memcached::{MemcachedConnection, MemcachedDriver};
 pub use self::mysql::{MysqlConnection, MysqlDriver};
 pub use self::postgres::{PostgresConnection, PostgresDriver};
@@ -34,6 +36,7 @@ pub fn register_builtin_drivers(registrar: &mut dyn DriverRegistrar) {
     registrar.register_database_driver(Arc::new(MysqlDriver));
     registrar.register_database_driver(Arc::new(SqliteDriver));
     registrar.register_database_driver(Arc::new(RedisDriver));
+    #[cfg(unix)]
     registrar.register_database_driver(Arc::new(MemcachedDriver));
     registrar.register_database_driver(Arc::new(RpsClientDriver));
     registrar.register_database_driver(Arc::new(EventBusDriver::new()));
