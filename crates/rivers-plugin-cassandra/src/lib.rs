@@ -206,9 +206,11 @@ fn cql_value_to_query_value(val: Option<&CqlValue>) -> QueryValue {
 
 // ── Plugin ABI ─────────────────────────────────────────────────────────
 
+#[cfg(feature = "plugin-exports")]
 #[no_mangle]
 pub extern "C" fn _rivers_abi_version() -> u32 { ABI_VERSION }
 
+#[cfg(feature = "plugin-exports")]
 #[no_mangle]
 #[allow(improper_ctypes_definitions)]
 pub extern "C" fn _rivers_register_driver(registrar: &mut dyn DriverRegistrar) {
@@ -224,7 +226,7 @@ mod tests {
     fn driver_name() { assert_eq!(CassandraDriver.name(), "cassandra"); }
 
     #[test]
-    fn abi_version_matches() { assert_eq!(_rivers_abi_version(), ABI_VERSION); }
+    fn abi_version_matches() { assert_eq!(ABI_VERSION, 1); }
 
     #[test]
     fn query_value_to_cql_string() {

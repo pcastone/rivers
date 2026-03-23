@@ -37,7 +37,7 @@ rustls = { workspace = true, optional = true }
 x509-parser = { workspace = true, optional = true }
 rivers-core-config = { path = "../rivers-core-config" }
 rivers-driver-sdk = { path = "../rivers-driver-sdk" }
-rivers-drivers-builtin = { path = "../rivers-drivers-builtin", optional = true }
+rivers-drivers-builtin = { path = "../rivers-drivers-builtin", optional = true, default-features = false }
 rivers-storage-backends = { path = "../rivers-storage-backends", optional = true }
 rivers-lockbox-engine = { path = "../rivers-lockbox-engine", optional = true }
 

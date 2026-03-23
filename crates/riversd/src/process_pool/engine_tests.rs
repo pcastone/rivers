@@ -923,7 +923,7 @@ mod engine_tests {
             .trace_id("t1".into())
             .build()
             .unwrap();
-        let result = execute_wasm_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, None).await;
+        let result = execute_wasm_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0, None).await;
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("cannot read"),
@@ -943,7 +943,7 @@ mod engine_tests {
             .trace_id("t1".into())
             .build()
             .unwrap();
-        let result = dispatch_task("wasmtime", ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await;
+        let result = dispatch_task("wasmtime", ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, 0, None, None).await;
         assert!(result.is_err());
         // Should be a HandlerError (module not found), NOT EngineUnavailable
         let err_msg = result.unwrap_err().to_string();
@@ -1414,7 +1414,7 @@ mod engine_tests {
             .unwrap();
 
         // 16 MiB memory limit — more than enough for a trivial module
-        let result = execute_wasm_task(ctx, 5000, 0, 16 * 1024 * 1024, None).await.unwrap();
+        let result = execute_wasm_task(ctx, 5000, 0, 16 * 1024 * 1024, 0, None).await.unwrap();
         assert_eq!(result.value["result"], 42);
 
         // Clean up
@@ -1449,7 +1449,7 @@ mod engine_tests {
             .unwrap();
 
         // Short timeout — should hit fuel exhaustion or epoch interrupt
-        let result = execute_wasm_task(ctx, 100, 0, DEFAULT_HEAP_LIMIT, None).await;
+        let result = execute_wasm_task(ctx, 100, 0, DEFAULT_HEAP_LIMIT, 0, None).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             TaskError::Timeout(_) => {} // expected
@@ -1481,7 +1481,7 @@ mod engine_tests {
             .unwrap();
 
         // Use dispatch_task with "wasmtime" engine
-        let result = dispatch_task("wasmtime", ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
+        let result = dispatch_task("wasmtime", ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, 0, None, None).await.unwrap();
         assert_eq!(result.value["result"], 7);
 
         let _ = std::fs::remove_file(&wasm_path);
@@ -2012,7 +2012,7 @@ mod engine_tests {
             .build()
             .unwrap();
 
-        let result = execute_wasm_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, None).await.unwrap();
+        let result = execute_wasm_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0, None).await.unwrap();
         assert_eq!(result.value["result"], 42); // 17 + 25
 
         let _ = std::fs::remove_file(&wasm_path);
@@ -2043,7 +2043,7 @@ mod engine_tests {
             .build()
             .unwrap();
 
-        let result = execute_wasm_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, None).await.unwrap();
+        let result = execute_wasm_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0, None).await.unwrap();
         assert_eq!(result.value["result"], 99);
 
         let _ = std::fs::remove_file(&wasm_path);

@@ -600,7 +600,7 @@ async fn executor_invalidates_cache_after_write() {
     );
 
     // Execute the write DataView
-    let result = executor.execute("create_contact", HashMap::new(), "trace-1").await;
+    let result = executor.execute("create_contact", HashMap::new(), "POST", "trace-1").await;
     assert!(result.is_ok(), "execute should succeed: {:?}", result.err());
 
     // Verify "list_contacts" cache was invalidated

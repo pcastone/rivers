@@ -7,6 +7,9 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+plugin-exports = []
+
 [dependencies]
 rivers-driver-sdk = { path = "../rivers-driver-sdk" }
 async-trait = { workspace = true }
