@@ -151,6 +151,20 @@ pub async fn load_and_wire_bundle(
             for (k, v) in &ds.extra {
                 params.options.insert(k.clone(), v.clone());
             }
+            // Pass write_batch config to driver via options
+            if let Some(ref wb) = ds.write_batch {
+                if wb.enabled {
+                    params.options.insert("write_batch_enabled".into(), "true".into());
+                    params.options.insert("write_batch_max_size".into(), wb.max_size.to_string());
+                    params.options.insert("write_batch_flush_interval_ms".into(), wb.flush_interval_ms.to_string());
+                    tracing::info!(
+                        datasource = %ds.name,
+                        max_size = wb.max_size,
+                        flush_interval_ms = wb.flush_interval_ms,
+                        "write batching enabled"
+                    );
+                }
+            }
 
             // ── LockBox: fetch credential if datasource has lockbox reference ──
             if !ds.nopassword {
