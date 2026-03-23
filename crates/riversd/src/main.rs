@@ -194,7 +194,8 @@ async fn async_main(
     }
 
     // Serve
-    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let shutdown_tx = std::sync::Arc::new(shutdown_tx);
 
     if args.no_ssl {
         let port = args
@@ -207,7 +208,7 @@ async fn async_main(
             "riversd starting"
         );
         if let Err(e) =
-            riversd::server::run_server_no_ssl(config, port, shutdown_rx).await
+            riversd::server::run_server_no_ssl(config, port, shutdown_rx, Some(shutdown_tx.clone())).await
         {
             tracing::error!(error = %e, "server failed");
             std::process::exit(1);
@@ -238,6 +239,7 @@ async fn async_main(
                 listener,
                 shutdown_rx,
                 Some(log_controller),
+                Some(shutdown_tx),
             )
             .await
         {
