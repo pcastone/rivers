@@ -215,17 +215,37 @@ pub async fn session_middleware(
 /// Token bucket rate limiting middleware.
 ///
 /// Per spec §10.1, §10.5.
+/// Supports IP (default) and custom header strategies.
 pub async fn rate_limit_middleware(
-    State(limiter): State<Arc<RateLimiter>>,
+    State((limiter, strategy)): State<(Arc<RateLimiter>, crate::rate_limit::RateLimitStrategy)>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    // Extract key — use remote address or fallback to "unknown"
-    let key = request
-        .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| ci.0.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    // Extract key based on strategy
+    let key = match &strategy {
+        crate::rate_limit::RateLimitStrategy::CustomHeader(header_name) => {
+            request
+                .headers()
+                .get(header_name.as_str())
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    // Fall back to IP if custom header is absent
+                    request
+                        .extensions()
+                        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                        .map(|ci| ci.0.ip().to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                })
+        }
+        crate::rate_limit::RateLimitStrategy::Ip => {
+            request
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|ci| ci.0.ip().to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+    };
 
     match limiter.check(&key).await {
         RateLimitResult::Allowed => next.run(request).await,

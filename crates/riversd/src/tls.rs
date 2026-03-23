@@ -72,8 +72,14 @@ pub fn validate_redirect_port(base_port: u16, redirect_port: u16) -> Result<(), 
 /// Build a TlsAcceptor from PEM cert + key files.
 ///
 /// When `http2` is true, ALPN is configured to advertise both `h2` and `http/1.1`.
-/// Clients that support HTTP/2 will negotiate `h2`; others fall back to HTTP/1.1.
-pub fn load_tls_acceptor(cert_path: &str, key_path: &str, http2: bool) -> Result<TlsAcceptor, String> {
+/// `min_version` controls the minimum TLS version: `"tls13"` for TLS 1.3 only,
+/// otherwise TLS 1.2+ (rustls default).
+pub fn load_tls_acceptor(
+    cert_path: &str,
+    key_path: &str,
+    http2: bool,
+    min_version: &str,
+) -> Result<TlsAcceptor, String> {
     let cert_bytes = std::fs::read(cert_path)
         .map_err(|e| format!("cannot read cert {cert_path}: {e}"))?;
     let key_bytes = std::fs::read(key_path)
@@ -90,7 +96,14 @@ pub fn load_tls_acceptor(cert_path: &str, key_path: &str, http2: bool) -> Result
         .ok_or_else(|| format!("no private key found in {key_path}"))?;
 
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let mut tls_config = rustls::ServerConfig::builder()
+
+    // Configure minimum TLS version
+    let versions: Vec<&'static rustls::SupportedProtocolVersion> = match min_version {
+        "tls13" => vec![&rustls::version::TLS13],
+        _ => vec![&rustls::version::TLS12, &rustls::version::TLS13],
+    };
+
+    let mut tls_config = rustls::ServerConfig::builder_with_protocol_versions(&versions)
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| format!("TLS config error: {e}"))?;

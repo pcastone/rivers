@@ -80,6 +80,8 @@ async fn main() {
     let filter_handle = std::sync::Arc::new(filter_handle);
 
     // Optional file appender alongside stdout
+    let use_json = config.base.logging.format == "json";
+
     let _file_guard = if let Some(ref file_path) = config.base.logging.local_file_path {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
@@ -94,20 +96,35 @@ async fn main() {
             });
         let (non_blocking, guard) = tracing_appender::non_blocking(file);
 
-        tracing_subscriber::registry()
-            .with(reloadable_filter)
-            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
-            .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
-            .init();
+        if use_json {
+            tracing_subscriber::registry()
+                .with(reloadable_filter)
+                .with(tracing_subscriber::fmt::layer().json().with_writer(std::io::stdout))
+                .with(tracing_subscriber::fmt::layer().json().with_writer(non_blocking))
+                .init();
+        } else {
+            tracing_subscriber::registry()
+                .with(reloadable_filter)
+                .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
+                .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
+                .init();
+        }
         Some(guard)
     } else {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
 
-        tracing_subscriber::registry()
-            .with(reloadable_filter)
-            .with(tracing_subscriber::fmt::layer())
-            .init();
+        if use_json {
+            tracing_subscriber::registry()
+                .with(reloadable_filter)
+                .with(tracing_subscriber::fmt::layer().json())
+                .init();
+        } else {
+            tracing_subscriber::registry()
+                .with(reloadable_filter)
+                .with(tracing_subscriber::fmt::layer())
+                .init();
+        }
         None
     };
 
