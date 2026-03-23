@@ -118,6 +118,10 @@ pub struct CircuitBreakerConfig {
     #[serde(default = "default_failure_threshold")]
     pub failure_threshold: u32,
 
+    /// Rolling window in milliseconds for counting failures. Default: 60000 (60s).
+    #[serde(default = "default_window_ms")]
+    pub window_ms: u64,
+
     #[serde(default = "default_open_timeout")]
     pub open_timeout_ms: u64,
 
@@ -130,10 +134,15 @@ impl Default for CircuitBreakerConfig {
         Self {
             enabled: false,
             failure_threshold: default_failure_threshold(),
+            window_ms: default_window_ms(),
             open_timeout_ms: default_open_timeout(),
             half_open_max_trials: default_half_open_trials(),
         }
     }
+}
+
+fn default_window_ms() -> u64 {
+    60_000
 }
 
 fn default_failure_threshold() -> u32 {
