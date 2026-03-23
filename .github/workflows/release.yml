@@ -41,6 +41,16 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: release-${{ matrix.target }}-cargo-
+
       - name: Install cross
         if: matrix.cross
         shell: bash
@@ -106,27 +116,36 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ env.ASSET }}
 
-  # ── Debian packages ───────────────────────────────────────────────
+  # ── Debian packages (x86_64 + aarch64) ──────────────────────────
   package-deb:
     needs: build
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - artifact: rivers-linux-x86_64
+            arch: amd64
+          - artifact: rivers-linux-aarch64
+            arch: arm64
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download Linux x86_64 build
+      - name: Download build
         uses: actions/download-artifact@v4
         with:
-          name: rivers-linux-x86_64
+          name: ${{ matrix.artifact }}
 
-      - name: Build .deb packages (base, lib, plugins)
+      - name: Build .deb packages
         shell: bash
+        env:
+          DEB_ARCH: ${{ matrix.arch }}
+          ARTIFACT_NAME: ${{ matrix.artifact }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          ARCH="amd64"
           tar xzf rivers-*.tar.gz
 
           # ── rivers (base) ──
-          BASE="rivers_${VERSION}_${ARCH}"
+          BASE="rivers_${VERSION}_${DEB_ARCH}"
           mkdir -p "${BASE}/DEBIAN" "${BASE}/usr/bin" "${BASE}/etc/rivers" \
                    "${BASE}/lib/systemd/system" "${BASE}/var/lib/rivers" \
                    "${BASE}/var/log/rivers" "${BASE}/var/lib/rivers/lockbox"
@@ -134,7 +153,7 @@ jobs:
           cat > "${BASE}/DEBIAN/control" <<EOF
           Package: rivers
           Version: ${VERSION}
-          Architecture: ${ARCH}
+          Architecture: ${DEB_ARCH}
           Maintainer: Paul Castone <paul.castone@gmail.com>
           Depends: rivers-lib (= ${VERSION})
           Recommends: rivers-plugins
@@ -143,7 +162,6 @@ jobs:
           Description: Rivers application server
            Declarative app-service framework in Rust.
           EOF
-          # dpkg requires no leading whitespace in control fields
           sed -i 's/^          //' "${BASE}/DEBIAN/control"
 
           cp packaging/debian/postinst "${BASE}/DEBIAN/"
@@ -157,12 +175,12 @@ jobs:
           dpkg-deb --build --root-owner-group "$BASE"
 
           # ── rivers-lib ──
-          LIB="rivers-lib_${VERSION}_${ARCH}"
+          LIB="rivers-lib_${VERSION}_${DEB_ARCH}"
           mkdir -p "${LIB}/DEBIAN" "${LIB}/usr/lib/rivers"
           cat > "${LIB}/DEBIAN/control" <<EOF
           Package: rivers-lib
           Version: ${VERSION}
-          Architecture: ${ARCH}
+          Architecture: ${DEB_ARCH}
           Maintainer: Paul Castone <paul.castone@gmail.com>
           Section: libs
           Priority: optional
@@ -172,12 +190,12 @@ jobs:
           dpkg-deb --build --root-owner-group "$LIB"
 
           # ── rivers-plugins ──
-          PLUG="rivers-plugins_${VERSION}_${ARCH}"
+          PLUG="rivers-plugins_${VERSION}_${DEB_ARCH}"
           mkdir -p "${PLUG}/DEBIAN" "${PLUG}/usr/lib/rivers/plugins"
           cat > "${PLUG}/DEBIAN/control" <<EOF
           Package: rivers-plugins
           Version: ${VERSION}
-          Architecture: ${ARCH}
+          Architecture: ${DEB_ARCH}
           Maintainer: Paul Castone <paul.castone@gmail.com>
           Depends: rivers-lib (= ${VERSION})
           Section: libs
@@ -190,33 +208,41 @@ jobs:
       - name: Upload .deb packages
         uses: actions/upload-artifact@v4
         with:
-          name: deb-packages
+          name: deb-${{ matrix.arch }}
           path: "*.deb"
 
-  # ── RPM packages ──────────────────────────────────────────────────
+  # ── RPM packages (x86_64 + aarch64) ─────────────────────────────
   package-rpm:
     needs: build
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - artifact: rivers-linux-x86_64
+            rpm_arch: x86_64
+          - artifact: rivers-linux-aarch64
+            rpm_arch: aarch64
     steps:
       - uses: actions/checkout@v4
 
       - name: Install rpmbuild
         run: sudo apt-get update && sudo apt-get install -y rpm
 
-      - name: Download Linux x86_64 build
+      - name: Download build
         uses: actions/download-artifact@v4
         with:
-          name: rivers-linux-x86_64
+          name: ${{ matrix.artifact }}
 
-      - name: Build .rpm packages (base, lib, plugins)
+      - name: Build .rpm packages
         shell: bash
+        env:
+          RPM_ARCH: ${{ matrix.rpm_arch }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           tar xzf rivers-*.tar.gz
 
           mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 
-          # Create a simple binary-only spec that packages pre-built binaries
           cat > rpmbuild/SPECS/rivers.spec <<'SPEC'
           Name:       rivers
           Version:    %{pkg_version}
@@ -228,7 +254,6 @@ jobs:
           %description
           Rivers is a declarative app-service framework written in Rust.
 
-          # ── Base package ──
           %install
           install -D -m 0755 %{_sourcedir}/riversd       %{buildroot}%{_bindir}/riversd
           install -D -m 0755 %{_sourcedir}/riversctl      %{buildroot}%{_bindir}/riversctl
@@ -266,10 +291,8 @@ jobs:
           %postun
           systemctl daemon-reload 2>/dev/null || true
           SPEC
-          # Strip leading whitespace from spec
           sed -i 's/^          //' rpmbuild/SPECS/rivers.spec
 
-          # Copy sources
           mkdir -p rpmbuild/SOURCES
           cp rivers-*/bin/* rpmbuild/SOURCES/
           cp packaging/config/riversd.toml rpmbuild/SOURCES/
@@ -277,6 +300,7 @@ jobs:
 
           rpmbuild --define "_topdir $(pwd)/rpmbuild" \
                    --define "pkg_version ${VERSION}" \
+                   --target "${RPM_ARCH}" \
                    -bb rpmbuild/SPECS/rivers.spec
 
           find rpmbuild/RPMS -name '*.rpm' -exec cp {} . \;
@@ -284,7 +308,7 @@ jobs:
       - name: Upload .rpm packages
         uses: actions/upload-artifact@v4
         with:
-          name: rpm-packages
+          name: rpm-${{ matrix.rpm_arch }}
           path: "*.rpm"
 
   # ── GitHub Release ────────────────────────────────────────────────
