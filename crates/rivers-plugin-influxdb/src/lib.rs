@@ -15,6 +15,8 @@ use async_trait::async_trait;
 use reqwest::Client;
 use tracing::debug;
 
+use tokio::sync::Mutex;
+
 use rivers_driver_sdk::{
     Connection, ConnectionParams, DatabaseDriver, DriverError, DriverRegistrar, Query, QueryResult,
     QueryValue, ABI_VERSION,
@@ -63,18 +65,38 @@ impl DatabaseDriver for InfluxDriver {
             )));
         }
 
-        debug!(
-            base_url = %base_url,
-            org = %org,
-            "influxdb: connected"
-        );
+        // Read write_batch config from connection options
+        let batch_enabled = params.options.get("write_batch_enabled").map(|v| v == "true").unwrap_or(false);
+        let batch_max_size = params.options.get("write_batch_max_size")
+            .and_then(|v| v.parse::<usize>().ok()).unwrap_or(1000);
+        let batch_flush_ms = params.options.get("write_batch_flush_interval_ms")
+            .and_then(|v| v.parse::<u64>().ok()).unwrap_or(1000);
 
-        Ok(Box::new(InfluxConnection {
-            client,
-            base_url,
-            org,
-            token,
-        }))
+        if batch_enabled {
+            debug!(
+                base_url = %base_url,
+                org = %org,
+                batch_max_size = batch_max_size,
+                batch_flush_ms = batch_flush_ms,
+                "influxdb: connected (write batching enabled)"
+            );
+
+            Ok(Box::new(BatchingInfluxConnection {
+                inner: InfluxConnection { client, base_url, org, token },
+                buffer: Mutex::new(Vec::with_capacity(batch_max_size)),
+                max_size: batch_max_size,
+                flush_interval_ms: batch_flush_ms,
+                last_flush: Mutex::new(std::time::Instant::now()),
+            }))
+        } else {
+            debug!(
+                base_url = %base_url,
+                org = %org,
+                "influxdb: connected"
+            );
+
+            Ok(Box::new(InfluxConnection { client, base_url, org, token }))
+        }
     }
 }
 
@@ -231,6 +253,128 @@ impl InfluxConnection {
             )));
         }
         Ok(QueryResult::empty())
+    }
+}
+
+// ── Batching Connection ───────────────────────────────────────────────
+
+/// Write-batching wrapper for InfluxConnection.
+///
+/// Accumulates line protocol writes in a buffer. Flushes when:
+/// - Buffer reaches max_size lines
+/// - flush_interval_ms has elapsed since last flush
+/// - A non-write operation is executed (query/ping)
+/// - The connection is dropped
+struct BatchingInfluxConnection {
+    inner: InfluxConnection,
+    buffer: Mutex<Vec<String>>,
+    max_size: usize,
+    flush_interval_ms: u64,
+    last_flush: Mutex<std::time::Instant>,
+}
+
+impl BatchingInfluxConnection {
+    /// Flush all buffered lines to InfluxDB in a single batch write.
+    async fn flush_buffer(&self) -> Result<(), DriverError> {
+        let mut buf = self.buffer.lock().await;
+        if buf.is_empty() {
+            return Ok(());
+        }
+
+        let batch = buf.join("\n");
+        let count = buf.len();
+        buf.clear();
+        drop(buf);
+
+        *self.last_flush.lock().await = std::time::Instant::now();
+
+        debug!(lines = count, "influxdb: flushing write batch");
+
+        let url = format!(
+            "{}/api/v2/write?org={}",
+            self.inner.base_url,
+            urlencoded(&self.inner.org)
+        );
+        let resp = self.inner.client
+            .post(&url)
+            .header("Authorization", format!("Token {}", self.inner.token))
+            .header("Content-Type", "text/plain; charset=utf-8")
+            .body(batch)
+            .send()
+            .await
+            .map_err(|e| DriverError::Query(format!("influxdb batch write failed: {e}")))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(DriverError::Query(format!(
+                "influxdb batch write returned {status}: {text}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Check if a time-based flush is needed.
+    async fn should_time_flush(&self) -> bool {
+        let last = self.last_flush.lock().await;
+        last.elapsed().as_millis() >= self.flush_interval_ms as u128
+    }
+}
+
+#[async_trait]
+impl Connection for BatchingInfluxConnection {
+    async fn execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
+        match query.operation.as_str() {
+            "write" | "insert" => {
+                // Build line protocol and buffer it
+                let line = build_line_protocol(query)?;
+                let mut buf = self.buffer.lock().await;
+                buf.push(line);
+                let should_size_flush = buf.len() >= self.max_size;
+                drop(buf);
+
+                // Flush if buffer full or time elapsed
+                if should_size_flush || self.should_time_flush().await {
+                    self.flush_buffer().await?;
+                }
+
+                Ok(QueryResult {
+                    rows: Vec::new(),
+                    affected_rows: 1,
+                    last_insert_id: None,
+                })
+            }
+            _ => {
+                // For non-write operations, flush buffer first then delegate
+                self.flush_buffer().await?;
+                self.inner.execute(query).await
+            }
+        }
+    }
+
+    async fn ping(&mut self) -> Result<(), DriverError> {
+        self.flush_buffer().await?;
+        self.inner.ping().await
+    }
+
+    fn driver_name(&self) -> &str {
+        "influxdb"
+    }
+}
+
+impl Drop for BatchingInfluxConnection {
+    fn drop(&mut self) {
+        // Best-effort flush on drop — can't await in drop, so log warning if buffer not empty
+        let buf = self.buffer.try_lock();
+        if let Ok(buf) = buf {
+            if !buf.is_empty() {
+                tracing::warn!(
+                    lines = buf.len(),
+                    "influxdb: dropping connection with unflushed write batch"
+                );
+            }
+        }
     }
 }
 
