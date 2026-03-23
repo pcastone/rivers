@@ -535,6 +535,13 @@ impl DataViewExecutor {
                     .await
                     .map_err(|e| DataViewError::Driver(e.to_string()))?;
 
+                // 6b. Validate result against schema if configured
+                if config.validate_result {
+                    if let Some(ref schema_path) = config.return_schema {
+                        validate_query_result(&query_result, schema_path)?;
+                    }
+                }
+
                 // 7. Cache populate on success (unless bypass or no caching config)
                 if let Some(ref cache) = self.cache {
                     if !request.cache_bypass && view_caching.is_some() {
@@ -700,4 +707,56 @@ impl DataViewExecutor {
         names.sort();
         names
     }
+}
+
+/// Validate query result rows against a schema file's required fields.
+///
+/// Loads the schema JSON, extracts `fields[].name` where `required = true`,
+/// and checks that every result row contains those fields.
+fn validate_query_result(
+    result: &rivers_driver_sdk::types::QueryResult,
+    schema_path: &str,
+) -> Result<(), DataViewError> {
+    // Load and parse schema file
+    let schema_json = match std::fs::read_to_string(schema_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(()), // Schema file not found — skip validation
+    };
+    let schema: serde_json::Value = match serde_json::from_str(&schema_json) {
+        Ok(v) => v,
+        Err(_) => return Ok(()), // Malformed schema — skip validation
+    };
+
+    // Extract required field names from schema
+    let required_fields: Vec<&str> = schema
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .map(|fields| {
+            fields
+                .iter()
+                .filter(|f| f.get("required").and_then(|r| r.as_bool()).unwrap_or(false))
+                .filter_map(|f| f.get("name").and_then(|n| n.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if required_fields.is_empty() {
+        return Ok(());
+    }
+
+    // Check each result row for required fields
+    for (i, row) in result.rows.iter().enumerate() {
+        for field in &required_fields {
+            if row.get(*field).is_none() {
+                return Err(DataViewError::Schema {
+                    reason: format!(
+                        "row {}: missing required field '{}'",
+                        i, field
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
