@@ -2047,8 +2047,15 @@ pub async fn run_server_with_listener_and_log(
     let acceptor = crate::tls::load_tls_acceptor(&cert_path, &key_path, http2_enabled)
         .map_err(|e| ServerError::Config(e))?;
 
+    let h2_max_streams = config.base.http2.max_concurrent_streams.unwrap_or(250);
+    let h2_window_size = config.base.http2.initial_window_size.unwrap_or(1_048_576); // 1MB
+
     if http2_enabled {
-        tracing::info!("TLS enabled — serving HTTPS with HTTP/2 (ALPN: h2, http/1.1)");
+        tracing::info!(
+            max_streams = h2_max_streams,
+            window_size = h2_window_size,
+            "TLS enabled — serving HTTPS with HTTP/2 (ALPN: h2, http/1.1)"
+        );
     } else {
         tracing::info!("TLS enabled — serving HTTPS");
     }
@@ -2072,9 +2079,16 @@ pub async fn run_server_with_listener_and_log(
                                             app.oneshot(req).await
                                         }
                                     });
-                                    if let Err(e) = hyper_util::server::conn::auto::Builder::new(
+                                    let mut builder = hyper_util::server::conn::auto::Builder::new(
                                         hyper_util::rt::TokioExecutor::new(),
-                                    )
+                                    );
+                                    if http2_enabled {
+                                        builder.http2()
+                                            .max_concurrent_streams(h2_max_streams)
+                                            .initial_stream_window_size(h2_window_size)
+                                            .initial_connection_window_size(h2_window_size);
+                                    }
+                                    if let Err(e) = builder
                                     .serve_connection(io, service)
                                     .await
                                     {
