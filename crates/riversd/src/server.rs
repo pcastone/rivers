@@ -153,6 +153,8 @@ pub struct AppContext {
     pub graphql_schema: Arc<tokio::sync::RwLock<Option<async_graphql::dynamic::Schema>>>,
     /// DriverFactory — shared with host callbacks for cdylib engine access.
     pub driver_factory: Option<Arc<rivers_runtime::rivers_core::DriverFactory>>,
+    /// Shutdown sender — triggers graceful shutdown when sent `true`.
+    pub shutdown_tx: Option<Arc<tokio::sync::watch::Sender<bool>>>,
 }
 
 impl AppContext {
@@ -183,6 +185,7 @@ impl AppContext {
             ws_manager: Arc::new(WebSocketRouteManager::new()),
             graphql_schema: Arc::new(tokio::sync::RwLock::new(None)),
             driver_factory: None,
+            shutdown_tx: None,
         }
     }
 }
@@ -327,6 +330,8 @@ pub fn build_admin_router(ctx: AppContext) -> Router {
         .route("/admin/log/levels", get(admin_log_levels_handler))
         .route("/admin/log/set", axum::routing::post(admin_log_set_handler))
         .route("/admin/log/reset", axum::routing::post(admin_log_reset_handler))
+        // Shutdown endpoint
+        .route("/admin/shutdown", axum::routing::post(admin_shutdown_handler))
         .with_state(ctx);
 
     // Admin middleware: admin_auth → timeout → security_headers → trace_id → body_limit
@@ -1324,6 +1329,7 @@ use crate::admin_handlers::{
     admin_deploy_approve_handler, admin_deploy_reject_handler,
     admin_deploy_promote_handler, admin_deployments_handler,
     admin_log_levels_handler, admin_log_set_handler, admin_log_reset_handler,
+    admin_shutdown_handler,
 };
 
 
@@ -1460,6 +1466,7 @@ fn path_to_admin_permission(path: &str) -> Option<crate::admin::AdminPermission>
         "/admin/deploy/promote" => Some(AdminPermission::DeployPromote),
         "/admin/deployments" => Some(AdminPermission::DeployRead),
         p if p.starts_with("/admin/log") => Some(AdminPermission::Admin),
+        "/admin/shutdown" => Some(AdminPermission::Admin),
         _ => None,
     }
 }
@@ -1704,6 +1711,7 @@ pub async fn run_server_no_ssl(
     config: ServerConfig,
     port: u16,
     shutdown_rx: watch::Receiver<bool>,
+    shutdown_tx: Option<Arc<tokio::sync::watch::Sender<bool>>>,
 ) -> Result<(), ServerError> {
     tracing::warn!("--no-ssl: TLS is DISABLED for this session — do not use in production");
 
@@ -1724,6 +1732,7 @@ pub async fn run_server_no_ssl(
     // Build context same as TLS path
     let shutdown = Arc::new(ShutdownCoordinator::new());
     let mut ctx = AppContext::new(config.clone(), shutdown.clone());
+    ctx.shutdown_tx = shutdown_tx;
 
     // Build RBAC config once at startup (AN11.4)
     if config.base.admin_api.enabled {
@@ -1751,7 +1760,7 @@ pub async fn run_server_with_listener_with_control(
     listener: TcpListener,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Result<(), ServerError> {
-    run_server_with_listener_and_log(config, listener, shutdown_rx, None).await
+    run_server_with_listener_and_log(config, listener, shutdown_rx, None, None).await
 }
 
 /// Primary server entry point with optional log controller.
@@ -1763,6 +1772,7 @@ pub async fn run_server_with_listener_and_log(
     listener: TcpListener,
     shutdown_rx: watch::Receiver<bool>,
     log_controller: Option<Arc<LogController>>,
+    shutdown_tx: Option<Arc<tokio::sync::watch::Sender<bool>>>,
 ) -> Result<(), ServerError> {
     // Step 2: Config validation — TLS is mandatory (no_ssl=false)
     validate_server_tls(&config, false)
@@ -1772,6 +1782,7 @@ pub async fn run_server_with_listener_and_log(
     let shutdown = Arc::new(ShutdownCoordinator::new());
     let mut ctx = AppContext::new(config.clone(), shutdown.clone());
     ctx.log_controller = log_controller;
+    ctx.shutdown_tx = shutdown_tx;
 
     // Build RBAC config once at startup instead of per-request (AN11.4)
     if config.base.admin_api.enabled {

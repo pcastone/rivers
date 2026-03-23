@@ -309,3 +309,49 @@ pub async fn admin_log_reset_handler(State(ctx): State<AppContext>) -> Response 
         None => log_controller_unavailable(),
     }
 }
+
+// ── Shutdown Endpoint ────────────────────────────────────────────
+
+/// POST /admin/shutdown
+///
+/// Body: `{"mode": "graceful"}` or `{"mode": "immediate"}`
+///
+/// Graceful: marks server as draining, in-flight requests complete, then exits.
+/// Immediate: exits the process after response flushes.
+pub async fn admin_shutdown_handler(
+    State(ctx): State<AppContext>,
+    request: Request,
+) -> impl IntoResponse {
+    let body = parse_json_body(request, 1024).await;
+    let mode = body
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("graceful");
+
+    match mode {
+        "immediate" => {
+            tracing::warn!("admin API: immediate shutdown requested");
+            let response = Json(serde_json::json!({
+                "status": "shutting_down",
+                "mode": "immediate"
+            }));
+            // Spawn exit after short delay to allow response to flush
+            tokio::spawn(async {
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                std::process::exit(0);
+            });
+            response.into_response()
+        }
+        _ => {
+            tracing::info!("admin API: graceful shutdown requested");
+            ctx.shutdown.mark_draining();
+            if let Some(ref tx) = ctx.shutdown_tx {
+                let _ = tx.send(true);
+            }
+            Json(serde_json::json!({
+                "status": "shutting_down",
+                "mode": "graceful"
+            })).into_response()
+        }
+    }
+}
