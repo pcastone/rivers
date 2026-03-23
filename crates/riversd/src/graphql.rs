@@ -591,7 +591,7 @@ pub fn build_schema_with_executor(
 
                     let trace_id = format!("gql-{}", uuid::Uuid::new_v4());
                     let response = exec
-                        .execute(&dataview, params, &trace_id)
+                        .execute(&dataview, params, "GET", &trace_id)
                         .await
                         .map_err(|e| async_graphql::Error::new(e.to_string()))?;
 

@@ -358,7 +358,7 @@ extern "C" fn host_dataview_execute(
     match ctx.rt_handle.block_on(async {
         let guard = executor_lock.read().await;
         let executor = guard.as_ref().ok_or_else(|| "DataViewExecutor not initialized".to_string())?;
-        executor.execute(&name, params, &trace_id).await.map_err(|e| e.to_string())
+        executor.execute(&name, params, "GET", &trace_id).await.map_err(|e| e.to_string())
     }) {
         Ok(response) => {
             // Serialize DataViewResponse.query_result to JSON

@@ -466,6 +466,7 @@ impl DataViewExecutor {
         &self,
         name: &str,
         params: HashMap<String, QueryValue>,
+        method: &str,
         trace_id: &str,
     ) -> Result<DataViewResponse, DataViewError> {
         let start = Instant::now();
@@ -478,8 +479,9 @@ impl DataViewExecutor {
                 name: name.to_string(),
             })?;
 
-        // 2. Parameter validation
+        // 2. Parameter validation (use HTTP method for per-method query/param resolution)
         let request = DataViewRequestBuilder::new(name)
+            .method(method)
             .params(params)
             .trace_id(trace_id)
             .build_for(config)?;
