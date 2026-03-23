@@ -498,7 +498,7 @@ pub async fn execute_rest_view(
                             .collect();
 
                     let response = exec
-                        .execute(dataview, query_params, &ctx.trace_id)
+                        .execute(dataview, query_params, &ctx.request.method, &ctx.trace_id)
                         .await
                         .map_err(|e| ViewError::Handler(format!("dataview '{}': {}", dataview, e)))?;
 

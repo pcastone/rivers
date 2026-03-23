@@ -451,7 +451,7 @@ impl PollDataViewExecutor for DataViewPollExecutor {
             .collect();
 
         let response = exec
-            .execute(dataview_name, query_params, "poll")
+            .execute(dataview_name, query_params, "GET", "poll")
             .await
             .map_err(|e| PollError::DataViewError(e.to_string()))?;
 

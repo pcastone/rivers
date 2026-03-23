@@ -959,7 +959,7 @@ fn ctx_dataview_callback(
 
         match get_rt_handle() {
             Ok(rt) => {
-                match rt.block_on(exec.execute(&name, query_params, &trace_id)) {
+                match rt.block_on(exec.execute(&name, query_params, "GET", &trace_id)) {
                     Ok(response) => {
                         // Convert QueryResult rows to JSON
                         let json = serde_json::json!({
