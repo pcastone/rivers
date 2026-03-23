@@ -106,9 +106,77 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ env.ASSET }}
 
+  # ── Dynamic build (shared libs + plugins) ─────────────────────────
+  build-dynamic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build dynamic libraries
+        shell: bash
+        run: |
+          # Switch rivers-runtime to dylib
+          sed -i 's/crate-type = \["rlib"\]/crate-type = ["dylib"]/' crates/rivers-runtime/Cargo.toml
+
+          # Build with prefer-dynamic
+          export CARGO_PROFILE_RELEASE_LTO=off
+          export RUSTFLAGS='-C prefer-dynamic'
+
+          echo "==> Building runtime dylib..."
+          cargo build --release -p rivers-runtime
+
+          echo "==> Building engine cdylibs..."
+          cargo build --release -p rivers-engine-v8 -p rivers-engine-wasm || true
+
+          echo "==> Building plugin cdylibs..."
+          cargo build --release \
+            -p rivers-plugin-cassandra \
+            -p rivers-plugin-couchdb \
+            -p rivers-plugin-elasticsearch \
+            -p rivers-plugin-influxdb \
+            -p rivers-plugin-kafka \
+            -p rivers-plugin-ldap \
+            -p rivers-plugin-mongodb \
+            -p rivers-plugin-nats \
+            -p rivers-plugin-rabbitmq \
+            -p rivers-plugin-redis-streams || true
+
+          # Revert
+          sed -i 's/crate-type = \["dylib"\]/crate-type = ["rlib"]/' crates/rivers-runtime/Cargo.toml
+
+          # Collect artifacts
+          mkdir -p dynamic-libs dynamic-plugins
+          for f in target/release/librivers_runtime.so \
+                   target/release/librivers_engine_v8.so \
+                   target/release/librivers_engine_wasm.so \
+                   target/release/librivers_drivers_builtin.so \
+                   target/release/librivers_storage_backends.so \
+                   target/release/librivers_lockbox_engine.so; do
+            [ -f "$f" ] && cp "$f" dynamic-libs/ && echo "  lib: $(basename $f)" || true
+          done
+          for f in target/release/librivers_plugin_*.so; do
+            [ -f "$f" ] && cp "$f" dynamic-plugins/ && echo "  plugin: $(basename $f)" || true
+          done
+
+          echo "==> Libraries:"
+          ls -lh dynamic-libs/ || echo "  (none)"
+          echo "==> Plugins:"
+          ls -lh dynamic-plugins/ || echo "  (none)"
+
+          tar czf rivers-dynamic-libs.tar.gz dynamic-libs/ dynamic-plugins/
+
+      - name: Upload dynamic libraries
+        uses: actions/upload-artifact@v4
+        with:
+          name: dynamic-libs
+          path: rivers-dynamic-libs.tar.gz
+
   # ── Debian packages ───────────────────────────────────────────────
   package-deb:
-    needs: build
+    needs: [build, build-dynamic]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -118,12 +186,18 @@ jobs:
         with:
           name: rivers-linux-x86_64
 
+      - name: Download dynamic libraries
+        uses: actions/download-artifact@v4
+        with:
+          name: dynamic-libs
+
       - name: Build .deb packages (base, lib, plugins)
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           ARCH="amd64"
           tar xzf rivers-*.tar.gz
+          tar xzf rivers-dynamic-libs.tar.gz
 
           # ── rivers (base) ──
           BASE="rivers_${VERSION}_${ARCH}"
@@ -143,7 +217,6 @@ jobs:
           Description: Rivers application server
            Declarative app-service framework in Rust.
           EOF
-          # dpkg requires no leading whitespace in control fields
           sed -i 's/^          //' "${BASE}/DEBIAN/control"
 
           cp packaging/debian/postinst "${BASE}/DEBIAN/"
@@ -167,8 +240,11 @@ jobs:
           Section: libs
           Priority: optional
           Description: Rivers shared libraries and engines
+           Runtime library, V8/WASM engines, built-in drivers, storage, LockBox.
           EOF
           sed -i 's/^          //' "${LIB}/DEBIAN/control"
+          # Copy dynamic libraries
+          cp dynamic-libs/*.so "${LIB}/usr/lib/rivers/" 2>/dev/null || true
           dpkg-deb --build --root-owner-group "$LIB"
 
           # ── rivers-plugins ──
@@ -183,8 +259,11 @@ jobs:
           Section: libs
           Priority: optional
           Description: Rivers datasource driver plugins
+           MongoDB, Elasticsearch, Cassandra, CouchDB, InfluxDB, Kafka, RabbitMQ, NATS, Redis Streams, LDAP.
           EOF
           sed -i 's/^          //' "${PLUG}/DEBIAN/control"
+          # Copy plugin cdylibs
+          cp dynamic-plugins/*.so "${PLUG}/usr/lib/rivers/plugins/" 2>/dev/null || true
           dpkg-deb --build --root-owner-group "$PLUG"
 
       - name: Upload .deb packages
@@ -195,7 +274,7 @@ jobs:
 
   # ── RPM packages ──────────────────────────────────────────────────
   package-rpm:
-    needs: build
+    needs: [build, build-dynamic]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -207,6 +286,11 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: rivers-linux-x86_64
+
+      - name: Download dynamic libraries
+        uses: actions/download-artifact@v4
+        with:
+          name: dynamic-libs
 
       - name: Build .rpm packages (base, lib, plugins)
         shell: bash
@@ -289,7 +373,7 @@ jobs:
 
   # ── GitHub Release ────────────────────────────────────────────────
   release:
-    needs: [build, package-deb, package-rpm]
+    needs: [build, build-dynamic, package-deb, package-rpm]
     if: always() && needs.build.result != 'failure'
     runs-on: ubuntu-latest
     steps:
