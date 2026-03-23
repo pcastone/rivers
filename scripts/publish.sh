@@ -39,6 +39,8 @@ rsync -av --delete \
     --exclude='.git/' \
     --exclude='.worktrees/' \
     --exclude='logs/*.log' \
+    --exclude='node_modules/' \
+    --exclude='training/' \
     "$SRC/" "$DEST/"
 
 echo ""
