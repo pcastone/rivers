@@ -46,7 +46,7 @@ _build-dynamic-crates:
     echo "==> Building engine cdylibs..."
     cargo build --release -p rivers-engine-v8 -p rivers-engine-wasm
     echo "==> Building plugin cdylibs..."
-    cargo build --release \
+    cargo build --release --features plugin-exports \
         -p rivers-plugin-cassandra \
         -p rivers-plugin-couchdb \
         -p rivers-plugin-elasticsearch \

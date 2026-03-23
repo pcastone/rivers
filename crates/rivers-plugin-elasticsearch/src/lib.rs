@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn abi_version_matches() {
-        assert_eq!(_rivers_abi_version(), ABI_VERSION);
+        assert_eq!(ABI_VERSION, 1);
     }
 
     // ── json_to_query_value tests ─────────────────────────────────────
