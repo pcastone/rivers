@@ -137,6 +137,19 @@ impl Default for CircuitBreakerConfig {
     }
 }
 
+/// Convert datasource config CB to pool CB config.
+impl From<&rivers_runtime::datasource::CircuitBreakerConfig> for CircuitBreakerConfig {
+    fn from(ds: &rivers_runtime::datasource::CircuitBreakerConfig) -> Self {
+        Self {
+            enabled: ds.enabled,
+            failure_threshold: ds.failure_threshold,
+            window_ms: ds.window_ms,
+            open_timeout_ms: ds.open_timeout_ms,
+            half_open_max_trials: ds.half_open_max_trials,
+        }
+    }
+}
+
 // ── CircuitBreaker ─────────────────────────────────────────────────
 
 /// Circuit breaker state.
