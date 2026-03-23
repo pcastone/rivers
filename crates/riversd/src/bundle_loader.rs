@@ -501,6 +501,33 @@ pub async fn load_and_wire_bundle(
         );
     }
 
+    // ── AL3: Wire datasource event handlers ──
+    // Read event_handlers from DatasourceConfig and log configured handlers.
+    for app in &bundle.apps {
+        for ds in app.config.data.datasources.values() {
+            if let Some(ref handlers) = ds.event_handlers {
+                for handler in &handlers.on_connection_failed {
+                    tracing::info!(
+                        datasource = %ds.name,
+                        module = %handler.module,
+                        entrypoint = %handler.entrypoint,
+                        event = "on_connection_failed",
+                        "datasource event handler registered"
+                    );
+                }
+                for handler in &handlers.on_pool_exhausted {
+                    tracing::info!(
+                        datasource = %ds.name,
+                        module = %handler.module,
+                        entrypoint = %handler.entrypoint,
+                        event = "on_pool_exhausted",
+                        "datasource event handler registered"
+                    );
+                }
+            }
+        }
+    }
+
     // ── Wire SSE and WebSocket view managers ──
     let mut sse_count = 0usize;
     let mut ws_count = 0usize;
