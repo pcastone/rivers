@@ -1730,6 +1730,9 @@ pub async fn run_server_no_ssl(
         ctx.admin_auth_config = Some(build_admin_auth_config_for_rbac(&config));
     }
 
+    // Auto-load bundle from config if bundle_path is set
+    crate::bundle_loader::load_and_wire_bundle(&mut ctx, &config, shutdown_rx.clone()).await?;
+
     let router = build_main_router(ctx);
 
     axum::serve(listener, router)
