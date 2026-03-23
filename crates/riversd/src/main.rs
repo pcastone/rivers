@@ -145,49 +145,56 @@ async fn main() {
     }
 
     // Serve
-    tracing::info!(
-        host = %config.base.host,
-        port = %config.base.port,
-        "riversd starting"
-    );
-
-    let addr: std::net::SocketAddr =
-        format!("{}:{}", config.base.host, config.base.port)
-            .parse()
-            .expect("invalid server address");
-
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!(error = %e, addr = %addr, "failed to bind");
-            std::process::exit(1);
-        }
-    };
-
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     if args.no_ssl {
         let port = args
             .no_ssl_port
-            .or_else(|| config.base.tls.as_ref().map(|t| t.redirect_port))
-            .unwrap_or(80);
+            .or(Some(config.base.port))
+            .unwrap();
+        tracing::info!(
+            host = %config.base.host,
+            port = %port,
+            "riversd starting"
+        );
         if let Err(e) =
             riversd::server::run_server_no_ssl(config, port, shutdown_rx).await
         {
             tracing::error!(error = %e, "server failed");
             std::process::exit(1);
         }
-    } else if let Err(e) =
-        riversd::server::run_server_with_listener_and_log(
-            config,
-            listener,
-            shutdown_rx,
-            Some(log_controller),
-        )
-        .await
-    {
-        tracing::error!(error = %e, "server failed");
-        std::process::exit(1);
+    } else {
+        tracing::info!(
+            host = %config.base.host,
+            port = %config.base.port,
+            "riversd starting"
+        );
+
+        let addr: std::net::SocketAddr =
+            format!("{}:{}", config.base.host, config.base.port)
+                .parse()
+                .expect("invalid server address");
+
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(error = %e, addr = %addr, "failed to bind");
+                std::process::exit(1);
+            }
+        };
+
+        if let Err(e) =
+            riversd::server::run_server_with_listener_and_log(
+                config,
+                listener,
+                shutdown_rx,
+                Some(log_controller),
+            )
+            .await
+        {
+            tracing::error!(error = %e, "server failed");
+            std::process::exit(1);
+        }
     }
 }
 
