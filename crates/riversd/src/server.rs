@@ -804,10 +804,19 @@ async fn execute_sse_view(
         tracing::debug!(view_id = %view_id, last_event_id = %last_id, "SSE replay complete");
     }
 
+    // Extract session ID from request for revalidation
+    let session_id = {
+        let cookie_name = &ctx.config.security.session.cookie.name;
+        let cookie_hdr = request.headers().get("cookie").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+        let auth_hdr = request.headers().get("authorization").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+        crate::session::extract_session_id(cookie_hdr.as_deref(), auth_hdr.as_deref(), cookie_name)
+    };
+
     // Spawn per-client relay task: broadcast receiver → mpsc sender → HTTP stream
     let channel_for_cleanup = channel.clone();
     let revalidation_interval = matched.config.session_revalidation_interval_s;
     let session_mgr = ctx.session_manager.clone();
+    let view_id_clone = view_id.clone();
     tokio::spawn(async move {
         // Optional session revalidation timer
         let mut revalidation_tick = revalidation_interval.map(|secs| {
@@ -841,18 +850,22 @@ async fn execute_sse_view(
                     if let Some(ref mut tick) = revalidation_tick {
                         tick.tick().await
                     } else {
-                        // No revalidation configured — sleep forever
                         std::future::pending::<tokio::time::Instant>().await
                     }
                 } => {
-                    // Session revalidation tick — check if session is still valid
-                    if let Some(ref _mgr) = session_mgr {
-                        // TODO: validate session against StorageEngine
-                        // if !mgr.validate_session(&session_id).await {
-                        //     tracing::info!(view_id = %view_id_clone, "SSE session expired, closing");
-                        //     break;
-                        // }
-                        tracing::debug!("SSE session revalidation tick");
+                    // Session revalidation tick — validate against StorageEngine
+                    if let (Some(ref mgr), Some(ref sid)) = (&session_mgr, &session_id) {
+                        match mgr.validate_session(sid).await {
+                            Ok(Some(_)) => {} // Session still valid
+                            Ok(None) | Err(_) => {
+                                tracing::info!(
+                                    view_id = %view_id_clone,
+                                    "SSE session expired — closing connection"
+                                );
+                                let _ = tx.send(": session expired\n\n".to_string()).await;
+                                break;
+                            }
+                        }
                     }
                 }
             }
