@@ -377,12 +377,60 @@ pub async fn load_and_wire_bundle(
                         continue;
                     }
 
+                    // Read consumer config from the full DatasourceConfig (app.toml)
+                    let full_ds_config = app.config.data.datasources.get(&ds.name);
+                    let consumer_cfg = full_ds_config.and_then(|d| d.consumer.as_ref());
+
+                    let group_prefix = consumer_cfg
+                        .and_then(|c| c.group_prefix.as_deref())
+                        .unwrap_or("rivers")
+                        .to_string();
+                    let reconnect_ms = consumer_cfg
+                        .map(|c| c.reconnect_ms)
+                        .unwrap_or(5000);
+
+                    // Build failure policy from config (default: Drop)
+                    let failure_policy = consumer_cfg
+                        .and_then(|c| c.subscriptions.first())
+                        .and_then(|s| s.on_failure.as_ref())
+                        .map(|fp| {
+                            let mode = match fp.mode.as_str() {
+                                "dead_letter" => rivers_runtime::rivers_driver_sdk::broker::FailureMode::DeadLetter,
+                                "requeue" => rivers_runtime::rivers_driver_sdk::broker::FailureMode::Requeue,
+                                "redirect" => rivers_runtime::rivers_driver_sdk::broker::FailureMode::Redirect,
+                                _ => rivers_runtime::rivers_driver_sdk::broker::FailureMode::Drop,
+                            };
+                            rivers_runtime::rivers_driver_sdk::broker::FailurePolicy {
+                                mode,
+                                destination: fp.destination.clone(),
+                                handlers: Vec::new(),
+                            }
+                        })
+                        .unwrap_or(rivers_runtime::rivers_driver_sdk::broker::FailurePolicy {
+                            mode: rivers_runtime::rivers_driver_sdk::broker::FailureMode::Drop,
+                            destination: None,
+                            handlers: Vec::new(),
+                        });
+
+                    // Warn if manual ack mode is configured (not yet supported)
+                    if let Some(cfg) = consumer_cfg {
+                        for sub in &cfg.subscriptions {
+                            if sub.ack_mode == "manual" {
+                                tracing::warn!(
+                                    datasource = %ds.name,
+                                    topic = %sub.topic,
+                                    "ack_mode='manual' is not yet supported — using 'auto'"
+                                );
+                            }
+                        }
+                    }
+
                     let broker_config = rivers_runtime::rivers_driver_sdk::broker::BrokerConsumerConfig {
-                        group_prefix: "rivers".to_string(),
+                        group_prefix,
                         app_id: app.manifest.app_id.clone(),
                         datasource_id: ds.name.clone(),
                         node_id: "node-0".to_string(),
-                        reconnect_ms: 5000,
+                        reconnect_ms,
                         subscriptions,
                     };
 
@@ -391,13 +439,9 @@ pub async fn load_and_wire_bundle(
                             let bridge = crate::broker_bridge::BrokerConsumerBridge::new(
                                 consumer,
                                 ctx.event_bus.clone(),
-                                rivers_runtime::rivers_driver_sdk::broker::FailurePolicy {
-                                    mode: rivers_runtime::rivers_driver_sdk::broker::FailureMode::Drop,
-                                    destination: None,
-                                    handlers: Vec::new(),
-                                },
+                                failure_policy,
                                 &ds.name,
-                                5000,
+                                reconnect_ms,
                                 shutdown_rx.clone(),
                             );
                             tokio::spawn(bridge.run());
