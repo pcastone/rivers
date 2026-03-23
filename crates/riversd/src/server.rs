@@ -1890,7 +1890,7 @@ pub async fn run_server_with_listener_and_log(
             }
             _ => return Err(ServerError::Config("cert and key must both be specified or both absent".into())),
         };
-        let admin_acceptor = crate::tls::load_tls_acceptor(&admin_cert_path, &admin_key_path, false)
+        let admin_acceptor = crate::tls::load_tls_acceptor(&admin_cert_path, &admin_key_path, false, "tls12")
             .map_err(|e| ServerError::Config(e))?;
 
         let admin_listener = TcpListener::bind(admin_addr)
@@ -2044,7 +2044,10 @@ pub async fn run_server_with_listener_and_log(
     };
 
     let http2_enabled = config.base.http2.enabled;
-    let acceptor = crate::tls::load_tls_acceptor(&cert_path, &key_path, http2_enabled)
+    let min_tls_version = config.base.tls.as_ref()
+        .map(|t| t.engine.min_version.as_str())
+        .unwrap_or("tls12");
+    let acceptor = crate::tls::load_tls_acceptor(&cert_path, &key_path, http2_enabled, min_tls_version)
         .map_err(|e| ServerError::Config(e))?;
 
     let h2_max_streams = config.base.http2.max_concurrent_streams.unwrap_or(250);

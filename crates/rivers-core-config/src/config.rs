@@ -294,7 +294,10 @@ pub struct AdminApiConfig {
     pub host: String,
 
     pub port: Option<u16>,
+    /// Ed25519 public key for verifying admin API request signatures (hex-encoded 32-byte seed).
     pub public_key: Option<String>,
+    /// Ed25519 private key — used by riversctl for signing requests, NOT used by riversd.
+    /// Included in config for tool integration (riversctl reads this when RIVERS_ADMIN_KEY is not set).
     pub private_key: Option<String>,
 
     /// Skip Ed25519 signature verification (development only).
@@ -826,6 +829,37 @@ pub struct EnvironmentOverride {
     pub base: Option<BaseOverride>,
     pub security: Option<SecurityOverride>,
     pub storage_engine: Option<StorageEngineOverride>,
+}
+
+impl EnvironmentOverride {
+    /// Apply this override to a ServerConfig, overwriting only the fields that are set.
+    pub fn apply_to(&self, config: &mut ServerConfig) {
+        if let Some(ref base) = self.base {
+            if let Some(ref host) = base.host { config.base.host = host.clone(); }
+            if let Some(port) = base.port { config.base.port = port; }
+            if let Some(workers) = base.workers { config.base.workers = Some(workers); }
+            if let Some(timeout) = base.request_timeout_seconds { config.base.request_timeout_seconds = timeout; }
+            if let Some(ref level) = base.log_level { config.base.log_level = level.clone(); }
+            if let Some(ref bp) = base.backpressure {
+                if let Some(enabled) = bp.enabled { config.base.backpressure.enabled = enabled; }
+                if let Some(depth) = bp.queue_depth { config.base.backpressure.queue_depth = depth; }
+                if let Some(timeout) = bp.queue_timeout_ms { config.base.backpressure.queue_timeout_ms = timeout; }
+            }
+        }
+        if let Some(ref sec) = self.security {
+            if let Some(cors) = sec.cors_enabled { config.security.cors_enabled = cors; }
+            if let Some(ref origins) = sec.cors_allowed_origins { config.security.cors_allowed_origins = origins.clone(); }
+            if let Some(rpm) = sec.rate_limit_per_minute { config.security.rate_limit_per_minute = rpm; }
+            if let Some(burst) = sec.rate_limit_burst_size { config.security.rate_limit_burst_size = burst; }
+        }
+        if let Some(ref se) = self.storage_engine {
+            if let Some(ref backend) = se.backend { config.storage_engine.backend = backend.clone(); }
+            if let Some(ref url) = se.url { config.storage_engine.url = Some(url.clone()); }
+            if let Some(ref cred) = se.credentials_source { config.storage_engine.credentials_source = Some(cred.clone()); }
+            if let Some(ref prefix) = se.key_prefix { config.storage_engine.key_prefix = Some(prefix.clone()); }
+            if let Some(pool) = se.pool_size { config.storage_engine.pool_size = Some(pool); }
+        }
+    }
 }
 
 /// Partial `[base]` override for an environment.

@@ -12,8 +12,7 @@ use std::path::{Path, PathBuf};
 use rivers_runtime::rivers_core::ServerConfig;
 use riversd::cli::{parse_args, CliCommand};
 
-#[tokio::main]
-async fn main() {
+fn main() {
     // Parse CLI arguments
     let args = match parse_args(std::env::args()) {
         Ok(args) => args,
@@ -24,7 +23,7 @@ async fn main() {
         }
     };
 
-    // Handle non-server commands first (no logging setup needed)
+    // Handle non-server commands first (no runtime needed)
     match &args.command {
         CliCommand::Version => {
             println!("{}", riversd::cli::version_string());
@@ -38,7 +37,7 @@ async fn main() {
     }
 
     // Resolve config path: explicit flag > discovery > defaults
-    let (config, resolved_config_path) = if let Some(ref path) = args.config_path {
+    let (mut config, resolved_config_path) = if let Some(ref path) = args.config_path {
         match rivers_runtime::loader::load_server_config(Path::new(path)) {
             Ok(config) => (config, Some(path.clone())),
             Err(e) => {
@@ -57,6 +56,39 @@ async fn main() {
     } else {
         (ServerConfig::default(), None)
     };
+
+    // Apply environment overrides (RIVERS_ENV → environment_overrides.<name>)
+    let env_name = std::env::var("RIVERS_ENV").unwrap_or_else(|_| String::new());
+    if !env_name.is_empty() {
+        if let Some(overrides) = config.environment_overrides.remove(&env_name) {
+            overrides.apply_to(&mut config);
+            eprintln!("info: applied environment overrides for '{env_name}'");
+        }
+    }
+
+    // Build tokio runtime with configured worker threads
+    let workers = config.base.workers
+        .map(|w| w as usize)
+        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to build tokio runtime: {e}");
+            std::process::exit(1);
+        });
+
+    runtime.block_on(async_main(args, config, resolved_config_path));
+}
+
+async fn async_main(
+    args: riversd::cli::CliArgs,
+    config: ServerConfig,
+    resolved_config_path: Option<PathBuf>,
+) {
+    let config = config;
 
     // Set up logging: CLI --log-level overrides config
     let log_level = args
@@ -80,6 +112,8 @@ async fn main() {
     let filter_handle = std::sync::Arc::new(filter_handle);
 
     // Optional file appender alongside stdout
+    let use_json = config.base.logging.format == "json";
+
     let _file_guard = if let Some(ref file_path) = config.base.logging.local_file_path {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
@@ -94,20 +128,35 @@ async fn main() {
             });
         let (non_blocking, guard) = tracing_appender::non_blocking(file);
 
-        tracing_subscriber::registry()
-            .with(reloadable_filter)
-            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
-            .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
-            .init();
+        if use_json {
+            tracing_subscriber::registry()
+                .with(reloadable_filter)
+                .with(tracing_subscriber::fmt::layer().json().with_writer(std::io::stdout))
+                .with(tracing_subscriber::fmt::layer().json().with_writer(non_blocking))
+                .init();
+        } else {
+            tracing_subscriber::registry()
+                .with(reloadable_filter)
+                .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
+                .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
+                .init();
+        }
         Some(guard)
     } else {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
 
-        tracing_subscriber::registry()
-            .with(reloadable_filter)
-            .with(tracing_subscriber::fmt::layer())
-            .init();
+        if use_json {
+            tracing_subscriber::registry()
+                .with(reloadable_filter)
+                .with(tracing_subscriber::fmt::layer().json())
+                .init();
+        } else {
+            tracing_subscriber::registry()
+                .with(reloadable_filter)
+                .with(tracing_subscriber::fmt::layer())
+                .init();
+        }
         None
     };
 

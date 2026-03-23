@@ -181,6 +181,8 @@ impl ProcessPool {
             let timeout_ms = config.task_timeout_ms;
             let heap_bytes = config.max_heap_mb * 1024 * 1024;
             let heap_threshold = config.heap_recycle_threshold;
+            let epoch_interval = config.epoch_interval_ms;
+            let recycle_after = config.recycle_after_tasks;
             let registry = active_tasks.clone();
 
             handles.push(tokio::spawn(async move {
@@ -197,7 +199,7 @@ impl ProcessPool {
 
                     let result = dispatch_task(
                         &engine, msg.ctx, timeout_ms, worker_id,
-                        heap_bytes, heap_threshold,
+                        heap_bytes, heap_threshold, epoch_interval, recycle_after,
                         Some(registry.clone()),
                     ).await;
                     let _ = msg.reply.send(result);
@@ -282,6 +284,8 @@ async fn dispatch_task(
     worker_id: usize,
     heap_bytes: usize,
     heap_threshold: f64,
+    epoch_interval_ms: u64,
+    _recycle_after_tasks: Option<u64>,
     registry: Option<ActiveTaskRegistry>,
 ) -> Result<TaskResult, TaskError> {
     // BB6: Try dynamic engine loader first
@@ -314,7 +318,7 @@ async fn dispatch_task(
             return execute_js_task(ctx, timeout_ms, worker_id, heap_bytes, heap_threshold, registry.clone()).await;
         }
         "wasm" => {
-            return execute_wasm_task(ctx, timeout_ms, worker_id, heap_bytes, registry).await;
+            return execute_wasm_task(ctx, timeout_ms, worker_id, heap_bytes, epoch_interval_ms, registry).await;
         }
         _ => {}
     }
