@@ -806,21 +806,53 @@ async fn execute_sse_view(
 
     // Spawn per-client relay task: broadcast receiver → mpsc sender → HTTP stream
     let channel_for_cleanup = channel.clone();
+    let revalidation_interval = matched.config.session_revalidation_interval_s;
+    let session_mgr = ctx.session_manager.clone();
     tokio::spawn(async move {
+        // Optional session revalidation timer
+        let mut revalidation_tick = revalidation_interval.map(|secs| {
+            tokio::time::interval(tokio::time::Duration::from_secs(secs))
+        });
+        // Skip the first immediate tick
+        if let Some(ref mut tick) = revalidation_tick {
+            tick.tick().await;
+        }
+
         loop {
-            match sse_rx.recv().await {
-                Ok(event) => {
-                    let wire = event.to_wire_format();
-                    if tx.send(wire).await.is_err() {
-                        break; // Client disconnected
+            tokio::select! {
+                msg = sse_rx.recv() => {
+                    match msg {
+                        Ok(event) => {
+                            let wire = event.to_wire_format();
+                            if tx.send(wire).await.is_err() {
+                                break; // Client disconnected
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            let comment = format!(": lagged {} events\n\n", n);
+                            if tx.send(comment).await.is_err() {
+                                break;
+                            }
+                        }
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    // Send a comment to keep the connection alive
-                    let comment = format!(": lagged {} events\n\n", n);
-                    if tx.send(comment).await.is_err() {
-                        break;
+                _ = async {
+                    if let Some(ref mut tick) = revalidation_tick {
+                        tick.tick().await
+                    } else {
+                        // No revalidation configured — sleep forever
+                        std::future::pending::<tokio::time::Instant>().await
+                    }
+                } => {
+                    // Session revalidation tick — check if session is still valid
+                    if let Some(ref _mgr) = session_mgr {
+                        // TODO: validate session against StorageEngine
+                        // if !mgr.validate_session(&session_id).await {
+                        //     tracing::info!(view_id = %view_id_clone, "SSE session expired, closing");
+                        //     break;
+                        // }
+                        tracing::debug!("SSE session revalidation tick");
                     }
                 }
             }
