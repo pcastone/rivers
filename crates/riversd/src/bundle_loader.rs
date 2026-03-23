@@ -226,15 +226,22 @@ pub async fn load_and_wire_bundle(
 
     let factory = Arc::new(factory);
 
-    // Build DataView cache from StorageEngine if available
+    // Build DataView cache from StorageEngine if available.
+    // Aggregate caching policy from all DataView configs — use the most permissive values.
+    let cache_policy = build_cache_policy_from_bundle(&bundle);
     let cache: Option<Arc<dyn rivers_runtime::tiered_cache::DataViewCache>> =
         ctx.storage_engine.as_ref().map(|engine| {
             let tiered = rivers_runtime::tiered_cache::TieredDataViewCache::new(
-                rivers_runtime::tiered_cache::DataViewCachingPolicy::default(),
+                cache_policy.clone(),
             )
             .with_storage(engine.clone());
             Arc::new(tiered) as Arc<dyn rivers_runtime::tiered_cache::DataViewCache>
         });
+    if cache_policy.l2_enabled {
+        tracing::info!("DataView cache: L1 + L2 enabled (max L1 entries: {})", cache_policy.l1_max_entries);
+    } else if cache_policy.l1_enabled {
+        tracing::info!("DataView cache: L1 enabled (max entries: {})", cache_policy.l1_max_entries);
+    }
 
     let ds_params = Arc::new(ds_params);
     let mut executor = DataViewExecutor::new(registry, factory.clone(), ds_params.clone(), cache);
@@ -638,10 +645,11 @@ pub async fn rebuild_views_and_dataviews(
                 let factory = Arc::new(factory);
 
                 // Build cache from StorageEngine if available
+                let cache_policy = build_cache_policy_from_bundle(&bundle);
                 let cache: Option<Arc<dyn rivers_runtime::tiered_cache::DataViewCache>> =
                     ctx.storage_engine.as_ref().map(|engine| {
                         let tiered = rivers_runtime::tiered_cache::TieredDataViewCache::new(
-                            rivers_runtime::tiered_cache::DataViewCachingPolicy::default(),
+                            cache_policy,
                         )
                         .with_storage(engine.clone());
                         Arc::new(tiered) as Arc<dyn rivers_runtime::tiered_cache::DataViewCache>
@@ -751,4 +759,46 @@ pub async fn rebuild_views_and_dataviews(
         views: view_count,
         dataviews: dv_count,
     })
+}
+
+/// Build a DataViewCachingPolicy from the aggregate of all DataView caching configs in a bundle.
+///
+/// Uses the most permissive values: L1/L2 enabled if ANY DataView enables them,
+/// max entries = largest configured, TTL = longest configured.
+fn build_cache_policy_from_bundle(
+    bundle: &rivers_runtime::LoadedBundle,
+) -> rivers_runtime::tiered_cache::DataViewCachingPolicy {
+    let mut policy = rivers_runtime::tiered_cache::DataViewCachingPolicy::default();
+
+    let mut has_any_caching = false;
+    for app in &bundle.apps {
+        for dv in app.config.data.dataviews.values() {
+            if let Some(ref caching) = dv.caching {
+                has_any_caching = true;
+                if caching.ttl_seconds > policy.ttl_seconds {
+                    policy.ttl_seconds = caching.ttl_seconds;
+                }
+                if caching.l1_enabled {
+                    policy.l1_enabled = true;
+                }
+                if caching.l1_max_entries > policy.l1_max_entries {
+                    policy.l1_max_entries = caching.l1_max_entries;
+                }
+                if caching.l2_enabled {
+                    policy.l2_enabled = true;
+                }
+                if caching.l2_max_value_bytes > policy.l2_max_value_bytes {
+                    policy.l2_max_value_bytes = caching.l2_max_value_bytes;
+                }
+            }
+        }
+    }
+
+    if !has_any_caching {
+        // No DataView has caching configured — use defaults (L1 only)
+        policy.l1_enabled = true;
+        policy.l2_enabled = false;
+    }
+
+    policy
 }
