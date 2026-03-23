@@ -1890,7 +1890,7 @@ pub async fn run_server_with_listener_and_log(
             }
             _ => return Err(ServerError::Config("cert and key must both be specified or both absent".into())),
         };
-        let admin_acceptor = crate::tls::load_tls_acceptor(&admin_cert_path, &admin_key_path)
+        let admin_acceptor = crate::tls::load_tls_acceptor(&admin_cert_path, &admin_key_path, false)
             .map_err(|e| ServerError::Config(e))?;
 
         let admin_listener = TcpListener::bind(admin_addr)
@@ -2043,10 +2043,15 @@ pub async fn run_server_with_listener_and_log(
         _ => unreachable!("validated above"),
     };
 
-    let acceptor = crate::tls::load_tls_acceptor(&cert_path, &key_path)
+    let http2_enabled = config.base.http2.enabled;
+    let acceptor = crate::tls::load_tls_acceptor(&cert_path, &key_path, http2_enabled)
         .map_err(|e| ServerError::Config(e))?;
 
-    tracing::info!("TLS enabled — serving HTTPS");
+    if http2_enabled {
+        tracing::info!("TLS enabled — serving HTTPS with HTTP/2 (ALPN: h2, http/1.1)");
+    } else {
+        tracing::info!("TLS enabled — serving HTTPS");
+    }
 
     // Manual TLS accept loop with graceful shutdown
     loop {

@@ -70,7 +70,10 @@ pub fn validate_redirect_port(base_port: u16, redirect_port: u16) -> Result<(), 
 }
 
 /// Build a TlsAcceptor from PEM cert + key files.
-pub fn load_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor, String> {
+///
+/// When `http2` is true, ALPN is configured to advertise both `h2` and `http/1.1`.
+/// Clients that support HTTP/2 will negotiate `h2`; others fall back to HTTP/1.1.
+pub fn load_tls_acceptor(cert_path: &str, key_path: &str, http2: bool) -> Result<TlsAcceptor, String> {
     let cert_bytes = std::fs::read(cert_path)
         .map_err(|e| format!("cannot read cert {cert_path}: {e}"))?;
     let key_bytes = std::fs::read(key_path)
@@ -87,10 +90,16 @@ pub fn load_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor,
         .ok_or_else(|| format!("no private key found in {key_path}"))?;
 
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let tls_config = rustls::ServerConfig::builder()
+    let mut tls_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| format!("TLS config error: {e}"))?;
+
+    if http2 {
+        tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    } else {
+        tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    }
 
     Ok(TlsAcceptor::from(Arc::new(tls_config)))
 }
