@@ -62,16 +62,16 @@ base64 = { workspace = true, optional = true }
 reqwest = { workspace = true }
 
 # Optional: static plugin deps (included with "static-plugins" feature)
-rivers-plugin-cassandra = { path = "../rivers-plugin-cassandra", optional = true }
-rivers-plugin-couchdb = { path = "../rivers-plugin-couchdb", optional = true }
-rivers-plugin-mongodb = { path = "../rivers-plugin-mongodb", optional = true }
-rivers-plugin-elasticsearch = { path = "../rivers-plugin-elasticsearch", optional = true }
-rivers-plugin-influxdb = { path = "../rivers-plugin-influxdb", optional = true }
-rivers-plugin-kafka = { path = "../rivers-plugin-kafka", optional = true }
-rivers-plugin-rabbitmq = { path = "../rivers-plugin-rabbitmq", optional = true }
-rivers-plugin-nats = { path = "../rivers-plugin-nats", optional = true }
-rivers-plugin-redis-streams = { path = "../rivers-plugin-redis-streams", optional = true }
-rivers-plugin-ldap = { path = "../rivers-plugin-ldap", optional = true }
+rivers-plugin-cassandra = { path = "../rivers-plugin-cassandra", optional = true, default-features = false }
+rivers-plugin-couchdb = { path = "../rivers-plugin-couchdb", optional = true, default-features = false }
+rivers-plugin-mongodb = { path = "../rivers-plugin-mongodb", optional = true, default-features = false }
+rivers-plugin-elasticsearch = { path = "../rivers-plugin-elasticsearch", optional = true, default-features = false }
+rivers-plugin-influxdb = { path = "../rivers-plugin-influxdb", optional = true, default-features = false }
+rivers-plugin-kafka = { path = "../rivers-plugin-kafka", optional = true, default-features = false }
+rivers-plugin-rabbitmq = { path = "../rivers-plugin-rabbitmq", optional = true, default-features = false }
+rivers-plugin-nats = { path = "../rivers-plugin-nats", optional = true, default-features = false }
+rivers-plugin-redis-streams = { path = "../rivers-plugin-redis-streams", optional = true, default-features = false }
+rivers-plugin-ldap = { path = "../rivers-plugin-ldap", optional = true, default-features = false }
 
 [dev-dependencies]
 async-trait = { workspace = true }

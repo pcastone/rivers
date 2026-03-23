@@ -439,11 +439,13 @@ impl BrokerConsumer for RedisStreamConsumer {
 
 // ── Plugin ABI ─────────────────────────────────────────────────────────
 
+#[cfg(feature = "plugin-exports")]
 #[no_mangle]
 pub extern "C" fn _rivers_abi_version() -> u32 {
     ABI_VERSION
 }
 
+#[cfg(feature = "plugin-exports")]
 #[no_mangle]
 #[allow(improper_ctypes_definitions)]
 pub extern "C" fn _rivers_register_driver(registrar: &mut dyn DriverRegistrar) {

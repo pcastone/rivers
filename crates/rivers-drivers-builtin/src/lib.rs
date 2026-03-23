@@ -44,11 +44,13 @@ pub fn register_builtin_drivers(registrar: &mut dyn DriverRegistrar) {
 
 // ── cdylib ABI exports ──────────────────────────────────────────────
 
+#[cfg(feature = "plugin-exports")]
 #[no_mangle]
 pub extern "C" fn _rivers_abi_version() -> u32 {
     rivers_driver_sdk::ABI_VERSION
 }
 
+#[cfg(feature = "plugin-exports")]
 #[no_mangle]
 #[allow(improper_ctypes_definitions)]
 pub extern "C" fn _rivers_register_driver(registrar: &mut dyn DriverRegistrar) {
