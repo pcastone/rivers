@@ -27,6 +27,12 @@ pub fn generate_self_signed_cert(
     if let Some(ref country) = x509.country {
         dn.push(DnType::CountryName, country);
     }
+    if let Some(ref state) = x509.state {
+        dn.push(DnType::StateOrProvinceName, state);
+    }
+    if let Some(ref locality) = x509.locality {
+        dn.push(DnType::LocalityName, locality);
+    }
     params.distinguished_name = dn;
 
     // SANs — IP addresses use SanType::IpAddress, DNS names use SanType::DnsName(Ia5String)

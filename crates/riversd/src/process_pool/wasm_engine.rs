@@ -46,6 +46,7 @@ pub(crate) async fn execute_wasm_task(
     timeout_ms: u64,
     worker_id: usize,
     max_memory_bytes: usize,
+    epoch_interval_ms: u64,
     registry: Option<ActiveTaskRegistry>,
 ) -> Result<TaskResult, TaskError> {
     let result = tokio::task::spawn_blocking(move || {
@@ -113,9 +114,10 @@ pub(crate) async fn execute_wasm_task(
             .set_fuel(fuel)
             .map_err(|e| TaskError::Internal(format!("wasmtime fuel: {e}")))?;
 
-        // X6.5: Epoch deadline — timeout_ms / 10ms per tick
+        // X6.5: Epoch deadline — timeout_ms / epoch_interval_ms per tick
+        let interval = if epoch_interval_ms > 0 { epoch_interval_ms } else { 10 };
         let epoch_ticks = if timeout_ms > 0 {
-            (timeout_ms / 10).max(1)
+            (timeout_ms / interval).max(1)
         } else {
             100
         };
