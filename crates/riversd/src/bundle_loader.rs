@@ -502,29 +502,61 @@ pub async fn load_and_wire_bundle(
     }
 
     // ── AL3: Wire datasource event handlers ──
-    // Read event_handlers from DatasourceConfig and log configured handlers.
-    for app in &bundle.apps {
-        for ds in app.config.data.datasources.values() {
-            if let Some(ref handlers) = ds.event_handlers {
-                for handler in &handlers.on_connection_failed {
-                    tracing::info!(
-                        datasource = %ds.name,
-                        module = %handler.module,
-                        entrypoint = %handler.entrypoint,
-                        event = "on_connection_failed",
-                        "datasource event handler registered"
-                    );
-                }
-                for handler in &handlers.on_pool_exhausted {
-                    tracing::info!(
-                        datasource = %ds.name,
-                        module = %handler.module,
-                        entrypoint = %handler.entrypoint,
-                        event = "on_pool_exhausted",
-                        "datasource event handler registered"
-                    );
+    // Subscribe CodeComponent handlers to EventBus events for datasource failures.
+    {
+        use rivers_runtime::rivers_core::eventbus::{events, HandlerPriority};
+        let mut ds_handler_count = 0usize;
+
+        for app in &bundle.apps {
+            for ds in app.config.data.datasources.values() {
+                if let Some(ref handlers) = ds.event_handlers {
+                    // on_connection_failed → DatasourceCircuitOpened + DatasourceHealthCheckFailed
+                    for handler_ref in &handlers.on_connection_failed {
+                        let handler = Arc::new(DatasourceEventBusHandler {
+                            datasource: ds.name.clone(),
+                            module: handler_ref.module.clone(),
+                            entrypoint: handler_ref.entrypoint.clone(),
+                            pool: ctx.pool.clone(),
+                        });
+                        ctx.event_bus
+                            .subscribe(events::DATASOURCE_CIRCUIT_OPENED.to_string(), handler.clone(), HandlerPriority::Handle)
+                            .await;
+                        ctx.event_bus
+                            .subscribe(events::DATASOURCE_HEALTH_CHECK_FAILED.to_string(), handler, HandlerPriority::Handle)
+                            .await;
+                        ds_handler_count += 1;
+                        tracing::info!(
+                            datasource = %ds.name,
+                            module = %handler_ref.module,
+                            entrypoint = %handler_ref.entrypoint,
+                            "on_connection_failed handler subscribed"
+                        );
+                    }
+
+                    // on_pool_exhausted → ConnectionPoolExhausted
+                    for handler_ref in &handlers.on_pool_exhausted {
+                        let handler = Arc::new(DatasourceEventBusHandler {
+                            datasource: ds.name.clone(),
+                            module: handler_ref.module.clone(),
+                            entrypoint: handler_ref.entrypoint.clone(),
+                            pool: ctx.pool.clone(),
+                        });
+                        ctx.event_bus
+                            .subscribe(events::CONNECTION_POOL_EXHAUSTED.to_string(), handler, HandlerPriority::Handle)
+                            .await;
+                        ds_handler_count += 1;
+                        tracing::info!(
+                            datasource = %ds.name,
+                            module = %handler_ref.module,
+                            entrypoint = %handler_ref.entrypoint,
+                            "on_pool_exhausted handler subscribed"
+                        );
+                    }
                 }
             }
+        }
+        if ds_handler_count > 0 {
+            tracing::info!(handlers = ds_handler_count, "datasource event handlers wired");
         }
     }
 
@@ -847,9 +879,6 @@ pub async fn rebuild_views_and_dataviews(
 }
 
 /// Build a DataViewCachingPolicy from the aggregate of all DataView caching configs in a bundle.
-///
-/// Uses the most permissive values: L1/L2 enabled if ANY DataView enables them,
-/// max entries = largest configured, TTL = longest configured.
 fn build_cache_policy_from_bundle(
     bundle: &rivers_runtime::LoadedBundle,
 ) -> rivers_runtime::tiered_cache::DataViewCachingPolicy {
@@ -880,10 +909,58 @@ fn build_cache_policy_from_bundle(
     }
 
     if !has_any_caching {
-        // No DataView has caching configured — use defaults (L1 only)
         policy.l1_enabled = true;
         policy.l2_enabled = false;
     }
 
     policy
+}
+
+// ── Datasource Event Handler ──────────────────────────────────────
+
+/// EventBus handler that dispatches datasource failure events to a CodeComponent.
+struct DatasourceEventBusHandler {
+    datasource: String,
+    module: String,
+    entrypoint: String,
+    pool: Arc<crate::process_pool::ProcessPoolManager>,
+}
+
+#[async_trait::async_trait]
+impl rivers_runtime::rivers_core::eventbus::EventHandler for DatasourceEventBusHandler {
+    async fn handle(
+        &self,
+        event: &rivers_runtime::rivers_core::event::Event,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let entrypoint = crate::process_pool::Entrypoint {
+            module: self.module.clone(),
+            function: self.entrypoint.clone(),
+            language: "javascript".into(),
+        };
+
+        let args = serde_json::json!({
+            "datasource": self.datasource,
+            "event_type": event.event_type,
+            "event": event.payload,
+            "trace_id": event.trace_id,
+            "timestamp": event.timestamp.to_rfc3339(),
+        });
+
+        let task_ctx = crate::process_pool::TaskContextBuilder::new()
+            .entrypoint(entrypoint)
+            .args(args)
+            .trace_id(event.trace_id.clone().unwrap_or_default())
+            .build()
+            .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+
+        self.pool.dispatch("default", task_ctx).await.map_err(|e| {
+            Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+        })?;
+
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        &self.datasource
+    }
 }
