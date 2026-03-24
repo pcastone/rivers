@@ -1,17 +1,34 @@
-//! Shared test credential helper — resolves passwords from a real LockBox keystore.
+//! Shared test credential helper — resolves full connection info from a LockBox keystore.
 //!
-//! Reads Age-encrypted secrets from the on-disk keystore at `sec/lockbox/`.
-//! No passwords are stored in source code. The keystore is in `.gitignore`.
+//! Reads Age-encrypted passwords and plaintext `.meta.json` sidecars from `sec/lockbox/`.
+//! No passwords, IPs, or usernames are stored in source code. The keystore is in `.gitignore`.
 //!
-//! Setup: `RIVERS_LOCKBOX_DIR=sec/lockbox rivers-lockbox add <name> --value <secret>`
-//! Usage: `TestCredentials::new()` then `creds.get("postgres/test")`
+//! Usage:
+//!   `TestCredentials::new().connection_params("postgres/test")`
+//!   Returns a complete `ConnectionParams` — no hardcoded values needed in tests.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-use age::secrecy::ExposeSecret;
+use rivers_driver_sdk::ConnectionParams;
 
-/// Resolves credentials from the real LockBox keystore at `sec/lockbox/`.
+/// Credential metadata from a `.meta.json` sidecar file.
+#[derive(serde::Deserialize, Default)]
+struct CredentialMeta {
+    #[serde(default)]
+    driver: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    hosts: Vec<String>,
+    #[serde(default)]
+    database: Option<String>,
+    #[serde(default)]
+    options: HashMap<String, String>,
+}
+
+/// Resolves full connection credentials from the LockBox keystore at `sec/lockbox/`.
 pub struct TestCredentials {
     lockbox_dir: PathBuf,
     identity: age::x25519::Identity,
@@ -19,9 +36,6 @@ pub struct TestCredentials {
 
 impl TestCredentials {
     /// Load the lockbox identity from `sec/lockbox/identity.key`.
-    ///
-    /// Searches upward from the crate directory to find the workspace root
-    /// containing `sec/lockbox/`.
     pub fn new() -> Self {
         let lockbox_dir = find_lockbox_dir()
             .expect("cannot find sec/lockbox/ — run from workspace root or set RIVERS_LOCKBOX_DIR");
@@ -35,7 +49,7 @@ impl TestCredentials {
         Self { lockbox_dir, identity }
     }
 
-    /// Decrypt and return a credential by name (e.g. "postgres/test").
+    /// Decrypt and return just the password by name (e.g. "postgres/test").
     pub fn get(&self, name: &str) -> String {
         let entry_path = self.lockbox_dir.join("entries").join(format!("{name}.age"));
         if !entry_path.exists() {
@@ -48,11 +62,61 @@ impl TestCredentials {
         String::from_utf8(decrypted)
             .unwrap_or_else(|e| panic!("lockbox entry {name} is not valid UTF-8: {e}"))
     }
+
+    /// Read the `.meta.json` sidecar for an entry. Returns None if absent.
+    fn get_meta(&self, name: &str) -> Option<CredentialMeta> {
+        let meta_path = self.lockbox_dir.join("entries").join(format!("{name}.meta.json"));
+        if !meta_path.exists() {
+            return None;
+        }
+        let json = fs::read_to_string(&meta_path)
+            .unwrap_or_else(|e| panic!("cannot read meta for {name}: {e}"));
+        Some(serde_json::from_str(&json)
+            .unwrap_or_else(|e| panic!("invalid meta JSON for {name}: {e}")))
+    }
+
+    /// Build a complete `ConnectionParams` from the lockbox entry + sidecar.
+    ///
+    /// Reads password from `.age`, connection info from `.meta.json`.
+    /// No hardcoded IPs, usernames, or driver names needed in test code.
+    pub fn connection_params(&self, name: &str) -> ConnectionParams {
+        let password = self.get(name);
+        let meta = self.get_meta(name).unwrap_or_default();
+
+        let (host, port) = meta.hosts.first()
+            .map(|h| parse_host_port(h))
+            .unwrap_or_else(|| ("".into(), 0));
+
+        let mut options = meta.options;
+        if let Some(ref driver) = meta.driver {
+            options.insert("driver".into(), driver.clone());
+        }
+        if meta.hosts.len() > 1 {
+            options.insert("hosts".into(), meta.hosts.join(","));
+            options.insert("cluster".into(), "true".into());
+        }
+
+        ConnectionParams {
+            host,
+            port,
+            database: meta.database.unwrap_or_default(),
+            username: meta.username.unwrap_or_default(),
+            password,
+            options,
+        }
+    }
+}
+
+/// Parse "host:port" into (host, port). Returns port=0 if no port specified.
+fn parse_host_port(s: &str) -> (String, u16) {
+    match s.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse().unwrap_or(0)),
+        None => (s.to_string(), 0),
+    }
 }
 
 /// Walk up from the current directory to find the workspace root with `sec/lockbox/`.
-fn find_lockbox_dir() -> Option<PathBuf> {
-    // Check env var first
+pub fn find_lockbox_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("RIVERS_LOCKBOX_DIR") {
         let p = PathBuf::from(&dir);
         if p.join("identity.key").exists() {
@@ -60,7 +124,6 @@ fn find_lockbox_dir() -> Option<PathBuf> {
         }
     }
 
-    // Walk up from current dir
     let mut dir = std::env::current_dir().ok()?;
     for _ in 0..10 {
         let candidate = dir.join("sec").join("lockbox");

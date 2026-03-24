@@ -1,39 +1,57 @@
 //! Live integration tests for the InfluxDB v2 plugin driver.
 //!
-//! Requires a running InfluxDB v2 instance at 192.168.2.230:8086.
-//! Credentials are resolved from a LockBox keystore.
+//! Connection info resolved from LockBox keystore (see `sec/lockbox/`).
 //! If the service is unreachable, tests print SKIP and pass.
 //!
 //! Run with: cargo test --test influxdb_live_test
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query, QueryValue};
 use rivers_plugin_influxdb::InfluxDriver;
 
-const INFLUX_HOST: &str = "192.168.2.230";
-const INFLUX_PORT: u16 = 8086;
-const INFLUX_ORG: &str = "rivers";
-const INFLUX_BUCKET: &str = "test";
-const INFLUX_USER: &str = "rivers";
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Resolve a credential from the real LockBox keystore at `sec/lockbox/`.
-fn lockbox_resolve(name: &str) -> String {
-    let lockbox_dir = find_lockbox_dir()
-        .expect("cannot find sec/lockbox/ — run from workspace root or set RIVERS_LOCKBOX_DIR");
-    let identity_path = lockbox_dir.join("identity.key");
-    let key_str = std::fs::read_to_string(&identity_path)
-        .unwrap_or_else(|e| panic!("cannot read identity: {e}"));
-    let identity: age::x25519::Identity = key_str.trim().parse()
-        .expect("invalid age identity key");
-    let entry_path = lockbox_dir.join("entries").join(format!("{name}.age"));
-    let encrypted = std::fs::read(&entry_path)
-        .unwrap_or_else(|e| panic!("cannot read lockbox entry {name}: {e}"));
-    let decrypted = age::decrypt(&identity, &encrypted)
-        .unwrap_or_else(|e| panic!("cannot decrypt {name}: {e}"));
-    String::from_utf8(decrypted).unwrap()
+fn conn_params() -> ConnectionParams {
+    let dir = find_lockbox_dir().expect("cannot find sec/lockbox/");
+    let key_str = std::fs::read_to_string(dir.join("identity.key")).unwrap();
+    let identity: age::x25519::Identity = key_str.trim().parse().unwrap();
+
+    let encrypted = std::fs::read(dir.join("entries/influxdb/test.age")).unwrap();
+    let password = String::from_utf8(age::decrypt(&identity, &encrypted).unwrap()).unwrap();
+
+    let meta: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("entries/influxdb/test.meta.json")).unwrap()
+    ).unwrap();
+
+    let hosts: Vec<String> = meta["hosts"].as_array().unwrap()
+        .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    let (host, port) = parse_host_port(&hosts[0]);
+
+    let mut options: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Some(obj) = meta["options"].as_object() {
+        for (k, v) in obj { options.insert(k.clone(), v.as_str().unwrap_or("").to_string()); }
+    }
+    if hosts.len() > 1 {
+        options.insert("hosts".into(), hosts.join(","));
+        options.insert("cluster".into(), "true".into());
+    }
+
+    ConnectionParams {
+        host,
+        port,
+        database: meta["database"].as_str().unwrap_or("").to_string(),
+        username: meta["username"].as_str().unwrap_or("").to_string(),
+        password,
+        options,
+    }
+}
+
+fn parse_host_port(s: &str) -> (String, u16) {
+    match s.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse().unwrap_or(0)),
+        None => (s.to_string(), 0),
+    }
 }
 
 fn find_lockbox_dir() -> Option<std::path::PathBuf> {
@@ -50,31 +68,18 @@ fn find_lockbox_dir() -> Option<std::path::PathBuf> {
     None
 }
 
-fn conn_params() -> ConnectionParams {
-    let password = lockbox_resolve("influxdb/test");
-    let mut options = HashMap::new();
-    options.insert("org".to_string(), INFLUX_ORG.to_string());
-    ConnectionParams {
-        host: INFLUX_HOST.into(),
-        port: INFLUX_PORT,
-        database: INFLUX_BUCKET.into(),
-        username: INFLUX_USER.into(),
-        password,
-        options,
-    }
-}
-
 /// Try to connect; returns None (with SKIP message) if unreachable.
 async fn try_connect() -> Option<Box<dyn rivers_driver_sdk::Connection>> {
     let driver = InfluxDriver;
-    match tokio::time::timeout(TIMEOUT, driver.connect(&conn_params())).await {
+    let params = conn_params();
+    match tokio::time::timeout(TIMEOUT, driver.connect(&params)).await {
         Ok(Ok(conn)) => Some(conn),
         Ok(Err(e)) => {
-            eprintln!("SKIP: InfluxDB unreachable at {INFLUX_HOST}:{INFLUX_PORT} — {e}");
+            eprintln!("SKIP: InfluxDB unreachable — {e}");
             None
         }
         Err(_) => {
-            eprintln!("SKIP: InfluxDB connection timed out at {INFLUX_HOST}:{INFLUX_PORT}");
+            eprintln!("SKIP: InfluxDB connection timed out");
             None
         }
     }
@@ -99,6 +104,9 @@ async fn influxdb_connect_and_ping() {
 async fn influxdb_write_and_query() {
     let Some(mut conn) = try_connect().await else { return };
 
+    let params = conn_params();
+    let bucket = &params.database;
+
     // Use a unique tag to isolate this test run
     let test_id = format!(
         "test_{}",
@@ -109,7 +117,7 @@ async fn influxdb_write_and_query() {
     );
 
     // Write a data point using line protocol
-    let write_query = Query::with_operation("write", INFLUX_BUCKET, "")
+    let write_query = Query::with_operation("write", bucket, "")
         .param(
             "_line_protocol",
             QueryValue::String(format!(
@@ -138,7 +146,7 @@ async fn influxdb_write_and_query() {
 
     // Query the data back using Flux
     let flux = format!(
-        r#"from(bucket: "{INFLUX_BUCKET}")
+        r#"from(bucket: "{bucket}")
   |> range(start: -1h)
   |> filter(fn: (r) => r._measurement == "rivers_test" and r.run_id == "{test_id}")
   |> filter(fn: (r) => r._field == "temperature")"#,

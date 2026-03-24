@@ -1,7 +1,6 @@
 //! Live integration tests for the Redis Streams plugin driver.
 //!
-//! Requires a running Redis server at 192.168.2.206:6379.
-//! Credentials are resolved from a LockBox keystore.
+//! Connection info resolved from LockBox keystore (see `sec/lockbox/`).
 //! If the service is unreachable, tests print SKIP and pass.
 //!
 //! Run with: cargo test --test redis_streams_live_test
@@ -15,25 +14,48 @@ use rivers_driver_sdk::{
 };
 use rivers_plugin_redis_streams::RedisStreamsDriver;
 
-const REDIS_HOST: &str = "192.168.2.206";
-const REDIS_PORT: u16 = 6379;
 const TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Resolve a credential from the real LockBox keystore at `sec/lockbox/`.
-fn lockbox_resolve(name: &str) -> String {
-    let lockbox_dir = find_lockbox_dir()
-        .expect("cannot find sec/lockbox/ — run from workspace root or set RIVERS_LOCKBOX_DIR");
-    let identity_path = lockbox_dir.join("identity.key");
-    let key_str = std::fs::read_to_string(&identity_path)
-        .unwrap_or_else(|e| panic!("cannot read identity: {e}"));
-    let identity: age::x25519::Identity = key_str.trim().parse()
-        .expect("invalid age identity key");
-    let entry_path = lockbox_dir.join("entries").join(format!("{name}.age"));
-    let encrypted = std::fs::read(&entry_path)
-        .unwrap_or_else(|e| panic!("cannot read lockbox entry {name}: {e}"));
-    let decrypted = age::decrypt(&identity, &encrypted)
-        .unwrap_or_else(|e| panic!("cannot decrypt {name}: {e}"));
-    String::from_utf8(decrypted).unwrap()
+fn conn_params() -> ConnectionParams {
+    let dir = find_lockbox_dir().expect("cannot find sec/lockbox/");
+    let key_str = std::fs::read_to_string(dir.join("identity.key")).unwrap();
+    let identity: age::x25519::Identity = key_str.trim().parse().unwrap();
+
+    let encrypted = std::fs::read(dir.join("entries/redis-streams/test.age")).unwrap();
+    let password = String::from_utf8(age::decrypt(&identity, &encrypted).unwrap()).unwrap();
+
+    let meta: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("entries/redis-streams/test.meta.json")).unwrap()
+    ).unwrap();
+
+    let hosts: Vec<String> = meta["hosts"].as_array().unwrap()
+        .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    let (host, port) = parse_host_port(&hosts[0]);
+
+    let mut options: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Some(obj) = meta["options"].as_object() {
+        for (k, v) in obj { options.insert(k.clone(), v.as_str().unwrap_or("").to_string()); }
+    }
+    if hosts.len() > 1 {
+        options.insert("hosts".into(), hosts.join(","));
+        options.insert("cluster".into(), "true".into());
+    }
+
+    ConnectionParams {
+        host,
+        port,
+        database: meta["database"].as_str().unwrap_or("").to_string(),
+        username: meta["username"].as_str().unwrap_or("").to_string(),
+        password,
+        options,
+    }
+}
+
+fn parse_host_port(s: &str) -> (String, u16) {
+    match s.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse().unwrap_or(0)),
+        None => (s.to_string(), 0),
+    }
 }
 
 fn find_lockbox_dir() -> Option<std::path::PathBuf> {
@@ -48,24 +70,6 @@ fn find_lockbox_dir() -> Option<std::path::PathBuf> {
         if !dir.pop() { break; }
     }
     None
-}
-
-fn conn_params() -> ConnectionParams {
-    let password = lockbox_resolve("redis-streams/test");
-    let mut options = HashMap::new();
-    options.insert("cluster".into(), "true".into());
-    options.insert(
-        "hosts".into(),
-        "192.168.2.206:6379,192.168.2.207:6379,192.168.2.208:6379".into(),
-    );
-    ConnectionParams {
-        host: REDIS_HOST.into(),
-        port: REDIS_PORT,
-        database: "0".into(),
-        username: "".into(),
-        password,
-        options,
-    }
 }
 
 /// Generate a unique stream name to avoid collisions between test runs.
@@ -110,11 +114,11 @@ async fn try_create_producer(
     match tokio::time::timeout(TIMEOUT, driver.create_producer(&conn_params(), &config)).await {
         Ok(Ok(producer)) => Some(producer),
         Ok(Err(e)) => {
-            eprintln!("SKIP: Redis unreachable at {REDIS_HOST}:{REDIS_PORT} — {e}");
+            eprintln!("SKIP: Redis unreachable — {e}");
             None
         }
         Err(_) => {
-            eprintln!("SKIP: Redis connection timed out at {REDIS_HOST}:{REDIS_PORT}");
+            eprintln!("SKIP: Redis connection timed out");
             None
         }
     }
@@ -142,7 +146,7 @@ async fn redis_streams_produce_consume_roundtrip() {
         Ok(Err(e)) => {
             let msg = format!("{e}");
             if msg.contains("NOAUTH") || msg.contains("Authentication") {
-                eprintln!("SKIP: Redis requires authentication at {REDIS_HOST}:{REDIS_PORT}");
+                eprintln!("SKIP: Redis requires authentication");
                 return;
             }
             panic!("publish failed: {e:?}");
@@ -214,24 +218,47 @@ async fn redis_streams_produce_consume_roundtrip() {
 
 /// Delete a Redis stream for cleanup (uses cluster connection).
 async fn cleanup_stream(stream: &str) {
-    let password = lockbox_resolve("redis-streams/test");
-    let hosts = ["192.168.2.206:6379", "192.168.2.207:6379", "192.168.2.208:6379"];
-    let nodes: Vec<String> = hosts
-        .iter()
-        .map(|h| {
-            if password.is_empty() {
-                format!("redis://{h}")
-            } else {
-                format!("redis://:{}@{h}", password)
+    let params = conn_params();
+    let hosts_str = params.options.get("hosts").cloned().unwrap_or_default();
+    let hosts: Vec<&str> = if hosts_str.is_empty() {
+        vec![]
+    } else {
+        hosts_str.split(',').collect()
+    };
+
+    if hosts.is_empty() {
+        // Single-node fallback
+        let url = if params.password.is_empty() {
+            format!("redis://{}:{}", params.host, params.port)
+        } else {
+            format!("redis://:{}@{}:{}", params.password, params.host, params.port)
+        };
+        if let Ok(client) = redis::Client::open(url.as_str()) {
+            if let Ok(mut conn) = client.get_multiplexed_async_connection().await {
+                let _: Result<(), _> = redis::cmd("DEL")
+                    .arg(stream)
+                    .query_async(&mut conn)
+                    .await;
             }
-        })
-        .collect();
-    if let Ok(client) = redis::cluster::ClusterClient::new(nodes) {
-        if let Ok(mut conn) = client.get_async_connection().await {
-            let _: Result<(), _> = redis::cmd("DEL")
-                .arg(stream)
-                .query_async(&mut conn)
-                .await;
+        }
+    } else {
+        let nodes: Vec<String> = hosts
+            .iter()
+            .map(|h| {
+                if params.password.is_empty() {
+                    format!("redis://{h}")
+                } else {
+                    format!("redis://:{}@{h}", params.password)
+                }
+            })
+            .collect();
+        if let Ok(client) = redis::cluster::ClusterClient::new(nodes) {
+            if let Ok(mut conn) = client.get_async_connection().await {
+                let _: Result<(), _> = redis::cmd("DEL")
+                    .arg(stream)
+                    .query_async(&mut conn)
+                    .await;
+            }
         }
     }
 }

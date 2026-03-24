@@ -1,7 +1,6 @@
 //! Live integration test for RabbitMQ plugin against Podman infra.
 //!
-//! Requires: RabbitMQ on 192.168.2.228:5672
-//! Credentials are resolved from a LockBox keystore.
+//! Credentials are resolved from a LockBox keystore at sec/lockbox/.
 //! Run: cargo test -p rivers-plugin-rabbitmq --test rabbitmq_live_test -- --nocapture
 
 use std::collections::HashMap;
@@ -11,48 +10,58 @@ use rivers_driver_sdk::broker::{
 use rivers_driver_sdk::ConnectionParams;
 use rivers_plugin_rabbitmq::RabbitMqDriver;
 
-/// Resolve a single credential from a temporary LockBox keystore.
-fn lockbox_resolve(name: &str, value: &str) -> String {
-    use age::secrecy::ExposeSecret;
-    use rivers_core::lockbox::{
-        encrypt_keystore, fetch_secret_value, Keystore, KeystoreEntry, LockBoxResolver,
-    };
+fn conn_params() -> ConnectionParams {
+    let dir = find_lockbox_dir().expect("cannot find sec/lockbox/");
+    let key_str = std::fs::read_to_string(dir.join("identity.key")).unwrap();
+    let identity: age::x25519::Identity = key_str.trim().parse().unwrap();
 
-    let identity = age::x25519::Identity::generate();
-    let recipient = identity.to_public();
-    let now = chrono::Utc::now();
+    let encrypted = std::fs::read(dir.join("entries/rabbitmq/test.age")).unwrap();
+    let password = String::from_utf8(age::decrypt(&identity, &encrypted).unwrap()).unwrap();
 
-    let entry = KeystoreEntry {
-        name: name.to_string(),
-        value: value.to_string(),
-        entry_type: "string".to_string(),
-        aliases: vec![],
-        created: now,
-        updated: now,
-    };
-    let keystore = Keystore { version: 1, entries: vec![entry] };
+    let meta: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("entries/rabbitmq/test.meta.json")).unwrap()
+    ).unwrap();
 
-    let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("test.rkeystore");
-    encrypt_keystore(&path, &recipient.to_string(), &keystore).unwrap();
+    let hosts: Vec<String> = meta["hosts"].as_array().unwrap()
+        .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    let (host, port) = parse_host_port(&hosts[0]);
 
-    let resolver = LockBoxResolver::from_entries(&keystore.entries).unwrap();
-    let metadata = resolver.resolve(name).unwrap();
-    let identity_str = identity.to_string();
-    let resolved = fetch_secret_value(metadata, &path, identity_str.expose_secret()).unwrap();
-    resolved.value
+    let mut options: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Some(obj) = meta["options"].as_object() {
+        for (k, v) in obj { options.insert(k.clone(), v.as_str().unwrap_or("").to_string()); }
+    }
+    if hosts.len() > 1 {
+        options.insert("hosts".into(), hosts.join(","));
+        options.insert("cluster".into(), "true".into());
+    }
+
+    ConnectionParams {
+        host, port,
+        database: meta["database"].as_str().unwrap_or("").to_string(),
+        username: meta["username"].as_str().unwrap_or("").to_string(),
+        password, options,
+    }
 }
 
-fn rabbitmq_params() -> ConnectionParams {
-    let password = lockbox_resolve("rabbitmq/test", "guest");
-    ConnectionParams {
-        host: "192.168.2.228".into(),
-        port: 5672,
-        database: "/".into(), // vhost
-        username: "guest".into(),
-        password,
-        options: HashMap::new(),
+fn parse_host_port(s: &str) -> (String, u16) {
+    match s.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse().unwrap_or(0)),
+        None => (s.to_string(), 0),
     }
+}
+
+fn find_lockbox_dir() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("RIVERS_LOCKBOX_DIR") {
+        let p = std::path::PathBuf::from(&dir);
+        if p.join("identity.key").exists() { return Some(p); }
+    }
+    let mut dir = std::env::current_dir().ok()?;
+    for _ in 0..10 {
+        let candidate = dir.join("sec").join("lockbox");
+        if candidate.join("identity.key").exists() { return Some(candidate); }
+        if !dir.pop() { break; }
+    }
+    None
 }
 
 fn broker_config(queue: &str) -> BrokerConsumerConfig {
@@ -78,7 +87,7 @@ async fn rabbitmq_produce_and_consume() {
     // 1. Create a producer
     let producer_result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        driver.create_producer(&rabbitmq_params(), &config),
+        driver.create_producer(&conn_params(), &config),
     )
     .await;
 
@@ -119,7 +128,7 @@ async fn rabbitmq_produce_and_consume() {
 
     // 3. Create a consumer and read back
     let mut consumer = driver
-        .create_consumer(&rabbitmq_params(), &config)
+        .create_consumer(&conn_params(), &config)
         .await
         .expect("create_consumer should succeed");
 

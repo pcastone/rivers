@@ -133,6 +133,26 @@ pub struct KeystoreEntry {
 
     /// Last update timestamp.
     pub updated: DateTime<Utc>,
+
+    // ── Credential record fields (optional, not secret) ──
+
+    /// Driver name (e.g. "postgres", "redis", "kafka"). Enables validation
+    /// that the credential matches the expected datasource type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+
+    /// Database username.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+
+    /// Host list as "host:port" strings. Supports clusters (Redis, Kafka, etc.).
+    /// Single-node datasources use a one-element list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
+
+    /// Database or bucket name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
 }
 
 impl Zeroize for KeystoreEntry {
@@ -229,12 +249,32 @@ pub fn is_lockbox_uri(s: &str) -> bool {
 /// Entry metadata stored in the resolver. No secret values.
 ///
 /// Per SHAPE-5: only name, type, and entry index live in memory.
+/// Credential record fields (driver, username, hosts, database) are
+/// non-secret connection routing metadata — safe to hold in memory.
 #[derive(Debug, Clone)]
 pub struct EntryMetadata {
     pub name: String,
     pub entry_type: EntryType,
     /// Index into the keystore entries array (for disk-based value retrieval).
     pub entry_index: usize,
+
+    // ── Credential record metadata (non-secret) ──
+
+    /// Driver name (e.g. "postgres", "redis", "kafka").
+    pub driver: Option<String>,
+    /// Database username.
+    pub username: Option<String>,
+    /// Host list as "host:port" strings.
+    pub hosts: Vec<String>,
+    /// Database or bucket name.
+    pub database: Option<String>,
+}
+
+impl EntryMetadata {
+    /// True if this entry carries full connection metadata (not just a password).
+    pub fn is_credential_record(&self) -> bool {
+        self.driver.is_some()
+    }
 }
 
 /// Resolved credential fetched on demand from disk.
@@ -286,6 +326,10 @@ impl LockBoxResolver {
                 name: entry.name.clone(),
                 entry_type,
                 entry_index: index,
+                driver: entry.driver.clone(),
+                username: entry.username.clone(),
+                hosts: entry.hosts.clone(),
+                database: entry.database.clone(),
             };
 
             // Insert name

@@ -22,4 +22,6 @@ chrono = { workspace = true }
 hex = { workspace = true }
 
 [dev-dependencies]
+age = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }

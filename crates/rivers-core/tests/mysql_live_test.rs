@@ -1,46 +1,33 @@
 //! Live integration tests for the MySQL driver.
 //!
-//! Requires a running MySQL instance at 192.168.2.215:3306.
-//! Credentials are resolved from a LockBox keystore (see `common/mod.rs`).
+//! Connection info resolved from LockBox keystore (see `common/mod.rs`).
 //! If the service is unreachable, tests print SKIP and pass.
 
 mod common;
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use rivers_core::drivers::MysqlDriver;
-use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query, QueryValue};
+use rivers_driver_sdk::{DatabaseDriver, Query, QueryValue};
 
-const MYSQL_HOST: &str = "192.168.2.215";
-const MYSQL_PORT: u16 = 3306;
-const MYSQL_DB: &str = "rivers";
-const MYSQL_USER: &str = "rivers";
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-fn conn_params() -> ConnectionParams {
-    let creds = common::TestCredentials::new();
-    ConnectionParams {
-        host: MYSQL_HOST.into(),
-        port: MYSQL_PORT,
-        database: MYSQL_DB.into(),
-        username: MYSQL_USER.into(),
-        password: creds.get("mysql/test"),
-        options: HashMap::new(),
-    }
+fn conn_params() -> rivers_driver_sdk::ConnectionParams {
+    common::TestCredentials::new().connection_params("mysql/test")
 }
 
 /// Try to connect; returns None (with SKIP message) if unreachable.
 async fn try_connect() -> Option<Box<dyn rivers_driver_sdk::Connection>> {
+    let params = conn_params();
     let driver = MysqlDriver;
-    match tokio::time::timeout(TIMEOUT, driver.connect(&conn_params())).await {
+    match tokio::time::timeout(TIMEOUT, driver.connect(&params)).await {
         Ok(Ok(conn)) => Some(conn),
         Ok(Err(e)) => {
-            eprintln!("SKIP: MySQL unreachable at {MYSQL_HOST}:{MYSQL_PORT} — {e}");
+            eprintln!("SKIP: MySQL unreachable — connection error: {e}");
             None
         }
         Err(_) => {
-            eprintln!("SKIP: MySQL connection timed out at {MYSQL_HOST}:{MYSQL_PORT}");
+            eprintln!("SKIP: MySQL connection timed out");
             None
         }
     }
