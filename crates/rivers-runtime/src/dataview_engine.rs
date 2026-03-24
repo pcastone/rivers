@@ -86,10 +86,10 @@ pub struct DataViewRequest {
 
 /// Response from a DataView execution.
 ///
-/// Per spec §6.3.
+/// Per spec §6.3. query_result is Arc-wrapped to avoid deep clones on cache hits.
 #[derive(Debug, Clone)]
 pub struct DataViewResponse {
-    pub query_result: QueryResult,
+    pub query_result: Arc<QueryResult>,
     pub execution_time_ms: u64,
     pub cache_hit: bool,
     pub trace_id: String,
@@ -403,7 +403,7 @@ pub fn build_query(config: &DataViewConfig, params: &HashMap<String, QueryValue>
 
 /// Measure execution time and build a DataViewResponse.
 pub fn build_response(
-    query_result: QueryResult,
+    query_result: Arc<QueryResult>,
     start: Instant,
     cache_hit: bool,
     trace_id: String,
@@ -430,19 +430,19 @@ pub struct DataViewExecutor {
     /// Wrapped in Arc so callers can share one copy instead of cloning
     /// all connection params (which include passwords) into separate heap allocations.
     datasource_params: Arc<HashMap<String, ConnectionParams>>,
-    /// Optional DataView cache (L1/L2 tiered).
-    cache: Option<Arc<dyn DataViewCache>>,
+    /// DataView cache (L1/L2 tiered). Always present — uses NoopDataViewCache as fallback.
+    cache: Arc<dyn DataViewCache>,
     /// Optional EventBus for cache invalidation events.
     event_bus: Option<Arc<rivers_core::EventBus>>,
 }
 
 impl DataViewExecutor {
-    /// Create a new executor with a registry, driver factory, datasource params, and optional cache.
+    /// Create a new executor with a registry, driver factory, datasource params, and cache.
     pub fn new(
         registry: DataViewRegistry,
         factory: Arc<DriverFactory>,
         datasource_params: Arc<HashMap<String, ConnectionParams>>,
-        cache: Option<Arc<dyn DataViewCache>>,
+        cache: Arc<dyn DataViewCache>,
     ) -> Self {
         Self {
             registry,
@@ -488,20 +488,18 @@ impl DataViewExecutor {
 
         // 3. Cache check — skip entirely if view has no caching config
         let view_caching = config.caching.as_ref();
-        if let Some(ref cache) = self.cache {
-            if !request.cache_bypass && view_caching.is_some() {
-                let key = cache_key(name, &request.parameters);
-                match cache.get(name, &request.parameters).await {
-                    Ok(Some(cached)) => {
-                        tracing::debug!(dataview = %name, cache_key = %key, "cache hit");
-                        return Ok(build_response(cached, start, true, trace_id.to_string()));
-                    }
-                    Ok(None) => {
-                        tracing::debug!(dataview = %name, cache_key = %key, "cache miss");
-                    }
-                    Err(e) => {
-                        tracing::warn!(dataview = %name, error = %e, "cache get failed, proceeding without cache");
-                    }
+        if !request.cache_bypass && view_caching.is_some() {
+            let key = cache_key(name, &request.parameters);
+            match self.cache.get(name, &request.parameters).await {
+                Ok(Some(cached)) => {
+                    tracing::debug!(dataview = %name, cache_key = %key, "cache hit");
+                    return Ok(build_response(cached, start, true, trace_id.to_string()));
+                }
+                Ok(None) => {
+                    tracing::debug!(dataview = %name, cache_key = %key, "cache miss");
+                }
+                Err(e) => {
+                    tracing::warn!(dataview = %name, error = %e, "cache get failed, proceeding without cache");
                 }
             }
         }
@@ -543,19 +541,17 @@ impl DataViewExecutor {
                 }
 
                 // 7. Cache populate on success (unless bypass or no caching config)
-                if let Some(ref cache) = self.cache {
-                    if !request.cache_bypass && view_caching.is_some() {
-                        let ttl_override = view_caching.map(|c| c.ttl_seconds);
-                        if let Err(e) = cache.set(name, &request.parameters, &query_result, ttl_override).await {
-                            tracing::warn!(dataview = %name, error = %e, "cache set failed");
-                        }
+                if !request.cache_bypass && view_caching.is_some() {
+                    let ttl_override = view_caching.map(|c| c.ttl_seconds);
+                    if let Err(e) = self.cache.set(name, &request.parameters, &query_result, ttl_override).await {
+                        tracing::warn!(dataview = %name, error = %e, "cache set failed");
                     }
                 }
 
                 // 8. Cache invalidation — invalidate listed DataViews on success
                 self.run_cache_invalidation(name, &config.invalidates, trace_id).await;
 
-                Ok(build_response(query_result, start, false, trace_id.to_string()))
+                Ok(build_response(Arc::new(query_result), start, false, trace_id.to_string()))
             }
             Err(DriverError::UnknownDriver(_)) => {
                 // 6b. Try broker driver → produce path
@@ -575,15 +571,13 @@ impl DataViewExecutor {
         if invalidates.is_empty() {
             return;
         }
-        if let Some(ref cache) = self.cache {
-            for target_view in invalidates {
-                cache.invalidate(Some(target_view.as_str())).await;
-                tracing::info!(
-                    source = %source_view,
-                    target = %target_view,
-                    "cache invalidated"
-                );
-            }
+        for target_view in invalidates {
+            self.cache.invalidate(Some(target_view.as_str())).await;
+            tracing::info!(
+                source = %source_view,
+                target = %target_view,
+                "cache invalidated"
+            );
         }
 
         // Emit CacheInvalidation event for observability
@@ -661,7 +655,7 @@ impl DataViewExecutor {
             last_insert_id: None,
         };
 
-        Ok(build_response(query_result, start, false, trace_id.to_string()))
+        Ok(build_response(Arc::new(query_result), start, false, trace_id.to_string()))
     }
 
     /// Get a reference to the registry.

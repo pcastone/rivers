@@ -73,15 +73,15 @@ pub fn cache_key(view_name: &str, parameters: &HashMap<String, QueryValue>) -> S
 
 /// DataView cache trait.
 ///
-/// Per spec §7.3.
+/// Per spec §7.3. Returns `Arc<QueryResult>` to avoid deep clones on cache hits.
 #[async_trait]
 pub trait DataViewCache: Send + Sync {
-    /// Look up a cached result.
+    /// Look up a cached result. Returns Arc to avoid cloning large result sets.
     async fn get(
         &self,
         view_name: &str,
         parameters: &HashMap<String, QueryValue>,
-    ) -> Result<Option<QueryResult>, DataViewError>;
+    ) -> Result<Option<Arc<QueryResult>>, DataViewError>;
 
     /// Store a result in the cache.
     ///
@@ -112,7 +112,7 @@ impl DataViewCache for NoopDataViewCache {
         &self,
         _view_name: &str,
         _parameters: &HashMap<String, QueryValue>,
-    ) -> Result<Option<QueryResult>, DataViewError> {
+    ) -> Result<Option<Arc<QueryResult>>, DataViewError> {
         Ok(None)
     }
 
@@ -133,16 +133,18 @@ impl DataViewCache for NoopDataViewCache {
 
 /// A cached result with expiry tracking.
 struct CachedEntry {
-    result: QueryResult,
+    result: Arc<QueryResult>,
     expires_at: Instant,
 }
 
 /// L1 in-process LRU cache with lazy TTL expiry.
 ///
-/// Per spec §5.2.
+/// Per spec §5.2. Uses HashMap for O(1) key lookup + VecDeque for LRU order.
 pub struct LruDataViewCache {
-    /// Ordered entries — most recently used at the back.
-    entries: Mutex<VecDeque<(String, CachedEntry)>>,
+    /// O(1) key → entry lookup.
+    map: Mutex<HashMap<String, CachedEntry>>,
+    /// LRU order — least recently used at the front, most recent at back.
+    order: Mutex<VecDeque<String>>,
     max_entries: usize,
     ttl: Duration,
 }
@@ -151,41 +153,47 @@ impl LruDataViewCache {
     /// Create a new L1 cache.
     pub fn new(max_entries: usize, ttl_seconds: u64) -> Self {
         Self {
-            entries: Mutex::new(VecDeque::with_capacity(max_entries)),
+            map: Mutex::new(HashMap::with_capacity(max_entries)),
+            order: Mutex::new(VecDeque::with_capacity(max_entries)),
             max_entries,
             ttl: Duration::from_secs(ttl_seconds),
         }
     }
 
     /// Get a cached result by key. Returns None on miss or expiry.
-    pub async fn get(&self, key: &str) -> Option<QueryResult> {
-        let mut entries = self.entries.lock().await;
+    /// Returns Arc clone (cheap pointer bump, no deep copy).
+    pub async fn get(&self, key: &str) -> Option<Arc<QueryResult>> {
+        let mut map = self.map.lock().await;
         let now = Instant::now();
 
-        // Find the entry
-        if let Some(pos) = entries.iter().position(|(k, _)| k == key) {
-            let (_, entry) = &entries[pos];
-
-            // Lazy TTL check
-            if now >= entry.expires_at {
-                entries.remove(pos);
-                return None;
+        match map.get(key) {
+            Some(entry) if now >= entry.expires_at => {
+                // Expired — remove from both structures
+                map.remove(key);
+                let mut order = self.order.lock().await;
+                if let Some(pos) = order.iter().position(|k| k == key) {
+                    order.remove(pos);
+                }
+                None
             }
-
-            // Move to back (most recently used)
-            let item = entries.remove(pos).unwrap();
-            let result = item.1.result.clone();
-            entries.push_back(item);
-            Some(result)
-        } else {
-            None
+            Some(entry) => {
+                let result = Arc::clone(&entry.result);
+                // Move to back (most recently used)
+                let mut order = self.order.lock().await;
+                if let Some(pos) = order.iter().position(|k| k == key) {
+                    order.remove(pos);
+                }
+                order.push_back(key.to_string());
+                Some(result)
+            }
+            None => None,
         }
     }
 
     /// Set a cached result. Evicts LRU entry if at capacity.
     ///
     /// `ttl_override` allows per-view TTL; falls back to the default `self.ttl`.
-    pub async fn set(&self, key: String, result: QueryResult, ttl_override: Option<Duration>) {
+    pub async fn set(&self, key: String, result: Arc<QueryResult>, ttl_override: Option<Duration>) {
         let effective_ttl = ttl_override.unwrap_or(self.ttl);
 
         // TTL=0 means "no caching" — don't store the entry
@@ -193,50 +201,61 @@ impl LruDataViewCache {
             return;
         }
 
-        let mut entries = self.entries.lock().await;
+        let mut map = self.map.lock().await;
+        let mut order = self.order.lock().await;
         let now = Instant::now();
 
         // Remove existing entry with same key
-        if let Some(pos) = entries.iter().position(|(k, _)| k == &key) {
-            entries.remove(pos);
+        if map.remove(&key).is_some() {
+            if let Some(pos) = order.iter().position(|k| k == &key) {
+                order.remove(pos);
+            }
         }
 
         // Evict LRU (front) if at capacity
-        while entries.len() >= self.max_entries {
-            entries.pop_front();
+        while map.len() >= self.max_entries {
+            if let Some(evicted_key) = order.pop_front() {
+                map.remove(&evicted_key);
+            } else {
+                break;
+            }
         }
 
-        entries.push_back((
-            key,
+        map.insert(
+            key.clone(),
             CachedEntry {
                 result,
                 expires_at: now + effective_ttl,
             },
-        ));
+        );
+        order.push_back(key);
     }
 
     /// Clear entries matching a view name prefix, or all entries.
     pub async fn invalidate(&self, view_name: Option<&str>) {
-        let mut entries = self.entries.lock().await;
+        let mut map = self.map.lock().await;
+        let mut order = self.order.lock().await;
         match view_name {
             Some(name) => {
                 let prefix = format!("cache:views:{}:", name);
-                entries.retain(|(k, _)| !k.starts_with(&prefix));
+                map.retain(|k, _| !k.starts_with(&prefix));
+                order.retain(|k| !k.starts_with(&prefix));
             }
             None => {
-                entries.clear();
+                map.clear();
+                order.clear();
             }
         }
     }
 
     /// Return the number of entries (for testing).
     pub async fn len(&self) -> usize {
-        self.entries.lock().await.len()
+        self.map.lock().await.len()
     }
 
     /// Check if empty.
     pub async fn is_empty(&self) -> bool {
-        self.entries.lock().await.is_empty()
+        self.map.lock().await.is_empty()
     }
 }
 
@@ -286,7 +305,7 @@ impl DataViewCache for TieredDataViewCache {
         &self,
         view_name: &str,
         parameters: &HashMap<String, QueryValue>,
-    ) -> Result<Option<QueryResult>, DataViewError> {
+    ) -> Result<Option<Arc<QueryResult>>, DataViewError> {
         let key = cache_key(view_name, parameters);
 
         // L1 check
@@ -304,10 +323,10 @@ impl DataViewCache for TieredDataViewCache {
                         // Deserialize
                         match serde_json::from_slice::<SerializableQueryResult>(&bytes) {
                             Ok(cached) => {
-                                let result = cached.into_query_result();
+                                let result = Arc::new(cached.into_query_result());
                                 // Warm L1 (use default policy TTL for L2→L1 warming)
                                 if self.policy.l1_enabled {
-                                    self.l1.set(key, result.clone(), None).await;
+                                    self.l1.set(key, Arc::clone(&result), None).await;
                                 }
                                 return Ok(Some(result));
                             }
@@ -383,7 +402,7 @@ impl DataViewCache for TieredDataViewCache {
         // L1 (pass per-view TTL override as Duration)
         if self.policy.l1_enabled {
             let ttl_dur = ttl_override.map(Duration::from_secs);
-            self.l1.set(key, result.clone(), ttl_dur).await;
+            self.l1.set(key, Arc::new(result.clone()), ttl_dur).await;
         }
 
         Ok(())

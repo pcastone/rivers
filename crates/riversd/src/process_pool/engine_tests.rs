@@ -2,6 +2,7 @@
 
 use super::*;
 use rivers_runtime::rivers_core::DriverFactory;
+use rivers_runtime::tiered_cache::NoopDataViewCache;
 use rivers_runtime::DataViewExecutor;
 
 // ── Boa Engine Tests ─────────────────────────────────────────────
@@ -1726,7 +1727,7 @@ mod engine_tests {
             registry,
             Arc::new(factory),
             Arc::new(ds_params),
-            None,
+            Arc::new(NoopDataViewCache),
         ));
 
         let ctx = TaskContextBuilder::new()
@@ -1763,7 +1764,7 @@ mod engine_tests {
             registry,
             Arc::new(factory),
             Arc::new(HashMap::new()),
-            None,
+            Arc::new(NoopDataViewCache),
         ));
 
         let ctx = TaskContextBuilder::new()
@@ -1808,7 +1809,7 @@ mod engine_tests {
             registry,
             Arc::new(factory),
             Arc::new(HashMap::new()),
-            None,
+            Arc::new(NoopDataViewCache),
         ));
 
         let ctx = TaskContextBuilder::new()
@@ -2136,7 +2137,7 @@ mod engine_tests {
             registry,
             Arc::new(factory),
             Arc::new(ds_params),
-            None,
+            Arc::new(NoopDataViewCache),
         ));
 
         let ctx = TaskContextBuilder::new()

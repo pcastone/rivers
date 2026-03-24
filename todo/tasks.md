@@ -1,165 +1,44 @@
-# Tasks — Wire All Unwired Bundle Config Fields
+# Tasks — Cache Performance Fix
 
-**Source:** Config audit found ~35 fields parsed from TOML but never read by the server
-**Total:** 7 PRs, 34 fields, 1 deferred (write_batch)
-**Status:** ALL COMPLETE — all 7 PRs + deferred write_batch merged as of 2026-03-23
-
----
-
-## PR 1: DataView Caching Policy (5 fields) — Low complexity
-**Branch:** `feature/dataview-caching`
-
-- [x] **T1.1**: Scan DataView configs in bundle_loader.rs:229-237 to build `DataViewCachingPolicy` from aggregate caching settings instead of `::default()`
-- [x] **T1.2**: Apply same logic in hot reload path (bundle_loader.rs:640-648)
-- [x] **T1.3**: Verify `invalidates` field is already wired (confirmed in dataview_engine.rs:547)
-- [x] **T1.4**: Verify per-view `ttl_seconds` override already works (dataview_engine.rs:539)
-- [x] **T1.5**: Test: DataView with `l2_enabled = true` → cache constructed with L2 active
-
-**Fields:** `caching.ttl_seconds`, `caching.l1_enabled`, `caching.l1_max_entries`, `caching.l2_enabled`, `caching.l2_max_value_bytes`
+**Source:** Investigation showed L1 cache using O(n) VecDeque scan, cloning full results, and silently disabling when StorageEngine init fails
+**Branch:** `feature/performance`
 
 ---
 
-## PR 2: Per-Method CRUD Queries (12 fields) — Medium complexity
-**Branch:** `feature/per-method-crud`
+## Fix 1: O(1) LRU cache lookup (tiered_cache.rs)
 
-- [x] **T2.1**: Add `method: &str` param to `DataViewExecutor::execute()` (dataview_engine.rs:465)
-- [x] **T2.2**: Pass `ctx.request.method` in view_engine.rs:501
-- [x] **T2.3**: Pass `"GET"` for queries, `"POST"` for mutations in graphql.rs:594
-- [x] **T2.4**: Update host callback in engine_loader.rs:361 — pass method from task context
-- [x] **T2.5**: Update V8 host callback in v8_engine.rs:962 — extract method from JS args
-- [x] **T2.6**: Update polling.rs:454,550,666 — pass `"GET"`
-- [x] **T2.7**: Test: DataView with `post_query = "INSERT..."`, POST request uses INSERT not GET query
+Replace `VecDeque<(String, CachedEntry)>` with `HashMap<String, CachedEntry>` + `VecDeque<String>` for LRU order.
 
-**Fields:** `get_query`, `post_query`, `put_query`, `delete_query`, `get_schema`, `post_schema`, `put_schema`, `delete_schema`, `get_parameters`, `post_parameters`, `put_parameters`, `delete_parameters`
+- [x] **C1.1** Replace `LruDataViewCache` internals: `HashMap<String, CachedEntry>` for O(1) key lookup + `VecDeque<String>` for LRU eviction order
+- [x] **C1.2** Update `get()` — HashMap lookup O(1), move key to back of VecDeque for recency
+- [x] **C1.3** Update `set()` — HashMap insert, push key to VecDeque back, evict front on capacity
+- [x] **C1.4** Update `invalidate()` — drain matching keys from both structures
+- [x] **C1.5** Verify existing tests in `tiered_cache_tests.rs` still pass
 
----
+## Fix 2: Arc-wrap cached results (tiered_cache.rs + dataview_engine.rs)
 
-## PR 3: DataView Validation (2 fields) — Low-Medium complexity
-**Branch:** `feature/dataview-validation`
-**Depends on:** PR 2 (needs method param for schema_for_method)
+Avoid deep-cloning `QueryResult` on every cache hit.
 
-- [x] **T3.1**: Confirm `strict_parameters` already wired (dataview_engine.rs:207-217)
-- [x] **T3.2**: Pre-load schema JSON for DataViews with `validate_result = true` during bundle loading
-- [x] **T3.3**: After `conn.execute()`, validate result rows against loaded schema if `config.validate_result`
-- [x] **T3.4**: Return `DataViewError::Schema` on validation failure
-- [x] **T3.5**: Test: DataView with `validate_result = true` + schema requiring "id" → error on missing field
+- [x] **C2.1** Change `CachedEntry.result` to `Arc<QueryResult>`
+- [x] **C2.2** Update `DataViewCache` trait: `get()` returns `Arc<QueryResult>`, `set()` takes `Arc<QueryResult>`
+- [x] **C2.3** Update `LruDataViewCache` — store/return `Arc<QueryResult>` (clone is cheap Arc bump)
+- [x] **C2.4** Update `TieredDataViewCache` — pass Arc through L1/L2
+- [x] **C2.5** Update `DataViewExecutor::execute()` — wrap driver result in Arc before cache set, deref Arc for response
+- [x] **C2.6** Update `NoopDataViewCache` to match new trait signature
+- [x] **C2.7** Update `DataViewResponse.query_result` to `Arc<QueryResult>`
+- [x] **C2.8** Update consumers: `view_engine.rs`, `engine_loader.rs`, `v8_engine.rs`, `graphql.rs`, `polling.rs` — Arc auto-deref, no changes needed
 
-**Fields:** `validate_result`, `strict_parameters`
+## Fix 3: Always-on cache — never silently None (bundle_loader.rs)
 
----
+L1 doesn't need StorageEngine. Always create TieredDataViewCache; only attach L2 when storage is available.
 
-## PR 4: Broker Consumer Config (5 fields) — Low complexity
-**Branch:** `feature/broker-consumer-config`
-
-- [x] **T4.1**: Read `DatasourceConfig.consumer` in bundle_loader.rs:373-395 instead of hardcoding
-- [x] **T4.2**: Use `consumer.group_prefix` (default "rivers") instead of hardcoded `"rivers"`
-- [x] **T4.3**: Use `consumer.reconnect_ms` (default 5000) instead of hardcoded `5000`
-- [x] **T4.4**: Convert `on_failure.mode` string to FailureMode enum instead of hardcoded `Drop`
-- [x] **T4.5**: Add `max_retries: u32` to BrokerConsumerBridge, wrap publish in retry loop
-- [x] **T4.6**: Log warning if `ack_mode = "manual"` (only "auto" supported)
-- [x] **T4.7**: Test: `consumer.group_prefix = "myapp"` → broker connects with "myapp" in logs
-
-**Fields:** `consumer.group_prefix`, `consumer.reconnect_ms`, `consumer.subscriptions[].on_failure`, `consumer.subscriptions[].max_retries`, `consumer.subscriptions[].ack_mode`
-
----
-
-## PR 5: Datasource Event Handlers (2 fields) — Medium complexity
-**Branch:** `feature/datasource-event-handlers`
-**Approach:** EventBus subscriber → ProcessPool CodeComponent execution
-
-- [x] **T5.1**: Read `DatasourceConfig.event_handlers` during bundle loading in bundle_loader.rs
-- [x] **T5.2**: For each handler ref (module + entrypoint), register EventBus subscriber at App priority
-- [x] **T5.3**: Map `on_connection_failed` handlers to `DATASOURCE_CIRCUIT_OPENED` + `DATASOURCE_HEALTH_CHECK_FAILED` events
-- [x] **T5.4**: Map `on_pool_exhausted` handlers to `CONNECTION_POOL_EXHAUSTED` event
-- [x] **T5.5**: Subscriber dispatches to ProcessPool to execute CodeComponent handler with event context in `ctx.data`
-- [x] **T5.6**: Test: `on_connection_failed` handler fires when circuit breaker opens
-
-**Fields:** `event_handlers.on_connection_failed`, `event_handlers.on_pool_exhausted`
-**Reuses:** ProcessPool dispatch (same as MessageConsumer), EventBus subscription pattern
-
----
-
-## PR 6: Unify CircuitBreaker Config (1 field + refactor) — Medium complexity
-**Branch:** `feature/unify-circuit-breaker`
-
-- [x] **T6.1**: Define canonical `CircuitBreakerConfig` in `rivers-driver-sdk/src/lib.rs` with fields: `enabled`, `failure_threshold`, `window_ms`, `open_timeout_ms`, `half_open_max_trials`
-- [x] **T6.2**: Replace `rivers-runtime/src/datasource.rs` CB config with import from driver-sdk
-- [x] **T6.3**: Replace `riversd/src/pool.rs` CB config with import from driver-sdk
-- [x] **T6.4**: Update `rivers-driver-sdk/src/http_driver.rs` — rename fields to match canonical names or impl `From`
-- [x] **T6.5**: Wire `window_ms` from datasource config through to pool construction
-- [x] **T6.6**: Test: `circuit_breaker.window_ms = 30000` → 30s rolling window used in pool
-
-**Fields:** `CircuitBreakerConfig.window_ms` (+ unify 3 incompatible structs)
-**Plugin impact:** `#[serde(default)]` on new fields — existing configs won't break
-
----
-
-## PR 7: Session Revalidation (1 field) — Medium complexity
-**Branch:** `feature/session-revalidation`
-**Approach:** `tokio::interval` per SSE/WS connection
-
-- [x] **T7.1**: In SSE handler (server.rs ~line 950), after initial session auth, spawn revalidation interval task
-- [x] **T7.2**: In WS handler (server.rs ~line 1050), same for WebSocket connections
-- [x] **T7.3**: On each tick, call `SessionManager::validate_session(session_id)` against StorageEngine
-- [x] **T7.4**: If session invalid/expired, close connection gracefully (close frame for WS, end stream for SSE)
-- [x] **T7.5**: Cancel interval task automatically when connection drops (tokio::select! pattern)
-- [x] **T7.6**: Test: `session_revalidation_interval_s = 60` → session rechecked every 60s on SSE
-
-**Field:** `session_revalidation_interval_s`
-
----
-
-## ~~Deferred~~ — COMPLETE
-
-| Field | Status |
-|-------|--------|
-| `write_batch` | **Merged** — PR #21 (`feature/write-batch`), InfluxDB plugin write batching implemented |
-
----
-
-## Execution Order
-
-1. **PR 1** (Caching) — fewest files, no signature changes
-2. **PR 4** (Broker Consumer) — self-contained
-3. **PR 6** (CB Unification) — refactor before more features depend on it
-4. **PR 2** (Per-Method CRUD) — signature change on execute()
-5. **PR 3** (Validation) — depends on PR 2
-6. **PR 5** (Event Handlers) — depends on ProcessPool being stable
-7. **PR 7** (Session Revalidation) — SSE/WS connection changes, do last
-
----
-
-# Tasks — Remove Hardcoded IPs from Remaining Live Tests
-
-**Source:** LockBox credential record migration (PR #28)
-**Goal:** All test connection info comes from `sec/lockbox/` — zero IPs, usernames, or passwords in source
-**Pattern:** Each test reads `.age` (password) + `.meta.json` (host/user/db/driver) from lockbox
-**Done so far:** postgres, mysql, mongodb, couchdb, influxdb, redis-streams (6/16)
-
----
-
-## Group 1: rivers-core tests (use `common::TestCredentials`)
-
-These use the shared `common/mod.rs` helper with `connection_params()`.
-
-- [ ] **L1.1** `redis_live_test.rs` — remove `REDIS_HOST`, `REDIS_PORT`, hardcoded cluster hosts. Use `connection_params("redis/test")`.
-- [ ] **L1.2** `memcached_live_test.rs` — remove `MC_HOST`, `MC_PORT`. Use `connection_params("memcached/test")`.
-- [ ] **L1.3** `storage_live_test.rs` — remove `REDIS_HOSTS`, `REDIS_PASSWORD`. Use `connection_params("redis/test")` for Redis storage tests.
-- [ ] **L1.4** `lockbox_e2e_test.rs` — remove `REDIS_HOST`, `REDIS_PORT`. Use `connection_params("redis/test")` for the connect test.
-
-## Group 2: Plugin tests (inline lockbox helper)
-
-These can't share `common/mod.rs` (different crate). Each uses the compact inline `conn_params()` + `find_lockbox_dir()` + `parse_host_port()` pattern.
-
-- [ ] **L2.1** `cassandra_live_test.rs` — remove `CASS_HOST`, `CASS_PORT`.
-- [ ] **L2.2** `es_live_test.rs` — remove `ES_HOST`, `ES_PORT`. Note: ES uses HTTP URLs, not driver SDK.
-- [ ] **L2.3** `kafka_live_test.rs` — remove hardcoded `192.168.2.203`.
-- [ ] **L2.4** `ldap_live_test.rs` — remove hardcoded `192.168.2.227`. Meta has bind DN as username.
-- [ ] **L2.5** `nats_live_test.rs` — remove hardcoded `192.168.2.229`.
-- [ ] **L2.6** `rabbitmq_live_test.rs` — remove hardcoded `192.168.2.228`. Already has `age` in dev-deps.
+- [x] **C3.1** Change `bundle_loader.rs` — always create `TieredDataViewCache::new(policy)`, conditionally call `.with_storage()` if `ctx.storage_engine` is `Some`
+- [x] **C3.2** Change `DataViewExecutor.cache` from `Option<Arc<dyn DataViewCache>>` to `Arc<dyn DataViewCache>` — no more `if let Some(ref cache)` guards
+- [x] **C3.3** Update `execute()` in `dataview_engine.rs` — remove Option unwrap, call cache directly
+- [x] **C3.4** Log a warning if StorageEngine is None and L2 is configured
 
 ## Validation
 
-- [ ] **L3.1** `grep -rn "192\.168\.2\." crates/*/tests/ --include="*.rs"` returns zero results
-- [ ] **L3.2** All live tests pass against Podman infrastructure
-- [ ] **L3.3** `cargo test --workspace --lib` — 578 unit tests still pass
+- [x] **C4.1** `cargo test -p rivers-runtime` passes (23/23)
+- [x] **C4.2** `cargo test --workspace --lib` passes (232/232)
+- [x] **C4.3** `cargo build` succeeds

@@ -2,6 +2,7 @@
 //! error redaction, query building.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use rivers_runtime::dataview::{DataViewConfig, DataViewParameterConfig};
 use rivers_runtime::dataview_engine::*;
@@ -299,7 +300,7 @@ fn build_response_records_time() {
     let start = std::time::Instant::now();
     std::thread::sleep(std::time::Duration::from_millis(5));
     let resp = build_response(
-        QueryResult::empty(),
+        Arc::new(QueryResult::empty()),
         start,
         false,
         "trace-456".into(),
@@ -315,7 +316,7 @@ fn build_response_records_time() {
 fn build_response_cache_hit() {
     let start = std::time::Instant::now();
     let resp = build_response(
-        QueryResult::empty(),
+        Arc::new(QueryResult::empty()),
         start,
         true,
         "trace-789".into(),
@@ -477,7 +478,7 @@ fn executor_datasource_info_returns_configured_datasources() {
             options: opts,
         },
     );
-    let executor = rivers_runtime::DataViewExecutor::new(registry, factory, std::sync::Arc::new(params_map), None);
+    let executor = rivers_runtime::DataViewExecutor::new(registry, factory, std::sync::Arc::new(params_map), Arc::new(rivers_runtime::tiered_cache::NoopDataViewCache));
 
     let info = executor.datasource_info();
     assert_eq!(info.len(), 1);
@@ -500,7 +501,7 @@ fn executor_datasource_names_sorted() {
             options: HashMap::new(),
         });
     }
-    let executor = rivers_runtime::DataViewExecutor::new(registry, factory, std::sync::Arc::new(params_map), None);
+    let executor = rivers_runtime::DataViewExecutor::new(registry, factory, std::sync::Arc::new(params_map), Arc::new(rivers_runtime::tiered_cache::NoopDataViewCache));
     let names = executor.datasource_names();
     assert_eq!(names, vec!["alpha", "middle", "zebra"]);
 }
@@ -511,7 +512,7 @@ fn executor_datasource_info_empty_when_no_datasources() {
 
     let registry = DataViewRegistry::new();
     let factory = std::sync::Arc::new(DriverFactory::new());
-    let executor = rivers_runtime::DataViewExecutor::new(registry, factory, std::sync::Arc::new(HashMap::new()), None);
+    let executor = rivers_runtime::DataViewExecutor::new(registry, factory, std::sync::Arc::new(HashMap::new()), Arc::new(rivers_runtime::tiered_cache::NoopDataViewCache));
     assert!(executor.datasource_info().is_empty());
     assert!(executor.datasource_names().is_empty());
 }
@@ -596,7 +597,7 @@ async fn executor_invalidates_cache_after_write() {
         registry,
         Arc::new(factory),
         Arc::new(ds_params),
-        Some(cache.clone() as Arc<dyn DataViewCache>),
+        cache.clone() as Arc<dyn DataViewCache>,
     );
 
     // Execute the write DataView
