@@ -126,3 +126,40 @@
 5. **PR 3** (Validation) — depends on PR 2
 6. **PR 5** (Event Handlers) — depends on ProcessPool being stable
 7. **PR 7** (Session Revalidation) — SSE/WS connection changes, do last
+
+---
+
+# Tasks — Remove Hardcoded IPs from Remaining Live Tests
+
+**Source:** LockBox credential record migration (PR #28)
+**Goal:** All test connection info comes from `sec/lockbox/` — zero IPs, usernames, or passwords in source
+**Pattern:** Each test reads `.age` (password) + `.meta.json` (host/user/db/driver) from lockbox
+**Done so far:** postgres, mysql, mongodb, couchdb, influxdb, redis-streams (6/16)
+
+---
+
+## Group 1: rivers-core tests (use `common::TestCredentials`)
+
+These use the shared `common/mod.rs` helper with `connection_params()`.
+
+- [ ] **L1.1** `redis_live_test.rs` — remove `REDIS_HOST`, `REDIS_PORT`, hardcoded cluster hosts. Use `connection_params("redis/test")`.
+- [ ] **L1.2** `memcached_live_test.rs` — remove `MC_HOST`, `MC_PORT`. Use `connection_params("memcached/test")`.
+- [ ] **L1.3** `storage_live_test.rs` — remove `REDIS_HOSTS`, `REDIS_PASSWORD`. Use `connection_params("redis/test")` for Redis storage tests.
+- [ ] **L1.4** `lockbox_e2e_test.rs` — remove `REDIS_HOST`, `REDIS_PORT`. Use `connection_params("redis/test")` for the connect test.
+
+## Group 2: Plugin tests (inline lockbox helper)
+
+These can't share `common/mod.rs` (different crate). Each uses the compact inline `conn_params()` + `find_lockbox_dir()` + `parse_host_port()` pattern.
+
+- [ ] **L2.1** `cassandra_live_test.rs` — remove `CASS_HOST`, `CASS_PORT`.
+- [ ] **L2.2** `es_live_test.rs` — remove `ES_HOST`, `ES_PORT`. Note: ES uses HTTP URLs, not driver SDK.
+- [ ] **L2.3** `kafka_live_test.rs` — remove hardcoded `192.168.2.203`.
+- [ ] **L2.4** `ldap_live_test.rs` — remove hardcoded `192.168.2.227`. Meta has bind DN as username.
+- [ ] **L2.5** `nats_live_test.rs` — remove hardcoded `192.168.2.229`.
+- [ ] **L2.6** `rabbitmq_live_test.rs` — remove hardcoded `192.168.2.228`. Already has `age` in dev-deps.
+
+## Validation
+
+- [ ] **L3.1** `grep -rn "192\.168\.2\." crates/*/tests/ --include="*.rs"` returns zero results
+- [ ] **L3.2** All live tests pass against Podman infrastructure
+- [ ] **L3.3** `cargo test --workspace --lib` — 578 unit tests still pass
