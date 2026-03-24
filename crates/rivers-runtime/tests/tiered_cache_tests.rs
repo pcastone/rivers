@@ -97,7 +97,7 @@ async fn noop_cache_set_noop() {
 
 #[tokio::test]
 async fn l1_cache_set_and_get() {
-    let cache = LruDataViewCache::new(10, 60);
+    let cache = LruDataViewCache::new(usize::MAX, 10, 60);
     let key = "views:test:abc";
 
     cache.set(key.to_string(), Arc::new(sample_result()), None).await;
@@ -108,13 +108,13 @@ async fn l1_cache_set_and_get() {
 
 #[tokio::test]
 async fn l1_cache_miss() {
-    let cache = LruDataViewCache::new(10, 60);
+    let cache = LruDataViewCache::new(usize::MAX, 10, 60);
     assert!(cache.get("nonexistent").await.is_none());
 }
 
 #[tokio::test]
 async fn l1_cache_evicts_lru() {
-    let cache = LruDataViewCache::new(2, 60);
+    let cache = LruDataViewCache::new(usize::MAX, 2, 60);
 
     cache.set("key1".to_string(), Arc::new(sample_result()), None).await;
     cache.set("key2".to_string(), Arc::new(sample_result()), None).await;
@@ -127,7 +127,7 @@ async fn l1_cache_evicts_lru() {
 
 #[tokio::test]
 async fn l1_cache_lru_access_refreshes() {
-    let cache = LruDataViewCache::new(2, 60);
+    let cache = LruDataViewCache::new(usize::MAX, 2, 60);
 
     cache.set("key1".to_string(), Arc::new(sample_result()), None).await;
     cache.set("key2".to_string(), Arc::new(sample_result()), None).await;
@@ -144,7 +144,7 @@ async fn l1_cache_lru_access_refreshes() {
 
 #[tokio::test]
 async fn l1_cache_ttl_expiry() {
-    let cache = LruDataViewCache::new(10, 0); // TTL = 0 seconds → expires immediately
+    let cache = LruDataViewCache::new(usize::MAX, 10, 0); // TTL = 0 seconds → expires immediately
 
     cache.set("key".to_string(), Arc::new(sample_result()), None).await;
     // Sleep briefly to ensure expiry
@@ -154,7 +154,7 @@ async fn l1_cache_ttl_expiry() {
 
 #[tokio::test]
 async fn l1_cache_overwrite_same_key() {
-    let cache = LruDataViewCache::new(10, 60);
+    let cache = LruDataViewCache::new(usize::MAX, 10, 60);
 
     let mut result1 = sample_result();
     result1.affected_rows = 1;
@@ -172,7 +172,7 @@ async fn l1_cache_overwrite_same_key() {
 
 #[tokio::test]
 async fn l1_cache_invalidate_by_view() {
-    let cache = LruDataViewCache::new(10, 60);
+    let cache = LruDataViewCache::new(usize::MAX, 10, 60);
 
     cache.set("cache:views:contacts:a".to_string(), Arc::new(sample_result()), None).await;
     cache.set("cache:views:contacts:b".to_string(), Arc::new(sample_result()), None).await;
@@ -187,7 +187,7 @@ async fn l1_cache_invalidate_by_view() {
 
 #[tokio::test]
 async fn l1_cache_invalidate_all() {
-    let cache = LruDataViewCache::new(10, 60);
+    let cache = LruDataViewCache::new(usize::MAX, 10, 60);
 
     cache.set("cache:views:a:1".to_string(), Arc::new(sample_result()), None).await;
     cache.set("cache:views:b:2".to_string(), Arc::new(sample_result()), None).await;
@@ -203,6 +203,7 @@ async fn tiered_l1_only_hit() {
     let policy = DataViewCachingPolicy {
         ttl_seconds: 60,
         l1_enabled: true,
+        l1_max_bytes: usize::MAX,
         l1_max_entries: 100,
         l2_enabled: false,
         l2_max_value_bytes: 524_288,
@@ -266,6 +267,7 @@ async fn tiered_l2_storage_roundtrip() {
     let policy = DataViewCachingPolicy {
         ttl_seconds: 60,
         l1_enabled: false, // disable L1 to test L2 in isolation
+        l1_max_bytes: usize::MAX,
         l1_max_entries: 100,
         l2_enabled: true,
         l2_max_value_bytes: 524_288,
@@ -287,6 +289,7 @@ async fn tiered_l2_warms_l1() {
     let policy = DataViewCachingPolicy {
         ttl_seconds: 60,
         l1_enabled: true,
+        l1_max_bytes: usize::MAX,
         l1_max_entries: 100,
         l2_enabled: true,
         l2_max_value_bytes: 524_288,
@@ -321,6 +324,7 @@ async fn tiered_l2_size_gate() {
     let policy = DataViewCachingPolicy {
         ttl_seconds: 60,
         l1_enabled: true,
+        l1_max_bytes: usize::MAX,
         l1_max_entries: 100,
         l2_enabled: true,
         l2_max_value_bytes: 10, // very small — should skip L2
@@ -346,7 +350,8 @@ fn caching_policy_defaults() {
     let policy = DataViewCachingPolicy::default();
     assert_eq!(policy.ttl_seconds, 60);
     assert!(policy.l1_enabled);
-    assert_eq!(policy.l1_max_entries, 1000);
+    assert_eq!(policy.l1_max_bytes, 150 * 1024 * 1024);
+    assert_eq!(policy.l1_max_entries, 100_000);
     assert!(!policy.l2_enabled);
     assert_eq!(policy.l2_max_value_bytes, 131_072);
 }

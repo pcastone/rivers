@@ -30,7 +30,9 @@ pub struct DataViewCachingPolicy {
     pub ttl_seconds: u64,
     /// L1 in-process LRU cache enabled. Default: true.
     pub l1_enabled: bool,
-    /// Max entries in L1 LRU cache. Default: 1000.
+    /// Max L1 memory in bytes. Default: 157,286,400 (150 MB).
+    pub l1_max_bytes: usize,
+    /// Hard cap on L1 entry count. Default: 100,000 (safety valve).
     pub l1_max_entries: usize,
     /// L2 StorageEngine cache enabled. Default: false.
     pub l2_enabled: bool,
@@ -38,12 +40,16 @@ pub struct DataViewCachingPolicy {
     pub l2_max_value_bytes: usize,
 }
 
+/// 150 MB default L1 cache size.
+pub const DEFAULT_L1_MAX_BYTES: usize = 150 * 1024 * 1024;
+
 impl Default for DataViewCachingPolicy {
     fn default() -> Self {
         Self {
             ttl_seconds: 60,
             l1_enabled: true,
-            l1_max_entries: 1000,
+            l1_max_bytes: DEFAULT_L1_MAX_BYTES,
+            l1_max_entries: 100_000,
             l2_enabled: false,
             l2_max_value_bytes: 131_072,
         }
@@ -135,27 +141,38 @@ impl DataViewCache for NoopDataViewCache {
 struct CachedEntry {
     result: Arc<QueryResult>,
     expires_at: Instant,
+    /// Estimated heap size in bytes (for memory-bounded eviction).
+    size_bytes: usize,
 }
 
-/// L1 in-process LRU cache with lazy TTL expiry.
+/// L1 in-process LRU cache with memory-bounded eviction.
 ///
 /// Per spec §5.2. Uses HashMap for O(1) key lookup + VecDeque for LRU order.
+/// Evicts LRU entries when total memory exceeds `max_bytes` or count exceeds `max_entries`.
 pub struct LruDataViewCache {
     /// O(1) key → entry lookup.
     map: Mutex<HashMap<String, CachedEntry>>,
     /// LRU order — least recently used at the front, most recent at back.
     order: Mutex<VecDeque<String>>,
+    /// Memory limit in bytes.
+    max_bytes: usize,
+    /// Hard cap on entry count (safety valve).
     max_entries: usize,
+    /// Current total estimated bytes.
+    total_bytes: Mutex<usize>,
     ttl: Duration,
 }
 
 impl LruDataViewCache {
-    /// Create a new L1 cache.
-    pub fn new(max_entries: usize, ttl_seconds: u64) -> Self {
+    /// Create a new memory-bounded L1 cache.
+    pub fn new(max_bytes: usize, max_entries: usize, ttl_seconds: u64) -> Self {
+        let initial_cap = max_entries.min(4096);
         Self {
-            map: Mutex::new(HashMap::with_capacity(max_entries)),
-            order: Mutex::new(VecDeque::with_capacity(max_entries)),
+            map: Mutex::new(HashMap::with_capacity(initial_cap)),
+            order: Mutex::new(VecDeque::with_capacity(initial_cap)),
+            max_bytes,
             max_entries,
+            total_bytes: Mutex::new(0),
             ttl: Duration::from_secs(ttl_seconds),
         }
     }
@@ -169,7 +186,8 @@ impl LruDataViewCache {
         match map.get(key) {
             Some(entry) if now >= entry.expires_at => {
                 // Expired — remove from both structures
-                map.remove(key);
+                let removed = map.remove(key).unwrap();
+                *self.total_bytes.lock().await -= removed.size_bytes;
                 let mut order = self.order.lock().await;
                 if let Some(pos) = order.iter().position(|k| k == key) {
                     order.remove(pos);
@@ -190,7 +208,7 @@ impl LruDataViewCache {
         }
     }
 
-    /// Set a cached result. Evicts LRU entry if at capacity.
+    /// Set a cached result. Evicts LRU entries when memory or count limit is exceeded.
     ///
     /// `ttl_override` allows per-view TTL; falls back to the default `self.ttl`.
     pub async fn set(&self, key: String, result: Arc<QueryResult>, ttl_override: Option<Duration>) {
@@ -201,31 +219,39 @@ impl LruDataViewCache {
             return;
         }
 
+        let entry_bytes = result.estimated_bytes();
+
         let mut map = self.map.lock().await;
         let mut order = self.order.lock().await;
+        let mut total = self.total_bytes.lock().await;
         let now = Instant::now();
 
         // Remove existing entry with same key
-        if map.remove(&key).is_some() {
+        if let Some(old) = map.remove(&key) {
+            *total -= old.size_bytes;
             if let Some(pos) = order.iter().position(|k| k == &key) {
                 order.remove(pos);
             }
         }
 
-        // Evict LRU (front) if at capacity
-        while map.len() >= self.max_entries {
+        // Evict LRU entries until under memory and count limits
+        while (*total + entry_bytes > self.max_bytes || map.len() >= self.max_entries)
+            && !order.is_empty()
+        {
             if let Some(evicted_key) = order.pop_front() {
-                map.remove(&evicted_key);
-            } else {
-                break;
+                if let Some(evicted) = map.remove(&evicted_key) {
+                    *total -= evicted.size_bytes;
+                }
             }
         }
 
+        *total += entry_bytes;
         map.insert(
             key.clone(),
             CachedEntry {
                 result,
                 expires_at: now + effective_ttl,
+                size_bytes: entry_bytes,
             },
         );
         order.push_back(key);
@@ -235,15 +261,24 @@ impl LruDataViewCache {
     pub async fn invalidate(&self, view_name: Option<&str>) {
         let mut map = self.map.lock().await;
         let mut order = self.order.lock().await;
+        let mut total = self.total_bytes.lock().await;
         match view_name {
             Some(name) => {
                 let prefix = format!("cache:views:{}:", name);
-                map.retain(|k, _| !k.starts_with(&prefix));
+                map.retain(|k, v| {
+                    if k.starts_with(&prefix) {
+                        *total -= v.size_bytes;
+                        false
+                    } else {
+                        true
+                    }
+                });
                 order.retain(|k| !k.starts_with(&prefix));
             }
             None => {
                 map.clear();
                 order.clear();
+                *total = 0;
             }
         }
     }
@@ -256,6 +291,11 @@ impl LruDataViewCache {
     /// Check if empty.
     pub async fn is_empty(&self) -> bool {
         self.map.lock().await.is_empty()
+    }
+
+    /// Return current estimated memory usage in bytes.
+    pub async fn total_bytes(&self) -> usize {
+        *self.total_bytes.lock().await
     }
 }
 
@@ -279,7 +319,7 @@ const L2_NAMESPACE: &str = "cache";
 impl TieredDataViewCache {
     /// Create a tiered cache with the given policy.
     pub fn new(policy: DataViewCachingPolicy) -> Self {
-        let l1 = LruDataViewCache::new(policy.l1_max_entries, policy.ttl_seconds);
+        let l1 = LruDataViewCache::new(policy.l1_max_bytes, policy.l1_max_entries, policy.ttl_seconds);
         Self {
             l1,
             l2: None,

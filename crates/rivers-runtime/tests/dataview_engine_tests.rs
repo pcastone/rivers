@@ -529,10 +529,7 @@ async fn executor_invalidates_cache_after_write() {
     // Set up cache with L1
     let policy = DataViewCachingPolicy {
         ttl_seconds: 300,
-        l1_enabled: true,
-        l1_max_entries: 100,
-        l2_enabled: false,
-        l2_max_value_bytes: 131_072,
+        ..Default::default()
     };
     let cache = Arc::new(TieredDataViewCache::new(policy));
 

@@ -176,4 +176,47 @@ impl QueryResult {
             last_insert_id: None,
         }
     }
+
+    /// Approximate heap size in bytes. Not exact — proportional estimate
+    /// for memory-bounded cache eviction.
+    pub fn estimated_bytes(&self) -> usize {
+        let mut size = std::mem::size_of::<Self>();
+        for row in &self.rows {
+            size += std::mem::size_of::<HashMap<String, QueryValue>>();
+            for (k, v) in row {
+                size += k.len() + std::mem::size_of::<String>();
+                size += v.estimated_bytes();
+            }
+        }
+        if let Some(ref id) = self.last_insert_id {
+            size += id.len();
+        }
+        size
+    }
+}
+
+impl QueryValue {
+    /// Approximate heap size in bytes.
+    pub fn estimated_bytes(&self) -> usize {
+        match self {
+            QueryValue::Null | QueryValue::Boolean(_) => std::mem::size_of::<Self>(),
+            QueryValue::Integer(_) | QueryValue::Float(_) => std::mem::size_of::<Self>(),
+            QueryValue::String(s) => std::mem::size_of::<Self>() + s.len(),
+            QueryValue::Array(a) => {
+                std::mem::size_of::<Self>() + a.iter().map(|v| v.estimated_bytes()).sum::<usize>()
+            }
+            QueryValue::Json(v) => std::mem::size_of::<Self>() + estimate_json_bytes(v),
+        }
+    }
+}
+
+fn estimate_json_bytes(v: &serde_json::Value) -> usize {
+    match v {
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => 16,
+        serde_json::Value::String(s) => 16 + s.len(),
+        serde_json::Value::Array(a) => 24 + a.iter().map(estimate_json_bytes).sum::<usize>(),
+        serde_json::Value::Object(o) => {
+            24 + o.iter().map(|(k, v)| k.len() + 16 + estimate_json_bytes(v)).sum::<usize>()
+        }
+    }
 }

@@ -250,9 +250,9 @@ pub async fn load_and_wire_bundle(
     }
     let cache: Arc<dyn rivers_runtime::tiered_cache::DataViewCache> = Arc::new(tiered);
     if cache_policy.l2_enabled && ctx.storage_engine.is_some() {
-        tracing::info!("DataView cache: L1 + L2 enabled (max L1 entries: {})", cache_policy.l1_max_entries);
+        tracing::info!("DataView cache: L1 + L2 enabled (L1 max: {} MB)", cache_policy.l1_max_bytes / (1024 * 1024));
     } else if cache_policy.l1_enabled {
-        tracing::info!("DataView cache: L1 enabled (max entries: {})", cache_policy.l1_max_entries);
+        tracing::info!("DataView cache: L1 enabled (max: {} MB)", cache_policy.l1_max_bytes / (1024 * 1024));
     }
 
     let ds_params = Arc::new(ds_params);
@@ -889,6 +889,9 @@ fn build_cache_policy_from_bundle(
                 }
                 if caching.l1_enabled {
                     policy.l1_enabled = true;
+                }
+                if caching.l1_max_bytes > policy.l1_max_bytes {
+                    policy.l1_max_bytes = caching.l1_max_bytes;
                 }
                 if caching.l1_max_entries > policy.l1_max_entries {
                     policy.l1_max_entries = caching.l1_max_entries;
