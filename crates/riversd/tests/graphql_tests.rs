@@ -550,7 +550,7 @@ async fn schema_with_real_executor_resolves_query() {
         registry,
         Arc::new(factory),
         Arc::new(ds_params),
-        None,
+        Arc::new(rivers_runtime::tiered_cache::NoopDataViewCache),
     );
 
     let executor_ref: Arc<RwLock<Option<rivers_runtime::DataViewExecutor>>> =
@@ -600,7 +600,7 @@ async fn schema_with_executor_missing_dataview_returns_error() {
         registry,
         factory,
         Arc::new(std::collections::HashMap::new()),
-        None,
+        Arc::new(rivers_runtime::tiered_cache::NoopDataViewCache),
     );
 
     let executor_ref: Arc<RwLock<Option<rivers_runtime::DataViewExecutor>>> =

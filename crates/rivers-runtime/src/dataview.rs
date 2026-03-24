@@ -39,7 +39,12 @@ pub struct DataViewCachingConfig {
     #[serde(default = "default_true")]
     pub l1_enabled: bool,
 
-    #[serde(default = "default_l1_max")]
+    /// Max L1 memory in bytes. Default: 150 MB.
+    #[serde(default = "default_l1_max_bytes")]
+    pub l1_max_bytes: usize,
+
+    /// Hard cap on L1 entry count. Default: 100,000.
+    #[serde(default = "default_l1_max_entries")]
     pub l1_max_entries: usize,
 
     #[serde(default)]
@@ -53,8 +58,12 @@ fn default_true() -> bool {
     true
 }
 
-fn default_l1_max() -> usize {
-    1000
+fn default_l1_max_bytes() -> usize {
+    150 * 1024 * 1024 // 150 MB
+}
+
+fn default_l1_max_entries() -> usize {
+    100_000
 }
 
 fn default_l2_max_bytes() -> usize {

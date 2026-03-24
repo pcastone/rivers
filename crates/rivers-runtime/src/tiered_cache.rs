@@ -30,7 +30,9 @@ pub struct DataViewCachingPolicy {
     pub ttl_seconds: u64,
     /// L1 in-process LRU cache enabled. Default: true.
     pub l1_enabled: bool,
-    /// Max entries in L1 LRU cache. Default: 1000.
+    /// Max L1 memory in bytes. Default: 157,286,400 (150 MB).
+    pub l1_max_bytes: usize,
+    /// Hard cap on L1 entry count. Default: 100,000 (safety valve).
     pub l1_max_entries: usize,
     /// L2 StorageEngine cache enabled. Default: false.
     pub l2_enabled: bool,
@@ -38,12 +40,16 @@ pub struct DataViewCachingPolicy {
     pub l2_max_value_bytes: usize,
 }
 
+/// 150 MB default L1 cache size.
+pub const DEFAULT_L1_MAX_BYTES: usize = 150 * 1024 * 1024;
+
 impl Default for DataViewCachingPolicy {
     fn default() -> Self {
         Self {
             ttl_seconds: 60,
             l1_enabled: true,
-            l1_max_entries: 1000,
+            l1_max_bytes: DEFAULT_L1_MAX_BYTES,
+            l1_max_entries: 100_000,
             l2_enabled: false,
             l2_max_value_bytes: 131_072,
         }
@@ -73,15 +79,15 @@ pub fn cache_key(view_name: &str, parameters: &HashMap<String, QueryValue>) -> S
 
 /// DataView cache trait.
 ///
-/// Per spec §7.3.
+/// Per spec §7.3. Returns `Arc<QueryResult>` to avoid deep clones on cache hits.
 #[async_trait]
 pub trait DataViewCache: Send + Sync {
-    /// Look up a cached result.
+    /// Look up a cached result. Returns Arc to avoid cloning large result sets.
     async fn get(
         &self,
         view_name: &str,
         parameters: &HashMap<String, QueryValue>,
-    ) -> Result<Option<QueryResult>, DataViewError>;
+    ) -> Result<Option<Arc<QueryResult>>, DataViewError>;
 
     /// Store a result in the cache.
     ///
@@ -112,7 +118,7 @@ impl DataViewCache for NoopDataViewCache {
         &self,
         _view_name: &str,
         _parameters: &HashMap<String, QueryValue>,
-    ) -> Result<Option<QueryResult>, DataViewError> {
+    ) -> Result<Option<Arc<QueryResult>>, DataViewError> {
         Ok(None)
     }
 
@@ -133,59 +139,79 @@ impl DataViewCache for NoopDataViewCache {
 
 /// A cached result with expiry tracking.
 struct CachedEntry {
-    result: QueryResult,
+    result: Arc<QueryResult>,
     expires_at: Instant,
+    /// Estimated heap size in bytes (for memory-bounded eviction).
+    size_bytes: usize,
 }
 
-/// L1 in-process LRU cache with lazy TTL expiry.
+/// L1 in-process LRU cache with memory-bounded eviction.
 ///
-/// Per spec §5.2.
+/// Per spec §5.2. Uses HashMap for O(1) key lookup + VecDeque for LRU order.
+/// Evicts LRU entries when total memory exceeds `max_bytes` or count exceeds `max_entries`.
 pub struct LruDataViewCache {
-    /// Ordered entries — most recently used at the back.
-    entries: Mutex<VecDeque<(String, CachedEntry)>>,
+    /// O(1) key → entry lookup.
+    map: Mutex<HashMap<String, CachedEntry>>,
+    /// LRU order — least recently used at the front, most recent at back.
+    order: Mutex<VecDeque<String>>,
+    /// Memory limit in bytes.
+    max_bytes: usize,
+    /// Hard cap on entry count (safety valve).
     max_entries: usize,
+    /// Current total estimated bytes.
+    total_bytes: Mutex<usize>,
     ttl: Duration,
 }
 
 impl LruDataViewCache {
-    /// Create a new L1 cache.
-    pub fn new(max_entries: usize, ttl_seconds: u64) -> Self {
+    /// Create a new memory-bounded L1 cache.
+    pub fn new(max_bytes: usize, max_entries: usize, ttl_seconds: u64) -> Self {
+        let initial_cap = max_entries.min(4096);
         Self {
-            entries: Mutex::new(VecDeque::with_capacity(max_entries)),
+            map: Mutex::new(HashMap::with_capacity(initial_cap)),
+            order: Mutex::new(VecDeque::with_capacity(initial_cap)),
+            max_bytes,
             max_entries,
+            total_bytes: Mutex::new(0),
             ttl: Duration::from_secs(ttl_seconds),
         }
     }
 
     /// Get a cached result by key. Returns None on miss or expiry.
-    pub async fn get(&self, key: &str) -> Option<QueryResult> {
-        let mut entries = self.entries.lock().await;
+    /// Returns Arc clone (cheap pointer bump, no deep copy).
+    pub async fn get(&self, key: &str) -> Option<Arc<QueryResult>> {
+        let mut map = self.map.lock().await;
         let now = Instant::now();
 
-        // Find the entry
-        if let Some(pos) = entries.iter().position(|(k, _)| k == key) {
-            let (_, entry) = &entries[pos];
-
-            // Lazy TTL check
-            if now >= entry.expires_at {
-                entries.remove(pos);
-                return None;
+        match map.get(key) {
+            Some(entry) if now >= entry.expires_at => {
+                // Expired — remove from both structures
+                let removed = map.remove(key).unwrap();
+                *self.total_bytes.lock().await -= removed.size_bytes;
+                let mut order = self.order.lock().await;
+                if let Some(pos) = order.iter().position(|k| k == key) {
+                    order.remove(pos);
+                }
+                None
             }
-
-            // Move to back (most recently used)
-            let item = entries.remove(pos).unwrap();
-            let result = item.1.result.clone();
-            entries.push_back(item);
-            Some(result)
-        } else {
-            None
+            Some(entry) => {
+                let result = Arc::clone(&entry.result);
+                // Move to back (most recently used)
+                let mut order = self.order.lock().await;
+                if let Some(pos) = order.iter().position(|k| k == key) {
+                    order.remove(pos);
+                }
+                order.push_back(key.to_string());
+                Some(result)
+            }
+            None => None,
         }
     }
 
-    /// Set a cached result. Evicts LRU entry if at capacity.
+    /// Set a cached result. Evicts LRU entries when memory or count limit is exceeded.
     ///
     /// `ttl_override` allows per-view TTL; falls back to the default `self.ttl`.
-    pub async fn set(&self, key: String, result: QueryResult, ttl_override: Option<Duration>) {
+    pub async fn set(&self, key: String, result: Arc<QueryResult>, ttl_override: Option<Duration>) {
         let effective_ttl = ttl_override.unwrap_or(self.ttl);
 
         // TTL=0 means "no caching" — don't store the entry
@@ -193,50 +219,83 @@ impl LruDataViewCache {
             return;
         }
 
-        let mut entries = self.entries.lock().await;
+        let entry_bytes = result.estimated_bytes();
+
+        let mut map = self.map.lock().await;
+        let mut order = self.order.lock().await;
+        let mut total = self.total_bytes.lock().await;
         let now = Instant::now();
 
         // Remove existing entry with same key
-        if let Some(pos) = entries.iter().position(|(k, _)| k == &key) {
-            entries.remove(pos);
+        if let Some(old) = map.remove(&key) {
+            *total -= old.size_bytes;
+            if let Some(pos) = order.iter().position(|k| k == &key) {
+                order.remove(pos);
+            }
         }
 
-        // Evict LRU (front) if at capacity
-        while entries.len() >= self.max_entries {
-            entries.pop_front();
+        // Evict LRU entries until under memory and count limits
+        while (*total + entry_bytes > self.max_bytes || map.len() >= self.max_entries)
+            && !order.is_empty()
+        {
+            if let Some(evicted_key) = order.pop_front() {
+                if let Some(evicted) = map.remove(&evicted_key) {
+                    *total -= evicted.size_bytes;
+                }
+            }
         }
 
-        entries.push_back((
-            key,
+        *total += entry_bytes;
+        map.insert(
+            key.clone(),
             CachedEntry {
                 result,
                 expires_at: now + effective_ttl,
+                size_bytes: entry_bytes,
             },
-        ));
+        );
+        order.push_back(key);
     }
 
     /// Clear entries matching a view name prefix, or all entries.
     pub async fn invalidate(&self, view_name: Option<&str>) {
-        let mut entries = self.entries.lock().await;
+        let mut map = self.map.lock().await;
+        let mut order = self.order.lock().await;
+        let mut total = self.total_bytes.lock().await;
         match view_name {
             Some(name) => {
                 let prefix = format!("cache:views:{}:", name);
-                entries.retain(|(k, _)| !k.starts_with(&prefix));
+                map.retain(|k, v| {
+                    if k.starts_with(&prefix) {
+                        *total -= v.size_bytes;
+                        false
+                    } else {
+                        true
+                    }
+                });
+                order.retain(|k| !k.starts_with(&prefix));
             }
             None => {
-                entries.clear();
+                map.clear();
+                order.clear();
+                *total = 0;
             }
         }
     }
 
     /// Return the number of entries (for testing).
     pub async fn len(&self) -> usize {
-        self.entries.lock().await.len()
+        self.map.lock().await.len()
     }
 
     /// Check if empty.
     pub async fn is_empty(&self) -> bool {
-        self.entries.lock().await.is_empty()
+        self.map.lock().await.is_empty()
+    }
+
+    /// Return current estimated memory usage in bytes.
+    pub async fn total_bytes(&self) -> usize {
+        *self.total_bytes.lock().await
     }
 }
 
@@ -260,7 +319,7 @@ const L2_NAMESPACE: &str = "cache";
 impl TieredDataViewCache {
     /// Create a tiered cache with the given policy.
     pub fn new(policy: DataViewCachingPolicy) -> Self {
-        let l1 = LruDataViewCache::new(policy.l1_max_entries, policy.ttl_seconds);
+        let l1 = LruDataViewCache::new(policy.l1_max_bytes, policy.l1_max_entries, policy.ttl_seconds);
         Self {
             l1,
             l2: None,
@@ -286,7 +345,7 @@ impl DataViewCache for TieredDataViewCache {
         &self,
         view_name: &str,
         parameters: &HashMap<String, QueryValue>,
-    ) -> Result<Option<QueryResult>, DataViewError> {
+    ) -> Result<Option<Arc<QueryResult>>, DataViewError> {
         let key = cache_key(view_name, parameters);
 
         // L1 check
@@ -304,10 +363,10 @@ impl DataViewCache for TieredDataViewCache {
                         // Deserialize
                         match serde_json::from_slice::<SerializableQueryResult>(&bytes) {
                             Ok(cached) => {
-                                let result = cached.into_query_result();
+                                let result = Arc::new(cached.into_query_result());
                                 // Warm L1 (use default policy TTL for L2→L1 warming)
                                 if self.policy.l1_enabled {
-                                    self.l1.set(key, result.clone(), None).await;
+                                    self.l1.set(key, Arc::clone(&result), None).await;
                                 }
                                 return Ok(Some(result));
                             }
@@ -383,7 +442,7 @@ impl DataViewCache for TieredDataViewCache {
         // L1 (pass per-view TTL override as Duration)
         if self.policy.l1_enabled {
             let ttl_dur = ttl_override.map(Duration::from_secs);
-            self.l1.set(key, result.clone(), ttl_dur).await;
+            self.l1.set(key, Arc::new(result.clone()), ttl_dur).await;
         }
 
         Ok(())

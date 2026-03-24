@@ -240,21 +240,19 @@ pub async fn load_and_wire_bundle(
 
     let factory = Arc::new(factory);
 
-    // Build DataView cache from StorageEngine if available.
-    // Aggregate caching policy from all DataView configs — use the most permissive values.
+    // Build DataView cache — L1 always active, L2 only when StorageEngine available.
     let cache_policy = build_cache_policy_from_bundle(&bundle);
-    let cache: Option<Arc<dyn rivers_runtime::tiered_cache::DataViewCache>> =
-        ctx.storage_engine.as_ref().map(|engine| {
-            let tiered = rivers_runtime::tiered_cache::TieredDataViewCache::new(
-                cache_policy.clone(),
-            )
-            .with_storage(engine.clone());
-            Arc::new(tiered) as Arc<dyn rivers_runtime::tiered_cache::DataViewCache>
-        });
-    if cache_policy.l2_enabled {
-        tracing::info!("DataView cache: L1 + L2 enabled (max L1 entries: {})", cache_policy.l1_max_entries);
+    let mut tiered = rivers_runtime::tiered_cache::TieredDataViewCache::new(cache_policy.clone());
+    if let Some(ref engine) = ctx.storage_engine {
+        tiered = tiered.with_storage(engine.clone());
+    } else if cache_policy.l2_enabled {
+        tracing::warn!("DataView cache: L2 enabled in config but no StorageEngine available — L2 disabled");
+    }
+    let cache: Arc<dyn rivers_runtime::tiered_cache::DataViewCache> = Arc::new(tiered);
+    if cache_policy.l2_enabled && ctx.storage_engine.is_some() {
+        tracing::info!("DataView cache: L1 + L2 enabled (L1 max: {} MB)", cache_policy.l1_max_bytes / (1024 * 1024));
     } else if cache_policy.l1_enabled {
-        tracing::info!("DataView cache: L1 enabled (max entries: {})", cache_policy.l1_max_entries);
+        tracing::info!("DataView cache: L1 enabled (max: {} MB)", cache_policy.l1_max_bytes / (1024 * 1024));
     }
 
     let ds_params = Arc::new(ds_params);
@@ -761,16 +759,13 @@ pub async fn rebuild_views_and_dataviews(
                 crate::server::register_all_drivers(&mut factory, &config.plugins.ignore);
                 let factory = Arc::new(factory);
 
-                // Build cache from StorageEngine if available
+                // Build cache — L1 always active, L2 only when StorageEngine available
                 let cache_policy = build_cache_policy_from_bundle(&bundle);
-                let cache: Option<Arc<dyn rivers_runtime::tiered_cache::DataViewCache>> =
-                    ctx.storage_engine.as_ref().map(|engine| {
-                        let tiered = rivers_runtime::tiered_cache::TieredDataViewCache::new(
-                            cache_policy,
-                        )
-                        .with_storage(engine.clone());
-                        Arc::new(tiered) as Arc<dyn rivers_runtime::tiered_cache::DataViewCache>
-                    });
+                let mut tiered = rivers_runtime::tiered_cache::TieredDataViewCache::new(cache_policy);
+                if let Some(ref engine) = ctx.storage_engine {
+                    tiered = tiered.with_storage(engine.clone());
+                }
+                let cache: Arc<dyn rivers_runtime::tiered_cache::DataViewCache> = Arc::new(tiered);
 
                 // Reuse existing ds_params by reading from the existing executor
                 // Since we can't access private fields, we need to rebuild ds_params too.
@@ -894,6 +889,9 @@ fn build_cache_policy_from_bundle(
                 }
                 if caching.l1_enabled {
                     policy.l1_enabled = true;
+                }
+                if caching.l1_max_bytes > policy.l1_max_bytes {
+                    policy.l1_max_bytes = caching.l1_max_bytes;
                 }
                 if caching.l1_max_entries > policy.l1_max_entries {
                     policy.l1_max_entries = caching.l1_max_entries;
