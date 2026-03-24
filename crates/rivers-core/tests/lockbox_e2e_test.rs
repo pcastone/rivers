@@ -36,6 +36,10 @@ async fn lockbox_credential_resolves_and_connects_redis() {
         aliases: vec!["cache-test".to_string()],
         created: now,
         updated: now,
+        driver: None,
+        username: None,
+        hosts: vec![],
+        database: None,
     }];
 
     let keystore = Keystore {

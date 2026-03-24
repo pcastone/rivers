@@ -29,6 +29,10 @@ fn lockbox_resolve(name: &str, value: &str) -> String {
         aliases: vec![],
         created: now,
         updated: now,
+        driver: None,
+        username: None,
+        hosts: vec![],
+        database: None,
     };
     let keystore = Keystore { version: 1, entries: vec![entry] };
 

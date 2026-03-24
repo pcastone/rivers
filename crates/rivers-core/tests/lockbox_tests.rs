@@ -13,6 +13,10 @@ fn make_entry(name: &str, value: &str, aliases: &[&str]) -> KeystoreEntry {
         aliases: aliases.iter().map(|s| s.to_string()).collect(),
         created: chrono::Utc::now(),
         updated: chrono::Utc::now(),
+        driver: None,
+        username: None,
+        hosts: vec![],
+        database: None,
     }
 }
 
@@ -450,6 +454,10 @@ fn create_test_keystore_file() {
             aliases: vec![],
             created: now,
             updated: now,
+            driver: None,
+            username: None,
+            hosts: vec![],
+            database: None,
         }).collect(),
     };
 
