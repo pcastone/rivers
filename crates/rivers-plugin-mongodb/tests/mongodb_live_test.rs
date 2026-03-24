@@ -14,14 +14,47 @@ const MONGO_PORT: u16 = 27017;
 const MONGO_DB: &str = "test";
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Resolve a credential from the real LockBox keystore at `sec/lockbox/`.
+fn lockbox_resolve(name: &str) -> String {
+    let lockbox_dir = find_lockbox_dir()
+        .expect("cannot find sec/lockbox/ — run from workspace root or set RIVERS_LOCKBOX_DIR");
+    let identity_path = lockbox_dir.join("identity.key");
+    let key_str = std::fs::read_to_string(&identity_path)
+        .unwrap_or_else(|e| panic!("cannot read identity: {e}"));
+    let identity: age::x25519::Identity = key_str.trim().parse()
+        .expect("invalid age identity key");
+    let entry_path = lockbox_dir.join("entries").join(format!("{name}.age"));
+    let encrypted = std::fs::read(&entry_path)
+        .unwrap_or_else(|e| panic!("cannot read lockbox entry {name}: {e}"));
+    let decrypted = age::decrypt(&identity, &encrypted)
+        .unwrap_or_else(|e| panic!("cannot decrypt {name}: {e}"));
+    String::from_utf8(decrypted).unwrap()
+}
+
+fn find_lockbox_dir() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("RIVERS_LOCKBOX_DIR") {
+        let p = std::path::PathBuf::from(&dir);
+        if p.join("identity.key").exists() { return Some(p); }
+    }
+    let mut dir = std::env::current_dir().ok()?;
+    for _ in 0..10 {
+        let candidate = dir.join("sec").join("lockbox");
+        if candidate.join("identity.key").exists() { return Some(candidate); }
+        if !dir.pop() { break; }
+    }
+    None
+}
+
 fn conn_params() -> ConnectionParams {
+    let mut options = HashMap::new();
+    options.insert("authSource".to_string(), "admin".to_string());
     ConnectionParams {
         host: MONGO_HOST.into(),
         port: MONGO_PORT,
         database: MONGO_DB.into(),
-        username: "".into(),
-        password: "".into(),
-        options: HashMap::new(),
+        username: "rivers".into(),
+        password: lockbox_resolve("mongodb/test"),
+        options,
     }
 }
 

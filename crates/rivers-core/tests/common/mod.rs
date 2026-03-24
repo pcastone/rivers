@@ -1,87 +1,73 @@
-//! Shared test credential helper — resolves passwords from a LockBox keystore.
+//! Shared test credential helper — resolves passwords from a real LockBox keystore.
 //!
-//! Creates an Age-encrypted keystore in a temp directory containing all
-//! test infrastructure credentials. Each live test calls `TestCredentials::new()`
-//! to build the keystore and then `creds.get("name")` to fetch a credential.
+//! Reads Age-encrypted secrets from the on-disk keystore at `sec/lockbox/`.
+//! No passwords are stored in source code. The keystore is in `.gitignore`.
+//!
+//! Setup: `RIVERS_LOCKBOX_DIR=sec/lockbox rivers-lockbox add <name> --value <secret>`
+//! Usage: `TestCredentials::new()` then `creds.get("postgres/test")`
 
+use std::fs;
 use std::path::PathBuf;
 
 use age::secrecy::ExposeSecret;
-use rivers_core::lockbox::{
-    encrypt_keystore, fetch_secret_value, Keystore, KeystoreEntry, LockBoxResolver,
-};
 
-/// All test infrastructure credentials backed by a LockBox keystore.
+/// Resolves credentials from the real LockBox keystore at `sec/lockbox/`.
 pub struct TestCredentials {
-    pub keystore_path: PathBuf,
-    pub identity: String,
-    pub resolver: LockBoxResolver,
-    _tempdir: tempfile::TempDir,
+    lockbox_dir: PathBuf,
+    identity: age::x25519::Identity,
 }
 
 impl TestCredentials {
-    /// Build a fresh keystore with all test credentials.
+    /// Load the lockbox identity from `sec/lockbox/identity.key`.
+    ///
+    /// Searches upward from the crate directory to find the workspace root
+    /// containing `sec/lockbox/`.
     pub fn new() -> Self {
-        let identity = age::x25519::Identity::generate();
-        let recipient = identity.to_public();
+        let lockbox_dir = find_lockbox_dir()
+            .expect("cannot find sec/lockbox/ — run from workspace root or set RIVERS_LOCKBOX_DIR");
 
-        let entries = vec![
-            entry("redis/test", "rivers_test"),
-            entry("postgres/test", "postgres"),
-            entry("mysql/test", "root"),
-            entry("rabbitmq/test", "guest"),
-            entry("couchdb/test", "admin"),
-            entry("influxdb/test", "rivers-test"),
-            entry("mongodb/test", ""),
-            entry("redis-streams/test", "rivers_test"),
-            entry("memcached/test", ""),
-            entry("sqlite/test", ""),
-            entry("faker/test", ""),
-        ];
+        let identity_path = lockbox_dir.join("identity.key");
+        let key_str = fs::read_to_string(&identity_path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", identity_path.display()));
+        let identity: age::x25519::Identity = key_str.trim().parse()
+            .expect("invalid age identity key in sec/lockbox/identity.key");
 
-        let keystore = Keystore {
-            version: 1,
-            entries,
-        };
-
-        let tempdir = tempfile::TempDir::new().expect("failed to create temp dir for keystore");
-        let keystore_path = tempdir.path().join("test.rkeystore");
-
-        encrypt_keystore(&keystore_path, &recipient.to_string(), &keystore)
-            .expect("failed to encrypt test keystore");
-
-        let resolver = LockBoxResolver::from_entries(&keystore.entries)
-            .expect("failed to build resolver from test entries");
-
-        let identity_str = identity.to_string();
-
-        Self {
-            keystore_path,
-            identity: identity_str.expose_secret().to_string(),
-            resolver,
-            _tempdir: tempdir,
-        }
+        Self { lockbox_dir, identity }
     }
 
-    /// Resolve a credential by name, decrypting from the keystore on disk.
+    /// Decrypt and return a credential by name (e.g. "postgres/test").
     pub fn get(&self, name: &str) -> String {
-        let metadata = self
-            .resolver
-            .resolve(name)
-            .unwrap_or_else(|| panic!("credential not found in test keystore: {name}"));
-        let resolved = fetch_secret_value(metadata, &self.keystore_path, &self.identity)
-            .unwrap_or_else(|e| panic!("failed to fetch credential {name}: {e}"));
-        resolved.value
+        let entry_path = self.lockbox_dir.join("entries").join(format!("{name}.age"));
+        if !entry_path.exists() {
+            panic!("lockbox entry not found: {name} (expected at {})", entry_path.display());
+        }
+        let encrypted = fs::read(&entry_path)
+            .unwrap_or_else(|e| panic!("cannot read lockbox entry {name}: {e}"));
+        let decrypted = age::decrypt(&self.identity, &encrypted)
+            .unwrap_or_else(|e| panic!("cannot decrypt lockbox entry {name}: {e}"));
+        String::from_utf8(decrypted)
+            .unwrap_or_else(|e| panic!("lockbox entry {name} is not valid UTF-8: {e}"))
     }
 }
 
-fn entry(name: &str, value: &str) -> KeystoreEntry {
-    KeystoreEntry {
-        name: name.to_string(),
-        value: value.to_string(),
-        entry_type: "string".to_string(),
-        aliases: vec![],
-        created: chrono::Utc::now(),
-        updated: chrono::Utc::now(),
+/// Walk up from the current directory to find the workspace root with `sec/lockbox/`.
+fn find_lockbox_dir() -> Option<PathBuf> {
+    // Check env var first
+    if let Ok(dir) = std::env::var("RIVERS_LOCKBOX_DIR") {
+        let p = PathBuf::from(&dir);
+        if p.join("identity.key").exists() {
+            return Some(p);
+        }
     }
+
+    // Walk up from current dir
+    let mut dir = std::env::current_dir().ok()?;
+    for _ in 0..10 {
+        let candidate = dir.join("sec").join("lockbox");
+        if candidate.join("identity.key").exists() {
+            return Some(candidate);
+        }
+        if !dir.pop() { break; }
+    }
+    None
 }

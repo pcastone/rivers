@@ -5092,6 +5092,7 @@ dependencies = [
 name = "rivers-plugin-mongodb"
 version = "0.50.2"
 dependencies = [
+ "age",
  "async-trait",
  "mongodb",
  "rivers-driver-sdk",

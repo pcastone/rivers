@@ -14,8 +14,8 @@ use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query, QueryValue};
 
 const MYSQL_HOST: &str = "192.168.2.215";
 const MYSQL_PORT: u16 = 3306;
-const MYSQL_DB: &str = "mysql";
-const MYSQL_USER: &str = "root";
+const MYSQL_DB: &str = "rivers";
+const MYSQL_USER: &str = "rivers";
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn conn_params() -> ConnectionParams {
