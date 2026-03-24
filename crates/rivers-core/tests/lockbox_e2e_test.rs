@@ -6,7 +6,6 @@
 
 mod common;
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use rivers_core::drivers::RedisDriver;
@@ -16,8 +15,6 @@ use rivers_core::lockbox::{
 };
 use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query};
 
-const REDIS_HOST: &str = "192.168.2.206";
-const REDIS_PORT: u16 = 6379;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::test]
@@ -89,13 +86,15 @@ async fn lockbox_credential_resolves_and_connects_redis() {
     assert_eq!(resolved.value, "rivers_test");
 
     // 8. Use the resolved password to connect to Redis
+    //    Get host/port from the real lockbox keystore (not hardcoded)
+    let real_params = common::TestCredentials::new().connection_params("redis/test");
     let params = ConnectionParams {
-        host: REDIS_HOST.into(),
-        port: REDIS_PORT,
+        host: real_params.host,
+        port: real_params.port,
         database: "0".into(),
         username: "".into(),
         password: resolved.value,
-        options: HashMap::new(),
+        options: real_params.options,
     };
 
     let driver = RedisDriver::new();
@@ -103,11 +102,11 @@ async fn lockbox_credential_resolves_and_connects_redis() {
     let mut conn = match conn_result {
         Ok(Ok(c)) => c,
         Ok(Err(e)) => {
-            eprintln!("SKIP: Redis unreachable at {REDIS_HOST}:{REDIS_PORT} — {e}");
+            eprintln!("SKIP: Redis unreachable — {e}");
             return;
         }
         Err(_) => {
-            eprintln!("SKIP: Redis timed out at {REDIS_HOST}:{REDIS_PORT}");
+            eprintln!("SKIP: Redis timed out");
             return;
         }
     };

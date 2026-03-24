@@ -1,6 +1,6 @@
 //! Live integration test for NATS plugin against Podman infra.
 //!
-//! Requires: NATS on 192.168.2.227:4222
+//! Credentials are resolved from a LockBox keystore at sec/lockbox/.
 //! Run: cargo test -p rivers-plugin-nats --test nats_live_test -- --nocapture
 
 use std::collections::HashMap;
@@ -10,15 +10,58 @@ use rivers_driver_sdk::broker::{
 use rivers_driver_sdk::ConnectionParams;
 use rivers_plugin_nats::NatsDriver;
 
-fn nats_params() -> ConnectionParams {
-    ConnectionParams {
-        host: "192.168.2.229".into(),
-        port: 4222,
-        database: "".into(),
-        username: "".into(),
-        password: "".into(),
-        options: HashMap::new(),
+fn conn_params() -> ConnectionParams {
+    let dir = find_lockbox_dir().expect("cannot find sec/lockbox/");
+    let key_str = std::fs::read_to_string(dir.join("identity.key")).unwrap();
+    let identity: age::x25519::Identity = key_str.trim().parse().unwrap();
+
+    let encrypted = std::fs::read(dir.join("entries/nats/test.age")).unwrap();
+    let password = String::from_utf8(age::decrypt(&identity, &encrypted).unwrap()).unwrap();
+
+    let meta: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("entries/nats/test.meta.json")).unwrap()
+    ).unwrap();
+
+    let hosts: Vec<String> = meta["hosts"].as_array().unwrap()
+        .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    let (host, port) = parse_host_port(&hosts[0]);
+
+    let mut options: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Some(obj) = meta["options"].as_object() {
+        for (k, v) in obj { options.insert(k.clone(), v.as_str().unwrap_or("").to_string()); }
     }
+    if hosts.len() > 1 {
+        options.insert("hosts".into(), hosts.join(","));
+        options.insert("cluster".into(), "true".into());
+    }
+
+    ConnectionParams {
+        host, port,
+        database: meta["database"].as_str().unwrap_or("").to_string(),
+        username: meta["username"].as_str().unwrap_or("").to_string(),
+        password, options,
+    }
+}
+
+fn parse_host_port(s: &str) -> (String, u16) {
+    match s.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse().unwrap_or(0)),
+        None => (s.to_string(), 0),
+    }
+}
+
+fn find_lockbox_dir() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("RIVERS_LOCKBOX_DIR") {
+        let p = std::path::PathBuf::from(&dir);
+        if p.join("identity.key").exists() { return Some(p); }
+    }
+    let mut dir = std::env::current_dir().ok()?;
+    for _ in 0..10 {
+        let candidate = dir.join("sec").join("lockbox");
+        if candidate.join("identity.key").exists() { return Some(candidate); }
+        if !dir.pop() { break; }
+    }
+    None
 }
 
 fn broker_config(subject: &str) -> BrokerConsumerConfig {
@@ -44,7 +87,7 @@ async fn nats_produce_and_consume() {
     // 1. Create a consumer FIRST (NATS is pub/sub — must subscribe before publish)
     let consumer_result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        driver.create_consumer(&nats_params(), &config),
+        driver.create_consumer(&conn_params(), &config),
     )
     .await;
 
@@ -64,7 +107,7 @@ async fn nats_produce_and_consume() {
 
     // 2. Create a producer
     let mut producer = driver
-        .create_producer(&nats_params(), &config)
+        .create_producer(&conn_params(), &config)
         .await
         .expect("create_producer should succeed");
 

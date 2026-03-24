@@ -19,4 +19,6 @@ ldap3 = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+age = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
