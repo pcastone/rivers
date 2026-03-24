@@ -1,6 +1,5 @@
 //! Live integration tests for the Memcached driver.
 //!
-//! Requires a running Memcached instance at 192.168.2.231:11211.
 //! Credentials are resolved from a LockBox keystore (see `common/mod.rs`).
 //! If the service is unreachable, tests print SKIP and pass.
 //!
@@ -8,39 +7,29 @@
 
 mod common;
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use rivers_core::drivers::MemcachedDriver;
 use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query, QueryValue};
 
-const MC_HOST: &str = "192.168.2.231";
-const MC_PORT: u16 = 11211;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn conn_params() -> ConnectionParams {
-    let creds = common::TestCredentials::new();
-    ConnectionParams {
-        host: MC_HOST.into(),
-        port: MC_PORT,
-        database: "".into(),
-        username: "".into(),
-        password: creds.get("memcached/test"),
-        options: HashMap::new(),
-    }
+    common::TestCredentials::new().connection_params("memcached/test")
 }
 
 /// Try to connect; returns None (with SKIP message) if unreachable.
 async fn try_connect() -> Option<Box<dyn rivers_driver_sdk::Connection>> {
     let driver = MemcachedDriver;
-    match tokio::time::timeout(TIMEOUT, driver.connect(&conn_params())).await {
+    let params = conn_params();
+    match tokio::time::timeout(TIMEOUT, driver.connect(&params)).await {
         Ok(Ok(conn)) => Some(conn),
         Ok(Err(e)) => {
-            eprintln!("SKIP: Memcached unreachable at {MC_HOST}:{MC_PORT} — {e}");
+            eprintln!("SKIP: Memcached unreachable — {e}");
             None
         }
         Err(_) => {
-            eprintln!("SKIP: Memcached connection timed out at {MC_HOST}:{MC_PORT}");
+            eprintln!("SKIP: Memcached connection timed out");
             None
         }
     }

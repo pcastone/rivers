@@ -20,7 +20,6 @@ futures-lite = { workspace = true }
 rivers-driver-sdk = { path = "../rivers-driver-sdk" }
 
 [dev-dependencies]
-rivers-core = { path = "../rivers-core" }
 age = { workspace = true }
-tempfile = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }

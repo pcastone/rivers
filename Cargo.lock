@@ -5006,6 +5006,7 @@ dependencies = [
 name = "rivers-plugin-cassandra"
 version = "0.50.2"
 dependencies = [
+ "age",
  "async-trait",
  "chrono",
  "hex",
@@ -5038,6 +5039,7 @@ dependencies = [
 name = "rivers-plugin-elasticsearch"
 version = "0.50.2"
 dependencies = [
+ "age",
  "async-trait",
  "reqwest",
  "rivers-driver-sdk",
@@ -5068,6 +5070,7 @@ dependencies = [
 name = "rivers-plugin-kafka"
 version = "0.50.2"
 dependencies = [
+ "age",
  "async-trait",
  "chrono",
  "rivers-driver-sdk",
@@ -5080,6 +5083,7 @@ dependencies = [
 name = "rivers-plugin-ldap"
 version = "0.50.2"
 dependencies = [
+ "age",
  "async-trait",
  "ldap3",
  "rivers-driver-sdk",
@@ -5106,6 +5110,7 @@ dependencies = [
 name = "rivers-plugin-nats"
 version = "0.50.2"
 dependencies = [
+ "age",
  "async-nats",
  "async-trait",
  "bytes",
@@ -5125,10 +5130,8 @@ dependencies = [
  "chrono",
  "futures-lite 2.6.1",
  "lapin",
- "rivers-core",
  "rivers-driver-sdk",
  "serde_json",
- "tempfile",
  "tokio",
 ]
 

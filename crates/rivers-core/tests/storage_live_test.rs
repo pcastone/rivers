@@ -1,8 +1,8 @@
 //! Live integration tests for StorageEngine backends.
 //!
 //! SQLite tests use tempfile — no external infrastructure needed.
-//! Redis tests require a running Redis server at 192.168.2.206:6379.
-//! Credentials are resolved from a LockBox keystore (see `common/mod.rs`).
+//! Redis tests require a running Redis server. Connection info is resolved
+//! from a LockBox keystore (see `common/mod.rs`).
 //!
 //! Run with: cargo test --test storage_live_test
 
@@ -14,12 +14,18 @@ use rivers_core::storage::StorageEngine;
 use rivers_core::RedisStorageEngine;
 use rivers_core::SqliteStorageEngine;
 
-const REDIS_HOSTS: &[&str] = &["192.168.2.206:6379", "192.168.2.207:6379", "192.168.2.208:6379"];
-
 fn redis_url() -> String {
-    let creds = common::TestCredentials::new();
-    let password = creds.get("redis/test");
-    REDIS_HOSTS
+    let params = common::TestCredentials::new().connection_params("redis/test");
+    let password = &params.password;
+
+    // Build host list: if cluster hosts are in options, use those; otherwise use primary host:port
+    let hosts: Vec<String> = if let Some(hosts_str) = params.options.get("hosts") {
+        hosts_str.split(',').map(|s| s.to_string()).collect()
+    } else {
+        vec![format!("{}:{}", params.host, params.port)]
+    };
+
+    hosts
         .iter()
         .map(|h| {
             if password.is_empty() {
