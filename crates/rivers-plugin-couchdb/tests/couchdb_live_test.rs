@@ -1,36 +1,55 @@
 //! Live integration tests for the CouchDB driver.
 //!
-//! Requires a running CouchDB instance at 192.168.2.221:5984.
-//! Credentials are resolved from a LockBox keystore.
+//! Connection info resolved from LockBox keystore (see `sec/lockbox/`).
 //! If the service is unreachable, tests print SKIP and pass.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query, QueryValue};
 use rivers_plugin_couchdb::CouchDBDriver;
 
-const COUCH_HOST: &str = "192.168.2.221";
-const COUCH_PORT: u16 = 5984;
-const COUCH_DB: &str = "test_rivers";
-const COUCH_USER: &str = "rivers";
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Resolve a credential from the real LockBox keystore at `sec/lockbox/`.
-fn lockbox_resolve(name: &str) -> String {
-    let lockbox_dir = find_lockbox_dir()
-        .expect("cannot find sec/lockbox/ — run from workspace root or set RIVERS_LOCKBOX_DIR");
-    let identity_path = lockbox_dir.join("identity.key");
-    let key_str = std::fs::read_to_string(&identity_path)
-        .unwrap_or_else(|e| panic!("cannot read identity: {e}"));
-    let identity: age::x25519::Identity = key_str.trim().parse()
-        .expect("invalid age identity key");
-    let entry_path = lockbox_dir.join("entries").join(format!("{name}.age"));
-    let encrypted = std::fs::read(&entry_path)
-        .unwrap_or_else(|e| panic!("cannot read lockbox entry {name}: {e}"));
-    let decrypted = age::decrypt(&identity, &encrypted)
-        .unwrap_or_else(|e| panic!("cannot decrypt {name}: {e}"));
-    String::from_utf8(decrypted).unwrap()
+fn conn_params() -> ConnectionParams {
+    let dir = find_lockbox_dir().expect("cannot find sec/lockbox/");
+    let key_str = std::fs::read_to_string(dir.join("identity.key")).unwrap();
+    let identity: age::x25519::Identity = key_str.trim().parse().unwrap();
+
+    let encrypted = std::fs::read(dir.join("entries/couchdb/test.age")).unwrap();
+    let password = String::from_utf8(age::decrypt(&identity, &encrypted).unwrap()).unwrap();
+
+    let meta: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("entries/couchdb/test.meta.json")).unwrap()
+    ).unwrap();
+
+    let hosts: Vec<String> = meta["hosts"].as_array().unwrap()
+        .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    let (host, port) = parse_host_port(&hosts[0]);
+
+    let mut options: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Some(obj) = meta["options"].as_object() {
+        for (k, v) in obj { options.insert(k.clone(), v.as_str().unwrap_or("").to_string()); }
+    }
+    if hosts.len() > 1 {
+        options.insert("hosts".into(), hosts.join(","));
+        options.insert("cluster".into(), "true".into());
+    }
+
+    ConnectionParams {
+        host,
+        port,
+        database: meta["database"].as_str().unwrap_or("").to_string(),
+        username: meta["username"].as_str().unwrap_or("").to_string(),
+        password,
+        options,
+    }
+}
+
+fn parse_host_port(s: &str) -> (String, u16) {
+    match s.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse().unwrap_or(0)),
+        None => (s.to_string(), 0),
+    }
 }
 
 fn find_lockbox_dir() -> Option<std::path::PathBuf> {
@@ -47,24 +66,13 @@ fn find_lockbox_dir() -> Option<std::path::PathBuf> {
     None
 }
 
-fn conn_params() -> ConnectionParams {
-    let password = lockbox_resolve("couchdb/test");
-    ConnectionParams {
-        host: COUCH_HOST.into(),
-        port: COUCH_PORT,
-        database: COUCH_DB.into(),
-        username: COUCH_USER.into(),
-        password,
-        options: HashMap::new(),
-    }
-}
-
 /// Ensure the test database exists before tests run.
 /// CouchDB requires the database to be explicitly created.
 async fn ensure_db_exists() -> bool {
-    let password = lockbox_resolve("couchdb/test");
+    let params = conn_params();
     let url = format!(
-        "http://{COUCH_USER}:{password}@{COUCH_HOST}:{COUCH_PORT}/{COUCH_DB}"
+        "http://{}:{}@{}:{}/{}",
+        params.username, params.password, params.host, params.port, params.database
     );
     let client = reqwest::Client::new();
 
@@ -81,14 +89,15 @@ async fn ensure_db_exists() -> bool {
 /// Try to connect; returns None (with SKIP message) if unreachable.
 async fn try_connect() -> Option<Box<dyn rivers_driver_sdk::Connection>> {
     let driver = CouchDBDriver;
-    match tokio::time::timeout(TIMEOUT, driver.connect(&conn_params())).await {
+    let params = conn_params();
+    match tokio::time::timeout(TIMEOUT, driver.connect(&params)).await {
         Ok(Ok(conn)) => Some(conn),
         Ok(Err(e)) => {
-            eprintln!("SKIP: CouchDB unreachable at {COUCH_HOST}:{COUCH_PORT} — {e}");
+            eprintln!("SKIP: CouchDB unreachable — {e}");
             None
         }
         Err(_) => {
-            eprintln!("SKIP: CouchDB connection timed out at {COUCH_HOST}:{COUCH_PORT}");
+            eprintln!("SKIP: CouchDB connection timed out");
             None
         }
     }
@@ -110,7 +119,7 @@ async fn couchdb_connect_and_ping() {
 async fn couchdb_insert_find_delete_roundtrip() {
     // Ensure database exists first.
     if !ensure_db_exists().await {
-        eprintln!("SKIP: Could not create/verify CouchDB database {COUCH_DB}");
+        eprintln!("SKIP: Could not create/verify CouchDB database");
         return;
     }
 

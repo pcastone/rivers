@@ -1,46 +1,33 @@
 //! Live integration tests for the PostgreSQL driver.
 //!
-//! Requires a running PostgreSQL instance at 192.168.2.209:5432.
-//! Credentials are resolved from a LockBox keystore (see `common/mod.rs`).
+//! Connection info resolved from LockBox keystore (see `common/mod.rs`).
 //! If the service is unreachable, tests print SKIP and pass.
 
 mod common;
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use rivers_core::drivers::PostgresDriver;
-use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query, QueryValue};
+use rivers_driver_sdk::{DatabaseDriver, Query, QueryValue};
 
-const PG_HOST: &str = "192.168.2.209";
-const PG_PORT: u16 = 5432;
-const PG_DB: &str = "rivers";
-const PG_USER: &str = "rivers";
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-fn conn_params() -> ConnectionParams {
-    let creds = common::TestCredentials::new();
-    ConnectionParams {
-        host: PG_HOST.into(),
-        port: PG_PORT,
-        database: PG_DB.into(),
-        username: PG_USER.into(),
-        password: creds.get("postgres/test"),
-        options: HashMap::new(),
-    }
+fn conn_params() -> rivers_driver_sdk::ConnectionParams {
+    common::TestCredentials::new().connection_params("postgres/test")
 }
 
 /// Try to connect; returns None (with SKIP message) if unreachable.
 async fn try_connect() -> Option<Box<dyn rivers_driver_sdk::Connection>> {
+    let params = conn_params();
     let driver = PostgresDriver;
-    match tokio::time::timeout(TIMEOUT, driver.connect(&conn_params())).await {
+    match tokio::time::timeout(TIMEOUT, driver.connect(&params)).await {
         Ok(Ok(conn)) => Some(conn),
         Ok(Err(e)) => {
-            eprintln!("SKIP: PostgreSQL unreachable at {PG_HOST}:{PG_PORT} — {e}");
+            eprintln!("SKIP: PostgreSQL unreachable — connection error: {e}");
             None
         }
         Err(_) => {
-            eprintln!("SKIP: PostgreSQL connection timed out at {PG_HOST}:{PG_PORT}");
+            eprintln!("SKIP: PostgreSQL connection timed out");
             None
         }
     }
