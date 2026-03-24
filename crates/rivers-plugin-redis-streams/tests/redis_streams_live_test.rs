@@ -19,40 +19,39 @@ const REDIS_HOST: &str = "192.168.2.206";
 const REDIS_PORT: u16 = 6379;
 const TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Resolve a single credential from a temporary LockBox keystore.
-fn lockbox_resolve(name: &str, value: &str) -> String {
-    use age::secrecy::ExposeSecret;
-    use rivers_core::lockbox::{
-        encrypt_keystore, fetch_secret_value, Keystore, KeystoreEntry, LockBoxResolver,
-    };
+/// Resolve a credential from the real LockBox keystore at `sec/lockbox/`.
+fn lockbox_resolve(name: &str) -> String {
+    let lockbox_dir = find_lockbox_dir()
+        .expect("cannot find sec/lockbox/ — run from workspace root or set RIVERS_LOCKBOX_DIR");
+    let identity_path = lockbox_dir.join("identity.key");
+    let key_str = std::fs::read_to_string(&identity_path)
+        .unwrap_or_else(|e| panic!("cannot read identity: {e}"));
+    let identity: age::x25519::Identity = key_str.trim().parse()
+        .expect("invalid age identity key");
+    let entry_path = lockbox_dir.join("entries").join(format!("{name}.age"));
+    let encrypted = std::fs::read(&entry_path)
+        .unwrap_or_else(|e| panic!("cannot read lockbox entry {name}: {e}"));
+    let decrypted = age::decrypt(&identity, &encrypted)
+        .unwrap_or_else(|e| panic!("cannot decrypt {name}: {e}"));
+    String::from_utf8(decrypted).unwrap()
+}
 
-    let identity = age::x25519::Identity::generate();
-    let recipient = identity.to_public();
-    let now = chrono::Utc::now();
-
-    let entry = KeystoreEntry {
-        name: name.to_string(),
-        value: value.to_string(),
-        entry_type: "string".to_string(),
-        aliases: vec![],
-        created: now,
-        updated: now,
-    };
-    let keystore = Keystore { version: 1, entries: vec![entry] };
-
-    let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("test.rkeystore");
-    encrypt_keystore(&path, &recipient.to_string(), &keystore).unwrap();
-
-    let resolver = LockBoxResolver::from_entries(&keystore.entries).unwrap();
-    let metadata = resolver.resolve(name).unwrap();
-    let identity_str = identity.to_string();
-    let resolved = fetch_secret_value(metadata, &path, identity_str.expose_secret()).unwrap();
-    resolved.value
+fn find_lockbox_dir() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("RIVERS_LOCKBOX_DIR") {
+        let p = std::path::PathBuf::from(&dir);
+        if p.join("identity.key").exists() { return Some(p); }
+    }
+    let mut dir = std::env::current_dir().ok()?;
+    for _ in 0..10 {
+        let candidate = dir.join("sec").join("lockbox");
+        if candidate.join("identity.key").exists() { return Some(candidate); }
+        if !dir.pop() { break; }
+    }
+    None
 }
 
 fn conn_params() -> ConnectionParams {
-    let password = lockbox_resolve("redis-streams/test", "rivers_test");
+    let password = lockbox_resolve("redis-streams/test");
     let mut options = HashMap::new();
     options.insert("cluster".into(), "true".into());
     options.insert(
@@ -215,7 +214,7 @@ async fn redis_streams_produce_consume_roundtrip() {
 
 /// Delete a Redis stream for cleanup (uses cluster connection).
 async fn cleanup_stream(stream: &str) {
-    let password = lockbox_resolve("redis-streams/test", "rivers_test");
+    let password = lockbox_resolve("redis-streams/test");
     let hosts = ["192.168.2.206:6379", "192.168.2.207:6379", "192.168.2.208:6379"];
     let nodes: Vec<String> = hosts
         .iter()

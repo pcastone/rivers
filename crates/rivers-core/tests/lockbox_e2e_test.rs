@@ -129,38 +129,35 @@ async fn lockbox_credential_resolves_and_connects_redis() {
 
 #[tokio::test]
 async fn lockbox_resolver_from_common_helper_works() {
-    // Verify the shared TestCredentials helper creates a valid keystore
+    // Verify the shared TestCredentials helper resolves from the real keystore
     let creds = common::TestCredentials::new();
 
-    // All expected entries should be resolvable
+    // All expected entries should be resolvable and non-panicking
     let redis_pw = creds.get("redis/test");
-    assert_eq!(redis_pw, "rivers_test");
+    assert!(!redis_pw.is_empty(), "redis credential should be non-empty");
 
     let pg_pw = creds.get("postgres/test");
-    assert_eq!(pg_pw, "postgres");
+    assert!(!pg_pw.is_empty(), "postgres credential should be non-empty");
 
     let mysql_pw = creds.get("mysql/test");
-    assert_eq!(mysql_pw, "root");
+    assert!(!mysql_pw.is_empty(), "mysql credential should be non-empty");
 
     let rmq_pw = creds.get("rabbitmq/test");
-    assert_eq!(rmq_pw, "guest");
+    assert!(!rmq_pw.is_empty(), "rabbitmq credential should be non-empty");
 
     let couch_pw = creds.get("couchdb/test");
-    assert_eq!(couch_pw, "admin");
+    assert!(!couch_pw.is_empty(), "couchdb credential should be non-empty");
 
     let influx_pw = creds.get("influxdb/test");
-    assert_eq!(influx_pw, "rivers-test");
+    assert!(!influx_pw.is_empty(), "influxdb credential should be non-empty");
 
-    let empty_pw = creds.get("memcached/test");
-    assert_eq!(empty_pw, "");
-
-    println!("LockBox common helper: all credentials resolved correctly");
+    println!("LockBox common helper: all credentials resolved from real keystore");
 }
 
 #[test]
 fn lockbox_missing_credential_panics() {
     let creds = common::TestCredentials::new();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         creds.get("nonexistent/key")
     }));
     assert!(result.is_err(), "get() should panic for missing credential");

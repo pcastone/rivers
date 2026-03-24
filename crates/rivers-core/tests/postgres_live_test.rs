@@ -14,8 +14,8 @@ use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query, QueryValue};
 
 const PG_HOST: &str = "192.168.2.209";
 const PG_PORT: u16 = 5432;
-const PG_DB: &str = "postgres";
-const PG_USER: &str = "postgres";
+const PG_DB: &str = "rivers";
+const PG_USER: &str = "rivers";
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn conn_params() -> ConnectionParams {

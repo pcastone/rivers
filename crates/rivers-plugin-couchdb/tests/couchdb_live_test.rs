@@ -13,43 +13,42 @@ use rivers_plugin_couchdb::CouchDBDriver;
 const COUCH_HOST: &str = "192.168.2.221";
 const COUCH_PORT: u16 = 5984;
 const COUCH_DB: &str = "test_rivers";
-const COUCH_USER: &str = "admin";
+const COUCH_USER: &str = "rivers";
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Resolve a single credential from a temporary LockBox keystore.
-fn lockbox_resolve(name: &str, value: &str) -> String {
-    use age::secrecy::ExposeSecret;
-    use rivers_core::lockbox::{
-        encrypt_keystore, fetch_secret_value, Keystore, KeystoreEntry, LockBoxResolver,
-    };
+/// Resolve a credential from the real LockBox keystore at `sec/lockbox/`.
+fn lockbox_resolve(name: &str) -> String {
+    let lockbox_dir = find_lockbox_dir()
+        .expect("cannot find sec/lockbox/ — run from workspace root or set RIVERS_LOCKBOX_DIR");
+    let identity_path = lockbox_dir.join("identity.key");
+    let key_str = std::fs::read_to_string(&identity_path)
+        .unwrap_or_else(|e| panic!("cannot read identity: {e}"));
+    let identity: age::x25519::Identity = key_str.trim().parse()
+        .expect("invalid age identity key");
+    let entry_path = lockbox_dir.join("entries").join(format!("{name}.age"));
+    let encrypted = std::fs::read(&entry_path)
+        .unwrap_or_else(|e| panic!("cannot read lockbox entry {name}: {e}"));
+    let decrypted = age::decrypt(&identity, &encrypted)
+        .unwrap_or_else(|e| panic!("cannot decrypt {name}: {e}"));
+    String::from_utf8(decrypted).unwrap()
+}
 
-    let identity = age::x25519::Identity::generate();
-    let recipient = identity.to_public();
-    let now = chrono::Utc::now();
-
-    let entry = KeystoreEntry {
-        name: name.to_string(),
-        value: value.to_string(),
-        entry_type: "string".to_string(),
-        aliases: vec![],
-        created: now,
-        updated: now,
-    };
-    let keystore = Keystore { version: 1, entries: vec![entry] };
-
-    let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("test.rkeystore");
-    encrypt_keystore(&path, &recipient.to_string(), &keystore).unwrap();
-
-    let resolver = LockBoxResolver::from_entries(&keystore.entries).unwrap();
-    let metadata = resolver.resolve(name).unwrap();
-    let identity_str = identity.to_string();
-    let resolved = fetch_secret_value(metadata, &path, identity_str.expose_secret()).unwrap();
-    resolved.value
+fn find_lockbox_dir() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("RIVERS_LOCKBOX_DIR") {
+        let p = std::path::PathBuf::from(&dir);
+        if p.join("identity.key").exists() { return Some(p); }
+    }
+    let mut dir = std::env::current_dir().ok()?;
+    for _ in 0..10 {
+        let candidate = dir.join("sec").join("lockbox");
+        if candidate.join("identity.key").exists() { return Some(candidate); }
+        if !dir.pop() { break; }
+    }
+    None
 }
 
 fn conn_params() -> ConnectionParams {
-    let password = lockbox_resolve("couchdb/test", "admin");
+    let password = lockbox_resolve("couchdb/test");
     ConnectionParams {
         host: COUCH_HOST.into(),
         port: COUCH_PORT,
@@ -63,7 +62,7 @@ fn conn_params() -> ConnectionParams {
 /// Ensure the test database exists before tests run.
 /// CouchDB requires the database to be explicitly created.
 async fn ensure_db_exists() -> bool {
-    let password = lockbox_resolve("couchdb/test", "admin");
+    let password = lockbox_resolve("couchdb/test");
     let url = format!(
         "http://{COUCH_USER}:{password}@{COUCH_HOST}:{COUCH_PORT}/{COUCH_DB}"
     );
