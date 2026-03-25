@@ -1,0 +1,4 @@
+bundleName    = "realtime-dashboard"
+bundleVersion = "1.0.0"
+source        = "examples/realtime-dashboard"
+apps          = ["dashboard-service"]

@@ -1,0 +1,5 @@
+# Bundle Manifest — rename "my-app" to your project name
+bundleName    = "my-app"
+bundleVersion = "1.0.0"
+source        = "https://github.com/your-org/my-app"
+apps          = ["my-service"]

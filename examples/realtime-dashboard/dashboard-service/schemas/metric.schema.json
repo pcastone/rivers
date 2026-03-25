@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "description": "Server metric snapshot",
+  "fields": [
+    { "name": "id",          "type": "uuid",     "faker": "datatype.uuid",   "required": true  },
+    { "name": "host",        "type": "string",   "faker": "internet.ip",     "required": true  },
+    { "name": "cpu_percent", "type": "float",    "faker": "number.float",    "required": true  },
+    { "name": "mem_mb",      "type": "integer",  "faker": "number.int",      "required": true  },
+    { "name": "disk_percent","type": "float",    "faker": "number.float",    "required": true  },
+    { "name": "timestamp",   "type": "datetime", "faker": "date.recent",     "required": true  }
+  ]
+}

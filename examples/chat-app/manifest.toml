@@ -1,0 +1,4 @@
+bundleName    = "chat-app"
+bundleVersion = "1.0.0"
+source        = "examples/chat-app"
+apps          = ["chat-service"]

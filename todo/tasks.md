@@ -1,44 +1,79 @@
-# Tasks — Cache Performance Fix
+# Tasks — Examples, Templates & Tutorials
 
-**Source:** Investigation showed L1 cache using O(n) VecDeque scan, cloning full results, and silently disabling when StorageEngine init fails
-**Branch:** `feature/performance`
+**Goal:** Create starter template, working examples, JS handler examples, and tutorial wiki entries covering all datasource drivers, WebSocket, and SSE.
 
 ---
 
-## Fix 1: O(1) LRU cache lookup (tiered_cache.rs)
+## 1. First-Time Starter Template
 
-Replace `VecDeque<(String, CachedEntry)>` with `HashMap<String, CachedEntry>` + `VecDeque<String>` for LRU order.
+`templates/starter/` — copy-rename-go minimal bundle.
 
-- [x] **C1.1** Replace `LruDataViewCache` internals: `HashMap<String, CachedEntry>` for O(1) key lookup + `VecDeque<String>` for LRU eviction order
-- [x] **C1.2** Update `get()` — HashMap lookup O(1), move key to back of VecDeque for recency
-- [x] **C1.3** Update `set()` — HashMap insert, push key to VecDeque back, evict front on capacity
-- [x] **C1.4** Update `invalidate()` — drain matching keys from both structures
-- [x] **C1.5** Verify existing tests in `tiered_cache_tests.rs` still pass
+- [x] **T1.1** Bundle manifest, single app-service manifest (faker datasource)
+- [x] **T1.2** resources.toml, one schema file, app.toml with 1 DataView + 1 REST view
+- [x] **T1.3** Placeholder comments in each file explaining what to change
 
-## Fix 2: Arc-wrap cached results (tiered_cache.rs + dataview_engine.rs)
+## 2. Example Bundles
 
-Avoid deep-cloning `QueryResult` on every cache hit.
+Each self-contained, runnable with `riversd`.
 
-- [x] **C2.1** Change `CachedEntry.result` to `Arc<QueryResult>`
-- [x] **C2.2** Update `DataViewCache` trait: `get()` returns `Arc<QueryResult>`, `set()` takes `Arc<QueryResult>`
-- [x] **C2.3** Update `LruDataViewCache` — store/return `Arc<QueryResult>` (clone is cheap Arc bump)
-- [x] **C2.4** Update `TieredDataViewCache` — pass Arc through L1/L2
-- [x] **C2.5** Update `DataViewExecutor::execute()` — wrap driver result in Arc before cache set, deref Arc for response
-- [x] **C2.6** Update `NoopDataViewCache` to match new trait signature
-- [x] **C2.7** Update `DataViewResponse.query_result` to `Arc<QueryResult>`
-- [x] **C2.8** Update consumers: `view_engine.rs`, `engine_loader.rs`, `v8_engine.rs`, `graphql.rs`, `polling.rs` — Arc auto-deref, no changes needed
+### 2a. hello-api (minimal REST)
+- [x] **T2.1** Bundle: app-service, faker datasource, 2 endpoints (list + get-by-id)
 
-## Fix 3: Always-on cache — never silently None (bundle_loader.rs)
+### 2b. todo-crud (CRUD with CodeComponent handlers)
+- [x] **T2.2** Bundle: app-service, faker datasource, 5 endpoints (list, get, create, update, delete)
+- [x] **T2.3** JS handlers: `createTodo`, `updateTodo`, `deleteTodo` with validation + cache invalidates
 
-L1 doesn't need StorageEngine. Always create TieredDataViewCache; only attach L2 when storage is available.
+### 2c. realtime-dashboard (SSE + polling)
+- [x] **T2.4** Bundle: app-service, faker datasource, SSE view with polling config + streaming REST export
+- [x] **T2.5** JS handler: `streamMetrics` using {chunk, done} protocol
 
-- [x] **C3.1** Change `bundle_loader.rs` — always create `TieredDataViewCache::new(policy)`, conditionally call `.with_storage()` if `ctx.storage_engine` is `Some`
-- [x] **C3.2** Change `DataViewExecutor.cache` from `Option<Arc<dyn DataViewCache>>` to `Arc<dyn DataViewCache>` — no more `if let Some(ref cache)` guards
-- [x] **C3.3** Update `execute()` in `dataview_engine.rs` — remove Option unwrap, call cache directly
-- [x] **C3.4** Log a warning if StorageEngine is None and L2 is configured
+### 2d. chat-app (WebSocket lifecycle hooks)
+- [x] **T2.6** Bundle: app-service, WebSocket view with on_connect/on_message/on_disconnect + SSE feed
+- [x] **T2.7** JS handlers: `onConnect`, `onMessage`, `onDisconnect`
+
+## 3. JavaScript Handler Examples
+
+`examples/handlers/` — standalone JS files demonstrating patterns.
+
+- [x] **T3.1** `basic-handler.js` — minimal handler reading request, setting resdata
+- [x] **T3.2** `crud-handler.js` — create/update/delete with ctx.dataview() calls
+- [x] **T3.3** `auth-guard.js` — guard handler with Rivers.crypto password verify + session claims
+- [x] **T3.4** `streaming-handler.js` — {chunk, done} protocol for streaming REST
+- [x] **T3.5** `websocket-hooks.js` — on_connect, on_message, on_disconnect lifecycle
+- [x] **T3.6** `async-handler.js` — Promise.all parallel dataview calls
+- [x] **T3.7** `kv-store-handler.js` — ctx.store.set/get/del with TTL
+- [x] **T3.8** `outbound-http.js` — Rivers.http.get/post for external API calls
+
+## 4. Tutorial Wiki Entries
+
+`docs/guide/tutorials/` — one tutorial per topic, each a self-contained walkthrough.
+
+### 4a. Datasource Tutorials (all 12 drivers)
+- [x] **T4.1** `datasource-faker.md` — faker driver setup, schema with faker attributes, seeded data
+- [x] **T4.2** `datasource-postgresql.md` — postgres driver, lockbox credentials, connection pool, SQL queries
+- [x] **T4.3** `datasource-mysql.md` — mysql driver, lockbox credentials, connection pool
+- [x] **T4.4** `datasource-sqlite.md` — sqlite driver, nopassword, embedded relational
+- [x] **T4.5** `datasource-redis.md` — redis driver, cache/sessions/KV, lockbox
+- [x] **T4.6** `datasource-http.md` — http driver, inter-service proxy, service references
+- [x] **T4.7** `datasource-kafka.md` — kafka broker, message streaming, lockbox
+- [x] **T4.8** `datasource-rabbitmq.md` — rabbitmq broker, message queuing
+- [x] **T4.9** `datasource-nats.md` — nats broker, pub/sub
+- [x] **T4.10** `datasource-elasticsearch.md` — elasticsearch plugin, search queries
+- [x] **T4.11** `datasource-mongodb.md` — mongodb plugin, document store
+- [x] **T4.12** `datasource-ldap.md` — ldap plugin, directory queries
+
+### 4b. Real-Time Tutorials
+- [x] **T4.13** `tutorial-websocket.md` — WebSocket view setup, lifecycle hooks, broadcast vs direct mode, JS handlers
+- [x] **T4.14** `tutorial-sse.md` — SSE view setup, polling config, diff strategies, Last-Event-ID reconnection, event buffer
+- [x] **T4.15** `tutorial-streaming-rest.md` — streaming REST view, ndjson vs sse format, {chunk, done} handler protocol
+
+### 4c. Handler Tutorials
+- [x] **T4.16** `tutorial-js-handlers.md` — JS handler API, ctx object, Rivers globals, async patterns
+- [x] **T4.17** `tutorial-auth-sessions.md` — guard views, session auth, Rivers.crypto, RBAC
+- [x] **T4.18** `tutorial-graphql.md` — enabling GraphQL, auto-generated queries/mutations/subscriptions
 
 ## Validation
 
-- [x] **C4.1** `cargo test -p rivers-runtime` passes (23/23)
-- [x] **C4.2** `cargo test --workspace --lib` passes (232/232)
-- [x] **C4.3** `cargo build` succeeds
+- [ ] **T5.1** All example bundles pass `riversctl validate`
+- [ ] **T5.2** All JS handler examples have correct ctx/Rivers API usage
+- [ ] **T5.3** All tutorials reference correct config keys and driver names

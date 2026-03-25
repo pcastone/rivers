@@ -1,0 +1,89 @@
+# ─────────────────────────────────────────────
+# Datasource
+# ─────────────────────────────────────────────
+
+[data.datasources.metrics]
+name       = "metrics"
+driver     = "faker"
+nopassword = true
+
+[data.datasources.metrics.config]
+locale                = "en_US"
+seed                  = 0
+max_records_per_query = 50
+
+# ─────────────────────────────────────────────
+# DataViews
+# ─────────────────────────────────────────────
+
+[data.dataviews.list_metrics]
+name          = "list_metrics"
+datasource    = "metrics"
+query         = "schemas/metric.schema.json"
+return_schema = "schemas/metric.schema.json"
+
+[data.dataviews.list_metrics.caching]
+ttl_seconds = 5
+
+[[data.dataviews.list_metrics.parameters]]
+name     = "limit"
+type     = "integer"
+required = false
+default  = 10
+
+# ─────────────────────────────────────────────
+# Views
+# ─────────────────────────────────────────────
+
+# GET /metrics — REST snapshot of current metrics
+[api.views.list_metrics]
+path            = "metrics"
+method          = "GET"
+view_type       = "Rest"
+response_format = "envelope"
+auth            = "none"
+
+[api.views.list_metrics.handler]
+type     = "dataview"
+dataview = "list_metrics"
+
+[api.views.list_metrics.parameter_mapping.query]
+limit = "limit"
+
+# ─────────────────────────
+
+# GET /metrics/stream — SSE live metrics feed (polling datasource)
+[api.views.metrics_stream]
+path                  = "metrics/stream"
+method                = "GET"
+view_type             = "ServerSentEvents"
+auth                  = "none"
+sse_event_buffer_size = 50
+
+[api.views.metrics_stream.handler]
+type     = "dataview"
+dataview = "list_metrics"
+
+[api.views.metrics_stream.polling]
+tick_interval_ms = 3000
+diff_strategy    = "hash"
+poll_state_ttl_s = 300
+
+# ─────────────────────────
+
+# POST /metrics/export — streaming REST export (ndjson)
+[api.views.metrics_export]
+path              = "metrics/export"
+method            = "POST"
+view_type         = "Rest"
+streaming         = true
+streaming_format  = "ndjson"
+stream_timeout_ms = 30000
+auth              = "none"
+
+[api.views.metrics_export.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/metrics.js"
+entrypoint = "streamMetrics"
+resources  = ["metrics"]

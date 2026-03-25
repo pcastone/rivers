@@ -1,0 +1,4 @@
+bundleName    = "todo-crud"
+bundleVersion = "1.0.0"
+source        = "examples/todo-crud"
+apps          = ["todo-service"]

@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "description": "Todo item",
+  "fields": [
+    { "name": "id",         "type": "uuid",     "faker": "datatype.uuid",   "required": true  },
+    { "name": "title",      "type": "string",   "faker": "lorem.sentence",  "required": true  },
+    { "name": "completed",  "type": "boolean",  "faker": "datatype.boolean","required": true  },
+    { "name": "priority",   "type": "integer",  "faker": "number.int",      "required": false },
+    { "name": "created_at", "type": "datetime", "faker": "date.past",       "required": true  }
+  ]
+}

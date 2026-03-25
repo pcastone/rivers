@@ -1,0 +1,7 @@
+appName       = "hello-service"
+description   = "Minimal REST API — list and get products"
+version       = "1.0.0"
+type          = "app-service"
+appId         = "a1b2c3d4-0001-4000-8000-000000000001"
+entryPoint    = "service"
+source        = "examples/hello-api/hello-service"

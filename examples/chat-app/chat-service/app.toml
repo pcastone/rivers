@@ -1,0 +1,49 @@
+# ─────────────────────────────────────────────
+# Datasource
+# ─────────────────────────────────────────────
+
+[data.datasources.messages]
+name       = "messages"
+driver     = "faker"
+nopassword = true
+
+[data.datasources.messages.config]
+locale = "en_US"
+
+# ─────────────────────────────────────────────
+# Views
+# ─────────────────────────────────────────────
+
+# WebSocket — ws://localhost:{port}/ws/chat?username=alice
+[api.views.chat]
+path           = "ws/chat"
+method         = "GET"
+view_type      = "Websocket"
+auth           = "none"
+websocket_mode = "Broadcast"
+
+[api.views.chat.ws_hooks]
+on_connect.module        = "libraries/handlers/chat.js"
+on_connect.entrypoint    = "onConnect"
+on_message.module        = "libraries/handlers/chat.js"
+on_message.entrypoint    = "onMessage"
+on_disconnect.module     = "libraries/handlers/chat.js"
+on_disconnect.entrypoint = "onDisconnect"
+
+# ─────────────────────────
+
+# SSE — live feed of chat events for read-only clients
+[api.views.chat_events]
+path                  = "events/chat"
+method                = "GET"
+view_type             = "ServerSentEvents"
+auth                  = "none"
+sse_trigger_events    = ["ChatMessage", "UserJoined", "UserLeft"]
+sse_event_buffer_size = 200
+
+[api.views.chat_events.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/chat.js"
+entrypoint = "onMessage"
+resources  = ["messages"]

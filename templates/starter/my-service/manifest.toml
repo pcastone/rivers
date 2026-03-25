@@ -1,0 +1,8 @@
+# App Manifest — update appName, description, and entryPoint port
+appName       = "my-service"
+description   = "My Rivers service"
+version       = "1.0.0"
+type          = "app-service"
+appId         = "GENERATE-A-UUID-HERE"       # Run: uuidgen | tr '[:upper:]' '[:lower:]'
+entryPoint    = "service"
+source        = "https://github.com/your-org/my-app/my-service"

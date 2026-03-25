@@ -1,0 +1,7 @@
+appName       = "todo-service"
+description   = "CRUD REST API with CodeComponent handlers"
+version       = "1.0.0"
+type          = "app-service"
+appId         = "a1b2c3d4-0002-4000-8000-000000000001"
+entryPoint    = "service"
+source        = "examples/todo-crud/todo-service"
