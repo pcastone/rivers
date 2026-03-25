@@ -195,10 +195,11 @@ Required parameters with no value produce a 422 error. Optional parameters use t
 
 ```toml
 [data.dataviews.list_users.caching]
-ttl_seconds    = 60       # Cache lifetime
-l1_enabled     = true     # In-process LRU (default: true)
-l1_max_entries = 1000     # LRU capacity (default: 1000)
-l2_enabled     = false    # StorageEngine-backed (requires [storage_engine])
+ttl_seconds    = 60          # Cache lifetime
+l1_enabled     = true        # In-process LRU (default: true)
+l1_max_bytes   = 157286400   # L1 memory limit in bytes (default: 150 MB)
+l1_max_entries = 100000      # Hard cap on entries (default: 100,000)
+l2_enabled     = false       # StorageEngine-backed (requires [storage_engine])
 ```
 
 ### Cache Invalidation

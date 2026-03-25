@@ -127,6 +127,12 @@ updated = "2026-01-15T10:00:00Z"
 | `aliases` | string[] | no | Alternative names that resolve to this entry. May be empty array. |
 | `created` | ISO 8601 | yes | Set by CLI at creation. Never modified. |
 | `updated` | ISO 8601 | yes | Set by CLI on creation and value change (`rivers lockbox rotate`). |
+| `driver` | string | no | Driver name (e.g., `"postgres"`, `"redis"`, `"kafka"`). |
+| `username` | string | no | Database username or bind DN. |
+| `hosts` | string[] | no | Host list as `"host:port"` strings. Supports clusters with multiple entries. |
+| `database` | string | no | Database, bucket, or base DN name. |
+
+Credential record fields (`driver`, `username`, `hosts`, `database`) are optional. Existing password-only keystores remain valid. When present, these fields enable full datasource connection resolution from the keystore — bundles can move between environments by swapping the LockBox with no hardcoded IPs or usernames in config.
 
 ### 3.2 Value types
 
@@ -139,7 +145,40 @@ updated = "2026-01-15T10:00:00Z"
 
 Type determines how the host delivers the resolved value to the datasource driver. The CodeComponent isolate never receives the raw value regardless of type.
 
-### 3.3 Naming rules
+### 3.3 Meta Sidecar Files
+
+For test and development environments, non-secret connection metadata can be stored in a plaintext `.meta.json` sidecar file alongside the Age-encrypted `.age` entry:
+
+```
+sec/lockbox/entries/
+├── postgres/
+│   ├── test.age           # Age-encrypted password
+│   └── test.meta.json     # Plaintext connection metadata
+```
+
+The sidecar JSON schema:
+
+```json
+{
+  "driver": "postgres",
+  "username": "rivers",
+  "hosts": ["192.168.2.209:5432", "192.168.2.210:5432"],
+  "database": "rivers",
+  "options": { "authSource": "admin", "replicaSet": "rs0" }
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `driver` | string | Driver name matching a registered driver |
+| `username` | string | Database username or bind DN |
+| `hosts` | string[] | `"host:port"` entries; first is primary, rest are replicas/cluster nodes |
+| `database` | string | Database, bucket, or base DN |
+| `options` | object | Driver-specific key-value options (optional) |
+
+Sidecars are never encrypted — they contain no secrets. The `TestCredentials` helper in `rivers-core/tests/common/mod.rs` combines the decrypted password from `.age` with metadata from `.meta.json` to build a complete `ConnectionParams`.
+
+### 3.4 Naming rules
 
 - Name must match `[a-z][a-z0-9_/.-]*` — lowercase alphanumeric plus `_`, `/`, `.`, `-`; starting with a letter
 - Maximum length: 128 characters

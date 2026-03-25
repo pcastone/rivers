@@ -145,11 +145,16 @@ Extracted from all specification documents. Top-level features with granular sub
 - Promotion path: prototype → harden (promote to TOML) → simplify (handler may disappear)
 
 ### 3.3 Two-Tier Caching
-- L1: in-process LRU cache (per-node)
+- L1: in-process LRU cache (per-node), memory-bounded (default 150 MB via `l1_max_bytes`)
+- L1 uses HashMap for O(1) key lookup + VecDeque for LRU eviction order
+- L1 returns `Arc<QueryResult>` — cache hits are pointer bumps, no deep clones
+- L1 eviction: LRU entries evicted when total bytes exceed `l1_max_bytes` or count exceeds `l1_max_entries` (100K safety valve)
+- Memory tracked via `QueryResult::estimated_bytes()` — proportional estimate, no allocator hooks
 - L2: StorageEngine-backed (Redis or SQLite) with TTL
 - Canonical JSON cache key derivation: `BTreeMap` ordering + `serde_json::to_string` + SHA-256 + hex encoding (SHAPE-3)
 - L2 skip when result exceeds `l2_max_value_bytes`
-- Cache invalidation by key or pattern
+- Cache always present as `Arc<dyn DataViewCache>` — never `Option`. Uses `NoopDataViewCache` fallback when unconfigured
+- Cache invalidation by view name or full flush; write DataViews declare `invalidates` list
 - Shared key derivation algorithm across cache, polling, and StorageEngine (see Appendix: Canonical JSON & Key Derivation)
 
 ### 3.4 Connection Pooling
@@ -272,26 +277,31 @@ Extracted from all specification documents. Top-level features with granular sub
 - Redis Streams
 - InfluxDB
 
-### 6.4 Stub Drivers (NotImplemented)
-- Neo4j, Cassandra, Solr, Hadoop/HDFS, ZooKeeper, LDAP, ActiveMQ, PingIdentity
+### 6.4 Additional Plugin Drivers
+- Cassandra (scylla)
+- CouchDB (HTTP-based)
+- LDAP (ldap3)
 
-### 6.5 Five-Op Driver Contract
+### 6.5 Stub Drivers (NotImplemented)
+- Neo4j, Solr, Hadoop/HDFS, ZooKeeper, ActiveMQ, PingIdentity
+
+### 6.6 Five-Op Driver Contract
 - Standard operations: `query`, `execute`, `ping`, `begin`, `stream`
 - DriverError distinction: `Unsupported` vs `NotImplemented` (SHAPE-6)
 - Operation inference algorithm from SQL first token (SHAPE-7)
 - DriverFactory registration and discovery
 - Plugin system: ABI version check, `catch_unwind` registration
 
-### 6.6 Two Driver Contracts
+### 6.7 Two Driver Contracts
 - **DatabaseDriver**: request/response (query → result)
 - **MessageBrokerDriver**: continuous push (subscribe → stream of messages)
 
-### 6.7 Broker Contracts
+### 6.8 Broker Contracts
 - `InboundMessage`, `OutboundMessage`, `BrokerMetadata`, `FailurePolicy`
 - `BrokerConsumerBridge`: broker → EventBus directly (SHAPE-18: no StorageEngine buffering)
 - Consumer lag detection and drain on shutdown
 
-### 6.8 rps-client Driver
+### 6.9 rps-client Driver
 - Application-facing RPS access
 - mTLS enforcement for RPS communication
 
@@ -376,7 +386,13 @@ Extracted from all specification documents. Top-level features with granular sub
 - `pem` (certificates)
 - `json` (structured credentials)
 
-### 8.6 Rotation
+### 8.6 Credential Record Fields
+- Optional non-secret metadata on entries: `driver`, `username`, `hosts`, `database`
+- Enables full datasource connection resolution from keystore — bundles move between environments by swapping the LockBox
+- Backward compatible: existing password-only keystores remain valid
+- Meta sidecar pattern: `.meta.json` files alongside `.age` entries for test/dev credential metadata
+
+### 8.7 Rotation
 - No restart required: rotation writes to disk (SHAPE-5)
 - New connections pick up updated credentials automatically
 
@@ -704,6 +720,7 @@ Extracted from all specification documents. Top-level features with granular sub
 - `POST /admin/deploy/reject` — reject a deployment
 - `POST /admin/deploy/promote` — promote approved deployment to active
 - `GET /admin/deployments` — list all deployments and their status
+- `POST /admin/shutdown` — gracefully shutdown the server
 
 ### 18.3 Ed25519 Request Authentication
 - Signing by `riversctl`: `{method}\n{path}\n{body_sha256_hex}\n{unix_timestamp_ms}` signed with Ed25519 private key
