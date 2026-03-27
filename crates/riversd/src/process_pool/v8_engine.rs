@@ -22,6 +22,11 @@ struct LockBoxContext {
     keystore_path: std::path::PathBuf,
     identity_str: String,
 }
+
+/// Application keystore context for V8 host functions (encrypt/decrypt + metadata).
+struct KeystoreContext {
+    keystore: Arc<rivers_keystore_engine::AppKeystore>,
+}
 // ── Thread-Local Async Bridge ───────────────────────────────────
 
 thread_local! {
@@ -78,6 +83,11 @@ thread_local! {
     /// When `Some`, `Rivers.crypto.hmac()` resolves keys via LockBox alias.
     /// When `None`, falls back to raw key (dev/test mode).
     static TASK_LOCKBOX: RefCell<Option<LockBoxContext>> = RefCell::new(None);
+
+    /// Application keystore for encrypt/decrypt and key metadata (App Keystore feature).
+    /// When `Some`, `Rivers.keystore.*` and `Rivers.crypto.encrypt/decrypt` are available.
+    /// When `None`, those functions throw "keystore not configured".
+    static TASK_KEYSTORE: RefCell<Option<KeystoreContext>> = RefCell::new(None);
 }
 
 type ActiveTaskRegistry = Arc<StdMutex<HashMap<usize, ActiveTask>>>;
@@ -125,6 +135,11 @@ impl TaskLocals {
                 _ => None,
             };
         });
+        TASK_KEYSTORE.with(|ks| {
+            *ks.borrow_mut() = ctx.keystore.as_ref().map(|k| KeystoreContext {
+                keystore: k.clone(),
+            });
+        });
         TaskLocals
     }
 }
@@ -142,6 +157,7 @@ impl Drop for TaskLocals {
         TASK_DS_CONFIGS.with(|c| c.borrow_mut().clear());
         TASK_DV_EXECUTOR.with(|e| *e.borrow_mut() = None);
         TASK_LOCKBOX.with(|lb| *lb.borrow_mut() = None);
+        TASK_KEYSTORE.with(|ks| *ks.borrow_mut() = None);
     }
 }
 
@@ -1424,6 +1440,85 @@ fn inject_rivers_global(
 
     let crypto_key = v8_str(scope, "crypto")?;
     rivers_obj.set(scope, crypto_key.into(), crypto_obj.into());
+
+    // ── Rivers.keystore (key metadata — App Keystore feature) ────
+    let ks_available = TASK_KEYSTORE.with(|ks| ks.borrow().is_some());
+    if ks_available {
+        let keystore_obj = v8::Object::new(scope);
+
+        // Rivers.keystore.has(name) — returns boolean
+        let has_fn = v8::Function::new(
+            scope,
+            |scope: &mut v8::HandleScope,
+             args: v8::FunctionCallbackArguments,
+             mut rv: v8::ReturnValue| {
+                let name = args.get(0).to_rust_string_lossy(scope);
+                let result = TASK_KEYSTORE.with(|ks| {
+                    ks.borrow().as_ref()
+                        .map(|ctx| ctx.keystore.has_key(&name))
+                        .unwrap_or(false)
+                });
+                rv.set(v8::Boolean::new(scope, result).into());
+            },
+        )
+        .ok_or_else(|| TaskError::Internal("failed to create Rivers.keystore.has".into()))?;
+        let has_key = v8_str(scope, "has")?;
+        keystore_obj.set(scope, has_key.into(), has_fn.into());
+
+        // Rivers.keystore.info(name) — returns {name, type, version, created_at} or throws
+        let info_fn = v8::Function::new(
+            scope,
+            |scope: &mut v8::HandleScope,
+             args: v8::FunctionCallbackArguments,
+             mut rv: v8::ReturnValue| {
+                let name = args.get(0).to_rust_string_lossy(scope);
+                let result = TASK_KEYSTORE.with(|ks| {
+                    let ks = ks.borrow();
+                    match ks.as_ref() {
+                        Some(ctx) => ctx.keystore.key_info(&name)
+                            .map_err(|e| e.to_string()),
+                        None => Err("keystore not configured".to_string()),
+                    }
+                });
+
+                match result {
+                    Ok(info) => {
+                        // Build a V8 object with the metadata
+                        let obj = v8::Object::new(scope);
+
+                        let name_key = v8::String::new(scope, "name").unwrap();
+                        let name_val = v8::String::new(scope, &info.name).unwrap();
+                        obj.set(scope, name_key.into(), name_val.into());
+
+                        let type_key = v8::String::new(scope, "type").unwrap();
+                        let type_val = v8::String::new(scope, &info.key_type).unwrap();
+                        obj.set(scope, type_key.into(), type_val.into());
+
+                        let ver_key = v8::String::new(scope, "version").unwrap();
+                        let ver_val = v8::Integer::new(scope, info.current_version as i32);
+                        obj.set(scope, ver_key.into(), ver_val.into());
+
+                        let created_key = v8::String::new(scope, "created_at").unwrap();
+                        let created_val = v8::String::new(scope, &info.created.to_rfc3339()).unwrap();
+                        obj.set(scope, created_key.into(), created_val.into());
+
+                        rv.set(obj.into());
+                    }
+                    Err(msg) => {
+                        let err_msg = v8::String::new(scope, &msg).unwrap();
+                        let exception = v8::Exception::error(scope, err_msg);
+                        scope.throw_exception(exception);
+                    }
+                }
+            },
+        )
+        .ok_or_else(|| TaskError::Internal("failed to create Rivers.keystore.info".into()))?;
+        let info_key = v8_str(scope, "info")?;
+        keystore_obj.set(scope, info_key.into(), info_fn.into());
+
+        let ks_key = v8_str(scope, "keystore")?;
+        rivers_obj.set(scope, ks_key.into(), keystore_obj.into());
+    }
 
     // ── Rivers.http — real outbound HTTP via async bridge (V2) ──
     // Per spec §10.5: only injected when allow_outbound_http = true (capability gating).

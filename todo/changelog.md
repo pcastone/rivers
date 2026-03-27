@@ -6,6 +6,16 @@
 
 ---
 
+## V8 Host Functions — Rivers.keystore.has/info (2026-03-27)
+
+- **File:** `crates/riversd/src/process_pool/v8_engine.rs` — added `KeystoreContext` struct (wraps `Arc<AppKeystore>`), `TASK_KEYSTORE` thread-local, population in `TaskLocals::set()` from `ctx.keystore`, cleanup in `TaskLocals::drop()`.
+- **File:** `crates/riversd/src/process_pool/v8_engine.rs` — added `Rivers.keystore` namespace in `inject_rivers_global()` between `Rivers.crypto` and `Rivers.http`. Two functions: `has(name)` returns boolean, `info(name)` returns `{name, type, version, created_at}` object or throws on key-not-found.
+- **Decision:** `Rivers.keystore` is only injected when `TASK_KEYSTORE` is `Some` — when the app has no keystore configured, `Rivers.keystore` is simply `undefined` (natural V8 behavior, same as `Rivers.http`).
+- **Decision:** No `#[cfg(feature = "keystore")]` gating needed in v8_engine.rs because riversd depends on rivers-runtime with `features = ["full"]` which includes `keystore`.
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 8
+
+---
+
 ## TaskContext & Engine SDK — Keystore Fields (2026-03-27)
 
 - **File:** `crates/rivers-runtime/src/process_pool/types.rs` — added `keystore: Option<Arc<rivers_keystore_engine::AppKeystore>>` field to `TaskContext` behind `#[cfg(feature = "keystore")]`. Updated Debug impl to include redacted keystore field.
