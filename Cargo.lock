@@ -4977,6 +4977,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rivers-keystore-engine"
+version = "0.50.2"
+dependencies = [
+ "age",
+ "base64 0.22.1",
+ "chrono",
+ "rand 0.8.5",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+ "zeroize",
+]
+
+[[package]]
 name = "rivers-lockbox"
 version = "0.50.2"
 dependencies = [

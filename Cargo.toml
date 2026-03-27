@@ -6,6 +6,7 @@ members = [
     "crates/rivers-drivers-builtin",
     "crates/rivers-storage-backends",
     "crates/rivers-lockbox-engine",
+    "crates/rivers-keystore-engine",
     "crates/rivers-driver-sdk",
     "crates/rivers-runtime",
     "crates/riversd",

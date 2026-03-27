@@ -6,6 +6,18 @@
 
 ---
 
+## Application Keystore Engine Crate (2026-03-27)
+
+- **File:** `crates/rivers-keystore-engine/Cargo.toml` — new crate manifest, rlib only, deps: age, base64, chrono, rand, serde, thiserror, toml, zeroize
+- **File:** `crates/rivers-keystore-engine/src/lib.rs` — AppKeystore types, AppKeystoreError, Zeroize/Drop, Age encrypt/decrypt, key generate/rotate/delete, 21 unit tests
+- **File:** `Cargo.toml` (workspace root) — added `rivers-keystore-engine` to workspace members
+- **Decision:** Followed `rivers-lockbox-engine` pattern: Age-encrypted TOML, Zeroize on drop, 0o600 file permissions
+- **Decision:** Only `aes-256` key type supported; `aes-gcm` crate deferred to Task 2
+- **Decision:** `EncryptResult` struct defined but no encrypt/decrypt functions yet (Task 2)
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 1
+
+---
+
 ## Dual Static/Dynamic Build Architecture (2026-03-21)
 
 **Goal:** Support both static monolithic binaries AND dynamic thin-binary+shared-lib builds.
