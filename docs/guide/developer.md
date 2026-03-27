@@ -391,6 +391,33 @@ function handler(ctx) {
 
     // Timing-safe comparison
     var equal = Rivers.crypto.timingSafeEqual("abc", "abc");
+
+    // AES-256-GCM encrypt/decrypt (requires [[keystores]] in resources.toml)
+    var enc = Rivers.crypto.encrypt("credential-key", "plaintext");
+    // enc = { ciphertext: "base64...", nonce: "base64...", key_version: 1 }
+
+    var dec = Rivers.crypto.decrypt("credential-key", enc.ciphertext, enc.nonce, {
+        key_version: enc.key_version
+    });
+    // dec === "plaintext"
+
+    // With additional authenticated data (AEAD)
+    var enc = Rivers.crypto.encrypt("credential-key", "data", { aad: "record-id" });
+    var dec = Rivers.crypto.decrypt("credential-key", enc.ciphertext, enc.nonce, {
+        key_version: enc.key_version, aad: "record-id"
+    });
+}
+```
+
+### `Rivers.keystore` (Key Metadata)
+
+Only available when `[[keystores]]` is declared in `resources.toml`. Key bytes never exposed to handler code.
+
+```javascript
+function handler(ctx) {
+    var exists = Rivers.keystore.has("credential-key");     // boolean
+    var info = Rivers.keystore.info("credential-key");
+    // info = { name: "credential-key", type: "aes-256", version: 2, created_at: "..." }
 }
 ```
 

@@ -12,7 +12,7 @@ Rivers application bundles containing one or more apps deployed to a Rivers V1 s
 ├── CHANGELOG.md               ← decisions log (create during build)
 ├── {app-service}/
 │   ├── manifest.toml          ← app manifest (type = "app-service")
-│   ├── resources.toml         ← datasources, services
+│   ├── resources.toml         ← datasources, keystores, services
 │   ├── schemas/               ← JSON schema files
 │   ├── app.toml               ← datasources, dataviews, views config
 │   └── libraries/             ← handlers, shared code
@@ -134,6 +134,30 @@ required   = true
 
 MUST: Use `nopassword = true` for faker, sqlite — omit `lockbox` entirely.
 MUST NOT: Include `lockbox` when `nopassword = true`.
+
+### Keystores (Application Encryption Keys)
+
+```toml
+[[keystores]]
+name     = "app-keys"
+lockbox  = "myapp/keystore-master-key"
+required = true
+```
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `name` | yes | Logical name — referenced in `[data.keystore.*]` in app.toml |
+| `lockbox` | yes | Lockbox alias for the Age identity that unlocks this keystore |
+| `required` | yes | If true, startup fails when keystore cannot be unlocked |
+
+Keystore file path is configured in `app.toml`:
+
+```toml
+[data.keystore.app-keys]
+path = "data/app.keystore"
+```
+
+Keys are managed via `rivers-keystore` CLI. Handlers use `Rivers.crypto.encrypt/decrypt` to encrypt/decrypt data, and `Rivers.keystore.has/info` for key metadata. Key bytes never leave Rust memory.
 
 ### Services (app-main only)
 
