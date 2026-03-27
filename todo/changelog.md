@@ -6,6 +6,18 @@
 
 ---
 
+## AES-256-GCM Encrypt/Decrypt Operations (2026-03-27)
+
+- **File:** `crates/rivers-keystore-engine/Cargo.toml` — added `aes-gcm = { workspace = true }` dependency
+- **File:** `crates/rivers-keystore-engine/src/lib.rs` — added standalone `encrypt()` and `decrypt()` functions, `encrypt_with_key()` and `decrypt_with_key()` convenience wrappers on `AppKeystore`, 17 new crypto unit tests (38 total)
+- **Decision:** Nonces always randomly generated via OsRng (never caller-supplied) per security spec
+- **Decision:** All crypto failures return generic `DecryptionFailed` to prevent padding oracle attacks
+- **Decision:** Convenience wrappers zeroize key bytes after use regardless of success/failure
+- **Decision:** Standalone functions accept raw key bytes (key_version=0), wrappers set real key_version
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 2
+
+---
+
 ## Application Keystore Engine Crate (2026-03-27)
 
 - **File:** `crates/rivers-keystore-engine/Cargo.toml` — new crate manifest, rlib only, deps: age, base64, chrono, rand, serde, thiserror, toml, zeroize

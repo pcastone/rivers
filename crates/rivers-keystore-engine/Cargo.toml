@@ -8,6 +8,7 @@ license.workspace = true
 crate-type = ["rlib"]
 
 [dependencies]
+aes-gcm = { workspace = true }
 age = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
