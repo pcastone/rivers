@@ -527,16 +527,38 @@ Built via `DataViewRequestBuilder`. Builder validates that name is non-empty and
 ```rust
 pub struct DataViewConfig {
     pub datasource: String,                      // must exist in datasources map
-    pub query: String,                           // raw statement passed to driver
+    pub query: Option<String>,                   // legacy: raw statement passed to driver
     pub parameters: Vec<DataViewParameterConfig>,
     pub return_schema: Option<String>,           // JSON Schema id from schemas map
     pub validate_result: bool,                   // default: false
     pub strict_parameters: bool,                 // default: false — rejects unknown params
+    pub invalidates: Vec<String>,                // DataViews to invalidate on write
     pub cache: Option<DataViewCachingPolicy>,
     pub on_event: Option<OnEventConfig>,         // event-driven trigger
     pub on_stream: Option<OnStreamConfig>,       // streaming DataView (WebSocket)
+
+    // Per-method CRUD queries — override `query` based on HTTP method.
+    // When present, these take precedence over the legacy `query` field.
+    pub get_query: Option<String>,
+    pub post_query: Option<String>,
+    pub put_query: Option<String>,
+    pub delete_query: Option<String>,
+
+    // Per-method schemas — validate request/response by HTTP method.
+    pub get_schema: Option<String>,
+    pub post_schema: Option<String>,
+    pub put_schema: Option<String>,
+    pub delete_schema: Option<String>,
+
+    // Per-method parameters — override `parameters` by HTTP method.
+    pub get_parameters: Vec<DataViewParameterConfig>,
+    pub post_parameters: Vec<DataViewParameterConfig>,
+    pub put_parameters: Vec<DataViewParameterConfig>,
+    pub delete_parameters: Vec<DataViewParameterConfig>,
 }
 ```
+
+When `execute()` receives an HTTP method, it resolves the query in order: method-specific query (e.g. `post_query`) → legacy `query` → error. This enables one DataView to serve CRUD operations across GET/POST/PUT/DELETE with different SQL statements per method.
 
 ### 6.5 DataViewParameterConfig
 
@@ -589,35 +611,45 @@ Cache keys use the canonical key format `cache:views:{view_name}:{param_hash}`, 
 ```rust
 pub struct DataViewCachingPolicy {
     pub ttl_seconds: u64,
-    pub l1_enabled: bool,
-    pub l1_max_entries: usize,
-    pub l2_enabled: bool,
-    pub l2_max_value_bytes: usize,  // results larger than this skip L2 storage
+    pub l1_enabled: bool,              // default: true
+    pub l1_max_bytes: usize,           // default: 157,286,400 (150 MB)
+    pub l1_max_entries: usize,         // default: 100,000 (safety valve)
+    pub l2_enabled: bool,              // default: false
+    pub l2_max_value_bytes: usize,     // default: 131,072 (128 KB) — results larger skip L2
 }
 ```
 
-L2 skipping protects the StorageEngine from very large result payloads. If a result exceeds `l2_max_value_bytes`, it is still cached in L1 (bounded by `l1_max_entries` LRU eviction).
+L1 eviction is memory-bounded — entries are evicted LRU when total estimated bytes exceed `l1_max_bytes` or entry count exceeds `l1_max_entries`. Memory is tracked via `QueryResult::estimated_bytes()` which walks rows and values for a proportional size estimate. L2 skipping protects the StorageEngine from very large result payloads.
+
+L1 uses a `HashMap<String, CachedEntry>` for O(1) key lookup paired with a `VecDeque<String>` for LRU eviction order.
 
 ### 7.3 DataViewCache trait
 
 ```rust
 #[async_trait]
 pub trait DataViewCache: Send + Sync {
+    /// Returns Arc to avoid deep-cloning large result sets on cache hits.
     async fn get(
         &self,
         view_name: &str,
         parameters: &HashMap<String, QueryValue>,
-    ) -> Result<Option<QueryResult>, DataViewError>;
+    ) -> Result<Option<Arc<QueryResult>>, DataViewError>;
+
+    /// `ttl_override` allows per-view TTL from DataViewCachingConfig.ttl_seconds.
     async fn set(
         &self,
         view_name: &str,
         parameters: &HashMap<String, QueryValue>,
         result: &QueryResult,
+        ttl_override: Option<u64>,
     ) -> Result<(), DataViewError>;
+
+    /// Invalidate cache entries for a specific view, or all entries if None.
+    async fn invalidate(&self, view_name: Option<&str>);
 }
 ```
 
-`NoopDataViewCache` is the default — zero allocation, always misses. Set a real implementation via `DataViewEngine::with_cache()`.
+Cache is always present as `Arc<dyn DataViewCache>` in `DataViewExecutor` — never `Option`. When no caching is configured, `NoopDataViewCache` is used as a zero-allocation fallback that always misses. `TieredDataViewCache` is always created at bundle load; L2 is only attached when a `StorageEngine` is available.
 
 ---
 

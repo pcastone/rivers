@@ -514,6 +514,23 @@ fn cmd_validate(args: &[String]) -> Result<(), String> {
         error_count += errors.len();
     }
 
+    // Check keystore files exist (warning only — file may be created at runtime)
+    // NOTE: Lockbox alias existence is verified at startup by bundle_loader.rs,
+    // not here. riversctl validate runs offline without Lockbox access.
+    // See rivers-feature-request-app-keystore.md §8.
+    let has_keystores = bundle.apps.iter().any(|a| !a.config.data.keystore.is_empty());
+    for app in &bundle.apps {
+        for (name, ks_config) in &app.config.data.keystore {
+            let ks_path = app.app_dir.join(&ks_config.path);
+            if !ks_path.exists() {
+                eprintln!("  [WARN]  keystore '{}' file not found: {}", name, ks_path.display());
+            }
+        }
+    }
+    if has_keystores {
+        eprintln!("  [NOTE]  Keystore lockbox aliases will be verified at startup (requires Lockbox access)");
+    }
+
     // Run driver name validation (hardcoded names — avoids pulling in DriverFactory + all drivers)
     let known: Vec<&str> = vec![
         // Built-in database drivers

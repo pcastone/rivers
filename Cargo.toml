@@ -6,6 +6,7 @@ members = [
     "crates/rivers-drivers-builtin",
     "crates/rivers-storage-backends",
     "crates/rivers-lockbox-engine",
+    "crates/rivers-keystore-engine",
     "crates/rivers-driver-sdk",
     "crates/rivers-runtime",
     "crates/riversd",
@@ -23,13 +24,14 @@ members = [
     "crates/rivers-engine-v8",
     "crates/rivers-engine-wasm",
     "crates/rivers-lockbox",
+    "crates/rivers-keystore",
     "crates/riversctl",
     "crates/riverpackage",
 ]
 
 [workspace.package]
 edition = "2021"
-version = "0.50.2"
+version = "0.51.0"
 license = "MIT"
 
 [workspace.dependencies]
@@ -90,6 +92,7 @@ tokio-tungstenite = "0.26"
 ldap3 = { version = "0.11", default-features = false, features = ["sync", "tls-rustls"] }
 wasmtime = "42"
 bcrypt = "0.15"
+aes-gcm = "0.10"
 percent-encoding = "2"
 
 [profile.release]

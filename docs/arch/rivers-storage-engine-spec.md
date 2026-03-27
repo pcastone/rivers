@@ -287,12 +287,15 @@ L2 invalidation via `list_keys` + delete is eventually consistent on Redis (SCAN
 ```rust
 pub struct DataViewCachingPolicy {
     pub ttl_seconds: u64,
-    pub l1_enabled: bool,           // default: true
-    pub l1_max_entries: usize,      // default: 1000
-    pub l2_enabled: bool,           // default: false
-    pub l2_max_value_bytes: usize,  // default: 524288 (512 KB)
+    pub l1_enabled: bool,              // default: true
+    pub l1_max_bytes: usize,           // default: 157,286,400 (150 MB)
+    pub l1_max_entries: usize,         // default: 100,000 (safety valve)
+    pub l2_enabled: bool,              // default: false
+    pub l2_max_value_bytes: usize,     // default: 131,072 (128 KB)
 }
 ```
+
+L1 eviction is memory-bounded — entries are evicted LRU when total estimated bytes exceed `l1_max_bytes` or entry count exceeds `l1_max_entries`. Memory is tracked via `QueryResult::estimated_bytes()`.
 
 ### 5.7 Cache bypass
 

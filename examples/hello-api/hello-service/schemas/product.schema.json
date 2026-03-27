@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "description": "Product record",
+  "fields": [
+    { "name": "id",          "type": "uuid",     "faker": "datatype.uuid",        "required": true  },
+    { "name": "name",        "type": "string",   "faker": "commerce.productName", "required": true  },
+    { "name": "price",       "type": "float",    "faker": "commerce.price",       "required": true  },
+    { "name": "category",    "type": "string",   "faker": "commerce.department",  "required": true  },
+    { "name": "description", "type": "string",   "faker": "commerce.productDescription", "required": false },
+    { "name": "in_stock",    "type": "boolean",  "faker": "datatype.boolean",     "required": true  },
+    { "name": "created_at",  "type": "datetime", "faker": "date.past",            "required": true  }
+  ]
+}

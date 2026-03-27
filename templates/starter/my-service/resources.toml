@@ -1,0 +1,16 @@
+# Datasources — add your datasources here
+# For real databases, replace faker with your driver and add lockbox alias
+[[datasources]]
+name       = "items"
+driver     = "faker"
+x-type     = "faker"
+nopassword = true
+required   = true
+
+# To add a real database:
+# [[datasources]]
+# name       = "db"
+# driver     = "postgresql"
+# x-type     = "postgresql"
+# lockbox    = "db/my-app"
+# required   = true

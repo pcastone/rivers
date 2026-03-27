@@ -1,0 +1,7 @@
+appName       = "dashboard-service"
+description   = "Real-time metrics dashboard with SSE streaming"
+version       = "1.0.0"
+type          = "app-service"
+appId         = "a1b2c3d4-0003-4000-8000-000000000001"
+entryPoint    = "service"
+source        = "examples/realtime-dashboard/dashboard-service"

@@ -1,0 +1,89 @@
+# ─────────────────────────────────────────────
+# Datasource
+# ─────────────────────────────────────────────
+
+[data.datasources.products]
+name       = "products"
+driver     = "faker"
+nopassword = true
+
+[data.datasources.products.config]
+locale                = "en_US"
+seed                  = 42
+max_records_per_query = 200
+
+# ─────────────────────────────────────────────
+# DataViews
+# ─────────────────────────────────────────────
+
+[data.dataviews.list_products]
+name          = "list_products"
+datasource    = "products"
+query         = "schemas/product.schema.json"
+return_schema = "schemas/product.schema.json"
+
+[data.dataviews.list_products.caching]
+ttl_seconds = 60
+
+[[data.dataviews.list_products.parameters]]
+name     = "limit"
+type     = "integer"
+required = false
+default  = 20
+
+[[data.dataviews.list_products.parameters]]
+name     = "offset"
+type     = "integer"
+required = false
+default  = 0
+
+# ─────────────────────────
+
+[data.dataviews.get_product]
+name          = "get_product"
+datasource    = "products"
+query         = "schemas/product.schema.json"
+return_schema = "schemas/product.schema.json"
+
+[data.dataviews.get_product.caching]
+ttl_seconds = 300
+
+[[data.dataviews.get_product.parameters]]
+name     = "id"
+type     = "uuid"
+required = true
+
+# ─────────────────────────────────────────────
+# Views
+# ─────────────────────────────────────────────
+
+[api.views.list_products]
+path            = "products"
+method          = "GET"
+view_type       = "Rest"
+response_format = "envelope"
+auth            = "none"
+
+[api.views.list_products.handler]
+type     = "dataview"
+dataview = "list_products"
+
+[api.views.list_products.parameter_mapping.query]
+limit  = "limit"
+offset = "offset"
+
+# ─────────────────────────
+
+[api.views.get_product]
+path            = "products/{id}"
+method          = "GET"
+view_type       = "Rest"
+response_format = "envelope"
+auth            = "none"
+
+[api.views.get_product.handler]
+type     = "dataview"
+dataview = "get_product"
+
+[api.views.get_product.parameter_mapping.path]
+id = "id"

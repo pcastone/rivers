@@ -1,6 +1,6 @@
 # CLI Reference
 
-Rivers ships four binaries: `riversd`, `riversctl`, `rivers-lockbox`, and `riverpackage`.
+Rivers ships five binaries: `riversd`, `riversctl`, `rivers-lockbox`, `rivers-keystore`, and `riverpackage`.
 
 ---
 
@@ -8,7 +8,7 @@ Rivers ships four binaries: `riversd`, `riversctl`, `rivers-lockbox`, and `river
 
 The main server. Loads config, resolves secrets, builds the runtime, and starts listening.
 
-**Startup sequence:** config -> LockBox -> bundle -> drivers -> DataView executor -> view router -> GraphQL schema -> admin server -> hot reload watcher -> TLS listener.
+**Startup sequence:** config -> LockBox -> bundle -> keystore unlock -> drivers -> DataView executor -> view router -> GraphQL schema -> admin server -> hot reload watcher -> TLS listener.
 
 **Exits on:** SIGTERM, SIGINT, ctrl+c.
 
@@ -85,6 +85,37 @@ rivers-lockbox rotate db_password "n3w_s3cret"
 rivers-lockbox rekey
 rivers-lockbox validate
 ```
+
+---
+
+## rivers-keystore
+
+Application keystore management CLI. Manages per-app AES-256 encryption keys stored in an Age-encrypted file. Master key sourced from `RIVERS_KEYSTORE_KEY` environment variable (Age identity string — typically provisioned via LockBox).
+
+| Command | Description |
+|---------|-------------|
+| `rivers-keystore init --path <path>` | Create a new application keystore. |
+| `rivers-keystore generate <name> --type aes-256 --path <path>` | Generate and store a new encryption key. |
+| `rivers-keystore list --path <path>` | List key names and metadata (never raw material). |
+| `rivers-keystore info <name> --path <path>` | Show key metadata (type, version, created). |
+| `rivers-keystore rotate <name> --path <path>` | Create new key version (old versions kept for decryption). |
+| `rivers-keystore delete <name> --path <path>` | Delete a key. |
+
+```sh
+export RIVERS_KEYSTORE_KEY="AGE-SECRET-KEY-..."
+rivers-keystore init --path data/app.keystore
+rivers-keystore generate credential-key --type aes-256 --path data/app.keystore
+rivers-keystore list --path data/app.keystore
+rivers-keystore info credential-key --path data/app.keystore
+rivers-keystore rotate credential-key --path data/app.keystore
+rivers-keystore delete credential-key --path data/app.keystore
+```
+
+Key differences from `rivers-lockbox`:
+- **Stores** typed encryption keys (AES-256), not arbitrary secrets
+- **Rotation** creates new versions (non-destructive), not replacement
+- **Scoped** to a single application, not system-wide
+- **Used by** handler code via `Rivers.crypto.encrypt/decrypt`
 
 ---
 

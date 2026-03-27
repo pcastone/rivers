@@ -278,6 +278,11 @@ struct HostContext {
 
 static HOST_CONTEXT: OnceLock<HostContext> = OnceLock::new();
 
+/// Application keystore for dynamic engine callbacks (App Keystore feature).
+/// Separate OnceLock because keystore resolution happens per-app and may
+/// occur after the main host context is wired.
+static HOST_KEYSTORE: OnceLock<Arc<rivers_keystore_engine::AppKeystore>> = OnceLock::new();
+
 /// Wire host subsystem references so callbacks can reach DataViewExecutor,
 /// StorageEngine, DriverFactory, and HTTP client. Called once during server
 /// startup after all subsystems are initialized.
@@ -295,6 +300,12 @@ pub fn set_host_context(
     });
 }
 
+/// Set the application keystore for dynamic engine callbacks.
+/// Called after `set_host_context` when an app has [[keystores]] declared.
+pub fn set_host_keystore(keystore: Arc<rivers_keystore_engine::AppKeystore>) {
+    let _ = HOST_KEYSTORE.set(keystore);
+}
+
 // ── Host Callback Implementations ───────────────────────────────
 
 /// Build the HostCallbacks table with all callbacks wired.
@@ -308,6 +319,10 @@ pub fn build_host_callbacks() -> HostCallbacks {
         http_request: Some(host_http_request),
         log_message: Some(host_log_message),
         free_buffer: Some(host_free_buffer),
+        keystore_has: Some(host_keystore_has),
+        keystore_info: Some(host_keystore_info),
+        crypto_encrypt: Some(host_crypto_encrypt),
+        crypto_decrypt: Some(host_crypto_decrypt),
     }
 }
 
@@ -664,4 +679,176 @@ extern "C" fn host_log_message(
 
 extern "C" fn host_free_buffer(ptr: *mut u8, len: usize) {
     unsafe { rivers_engine_sdk::free_json_buffer(ptr, len) };
+}
+
+// ── keystore_has ────────────────────────────────────────────────
+
+extern "C" fn host_keystore_has(
+    input_ptr: *const u8, input_len: usize,
+    out_ptr: *mut *mut u8, out_len: *mut usize,
+) -> i32 {
+    let keystore = match HOST_KEYSTORE.get() {
+        Some(ks) => ks,
+        None => {
+            let result = serde_json::json!({"exists": false});
+            write_output(out_ptr, out_len, &result);
+            return -1;
+        }
+    };
+
+    let input = match read_input(input_ptr, input_len) {
+        Ok(v) => v,
+        Err(_) => return -2,
+    };
+
+    let name = match input["name"].as_str() {
+        Some(n) => n,
+        None => return -3,
+    };
+
+    let exists = keystore.has_key(name);
+    let result = serde_json::json!({"exists": exists});
+    write_output(out_ptr, out_len, &result);
+    0
+}
+
+// ── keystore_info ───────────────────────────────────────────────
+
+extern "C" fn host_keystore_info(
+    input_ptr: *const u8, input_len: usize,
+    out_ptr: *mut *mut u8, out_len: *mut usize,
+) -> i32 {
+    let keystore = match HOST_KEYSTORE.get() {
+        Some(ks) => ks,
+        None => return -1,
+    };
+
+    let input = match read_input(input_ptr, input_len) {
+        Ok(v) => v,
+        Err(_) => return -2,
+    };
+
+    let name = match input["name"].as_str() {
+        Some(n) => n,
+        None => return -3,
+    };
+
+    match keystore.key_info(name) {
+        Ok(info) => {
+            let result = serde_json::json!({
+                "name": info.name,
+                "type": info.key_type,
+                "version": info.current_version,
+                "created_at": info.created.to_rfc3339(),
+            });
+            write_output(out_ptr, out_len, &result);
+            0
+        }
+        Err(e) => {
+            let err_val = serde_json::json!({"error": e.to_string()});
+            write_output(out_ptr, out_len, &err_val);
+            -10
+        }
+    }
+}
+
+// ── crypto_encrypt ──────────────────────────────────────────────
+
+extern "C" fn host_crypto_encrypt(
+    input_ptr: *const u8, input_len: usize,
+    out_ptr: *mut *mut u8, out_len: *mut usize,
+) -> i32 {
+    let keystore = match HOST_KEYSTORE.get() {
+        Some(ks) => ks,
+        None => return -1,
+    };
+
+    let input = match read_input(input_ptr, input_len) {
+        Ok(v) => v,
+        Err(_) => return -2,
+    };
+
+    let key_name = match input["key_name"].as_str() {
+        Some(n) => n,
+        None => return -3,
+    };
+    let plaintext = match input["plaintext"].as_str() {
+        Some(p) => p,
+        None => return -3,
+    };
+    let aad: Option<String> = input["aad"].as_str().map(|s| s.to_string());
+    let aad_bytes = aad.as_ref().map(|a| a.as_bytes());
+
+    match keystore.encrypt_with_key(key_name, plaintext.as_bytes(), aad_bytes) {
+        Ok(enc) => {
+            let result = serde_json::json!({
+                "ciphertext": enc.ciphertext,
+                "nonce": enc.nonce,
+                "key_version": enc.key_version,
+            });
+            write_output(out_ptr, out_len, &result);
+            0
+        }
+        Err(e) => {
+            let err_val = serde_json::json!({"error": e.to_string()});
+            write_output(out_ptr, out_len, &err_val);
+            -10
+        }
+    }
+}
+
+// ── crypto_decrypt ──────────────────────────────────────────────
+
+extern "C" fn host_crypto_decrypt(
+    input_ptr: *const u8, input_len: usize,
+    out_ptr: *mut *mut u8, out_len: *mut usize,
+) -> i32 {
+    let keystore = match HOST_KEYSTORE.get() {
+        Some(ks) => ks,
+        None => return -1,
+    };
+
+    let input = match read_input(input_ptr, input_len) {
+        Ok(v) => v,
+        Err(_) => return -2,
+    };
+
+    let key_name = match input["key_name"].as_str() {
+        Some(n) => n,
+        None => return -3,
+    };
+    let ciphertext = match input["ciphertext"].as_str() {
+        Some(c) => c,
+        None => return -3,
+    };
+    let nonce = match input["nonce"].as_str() {
+        Some(n) => n,
+        None => return -3,
+    };
+    let key_version = match input["key_version"].as_u64() {
+        Some(v) => v as u32,
+        None => return -3,
+    };
+    let aad: Option<String> = input["aad"].as_str().map(|s| s.to_string());
+    let aad_bytes = aad.as_ref().map(|a| a.as_bytes());
+
+    match keystore.decrypt_with_key(key_name, ciphertext, nonce, key_version, aad_bytes) {
+        Ok(plaintext_bytes) => {
+            let plaintext = String::from_utf8_lossy(&plaintext_bytes);
+            let result = serde_json::json!({"plaintext": plaintext});
+            write_output(out_ptr, out_len, &result);
+            0
+        }
+        Err(e) => {
+            // Generic error for auth failures — no oracle
+            let err_msg = match e {
+                rivers_keystore_engine::AppKeystoreError::KeyNotFound { .. } => e.to_string(),
+                rivers_keystore_engine::AppKeystoreError::KeyVersionNotFound { .. } => e.to_string(),
+                _ => "decryption failed".to_string(),
+            };
+            let err_val = serde_json::json!({"error": err_msg});
+            write_output(out_ptr, out_len, &err_val);
+            -10
+        }
+    }
 }

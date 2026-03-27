@@ -1,0 +1,159 @@
+# ─────────────────────────────────────────────
+# Datasource
+# ─────────────────────────────────────────────
+
+[data.datasources.todos]
+name       = "todos"
+driver     = "faker"
+nopassword = true
+
+[data.datasources.todos.config]
+locale                = "en_US"
+seed                  = 42
+max_records_per_query = 100
+
+# ─────────────────────────────────────────────
+# DataViews
+# ─────────────────────────────────────────────
+
+[data.dataviews.list_todos]
+name          = "list_todos"
+datasource    = "todos"
+query         = "schemas/todo.schema.json"
+return_schema = "schemas/todo.schema.json"
+
+[data.dataviews.list_todos.caching]
+ttl_seconds = 30
+
+[[data.dataviews.list_todos.parameters]]
+name     = "limit"
+type     = "integer"
+required = false
+default  = 20
+
+[[data.dataviews.list_todos.parameters]]
+name     = "offset"
+type     = "integer"
+required = false
+default  = 0
+
+# ─────────────────────────
+
+[data.dataviews.get_todo]
+name          = "get_todo"
+datasource    = "todos"
+query         = "schemas/todo.schema.json"
+return_schema = "schemas/todo.schema.json"
+
+[[data.dataviews.get_todo.parameters]]
+name     = "id"
+type     = "uuid"
+required = true
+
+# ─────────────────────────
+
+# Create/update DataViews — invalidate list cache on mutation
+[data.dataviews.create_todo]
+name          = "create_todo"
+datasource    = "todos"
+query         = "schemas/todo.schema.json"
+return_schema = "schemas/todo.schema.json"
+invalidates   = ["list_todos"]
+
+[data.dataviews.update_todo]
+name          = "update_todo"
+datasource    = "todos"
+query         = "schemas/todo.schema.json"
+return_schema = "schemas/todo.schema.json"
+invalidates   = ["list_todos", "get_todo"]
+
+# ─────────────────────────────────────────────
+# Views
+# ─────────────────────────────────────────────
+
+# GET /todos — list all
+[api.views.list_todos]
+path            = "todos"
+method          = "GET"
+view_type       = "Rest"
+response_format = "envelope"
+auth            = "none"
+
+[api.views.list_todos.handler]
+type     = "dataview"
+dataview = "list_todos"
+
+[api.views.list_todos.parameter_mapping.query]
+limit  = "limit"
+offset = "offset"
+
+# ─────────────────────────
+
+# GET /todos/{id} — get by id
+[api.views.get_todo]
+path            = "todos/{id}"
+method          = "GET"
+view_type       = "Rest"
+response_format = "envelope"
+auth            = "none"
+
+[api.views.get_todo.handler]
+type     = "dataview"
+dataview = "get_todo"
+
+[api.views.get_todo.parameter_mapping.path]
+id = "id"
+
+# ─────────────────────────
+
+# POST /todos — create (CodeComponent handler)
+[api.views.create_todo]
+path      = "todos"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.create_todo.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/todos.js"
+entrypoint = "createTodo"
+resources  = ["todos"]
+
+# ─────────────────────────
+
+# PUT /todos/{id} — update (CodeComponent handler)
+[api.views.update_todo]
+path      = "todos/{id}"
+method    = "PUT"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.update_todo.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/todos.js"
+entrypoint = "updateTodo"
+resources  = ["todos"]
+
+[api.views.update_todo.parameter_mapping.path]
+id = "id"
+
+# ─────────────────────────
+
+# DELETE /todos/{id} — delete (CodeComponent handler)
+[api.views.delete_todo]
+path      = "todos/{id}"
+method    = "DELETE"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.delete_todo.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/todos.js"
+entrypoint = "deleteTodo"
+resources  = ["todos"]
+
+[api.views.delete_todo.parameter_mapping.path]
+id = "id"

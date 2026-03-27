@@ -848,6 +848,7 @@ The admin API is a separate HTTP server on a separate socket. It is disabled by 
 | POST | `/admin/deploy/reject` | Reject a deployment |
 | POST | `/admin/deploy/promote` | Promote approved deployment to active |
 | GET | `/admin/deployments` | List all deployments and their status |
+| POST | `/admin/shutdown` | Gracefully shutdown the server |
 
 ### 15.2 Ed25519 authentication enforcement
 

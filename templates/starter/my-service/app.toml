@@ -1,0 +1,57 @@
+# ─────────────────────────────────────────────
+# Datasource
+# ─────────────────────────────────────────────
+
+[data.datasources.items]
+name       = "items"
+driver     = "faker"
+nopassword = true
+
+[data.datasources.items.config]
+locale                = "en_US"
+seed                  = 42
+max_records_per_query = 100
+
+# ─────────────────────────────────────────────
+# DataViews — define your queries here
+# ─────────────────────────────────────────────
+
+[data.dataviews.list_items]
+name          = "list_items"
+datasource    = "items"
+query         = "schemas/item.schema.json"
+return_schema = "schemas/item.schema.json"
+
+[data.dataviews.list_items.caching]
+ttl_seconds = 60
+
+[[data.dataviews.list_items.parameters]]
+name     = "limit"
+type     = "integer"
+required = false
+default  = 20
+
+[[data.dataviews.list_items.parameters]]
+name     = "offset"
+type     = "integer"
+required = false
+default  = 0
+
+# ─────────────────────────────────────────────
+# Views — define your endpoints here
+# ─────────────────────────────────────────────
+
+[api.views.list_items]
+path            = "items"
+method          = "GET"
+view_type       = "Rest"
+response_format = "envelope"
+auth            = "none"
+
+[api.views.list_items.handler]
+type     = "dataview"
+dataview = "list_items"
+
+[api.views.list_items.parameter_mapping.query]
+limit  = "limit"
+offset = "offset"

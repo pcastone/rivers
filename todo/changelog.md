@@ -2,7 +2,165 @@
 
 **Project:** Rivers declarative app-service framework
 **Stack:** Rust, Axum 0.8, V8 (rusty_v8 130), Wasmtime 27, tokio
-**Status:** V1 feature-complete — 200+ tasks, 1382 tests, 15 crates, 4 binaries, 16 drivers
+**Status:** V1 feature-complete — 200+ tasks, 1400+ tests, 17 crates, 5 binaries, 16 drivers
+
+---
+
+## v0.51.0 — Application Keystore & Encryption API (2026-03-27)
+
+**Feature:** Per-app AES-256-GCM encryption keys with `Rivers.keystore` and `Rivers.crypto.encrypt/decrypt` handler APIs. Master key from LockBox. Key bytes never leave Rust memory.
+
+**New crates (2):**
+- `rivers-keystore-engine` — keystore file format (Age-encrypted TOML), key management, AES-256-GCM encrypt/decrypt
+- `rivers-keystore` — CLI binary: init, generate, list, info, delete, rotate
+
+**New handler APIs:**
+- `Rivers.keystore.has(name)` — check if a key exists (boolean)
+- `Rivers.keystore.info(name)` — key metadata: `{ name, type, version, created_at }`
+- `Rivers.crypto.encrypt(keyName, plaintext, options?)` — returns `{ ciphertext, nonce, key_version }`
+- `Rivers.crypto.decrypt(keyName, ciphertext, nonce, options?)` — returns plaintext string
+- Optional AAD support via `options.aad` for both encrypt and decrypt
+
+**New config:**
+- `[[keystores]]` in `resources.toml` — declares keystore with Lockbox alias for master key
+- `[data.keystore.*]` in `app.toml` — configures keystore file path
+
+**Startup integration:**
+- Keystore master keys resolved from LockBox after datasource credential resolution
+- Unlocked keystores held in `KeystoreResolver` scoped by `"{entry_point}:{keystore_name}"`
+- Shared resolver available to V8/WASM engines via `process_pool::get_keystore_resolver()`
+
+**Validation:**
+- `riversctl validate` checks: name match, non-empty lockbox alias, no duplicate names, file existence (warning)
+- Lockbox alias existence verified at startup (not offline — documented limitation)
+
+**Security invariants:**
+- AES-256-GCM with 96-bit random nonce (OsRng) per encrypt call
+- Key bytes stay in Rust memory — never cross to V8/WASM heap
+- All auth tag failures produce generic "decryption failed" (no padding oracle)
+- Keys scoped to declaring app — cross-app access prevented
+- Zeroize on drop for all key material
+- File permissions 0o600 enforced
+
+**Test coverage:**
+- 60 tests in `rivers-keystore-engine` (38 unit + 22 integration)
+- 10 V8 engine tests (keystore.has/info, encrypt/decrypt round-trip, AAD, errors, nonce uniqueness, full workflow)
+- 5 validation tests, 5 engine SDK tests, 3 config parsing tests
+
+**Files changed:** 30+ files across 17 commits on `feature/app-keystore`
+
+**Spec:** `docs/rivers-feature-request-app-keystore.md` — all 14 acceptance criteria met
+
+---
+
+## Engine SDK HostCallbacks — keystore/crypto slots (2026-03-27)
+
+- **File:** `crates/rivers-engine-sdk/src/lib.rs` — added `keystore_has`, `keystore_info`, `crypto_encrypt`, `crypto_decrypt` callback slots to `HostCallbacks` struct.
+- **File:** `crates/riversd/src/engine_loader.rs` — implemented `host_keystore_has`, `host_keystore_info`, `host_crypto_encrypt`, `host_crypto_decrypt` extern "C" callbacks. Added `HOST_KEYSTORE` static OnceLock and `set_host_keystore()` for wiring. Wired all four in `build_host_callbacks()`.
+- **Decision:** Keystore uses a separate `OnceLock<Arc<AppKeystore>>` (`HOST_KEYSTORE`) rather than adding to `HostContext`, because keystore resolution is per-app and may happen after `set_host_context`. `set_host_keystore()` is the public API for wiring.
+- **Security:** Same generic-error pattern for decrypt failures as V8/WASM — only `KeyNotFound` and `KeyVersionNotFound` produce specific errors.
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 11
+
+---
+
+## WASM Host Function Bindings — keystore/crypto (2026-03-27)
+
+- **File:** `crates/riversd/src/process_pool/wasm_engine.rs` — added `TASK_KEYSTORE` thread-local (mirrors V8 pattern), `KeystoreContext` struct, `KeystoreGuard` for cleanup. Added 4 WASM host functions: `rivers.keystore_has`, `rivers.keystore_info`, `rivers.crypto_encrypt`, `rivers.crypto_decrypt`.
+- **Decision:** WASM host functions use the same thread-local pattern as V8. The `KeystoreGuard` RAII struct ensures cleanup on all exit paths (success, error, panic). The keystore is set from `ctx.keystore` at the start of `execute_wasm_task` and cleared in the guard's `Drop`.
+- **Decision:** Return convention: `keystore_has` returns 1/0/-1 (true/false/error). `keystore_info`, `crypto_encrypt`, `crypto_decrypt` return bytes-written on success (>0), -1 on error. This differs from V8 (which uses exceptions) but is idiomatic for WASM imports.
+- **Security:** Same generic-error pattern for decrypt failures. Key bytes never cross to WASM linear memory.
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 10
+
+---
+
+## V8 Host Functions — Rivers.crypto.encrypt/decrypt (2026-03-27)
+
+- **File:** `crates/riversd/src/process_pool/v8_engine.rs` — added `Rivers.crypto.encrypt(keyName, plaintext, options?)` and `Rivers.crypto.decrypt(keyName, ciphertext, nonce, options?)` V8 callbacks inside the existing `crypto_obj` block, after `hmac`.
+- **Decision:** Both functions are always registered on `Rivers.crypto` regardless of whether a keystore is configured. If called without a keystore, they throw "keystore not configured: no [[keystores]] resource declared". This matches the spec: encrypt/decrypt live on `Rivers.crypto`, but need a keystore to work.
+- **Decision:** No `aes-gcm` dependency needed in riversd — all crypto operations delegate to `rivers-keystore-engine::AppKeystore` methods (`encrypt_with_key`, `decrypt_with_key`) which handle key resolution and zeroization internally.
+- **Security:** Nonce generated by `OsRng` in `encrypt_with_key`, never caller-supplied. Key bytes resolved in Rust, never cross to V8. Plaintext not logged. Auth tag failures produce generic "decryption failed" message; only `KeyNotFound` and `KeyVersionNotFound` produce specific errors.
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 9
+
+---
+
+## V8 Host Functions — Rivers.keystore.has/info (2026-03-27)
+
+- **File:** `crates/riversd/src/process_pool/v8_engine.rs` — added `KeystoreContext` struct (wraps `Arc<AppKeystore>`), `TASK_KEYSTORE` thread-local, population in `TaskLocals::set()` from `ctx.keystore`, cleanup in `TaskLocals::drop()`.
+- **File:** `crates/riversd/src/process_pool/v8_engine.rs` — added `Rivers.keystore` namespace in `inject_rivers_global()` between `Rivers.crypto` and `Rivers.http`. Two functions: `has(name)` returns boolean, `info(name)` returns `{name, type, version, created_at}` object or throws on key-not-found.
+- **Decision:** `Rivers.keystore` is only injected when `TASK_KEYSTORE` is `Some` — when the app has no keystore configured, `Rivers.keystore` is simply `undefined` (natural V8 behavior, same as `Rivers.http`).
+- **Decision:** No `#[cfg(feature = "keystore")]` gating needed in v8_engine.rs because riversd depends on rivers-runtime with `features = ["full"]` which includes `keystore`.
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 8
+
+---
+
+## TaskContext & Engine SDK — Keystore Fields (2026-03-27)
+
+- **File:** `crates/rivers-runtime/src/process_pool/types.rs` — added `keystore: Option<Arc<rivers_keystore_engine::AppKeystore>>` field to `TaskContext` behind `#[cfg(feature = "keystore")]`. Updated Debug impl to include redacted keystore field.
+- **File:** `crates/rivers-engine-sdk/src/lib.rs` — added `keystore_available: bool` field to `SerializedTaskContext`. Updated round-trip test.
+- **File:** `crates/rivers-runtime/src/process_pool/bridge.rs` — added `keystore` field to `TaskContextBuilder` with `.keystore()` setter method. Updated `From<&TaskContext>` impl to serialize `keystore_available` using the same cfg-gated pattern as `lockbox_available`. Updated `build()` to pass keystore through.
+- **File:** `crates/rivers-engine-v8/src/lib.rs` — added `keystore_available: false` to test helper `make_ctx()`.
+- **File:** `crates/rivers-engine-wasm/src/lib.rs` — added `keystore_available: false` to test helper `make_ctx()`.
+- **Decision:** Builder method `.keystore()` is ready but not yet called at dispatch sites (view_engine, guard, etc.). The actual wiring will happen in Tasks 8-9 when V8/WASM host functions need the keystore context. This matches the lockbox pattern where the builder method exists but isn't wired at all dispatch sites yet.
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 7
+
+---
+
+## Keystore Resolver — Startup Integration (2026-03-27)
+
+- **File:** `crates/riversd/src/keystore.rs` — new module containing `KeystoreResolver` type. Thin wrapper over `HashMap<String, Arc<AppKeystore>>` keyed by `"{entry_point}:{keystore_name}"`. Methods: `new()`, `insert()`, `get()`, `is_empty()`.
+- **File:** `crates/riversd/src/server.rs` — added `keystore_resolver: Option<Arc<KeystoreResolver>>` field to `AppContext`, initialized as `None`.
+- **File:** `crates/riversd/src/bundle_loader.rs` — added keystore resolution block after LockBox resolution and before the per-app DataView/datasource loop. For each `[[keystores]]` entry: validates app.toml config exists, resolves file path, fetches master key from LockBox, decrypts keystore file, stores in resolver. Handles required vs optional keystores, zeroizes master key after use.
+- **File:** `crates/riversd/src/lib.rs` — added `pub mod keystore;` declaration.
+- **File:** `crates/riversd/Cargo.toml` — added `rivers-keystore-engine` as direct dependency.
+- **Decision:** Placed `KeystoreResolver` in its own `keystore.rs` module rather than inline in `bundle_loader.rs` for reuse by later tasks (V8/WASM host functions).
+- **Decision:** Follows the exact LockBox credential fetch pattern: `resolve_key_source()` + `fetch_secret_value()` + `zeroize()`.
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 6
+
+---
+
+## Bundle Validation — Keystore Checks (2026-03-27)
+
+- **File:** `crates/rivers-runtime/src/validate.rs` — added `validate_keystores()` function with 3 checks: name match between app.toml and resources.toml, non-empty lockbox alias, duplicate keystore names. Wired into `validate_bundle()` per-app loop. Added 5 unit tests.
+- **File:** `crates/riversctl/src/main.rs` — added keystore file existence warning in `cmd_validate()` after bundle validation, before driver check. Warns (not errors) if keystore file missing at configured path.
+- **Decision:** Keystore validation follows the same `Vec<String>` helper pattern as `validate_schema_files()` and `validate_duplicate_resource_names()`, returning strings that get wrapped with app label in the caller.
+- **Decision:** File existence is a warning only (in riversctl), not a validation error, since keystore files may be created after bundle deployment via the `rivers-keystore` CLI.
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 5
+
+---
+
+## rivers-keystore CLI Binary (2026-03-27)
+
+- **File:** `crates/rivers-keystore/Cargo.toml` — new crate manifest, binary, deps: rivers-keystore-engine, age, clap (derive)
+- **File:** `crates/rivers-keystore/src/main.rs` — CLI with clap derive: init, generate, list, info, delete, rotate commands
+- **File:** `Cargo.toml` (workspace root) — added `rivers-keystore` to workspace members
+- **Decision:** Used clap derive instead of manual arg parsing (unlike rivers-lockbox which uses manual parsing). Clap adds ~200KB but provides help, validation, and shell completions.
+- **Decision:** Dropped `base64` dependency from spec — engine handles all base64 internally, CLI never touches raw key material.
+- **Decision:** `read_identity()` returns both raw string and parsed identity to avoid `SecretBox<str>` issues with `age::x25519::Identity::to_string()` in age 0.11. The raw string is passed to `AppKeystore::load()`, the parsed identity is used for `to_public()`.
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 3
+
+---
+
+## AES-256-GCM Encrypt/Decrypt Operations (2026-03-27)
+
+- **File:** `crates/rivers-keystore-engine/Cargo.toml` — added `aes-gcm = { workspace = true }` dependency
+- **File:** `crates/rivers-keystore-engine/src/lib.rs` — added standalone `encrypt()` and `decrypt()` functions, `encrypt_with_key()` and `decrypt_with_key()` convenience wrappers on `AppKeystore`, 17 new crypto unit tests (38 total)
+- **Decision:** Nonces always randomly generated via OsRng (never caller-supplied) per security spec
+- **Decision:** All crypto failures return generic `DecryptionFailed` to prevent padding oracle attacks
+- **Decision:** Convenience wrappers zeroize key bytes after use regardless of success/failure
+- **Decision:** Standalone functions accept raw key bytes (key_version=0), wrappers set real key_version
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 2
+
+---
+
+## Application Keystore Engine Crate (2026-03-27)
+
+- **File:** `crates/rivers-keystore-engine/Cargo.toml` — new crate manifest, rlib only, deps: age, base64, chrono, rand, serde, thiserror, toml, zeroize
+- **File:** `crates/rivers-keystore-engine/src/lib.rs` — AppKeystore types, AppKeystoreError, Zeroize/Drop, Age encrypt/decrypt, key generate/rotate/delete, 21 unit tests
+- **File:** `Cargo.toml` (workspace root) — added `rivers-keystore-engine` to workspace members
+- **Decision:** Followed `rivers-lockbox-engine` pattern: Age-encrypted TOML, Zeroize on drop, 0o600 file permissions
+- **Decision:** Only `aes-256` key type supported; `aes-gcm` crate deferred to Task 2
+- **Decision:** `EncryptResult` struct defined but no encrypt/decrypt functions yet (Task 2)
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 1
 
 ---
 

@@ -156,6 +156,11 @@ pub fn validate_bundle(bundle: &LoadedBundle) -> Result<(), Vec<RiversError>> {
         for e in validate_schema_files(app) {
             errors.push(RiversError::Config(format!("[{}] {}", app_label, e)));
         }
+
+        // Keystore consistency checks
+        for e in validate_keystores(app) {
+            errors.push(RiversError::Config(format!("[{}] {}", app_label, e)));
+        }
     }
 
     // (K) Cross-app service reference check
@@ -229,6 +234,52 @@ fn validate_schema_files(app: &crate::loader::LoadedApp) -> Vec<String> {
     errors
 }
 
+/// Validate keystore consistency between app.toml and resources.toml.
+///
+/// Checks:
+/// 1. Every `[data.keystore.<name>]` in app.toml has a matching `[[keystores]]` in resources.toml
+/// 2. Every `[[keystores]]` entry has a non-empty `lockbox` alias
+/// 3. No duplicate keystore names in `[[keystores]]`
+fn validate_keystores(app: &crate::loader::LoadedApp) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    let resource_names: Vec<&str> = app.resources.keystores.iter()
+        .map(|k| k.name.as_str()).collect();
+
+    // 1. Every data.keystore.* must match a [[keystores]] declaration
+    for name in app.config.data.keystore.keys() {
+        if !resource_names.contains(&name.as_str()) {
+            errors.push(format!(
+                "keystore '{}' in app.toml has no matching [[keystores]] in resources.toml",
+                name,
+            ));
+        }
+    }
+
+    // 2. Non-empty lockbox alias
+    for ks in &app.resources.keystores {
+        if ks.lockbox.trim().is_empty() {
+            errors.push(format!(
+                "keystore '{}' has empty lockbox alias",
+                ks.name,
+            ));
+        }
+    }
+
+    // 3. No duplicate keystore names
+    let mut seen = std::collections::HashSet::new();
+    for ks in &app.resources.keystores {
+        if !seen.insert(&ks.name) {
+            errors.push(format!(
+                "duplicate keystore name '{}' in resources.toml",
+                ks.name,
+            ));
+        }
+    }
+
+    errors
+}
+
 /// (D) Validate that datasource drivers are known to the framework.
 ///
 /// Called from `bundle_loader.rs` after the DriverFactory is built,
@@ -250,4 +301,141 @@ pub fn validate_known_drivers(
         }
     }
     errors
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bundle::{
+        AppConfig, AppDataConfig, KeystoreDataConfig, ResourceKeystore, ResourcesConfig,
+    };
+    use crate::loader::LoadedApp;
+
+    /// Build a minimal `LoadedApp` for testing keystore validation.
+    fn test_app(resources: ResourcesConfig, config: AppConfig) -> LoadedApp {
+        LoadedApp {
+            manifest: crate::bundle::AppManifest {
+                app_name: "test-app".into(),
+                description: None,
+                version: None,
+                app_type: "app-service".into(),
+                app_id: "00000000-0000-0000-0000-000000000001".into(),
+                entry_point: None,
+                app_entry_point: None,
+                source: None,
+                spa: None,
+            },
+            resources,
+            config,
+            app_dir: std::path::PathBuf::from("/tmp/test-app"),
+        }
+    }
+
+    #[test]
+    fn valid_keystore_config_no_errors() {
+        let resources = ResourcesConfig {
+            keystores: vec![ResourceKeystore {
+                name: "app-keys".into(),
+                lockbox: "myapp/keystore-master".into(),
+                required: true,
+            }],
+            ..Default::default()
+        };
+        let mut keystore_map = std::collections::HashMap::new();
+        keystore_map.insert(
+            "app-keys".into(),
+            KeystoreDataConfig { path: "data/app.keystore".into() },
+        );
+        let config = AppConfig {
+            data: AppDataConfig { keystore: keystore_map, ..Default::default() },
+            ..Default::default()
+        };
+        let app = test_app(resources, config);
+        let errors = validate_keystores(&app);
+        assert!(errors.is_empty(), "expected no errors, got: {:?}", errors);
+    }
+
+    #[test]
+    fn keystore_in_app_toml_not_in_resources_errors() {
+        let resources = ResourcesConfig::default(); // no keystores declared
+        let mut keystore_map = std::collections::HashMap::new();
+        keystore_map.insert(
+            "orphan-ks".into(),
+            KeystoreDataConfig { path: "data/orphan.keystore".into() },
+        );
+        let config = AppConfig {
+            data: AppDataConfig { keystore: keystore_map, ..Default::default() },
+            ..Default::default()
+        };
+        let app = test_app(resources, config);
+        let errors = validate_keystores(&app);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("orphan-ks"));
+        assert!(errors[0].contains("no matching [[keystores]]"));
+    }
+
+    #[test]
+    fn empty_lockbox_alias_errors() {
+        let resources = ResourcesConfig {
+            keystores: vec![ResourceKeystore {
+                name: "bad-ks".into(),
+                lockbox: "   ".into(), // whitespace-only
+                required: true,
+            }],
+            ..Default::default()
+        };
+        let mut keystore_map = std::collections::HashMap::new();
+        keystore_map.insert(
+            "bad-ks".into(),
+            KeystoreDataConfig { path: "data/bad.keystore".into() },
+        );
+        let config = AppConfig {
+            data: AppDataConfig { keystore: keystore_map, ..Default::default() },
+            ..Default::default()
+        };
+        let app = test_app(resources, config);
+        let errors = validate_keystores(&app);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("empty lockbox alias"));
+    }
+
+    #[test]
+    fn duplicate_keystore_names_errors() {
+        let resources = ResourcesConfig {
+            keystores: vec![
+                ResourceKeystore {
+                    name: "dup-ks".into(),
+                    lockbox: "alias/one".into(),
+                    required: true,
+                },
+                ResourceKeystore {
+                    name: "dup-ks".into(),
+                    lockbox: "alias/two".into(),
+                    required: true,
+                },
+            ],
+            ..Default::default()
+        };
+        let mut keystore_map = std::collections::HashMap::new();
+        keystore_map.insert(
+            "dup-ks".into(),
+            KeystoreDataConfig { path: "data/dup.keystore".into() },
+        );
+        let config = AppConfig {
+            data: AppDataConfig { keystore: keystore_map, ..Default::default() },
+            ..Default::default()
+        };
+        let app = test_app(resources, config);
+        let errors = validate_keystores(&app);
+        assert!(errors.iter().any(|e| e.contains("duplicate keystore name")));
+    }
+
+    #[test]
+    fn no_keystores_backwards_compat() {
+        let resources = ResourcesConfig::default();
+        let config = AppConfig::default();
+        let app = test_app(resources, config);
+        let errors = validate_keystores(&app);
+        assert!(errors.is_empty(), "no keystores should produce no errors");
+    }
 }

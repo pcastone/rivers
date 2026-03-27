@@ -16,6 +16,7 @@ pub mod graphql;
 pub mod guard;
 pub mod hot_reload;
 pub mod health;
+pub mod keystore;
 pub mod init_handler;
 pub mod message_consumer;
 pub mod middleware;

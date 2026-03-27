@@ -92,6 +92,9 @@ pub struct TaskContext {
     /// Age identity string for LockBox decryption (Wave 9).
     #[cfg(feature = "lockbox")]
     pub lockbox_identity: Option<String>,
+    /// Unlocked application keystore for encrypt/decrypt (App Keystore feature).
+    #[cfg(feature = "keystore")]
+    pub keystore: Option<Arc<rivers_keystore_engine::AppKeystore>>,
 }
 
 impl std::fmt::Debug for TaskContext {
@@ -110,6 +113,8 @@ impl std::fmt::Debug for TaskContext {
             .field("dataview_executor", &self.dataview_executor.as_ref().map(|_| "<DataViewExecutor>"));
         #[cfg(feature = "lockbox")]
         s.field("lockbox", &self.lockbox.as_ref().map(|_| "<LockBoxResolver>"));
+        #[cfg(feature = "keystore")]
+        s.field("keystore", &self.keystore.as_ref().map(|_| "<AppKeystore>"));
         s.finish()
     }
 }

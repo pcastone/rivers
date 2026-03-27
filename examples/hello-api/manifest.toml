@@ -1,0 +1,4 @@
+bundleName    = "hello-api"
+bundleVersion = "1.0.0"
+source        = "examples/hello-api"
+apps          = ["hello-service"]

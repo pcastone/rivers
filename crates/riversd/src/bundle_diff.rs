@@ -320,6 +320,7 @@ mod tests {
                 config: rivers_runtime::AppConfig {
                     data: rivers_runtime::bundle::AppDataConfig {
                         datasources: HashMap::new(),
+                        keystore: HashMap::new(),
                         dataviews,
                     },
                     api: rivers_runtime::bundle::AppApiConfig { views },

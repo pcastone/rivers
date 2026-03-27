@@ -195,10 +195,11 @@ Required parameters with no value produce a 422 error. Optional parameters use t
 
 ```toml
 [data.dataviews.list_users.caching]
-ttl_seconds    = 60       # Cache lifetime
-l1_enabled     = true     # In-process LRU (default: true)
-l1_max_entries = 1000     # LRU capacity (default: 1000)
-l2_enabled     = false    # StorageEngine-backed (requires [storage_engine])
+ttl_seconds    = 60          # Cache lifetime
+l1_enabled     = true        # In-process LRU (default: true)
+l1_max_bytes   = 157286400   # L1 memory limit in bytes (default: 150 MB)
+l1_max_entries = 100000      # Hard cap on entries (default: 100,000)
+l2_enabled     = false       # StorageEngine-backed (requires [storage_engine])
 ```
 
 ### Cache Invalidation
@@ -390,6 +391,33 @@ function handler(ctx) {
 
     // Timing-safe comparison
     var equal = Rivers.crypto.timingSafeEqual("abc", "abc");
+
+    // AES-256-GCM encrypt/decrypt (requires [[keystores]] in resources.toml)
+    var enc = Rivers.crypto.encrypt("credential-key", "plaintext");
+    // enc = { ciphertext: "base64...", nonce: "base64...", key_version: 1 }
+
+    var dec = Rivers.crypto.decrypt("credential-key", enc.ciphertext, enc.nonce, {
+        key_version: enc.key_version
+    });
+    // dec === "plaintext"
+
+    // With additional authenticated data (AEAD)
+    var enc = Rivers.crypto.encrypt("credential-key", "data", { aad: "record-id" });
+    var dec = Rivers.crypto.decrypt("credential-key", enc.ciphertext, enc.nonce, {
+        key_version: enc.key_version, aad: "record-id"
+    });
+}
+```
+
+### `Rivers.keystore` (Key Metadata)
+
+Only available when `[[keystores]]` is declared in `resources.toml`. Key bytes never exposed to handler code.
+
+```javascript
+function handler(ctx) {
+    var exists = Rivers.keystore.has("credential-key");     // boolean
+    var info = Rivers.keystore.info("credential-key");
+    // info = { name: "credential-key", type: "aes-256", version: 2, created_at: "..." }
 }
 ```
 

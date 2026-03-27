@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "description": "Item record — replace with your own fields",
+  "fields": [
+    { "name": "id",         "type": "uuid",     "faker": "datatype.uuid",    "required": true  },
+    { "name": "name",       "type": "string",   "faker": "commerce.productName", "required": true  },
+    { "name": "description","type": "string",   "faker": "lorem.sentence",   "required": false },
+    { "name": "created_at", "type": "datetime", "faker": "date.past",        "required": true  }
+  ]
+}
