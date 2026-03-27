@@ -243,16 +243,20 @@ impl AppKeystore {
         // Zeroize plaintext
         toml_str.zeroize();
 
-        // Write to disk
-        std::fs::write(path, &encrypted)?;
+        // Atomic write: tempfile + rename to avoid torn keystore on crash
+        let dir = path.parent().unwrap_or(Path::new("."));
+        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+        std::io::Write::write_all(&mut tmp, &encrypted)?;
 
-        // Set permissions to 0o600 on Unix
+        // Set permissions to 0o600 on Unix before rename
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(path, perms)?;
+            std::fs::set_permissions(tmp.path(), perms)?;
         }
+
+        tmp.persist(path).map_err(|e| AppKeystoreError::Io(e.error))?;
 
         Ok(())
     }
@@ -428,6 +432,10 @@ impl AppKeystore {
     }
 
     /// Decode the current version's key material into raw bytes.
+    ///
+    /// # Security
+    /// The returned `Vec<u8>` contains raw key material. The caller **must**
+    /// zeroize it after use (e.g. `bytes.zeroize()`).
     pub fn current_key_bytes(&self, name: &str) -> Result<Vec<u8>, AppKeystoreError> {
         let key = self
             .get_key(name)
@@ -465,6 +473,10 @@ impl AppKeystore {
     }
 
     /// Decode a specific version's key material into raw bytes.
+    ///
+    /// # Security
+    /// The returned `Vec<u8>` contains raw key material. The caller **must**
+    /// zeroize it after use (e.g. `bytes.zeroize()`).
     pub fn versioned_key_bytes(
         &self,
         name: &str,
