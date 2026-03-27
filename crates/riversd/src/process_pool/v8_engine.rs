@@ -1438,6 +1438,162 @@ fn inject_rivers_global(
     let hmac_key = v8_str(scope, "hmac")?;
     crypto_obj.set(scope, hmac_key.into(), hmac_fn.into());
 
+    // Rivers.crypto.encrypt — AES-256-GCM encrypt via app keystore (App Keystore feature)
+    //
+    // Args:
+    //   0: keyName (string) — name of the key in the app keystore
+    //   1: plaintext (string) — data to encrypt
+    //   2: options (optional object) — { aad?: string }
+    // Returns: { ciphertext: string, nonce: string, key_version: number }
+    let encrypt_fn = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let key_name = args.get(0).to_rust_string_lossy(scope);
+            let plaintext = args.get(1).to_rust_string_lossy(scope);
+
+            // Extract optional AAD from options object
+            let aad: Option<String> = if args.length() > 2 && args.get(2).is_object() {
+                let opts = args.get(2).to_object(scope).unwrap();
+                let aad_key = v8::String::new(scope, "aad").unwrap();
+                let aad_val = opts.get(scope, aad_key.into());
+                aad_val.and_then(|v| {
+                    if v.is_undefined() || v.is_null() { None }
+                    else { Some(v.to_rust_string_lossy(scope)) }
+                })
+            } else {
+                None
+            };
+
+            let result = TASK_KEYSTORE.with(|ks| {
+                let ks = ks.borrow();
+                match ks.as_ref() {
+                    Some(ctx) => {
+                        let aad_bytes = aad.as_ref().map(|a| a.as_bytes());
+                        ctx.keystore.encrypt_with_key(&key_name, plaintext.as_bytes(), aad_bytes)
+                            .map_err(|e| e.to_string())
+                    }
+                    None => Err("keystore not configured: no [[keystores]] resource declared".to_string()),
+                }
+            });
+
+            match result {
+                Ok(enc) => {
+                    let obj = v8::Object::new(scope);
+
+                    let ct_key = v8::String::new(scope, "ciphertext").unwrap();
+                    let ct_val = v8::String::new(scope, &enc.ciphertext).unwrap();
+                    obj.set(scope, ct_key.into(), ct_val.into());
+
+                    let nonce_key = v8::String::new(scope, "nonce").unwrap();
+                    let nonce_val = v8::String::new(scope, &enc.nonce).unwrap();
+                    obj.set(scope, nonce_key.into(), nonce_val.into());
+
+                    let ver_key = v8::String::new(scope, "key_version").unwrap();
+                    let ver_val = v8::Integer::new(scope, enc.key_version as i32);
+                    obj.set(scope, ver_key.into(), ver_val.into());
+
+                    rv.set(obj.into());
+                }
+                Err(msg) => {
+                    let err_msg = v8::String::new(scope, &msg).unwrap();
+                    let exception = v8::Exception::error(scope, err_msg);
+                    scope.throw_exception(exception);
+                }
+            }
+        },
+    )
+    .ok_or_else(|| TaskError::Internal("failed to create Rivers.crypto.encrypt".into()))?;
+    let encrypt_key = v8_str(scope, "encrypt")?;
+    crypto_obj.set(scope, encrypt_key.into(), encrypt_fn.into());
+
+    // Rivers.crypto.decrypt — AES-256-GCM decrypt via app keystore (App Keystore feature)
+    //
+    // Args:
+    //   0: keyName (string) — name of the key in the app keystore
+    //   1: ciphertext (string) — base64 ciphertext from encrypt()
+    //   2: nonce (string) — base64 nonce from encrypt()
+    //   3: options (object) — { key_version: number, aad?: string }
+    // Returns: plaintext string
+    let decrypt_fn = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let key_name = args.get(0).to_rust_string_lossy(scope);
+            let ciphertext = args.get(1).to_rust_string_lossy(scope);
+            let nonce = args.get(2).to_rust_string_lossy(scope);
+
+            // Extract key_version (required) and aad (optional) from options
+            let (key_version, aad): (Option<u32>, Option<String>) = if args.length() > 3 && args.get(3).is_object() {
+                let opts = args.get(3).to_object(scope).unwrap();
+
+                let ver_key = v8::String::new(scope, "key_version").unwrap();
+                let ver_val = opts.get(scope, ver_key.into())
+                    .and_then(|v| v.int32_value(scope))
+                    .map(|v| v as u32);
+
+                let aad_key = v8::String::new(scope, "aad").unwrap();
+                let aad_val = opts.get(scope, aad_key.into())
+                    .and_then(|v| {
+                        if v.is_undefined() || v.is_null() { None }
+                        else { Some(v.to_rust_string_lossy(scope)) }
+                    });
+
+                (ver_val, aad_val)
+            } else {
+                (None, None)
+            };
+
+            let key_version = match key_version {
+                Some(v) => v,
+                None => {
+                    let msg = v8::String::new(scope, "Rivers.crypto.decrypt: options.key_version is required").unwrap();
+                    let exc = v8::Exception::error(scope, msg);
+                    scope.throw_exception(exc);
+                    return;
+                }
+            };
+
+            let result = TASK_KEYSTORE.with(|ks| {
+                let ks = ks.borrow();
+                match ks.as_ref() {
+                    Some(ctx) => {
+                        let aad_bytes = aad.as_ref().map(|a| a.as_bytes());
+                        ctx.keystore.decrypt_with_key(&key_name, &ciphertext, &nonce, key_version, aad_bytes)
+                            .map_err(|e| {
+                                // Generic error for auth failures — no oracle
+                                match e {
+                                    rivers_keystore_engine::AppKeystoreError::KeyNotFound { .. } => e.to_string(),
+                                    rivers_keystore_engine::AppKeystoreError::KeyVersionNotFound { .. } => e.to_string(),
+                                    _ => "decryption failed".to_string(),
+                                }
+                            })
+                    }
+                    None => Err("keystore not configured: no [[keystores]] resource declared".to_string()),
+                }
+            });
+
+            match result {
+                Ok(plaintext_bytes) => {
+                    let plaintext = String::from_utf8_lossy(&plaintext_bytes);
+                    if let Some(v8_str) = v8::String::new(scope, &plaintext) {
+                        rv.set(v8_str.into());
+                    }
+                }
+                Err(msg) => {
+                    let err_msg = v8::String::new(scope, &msg).unwrap();
+                    let exception = v8::Exception::error(scope, err_msg);
+                    scope.throw_exception(exception);
+                }
+            }
+        },
+    )
+    .ok_or_else(|| TaskError::Internal("failed to create Rivers.crypto.decrypt".into()))?;
+    let decrypt_key = v8_str(scope, "decrypt")?;
+    crypto_obj.set(scope, decrypt_key.into(), decrypt_fn.into());
+
     let crypto_key = v8_str(scope, "crypto")?;
     rivers_obj.set(scope, crypto_key.into(), crypto_obj.into());
 
