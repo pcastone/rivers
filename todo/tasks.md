@@ -284,7 +284,7 @@ Add keystore resource and data config types to `rivers-runtime`. This enables TO
 **Modify:** `crates/rivers-runtime/Cargo.toml`, `crates/rivers-runtime/src/bundle.rs`, `crates/rivers-runtime/src/lib.rs`
 **Reference:** `ResourceDatasource` in `bundle.rs:100-111`, `AppDataConfig` in `bundle.rs:143-153`
 
-- [ ] **T4.1** Add `rivers-keystore-engine` as optional dependency in `rivers-runtime/Cargo.toml`:
+- [x] **T4.1** Add `rivers-keystore-engine` as optional dependency in `rivers-runtime/Cargo.toml`:
   ```toml
   [dependencies]
   rivers-keystore-engine = { path = "../rivers-keystore-engine", optional = true }
@@ -294,7 +294,7 @@ Add keystore resource and data config types to `rivers-runtime`. This enables TO
   full = ["drivers", "storage-backends", "lockbox", "tls", "keystore"]
   ```
 
-- [ ] **T4.2** Add `ResourceKeystore` struct to `bundle.rs` (after `ResourceDatasource`):
+- [x] **T4.2** Add `ResourceKeystore` struct to `bundle.rs` (after `ResourceDatasource`):
   ```rust
   /// A keystore declaration in `resources.toml`.
   #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -307,7 +307,7 @@ Add keystore resource and data config types to `rivers-runtime`. This enables TO
   }
   ```
 
-- [ ] **T4.3** Add `keystores` field to `ResourcesConfig`:
+- [x] **T4.3** Add `keystores` field to `ResourcesConfig`:
   ```rust
   pub struct ResourcesConfig {
       #[serde(default)]
@@ -319,7 +319,7 @@ Add keystore resource and data config types to `rivers-runtime`. This enables TO
   }
   ```
 
-- [ ] **T4.4** Add `KeystoreDataConfig` struct to `bundle.rs`:
+- [x] **T4.4** Add `KeystoreDataConfig` struct to `bundle.rs`:
   ```rust
   /// Keystore configuration in `app.toml` under `[data.keystore.<name>]`.
   #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -329,7 +329,7 @@ Add keystore resource and data config types to `rivers-runtime`. This enables TO
   }
   ```
 
-- [ ] **T4.5** Add `keystore` field to `AppDataConfig`:
+- [x] **T4.5** Add `keystore` field to `AppDataConfig`:
   ```rust
   pub struct AppDataConfig {
       #[serde(default)]
@@ -341,9 +341,9 @@ Add keystore resource and data config types to `rivers-runtime`. This enables TO
   }
   ```
 
-- [ ] **T4.6** Re-export `ResourceKeystore` and `KeystoreDataConfig` from `rivers-runtime/src/lib.rs`
+- [x] **T4.6** Re-export `ResourceKeystore` and `KeystoreDataConfig` from `rivers-runtime/src/lib.rs`
 
-- [ ] **T4.7** Write a deserialization test:
+- [x] **T4.7** Write a deserialization test:
   ```rust
   #[test]
   fn parse_resources_with_keystores() {

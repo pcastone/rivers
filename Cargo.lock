@@ -5341,6 +5341,7 @@ dependencies = [
  "rivers-core-config",
  "rivers-driver-sdk",
  "rivers-engine-sdk",
+ "rivers-keystore-engine",
  "schemars",
  "serde",
  "serde_json",

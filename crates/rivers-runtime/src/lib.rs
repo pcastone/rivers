@@ -18,7 +18,7 @@ pub mod tiered_cache;
 pub mod validate;
 pub mod view;
 
-pub use bundle::{app_config_schema, bundle_manifest_schema, AppConfig, AppManifest, BundleManifest, ResourcesConfig};
+pub use bundle::{app_config_schema, bundle_manifest_schema, AppConfig, AppManifest, BundleManifest, KeystoreDataConfig, ResourceKeystore, ResourcesConfig};
 pub use datasource::DatasourceConfig;
 pub use dataview::{DataViewConfig, DataViewEngine, DataViewParameterConfig};
 pub use env_override::apply_environment_overrides;

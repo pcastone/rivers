@@ -91,6 +91,9 @@ pub struct ResourcesConfig {
     pub datasources: Vec<ResourceDatasource>,
 
     #[serde(default)]
+    pub keystores: Vec<ResourceKeystore>,
+
+    #[serde(default)]
     pub services: Vec<ServiceDependency>,
 }
 
@@ -106,6 +109,20 @@ pub struct ResourceDatasource {
     pub nopassword: bool,
     #[serde(rename = "x-type")]
     pub x_type: Option<String>,
+    #[serde(default = "default_true")]
+    pub required: bool,
+}
+
+/// A keystore declaration in `resources.toml`.
+///
+/// Per `rivers-feature-request-app-keystore.md` §5.1.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct ResourceKeystore {
+    /// Keystore name — must match a `[data.keystore.<name>]` section in app.toml.
+    pub name: String,
+    /// Lockbox alias for the master key that encrypts this keystore at rest.
+    pub lockbox: String,
+    /// Whether this keystore is required for the app to start.
     #[serde(default = "default_true")]
     pub required: bool,
 }
@@ -150,6 +167,19 @@ pub struct AppDataConfig {
     /// Named DataViews: `[data.dataviews.{id}]`
     #[serde(default)]
     pub dataviews: HashMap<String, DataViewConfig>,
+
+    /// Per-keystore config: `[data.keystore.{name}]`
+    #[serde(default)]
+    pub keystore: HashMap<String, KeystoreDataConfig>,
+}
+
+/// Keystore configuration in `app.toml` under `[data.keystore.<name>]`.
+///
+/// Per `rivers-feature-request-app-keystore.md` §5.2.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct KeystoreDataConfig {
+    /// Path to the keystore file, relative to app directory.
+    pub path: String,
 }
 
 /// `[api]` section of app.toml.
@@ -181,4 +211,56 @@ pub fn app_config_schema() -> serde_json::Value {
 /// Generate JSON Schema for `BundleManifest` (the bundle `manifest.toml` format).
 pub fn bundle_manifest_schema() -> serde_json::Value {
     serde_json::to_value(schemars::schema_for!(BundleManifest)).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_resources_with_keystores() {
+        let toml_str = r#"
+[[datasources]]
+name = "db"
+driver = "sqlite"
+nopassword = true
+
+[[keystores]]
+name = "app-keys"
+lockbox = "netinventory/keystore-master-key"
+required = true
+"#;
+        let config: ResourcesConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.keystores.len(), 1);
+        assert_eq!(config.keystores[0].name, "app-keys");
+        assert_eq!(config.keystores[0].lockbox, "netinventory/keystore-master-key");
+        assert!(config.keystores[0].required);
+    }
+
+    #[test]
+    fn parse_app_data_with_keystore() {
+        let toml_str = r#"
+[datasources.db]
+name = "db"
+driver = "sqlite"
+
+[keystore.app-keys]
+path = "data/app.keystore"
+"#;
+        let config: AppDataConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.keystore.len(), 1);
+        assert_eq!(config.keystore["app-keys"].path, "data/app.keystore");
+    }
+
+    #[test]
+    fn resources_without_keystores_still_parse() {
+        let toml_str = r#"
+[[datasources]]
+name = "db"
+driver = "sqlite"
+nopassword = true
+"#;
+        let config: ResourcesConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.keystores.is_empty());
+    }
 }
