@@ -650,6 +650,22 @@ impl AppKeystore {
     }
 }
 
+// ── Test Helpers ────────────────────────────────────────────────────
+
+/// Create a test keystore in memory with one AES-256 key.
+///
+/// Returns the keystore ready for use — no file I/O needed.
+/// Useful for integration tests that need a keystore without the full
+/// Lockbox/Age-encrypted-file lifecycle.
+pub fn create_test_keystore(key_name: &str) -> AppKeystore {
+    let mut ks = AppKeystore {
+        version: 1,
+        keys: Vec::new(),
+    };
+    ks.generate_key(key_name, "aes-256").unwrap();
+    ks
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]

@@ -66,17 +66,18 @@ use rivers_runtime::rivers_core::{DriverFactory, StorageEngine};
 // is None (which is the common case since dispatch sites don't call
 // .keystore() on the builder).
 
-static SHARED_KEYSTORE_RESOLVER: std::sync::OnceLock<Arc<crate::keystore::KeystoreResolver>> =
-    std::sync::OnceLock::new();
+static SHARED_KEYSTORE_RESOLVER: std::sync::RwLock<Option<Arc<crate::keystore::KeystoreResolver>>> =
+    std::sync::RwLock::new(None);
 
-/// Set the shared keystore resolver. Called once at startup after bundle loading.
+/// Set the shared keystore resolver. Called at startup after bundle loading.
+/// Can be called again on hot-reload or in tests.
 pub fn set_keystore_resolver(resolver: Arc<crate::keystore::KeystoreResolver>) {
-    let _ = SHARED_KEYSTORE_RESOLVER.set(resolver);
+    *SHARED_KEYSTORE_RESOLVER.write().unwrap() = Some(resolver);
 }
 
 /// Get the shared keystore resolver. Returns None if no keystores are configured.
-pub fn get_keystore_resolver() -> Option<&'static Arc<crate::keystore::KeystoreResolver>> {
-    SHARED_KEYSTORE_RESOLVER.get()
+pub fn get_keystore_resolver() -> Option<Arc<crate::keystore::KeystoreResolver>> {
+    SHARED_KEYSTORE_RESOLVER.read().unwrap().clone()
 }
 
 // ── Per-Pool Watchdog Types (Wave 10) ────────────────────────
