@@ -118,6 +118,92 @@ pub async fn load_and_wire_bundle(
             HashMap::new()
         };
 
+    // ── Keystore: resolve master keys and unlock keystores ──
+    let mut ks_resolver = crate::keystore::KeystoreResolver::new();
+    for app in &bundle.apps {
+        let entry_point = app
+            .manifest
+            .entry_point
+            .as_deref()
+            .unwrap_or(&app.manifest.app_name);
+
+        for ks_decl in &app.resources.keystores {
+            // 1. Check that the keystore is configured in app.toml
+            let ks_config = app.config.data.keystore.get(&ks_decl.name)
+                .ok_or_else(|| ServerError::Config(format!(
+                    "keystore '{}' declared in resources.toml but not configured in app.toml [data.keystore.{}]",
+                    ks_decl.name, ks_decl.name,
+                )))?;
+
+            // 2. Resolve the keystore file path (relative to app dir)
+            let ks_path = app.app_dir.join(&ks_config.path);
+            if !ks_path.exists() {
+                if ks_decl.required {
+                    return Err(ServerError::Config(format!(
+                        "keystore '{}' file not found: {}",
+                        ks_decl.name, ks_path.display(),
+                    )));
+                } else {
+                    tracing::warn!(keystore = %ks_decl.name, path = %ks_path.display(), "keystore: file not found (optional, skipping)");
+                    continue;
+                }
+            }
+
+            // 3. Resolve master key from LockBox
+            let lb_config = config.lockbox.as_ref().ok_or_else(|| {
+                ServerError::Config(format!(
+                    "keystore '{}' requires lockbox alias '{}' but [lockbox] is not configured",
+                    ks_decl.name, ks_decl.lockbox,
+                ))
+            })?;
+
+            let lb_resolver = ctx.lockbox_resolver.as_ref().ok_or_else(|| {
+                ServerError::Config(format!(
+                    "keystore '{}' requires lockbox but no lockbox resolver available",
+                    ks_decl.name,
+                ))
+            })?;
+
+            let metadata = lb_resolver.resolve(&ks_decl.lockbox)
+                .ok_or_else(|| ServerError::Config(format!(
+                    "keystore '{}': lockbox alias '{}' not found",
+                    ks_decl.name, ks_decl.lockbox,
+                )))?;
+
+            let keystore_path = std::path::Path::new(
+                lb_config.path.as_deref().unwrap_or(""),
+            );
+            let identity_str = rivers_runtime::rivers_core::lockbox::resolve_key_source(lb_config)
+                .map_err(|e| ServerError::Config(format!("lockbox key: {e}")))?;
+            let mut resolved = rivers_runtime::rivers_core::lockbox::fetch_secret_value(
+                metadata,
+                keystore_path,
+                identity_str.trim(),
+            ).map_err(|e| ServerError::Config(format!(
+                "keystore '{}': failed to fetch master key from lockbox: {e}",
+                ks_decl.name,
+            )))?;
+
+            // The resolved value IS the Age identity string for the keystore
+            let master_key = resolved.value.clone();
+            resolved.value.zeroize();
+
+            // 4. Load and decrypt the keystore
+            let keystore = rivers_keystore_engine::AppKeystore::load(&ks_path, &master_key)
+                .map_err(|e| ServerError::Config(format!(
+                    "keystore '{}': failed to unlock: {e}",
+                    ks_decl.name,
+                )))?;
+
+            let scoped_name = format!("{}:{}", entry_point, ks_decl.name);
+            tracing::info!(keystore = %ks_decl.name, app = %entry_point, keys = keystore.keys.len(), "keystore: unlocked");
+            ks_resolver.insert(scoped_name, keystore);
+        }
+    }
+    if !ks_resolver.is_empty() {
+        ctx.keystore_resolver = Some(Arc::new(ks_resolver));
+    }
+
     for app in &bundle.apps {
         let entry_point = app
             .manifest

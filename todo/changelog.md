@@ -6,6 +6,19 @@
 
 ---
 
+## Keystore Resolver — Startup Integration (2026-03-27)
+
+- **File:** `crates/riversd/src/keystore.rs` — new module containing `KeystoreResolver` type. Thin wrapper over `HashMap<String, Arc<AppKeystore>>` keyed by `"{entry_point}:{keystore_name}"`. Methods: `new()`, `insert()`, `get()`, `is_empty()`.
+- **File:** `crates/riversd/src/server.rs` — added `keystore_resolver: Option<Arc<KeystoreResolver>>` field to `AppContext`, initialized as `None`.
+- **File:** `crates/riversd/src/bundle_loader.rs` — added keystore resolution block after LockBox resolution and before the per-app DataView/datasource loop. For each `[[keystores]]` entry: validates app.toml config exists, resolves file path, fetches master key from LockBox, decrypts keystore file, stores in resolver. Handles required vs optional keystores, zeroizes master key after use.
+- **File:** `crates/riversd/src/lib.rs` — added `pub mod keystore;` declaration.
+- **File:** `crates/riversd/Cargo.toml` — added `rivers-keystore-engine` as direct dependency.
+- **Decision:** Placed `KeystoreResolver` in its own `keystore.rs` module rather than inline in `bundle_loader.rs` for reuse by later tasks (V8/WASM host functions).
+- **Decision:** Follows the exact LockBox credential fetch pattern: `resolve_key_source()` + `fetch_secret_value()` + `zeroize()`.
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 6
+
+---
+
 ## Bundle Validation — Keystore Checks (2026-03-27)
 
 - **File:** `crates/rivers-runtime/src/validate.rs` — added `validate_keystores()` function with 3 checks: name match between app.toml and resources.toml, non-empty lockbox alias, duplicate keystore names. Wired into `validate_bundle()` per-app loop. Added 5 unit tests.

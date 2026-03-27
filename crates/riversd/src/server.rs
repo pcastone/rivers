@@ -127,6 +127,8 @@ pub struct AppContext {
     pub loaded_bundle: Option<Arc<rivers_runtime::LoadedBundle>>,
     /// LockBox resolver — resolves credential names to metadata (no values in memory).
     pub lockbox_resolver: Option<Arc<rivers_runtime::rivers_core::lockbox::LockBoxResolver>>,
+    /// Application keystore resolver — holds unlocked keystores scoped by app.
+    pub keystore_resolver: Option<Arc<crate::keystore::KeystoreResolver>>,
     /// In-process EventBus — pub/sub with priority-tiered dispatch.
     /// Per spec §11: wired to broker bridges, message consumers, and middleware.
     pub event_bus: Arc<EventBus>,
@@ -175,6 +177,7 @@ impl AppContext {
             config_path: None,
             loaded_bundle: None,
             lockbox_resolver: None,
+            keystore_resolver: None,
             event_bus: Arc::new(EventBus::new()),
             storage_engine: None,
             session_manager: None,

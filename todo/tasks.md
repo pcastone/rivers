@@ -443,7 +443,7 @@ Startup flow (new steps marked with ←):
 8. Build DriverFactory, DataViewExecutor, etc.
 ```
 
-- [ ] **T6.1** Define `KeystoreResolver` — a thin wrapper holding unlocked keystores per app:
+- [x] **T6.1** Define `KeystoreResolver` — a thin wrapper holding unlocked keystores per app:
   ```rust
   /// Holds unlocked application keystores, scoped by app.
   /// Key: "{entry_point}:{keystore_name}", Value: unlocked AppKeystore
@@ -458,9 +458,9 @@ Startup flow (new steps marked with ←):
   ```
   Place in `riversd/src/bundle_loader.rs` or a new `riversd/src/keystore.rs` module.
 
-- [ ] **T6.2** Add `keystore_resolver: Option<Arc<KeystoreResolver>>` to `AppContext` in `server.rs:119-158`. Initialize as `None` in `AppContext::new()`.
+- [x] **T6.2** Add `keystore_resolver: Option<Arc<KeystoreResolver>>` to `AppContext` in `server.rs:119-158`. Initialize as `None` in `AppContext::new()`.
 
-- [ ] **T6.3** In `load_and_wire_bundle()`, after LockBox resolution block (line ~119) and before the per-app DataView/datasource loop (line ~121), add keystore resolution:
+- [x] **T6.3** In `load_and_wire_bundle()`, after LockBox resolution block (line ~119) and before the per-app DataView/datasource loop (line ~121), add keystore resolution:
   ```rust
   // ── Keystore: resolve master keys and unlock keystores ──
   let mut ks_resolver = KeystoreResolver::new();
@@ -488,7 +488,7 @@ Startup flow (new steps marked with ←):
   }
   ```
 
-- [ ] **T6.4** Handle error cases with clear messages:
+- [x] **T6.4** Handle error cases with clear messages:
   - Missing lockbox alias → `KeystoreLocked: lockbox alias 'X' not found`
   - Missing keystore file → `KeystoreNotFound: keystore file 'X' does not exist`
   - Decryption failure → `KeystoreLocked: cannot unlock keystore 'X' — check master key`
