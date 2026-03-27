@@ -6,6 +6,26 @@
 
 ---
 
+## Engine SDK HostCallbacks — keystore/crypto slots (2026-03-27)
+
+- **File:** `crates/rivers-engine-sdk/src/lib.rs` — added `keystore_has`, `keystore_info`, `crypto_encrypt`, `crypto_decrypt` callback slots to `HostCallbacks` struct.
+- **File:** `crates/riversd/src/engine_loader.rs` — implemented `host_keystore_has`, `host_keystore_info`, `host_crypto_encrypt`, `host_crypto_decrypt` extern "C" callbacks. Added `HOST_KEYSTORE` static OnceLock and `set_host_keystore()` for wiring. Wired all four in `build_host_callbacks()`.
+- **Decision:** Keystore uses a separate `OnceLock<Arc<AppKeystore>>` (`HOST_KEYSTORE`) rather than adding to `HostContext`, because keystore resolution is per-app and may happen after `set_host_context`. `set_host_keystore()` is the public API for wiring.
+- **Security:** Same generic-error pattern for decrypt failures as V8/WASM — only `KeyNotFound` and `KeyVersionNotFound` produce specific errors.
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 11
+
+---
+
+## WASM Host Function Bindings — keystore/crypto (2026-03-27)
+
+- **File:** `crates/riversd/src/process_pool/wasm_engine.rs` — added `TASK_KEYSTORE` thread-local (mirrors V8 pattern), `KeystoreContext` struct, `KeystoreGuard` for cleanup. Added 4 WASM host functions: `rivers.keystore_has`, `rivers.keystore_info`, `rivers.crypto_encrypt`, `rivers.crypto_decrypt`.
+- **Decision:** WASM host functions use the same thread-local pattern as V8. The `KeystoreGuard` RAII struct ensures cleanup on all exit paths (success, error, panic). The keystore is set from `ctx.keystore` at the start of `execute_wasm_task` and cleared in the guard's `Drop`.
+- **Decision:** Return convention: `keystore_has` returns 1/0/-1 (true/false/error). `keystore_info`, `crypto_encrypt`, `crypto_decrypt` return bytes-written on success (>0), -1 on error. This differs from V8 (which uses exceptions) but is idiomatic for WASM imports.
+- **Security:** Same generic-error pattern for decrypt failures. Key bytes never cross to WASM linear memory.
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 10
+
+---
+
 ## V8 Host Functions — Rivers.crypto.encrypt/decrypt (2026-03-27)
 
 - **File:** `crates/riversd/src/process_pool/v8_engine.rs` — added `Rivers.crypto.encrypt(keyName, plaintext, options?)` and `Rivers.crypto.decrypt(keyName, ciphertext, nonce, options?)` V8 callbacks inside the existing `crypto_obj` block, after `hmac`.

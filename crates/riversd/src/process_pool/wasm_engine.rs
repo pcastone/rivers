@@ -3,6 +3,7 @@
 //! Contains WASM module cache, execute_wasm_task, host function bindings,
 //! and fuel computation logic.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -11,6 +12,20 @@ use std::time::Instant;
 use super::{
     ActiveTask, ActiveTaskRegistry, TaskContext, TaskError, TaskResult, TaskTerminator,
 };
+
+// ── Thread-Local Keystore for WASM Host Functions ───────────────
+
+/// Application keystore context for WASM host functions (encrypt/decrypt + metadata).
+struct KeystoreContext {
+    keystore: Arc<rivers_keystore_engine::AppKeystore>,
+}
+
+thread_local! {
+    /// Application keystore for encrypt/decrypt and key metadata (App Keystore feature).
+    /// Set before WASM execution, cleared after. WASM host functions access this
+    /// to perform keystore operations without exposing key bytes to WASM memory.
+    static TASK_KEYSTORE: RefCell<Option<KeystoreContext>> = RefCell::new(None);
+}
 
 // ── V2.11: WASM Module Cache ────────────────────────────────────
 
@@ -51,6 +66,23 @@ pub(crate) async fn execute_wasm_task(
 ) -> Result<TaskResult, TaskError> {
     let result = tokio::task::spawn_blocking(move || {
         let start = Instant::now();
+
+        // Set up TASK_KEYSTORE thread-local for WASM host functions (App Keystore feature).
+        // TaskContext.keystore is Some when an app has [[keystores]] declared.
+        TASK_KEYSTORE.with(|ks| {
+            *ks.borrow_mut() = ctx.keystore.as_ref().map(|k| KeystoreContext {
+                keystore: k.clone(),
+            });
+        });
+
+        // Guard: ensure keystore is cleared on all exit paths
+        struct KeystoreGuard;
+        impl Drop for KeystoreGuard {
+            fn drop(&mut self) {
+                TASK_KEYSTORE.with(|ks| *ks.borrow_mut() = None);
+            }
+        }
+        let _ks_guard = KeystoreGuard;
 
         // X6.5: Shared engine with fuel AND epoch-based preemption.
         // Using a singleton engine so cached modules are compatible.
@@ -165,6 +197,241 @@ pub(crate) async fn execute_wasm_task(
                 }
             }
         }).map_err(|e| TaskError::Internal(format!("linker log_error: {e}")))?;
+
+        // ── Keystore host functions (App Keystore feature) ──────────
+        //
+        // These follow the read-from-WASM-memory / write-to-WASM-memory pattern:
+        //   Input:  (name_ptr, name_len) or (json_ptr, json_len)
+        //   Output: written to (out_ptr, out_len) caller-allocated buffer
+        //   Return: 0 success, 1 true, 0 false (for has), -1 error
+
+        // rivers.keystore_has(name_ptr, name_len) -> i32
+        // Returns 1 (true), 0 (false), -1 (error/no keystore)
+        linker.func_wrap("rivers", "keystore_has",
+            |mut caller: wasmtime::Caller<'_, wasmtime::StoreLimits>,
+             name_ptr: i32, name_len: i32| -> i32 {
+                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                    Some(m) => m,
+                    None => return -1,
+                };
+                let data = memory.data(&caller);
+                let name = match data.get(name_ptr as usize..(name_ptr as usize + name_len as usize)) {
+                    Some(slice) => String::from_utf8_lossy(slice).to_string(),
+                    None => return -1,
+                };
+
+                TASK_KEYSTORE.with(|ks| {
+                    let ks = ks.borrow();
+                    match ks.as_ref() {
+                        Some(ctx) => if ctx.keystore.has_key(&name) { 1 } else { 0 },
+                        None => -1,
+                    }
+                })
+            }
+        ).map_err(|e| TaskError::Internal(format!("linker keystore_has: {e}")))?;
+
+        // rivers.keystore_info(name_ptr, name_len, out_ptr, out_len) -> i32
+        // Writes JSON {"name","type","version","created_at"} to output buffer.
+        // Returns 0 on success, -1 on error.
+        linker.func_wrap("rivers", "keystore_info",
+            |mut caller: wasmtime::Caller<'_, wasmtime::StoreLimits>,
+             name_ptr: i32, name_len: i32, out_ptr: i32, out_len: i32| -> i32 {
+                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                    Some(m) => m,
+                    None => return -1,
+                };
+                let name = {
+                    let data = memory.data(&caller);
+                    match data.get(name_ptr as usize..(name_ptr as usize + name_len as usize)) {
+                        Some(slice) => String::from_utf8_lossy(slice).to_string(),
+                        None => return -1,
+                    }
+                };
+
+                let json_bytes = TASK_KEYSTORE.with(|ks| {
+                    let ks = ks.borrow();
+                    match ks.as_ref() {
+                        Some(ctx) => match ctx.keystore.key_info(&name) {
+                            Ok(info) => {
+                                let json = serde_json::json!({
+                                    "name": info.name,
+                                    "type": info.key_type,
+                                    "version": info.current_version,
+                                    "created_at": info.created.to_rfc3339(),
+                                });
+                                Ok(serde_json::to_vec(&json).unwrap_or_default())
+                            }
+                            Err(e) => Err(e.to_string()),
+                        },
+                        None => Err("keystore not configured".to_string()),
+                    }
+                });
+
+                match json_bytes {
+                    Ok(bytes) => {
+                        let out_buf_len = out_len as usize;
+                        if bytes.len() > out_buf_len {
+                            return -1; // output buffer too small
+                        }
+                        let data = memory.data_mut(&mut caller);
+                        if let Some(dest) = data.get_mut(out_ptr as usize..(out_ptr as usize + bytes.len())) {
+                            dest.copy_from_slice(&bytes);
+                            bytes.len() as i32 // return actual bytes written (>0 means success with length)
+                        } else {
+                            -1
+                        }
+                    }
+                    Err(_) => -1,
+                }
+            }
+        ).map_err(|e| TaskError::Internal(format!("linker keystore_info: {e}")))?;
+
+        // rivers.crypto_encrypt(input_ptr, input_len, out_ptr, out_len) -> i32
+        // Input JSON: {"key_name":"...", "plaintext":"...", "aad":"..."}
+        // Output JSON: {"ciphertext":"...", "nonce":"...", "key_version":N}
+        // Returns bytes written on success (>0), -1 on error.
+        linker.func_wrap("rivers", "crypto_encrypt",
+            |mut caller: wasmtime::Caller<'_, wasmtime::StoreLimits>,
+             input_ptr: i32, input_len: i32, out_ptr: i32, out_len: i32| -> i32 {
+                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                    Some(m) => m,
+                    None => return -1,
+                };
+                let input_json = {
+                    let data = memory.data(&caller);
+                    match data.get(input_ptr as usize..(input_ptr as usize + input_len as usize)) {
+                        Some(slice) => match serde_json::from_slice::<serde_json::Value>(slice) {
+                            Ok(v) => v,
+                            Err(_) => return -1,
+                        },
+                        None => return -1,
+                    }
+                };
+
+                let key_name = match input_json["key_name"].as_str() {
+                    Some(n) => n.to_string(),
+                    None => return -1,
+                };
+                let plaintext = match input_json["plaintext"].as_str() {
+                    Some(p) => p.to_string(),
+                    None => return -1,
+                };
+                let aad: Option<String> = input_json["aad"].as_str().map(|s| s.to_string());
+
+                let result = TASK_KEYSTORE.with(|ks| {
+                    let ks = ks.borrow();
+                    match ks.as_ref() {
+                        Some(ctx) => {
+                            let aad_bytes = aad.as_ref().map(|a| a.as_bytes());
+                            ctx.keystore.encrypt_with_key(&key_name, plaintext.as_bytes(), aad_bytes)
+                                .map_err(|e| e.to_string())
+                        }
+                        None => Err("keystore not configured".to_string()),
+                    }
+                });
+
+                match result {
+                    Ok(enc) => {
+                        let out_json = serde_json::json!({
+                            "ciphertext": enc.ciphertext,
+                            "nonce": enc.nonce,
+                            "key_version": enc.key_version,
+                        });
+                        let bytes = serde_json::to_vec(&out_json).unwrap_or_default();
+                        let out_buf_len = out_len as usize;
+                        if bytes.len() > out_buf_len {
+                            return -1;
+                        }
+                        let data = memory.data_mut(&mut caller);
+                        if let Some(dest) = data.get_mut(out_ptr as usize..(out_ptr as usize + bytes.len())) {
+                            dest.copy_from_slice(&bytes);
+                            bytes.len() as i32
+                        } else {
+                            -1
+                        }
+                    }
+                    Err(_) => -1,
+                }
+            }
+        ).map_err(|e| TaskError::Internal(format!("linker crypto_encrypt: {e}")))?;
+
+        // rivers.crypto_decrypt(input_ptr, input_len, out_ptr, out_len) -> i32
+        // Input JSON: {"key_name":"...", "ciphertext":"...", "nonce":"...", "key_version":N, "aad":"..."}
+        // Output: plaintext string bytes
+        // Returns bytes written on success (>0), -1 on error.
+        linker.func_wrap("rivers", "crypto_decrypt",
+            |mut caller: wasmtime::Caller<'_, wasmtime::StoreLimits>,
+             input_ptr: i32, input_len: i32, out_ptr: i32, out_len: i32| -> i32 {
+                let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                    Some(m) => m,
+                    None => return -1,
+                };
+                let input_json = {
+                    let data = memory.data(&caller);
+                    match data.get(input_ptr as usize..(input_ptr as usize + input_len as usize)) {
+                        Some(slice) => match serde_json::from_slice::<serde_json::Value>(slice) {
+                            Ok(v) => v,
+                            Err(_) => return -1,
+                        },
+                        None => return -1,
+                    }
+                };
+
+                let key_name = match input_json["key_name"].as_str() {
+                    Some(n) => n.to_string(),
+                    None => return -1,
+                };
+                let ciphertext = match input_json["ciphertext"].as_str() {
+                    Some(c) => c.to_string(),
+                    None => return -1,
+                };
+                let nonce = match input_json["nonce"].as_str() {
+                    Some(n) => n.to_string(),
+                    None => return -1,
+                };
+                let key_version = match input_json["key_version"].as_u64() {
+                    Some(v) => v as u32,
+                    None => return -1,
+                };
+                let aad: Option<String> = input_json["aad"].as_str().map(|s| s.to_string());
+
+                let result = TASK_KEYSTORE.with(|ks| {
+                    let ks = ks.borrow();
+                    match ks.as_ref() {
+                        Some(ctx) => {
+                            let aad_bytes = aad.as_ref().map(|a| a.as_bytes());
+                            ctx.keystore.decrypt_with_key(&key_name, &ciphertext, &nonce, key_version, aad_bytes)
+                                .map_err(|e| {
+                                    // Generic error for auth failures — no oracle
+                                    match e {
+                                        rivers_keystore_engine::AppKeystoreError::KeyNotFound { .. } => e.to_string(),
+                                        rivers_keystore_engine::AppKeystoreError::KeyVersionNotFound { .. } => e.to_string(),
+                                        _ => "decryption failed".to_string(),
+                                    }
+                                })
+                        }
+                        None => Err("keystore not configured".to_string()),
+                    }
+                });
+
+                match result {
+                    Ok(plaintext_bytes) => {
+                        let out_buf_len = out_len as usize;
+                        if plaintext_bytes.len() > out_buf_len {
+                            return -1;
+                        }
+                        let data = memory.data_mut(&mut caller);
+                        if let Some(dest) = data.get_mut(out_ptr as usize..(out_ptr as usize + plaintext_bytes.len())) {
+                            dest.copy_from_slice(&plaintext_bytes);
+                            plaintext_bytes.len() as i32
+                        } else {
+                            -1
+                        }
+                    }
+                    Err(_) => -1,
+                }
+            }
+        ).map_err(|e| TaskError::Internal(format!("linker crypto_decrypt: {e}")))?;
 
         // Instantiate module with host bindings
         let instance = linker

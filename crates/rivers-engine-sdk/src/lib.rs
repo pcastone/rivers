@@ -178,6 +178,46 @@ pub struct HostCallbacks {
     pub free_buffer: Option<
         extern "C" fn(ptr: *mut u8, len: usize),
     >,
+
+    /// Check if a key exists in the application keystore.
+    /// Input: JSON `{"name": "..."}`.
+    /// Output: JSON `{"exists": true/false}`.
+    pub keystore_has: Option<
+        extern "C" fn(
+            input_ptr: *const u8, input_len: usize,
+            out_ptr: *mut *mut u8, out_len: *mut usize,
+        ) -> i32,
+    >,
+
+    /// Get metadata for a key in the application keystore.
+    /// Input: JSON `{"name": "..."}`.
+    /// Output: JSON `{"name":"...", "type":"...", "version":N, "created_at":"..."}`.
+    pub keystore_info: Option<
+        extern "C" fn(
+            input_ptr: *const u8, input_len: usize,
+            out_ptr: *mut *mut u8, out_len: *mut usize,
+        ) -> i32,
+    >,
+
+    /// Encrypt data using the application keystore.
+    /// Input: JSON `{"key_name":"...", "plaintext":"...", "aad":"..."}`.
+    /// Output: JSON `{"ciphertext":"...", "nonce":"...", "key_version":N}`.
+    pub crypto_encrypt: Option<
+        extern "C" fn(
+            input_ptr: *const u8, input_len: usize,
+            out_ptr: *mut *mut u8, out_len: *mut usize,
+        ) -> i32,
+    >,
+
+    /// Decrypt data using the application keystore.
+    /// Input: JSON `{"key_name":"...", "ciphertext":"...", "nonce":"...", "key_version":N, "aad":"..."}`.
+    /// Output: JSON `{"plaintext":"..."}`.
+    pub crypto_decrypt: Option<
+        extern "C" fn(
+            input_ptr: *const u8, input_len: usize,
+            out_ptr: *mut *mut u8, out_len: *mut usize,
+        ) -> i32,
+    >,
 }
 
 // ── C-ABI Function Signatures ───────────────────────────────────
