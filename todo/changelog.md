@@ -6,6 +6,16 @@
 
 ---
 
+## Bundle Validation — Keystore Checks (2026-03-27)
+
+- **File:** `crates/rivers-runtime/src/validate.rs` — added `validate_keystores()` function with 3 checks: name match between app.toml and resources.toml, non-empty lockbox alias, duplicate keystore names. Wired into `validate_bundle()` per-app loop. Added 5 unit tests.
+- **File:** `crates/riversctl/src/main.rs` — added keystore file existence warning in `cmd_validate()` after bundle validation, before driver check. Warns (not errors) if keystore file missing at configured path.
+- **Decision:** Keystore validation follows the same `Vec<String>` helper pattern as `validate_schema_files()` and `validate_duplicate_resource_names()`, returning strings that get wrapped with app label in the caller.
+- **Decision:** File existence is a warning only (in riversctl), not a validation error, since keystore files may be created after bundle deployment via the `rivers-keystore` CLI.
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 5
+
+---
+
 ## rivers-keystore CLI Binary (2026-03-27)
 
 - **File:** `crates/rivers-keystore/Cargo.toml` — new crate manifest, binary, deps: rivers-keystore-engine, age, clap (derive)

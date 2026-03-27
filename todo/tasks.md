@@ -385,22 +385,22 @@ Add keystore-specific validation rules to catch config errors before startup.
 **Modify:** `crates/rivers-runtime/src/validate.rs`, `crates/riversctl/src/main.rs`
 **Reference:** Existing validation patterns in `validate.rs:57-95`
 
-- [ ] **T5.1** Add `validate_keystores()` function to `validate.rs`:
+- [x] **T5.1** Add `validate_keystores()` function to `validate.rs`:
   - Every `[data.keystore.<name>]` must match a `[[keystores]]` entry by name
   - Every `[[keystores]]` `lockbox` alias must be non-empty
   - No duplicate keystore names in `[[keystores]]`
 
-- [ ] **T5.2** Add file-existence check (used by `riversctl validate` with bundle path):
+- [x] **T5.2** Add file-existence check (used by `riversctl validate` with bundle path):
   - For each keystore, resolve `path` relative to app dir → check file exists
   - Return warning (not error) if file missing — file may be created later by CLI
 
-- [ ] **T5.3** Wire `validate_keystores()` into `validate_bundle()` (called by both `riversctl validate` and `load_and_wire_bundle`)
+- [x] **T5.3** Wire `validate_keystores()` into `validate_bundle()` (called by both `riversctl validate` and `load_and_wire_bundle`)
 
-- [ ] **T5.4** Add keystore checks to `riversctl/src/main.rs:cmd_validate()`:
+- [x] **T5.4** Add keystore checks to `riversctl/src/main.rs:cmd_validate()`:
   - Check keystore file existence at configured paths
   - Log warnings for missing files
 
-- [ ] **T5.5** Write unit tests:
+- [x] **T5.5** Write unit tests:
   - Valid config → passes
   - Name mismatch (keystore in app.toml not declared in resources.toml) → error
   - Empty lockbox alias → error

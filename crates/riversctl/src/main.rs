@@ -514,6 +514,16 @@ fn cmd_validate(args: &[String]) -> Result<(), String> {
         error_count += errors.len();
     }
 
+    // Check keystore files exist (warning only — file may be created at runtime)
+    for app in &bundle.apps {
+        for (name, ks_config) in &app.config.data.keystore {
+            let ks_path = app.app_dir.join(&ks_config.path);
+            if !ks_path.exists() {
+                eprintln!("  [WARN]  keystore '{}' file not found: {}", name, ks_path.display());
+            }
+        }
+    }
+
     // Run driver name validation (hardcoded names — avoids pulling in DriverFactory + all drivers)
     let known: Vec<&str> = vec![
         // Built-in database drivers
