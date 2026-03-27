@@ -135,10 +135,17 @@ impl TaskLocals {
                 _ => None,
             };
         });
+        // App keystore: first check TaskContext, then fall back to shared resolver.
+        // Dispatch sites don't call .keystore() on the builder, so ctx.keystore is
+        // typically None. The shared resolver (set at startup) provides the fallback.
+        let keystore_arc = ctx.keystore.clone().or_else(|| {
+            if ctx.app_id.is_empty() { return None; }
+            let resolver = super::get_keystore_resolver()?;
+            // app_id is used as entry_point in bundle loading
+            resolver.get_for_entry_point(&ctx.app_id).cloned()
+        });
         TASK_KEYSTORE.with(|ks| {
-            *ks.borrow_mut() = ctx.keystore.as_ref().map(|k| KeystoreContext {
-                keystore: k.clone(),
-            });
+            *ks.borrow_mut() = keystore_arc.map(|k| KeystoreContext { keystore: k });
         });
         TaskLocals
     }

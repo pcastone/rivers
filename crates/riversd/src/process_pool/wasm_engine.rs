@@ -67,12 +67,15 @@ pub(crate) async fn execute_wasm_task(
     let result = tokio::task::spawn_blocking(move || {
         let start = Instant::now();
 
-        // Set up TASK_KEYSTORE thread-local for WASM host functions (App Keystore feature).
-        // TaskContext.keystore is Some when an app has [[keystores]] declared.
+        // App keystore: first check TaskContext, then fall back to shared resolver.
+        // Same fallback pattern as V8 engine — dispatch sites don't call .keystore().
+        let keystore_arc = ctx.keystore.clone().or_else(|| {
+            if ctx.app_id.is_empty() { return None; }
+            let resolver = super::get_keystore_resolver()?;
+            resolver.get_for_entry_point(&ctx.app_id).cloned()
+        });
         TASK_KEYSTORE.with(|ks| {
-            *ks.borrow_mut() = ctx.keystore.as_ref().map(|k| KeystoreContext {
-                keystore: k.clone(),
-            });
+            *ks.borrow_mut() = keystore_arc.map(|k| KeystoreContext { keystore: k });
         });
 
         // Guard: ensure keystore is cleared on all exit paths

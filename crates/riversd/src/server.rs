@@ -1923,6 +1923,13 @@ pub async fn run_server_with_listener_and_log(
         ctx.driver_factory.clone(),
     );
 
+    // Wire shared keystore resolver for static engines (V8/WASM) — fallback when
+    // TaskContext.keystore is None (which is always the case since dispatch sites
+    // don't call .keystore() on the builder).
+    if let Some(ref resolver) = ctx.keystore_resolver {
+        crate::process_pool::set_keystore_resolver(resolver.clone());
+    }
+
     // Step 18: Maybe spawn admin server
     let admin_handle = if config.base.admin_api.enabled {
         // SHAPE-25: validate TLS and access control before binding
