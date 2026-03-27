@@ -207,13 +207,14 @@ Create the CLI binary for managing application keystores. Pattern: `crates/river
 **Create:** `crates/rivers-keystore/Cargo.toml`, `crates/rivers-keystore/src/main.rs`
 **Modify:** `Cargo.toml` (workspace root)
 
-- [ ] **T3.1** Create `crates/rivers-keystore/Cargo.toml`:
+- [x] **T3.1** Create `crates/rivers-keystore/Cargo.toml`:
   - `[[bin]] name = "rivers-keystore"`
-  - Dependencies: `rivers-keystore-engine` (path), `clap` (derive feature), `age` (workspace), `base64` (workspace)
+  - Dependencies: `rivers-keystore-engine` (path), `clap` (derive feature), `age` (workspace)
+  - Note: `base64` not needed — engine handles all base64 internally
 
-- [ ] **T3.2** Add `rivers-keystore` to workspace `members`
+- [x] **T3.2** Add `rivers-keystore` to workspace `members`
 
-- [ ] **T3.3** Implement CLI with clap derive:
+- [x] **T3.3** Implement CLI with clap derive:
   ```
   rivers-keystore <COMMAND>
 
@@ -225,29 +226,29 @@ Create the CLI binary for managing application keystores. Pattern: `crates/river
     delete     Delete a key
     rotate     Rotate a key (create new version)
   ```
-  Master key sourced from `RIVERS_KEYSTORE_KEY` env var (Age identity or hex).
+  Master key sourced from `RIVERS_KEYSTORE_KEY` env var (Age identity string).
 
-- [ ] **T3.4** Implement `init --path <path>`:
+- [x] **T3.4** Implement `init --path <path>`:
   - Read master key from env
   - Create empty `AppKeystore`, encrypt, write to `path`
   - Print confirmation
 
-- [ ] **T3.5** Implement `generate <name> --type aes-256 --path <path>`:
+- [x] **T3.5** Implement `generate <name> --type aes-256 --path <path>`:
   - Load keystore, generate key, save keystore
   - Print: `generated key "{name}" (aes-256, v1)`
 
-- [ ] **T3.6** Implement `list --path <path>`:
+- [x] **T3.6** Implement `list --path <path>`:
   - Load keystore, print table: name | type | version | created
   - Never print raw key material
 
-- [ ] **T3.7** Implement `info <name> --path <path>`:
+- [x] **T3.7** Implement `info <name> --path <path>`:
   - Load keystore, print key metadata
   - Output: `name=<name> type=aes-256 version=<N> versions=<count> created=<ts>`
 
-- [ ] **T3.8** Implement `delete <name> --path <path>`:
+- [x] **T3.8** Implement `delete <name> --path <path>`:
   - Load keystore, delete key, save keystore
 
-- [ ] **T3.9** Implement `rotate <name> --path <path>`:
+- [x] **T3.9** Implement `rotate <name> --path <path>`:
   - Load keystore, rotate key, save keystore
   - Print: `rotated key "{name}" (v{old} → v{new})`
 

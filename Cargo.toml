@@ -24,6 +24,7 @@ members = [
     "crates/rivers-engine-v8",
     "crates/rivers-engine-wasm",
     "crates/rivers-lockbox",
+    "crates/rivers-keystore",
     "crates/riversctl",
     "crates/riverpackage",
 ]

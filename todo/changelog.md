@@ -6,6 +6,18 @@
 
 ---
 
+## rivers-keystore CLI Binary (2026-03-27)
+
+- **File:** `crates/rivers-keystore/Cargo.toml` — new crate manifest, binary, deps: rivers-keystore-engine, age, clap (derive)
+- **File:** `crates/rivers-keystore/src/main.rs` — CLI with clap derive: init, generate, list, info, delete, rotate commands
+- **File:** `Cargo.toml` (workspace root) — added `rivers-keystore` to workspace members
+- **Decision:** Used clap derive instead of manual arg parsing (unlike rivers-lockbox which uses manual parsing). Clap adds ~200KB but provides help, validation, and shell completions.
+- **Decision:** Dropped `base64` dependency from spec — engine handles all base64 internally, CLI never touches raw key material.
+- **Decision:** `read_identity()` returns both raw string and parsed identity to avoid `SecretBox<str>` issues with `age::x25519::Identity::to_string()` in age 0.11. The raw string is passed to `AppKeystore::load()`, the parsed identity is used for `to_public()`.
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 3
+
+---
+
 ## AES-256-GCM Encrypt/Decrypt Operations (2026-03-27)
 
 - **File:** `crates/rivers-keystore-engine/Cargo.toml` — added `aes-gcm = { workspace = true }` dependency
