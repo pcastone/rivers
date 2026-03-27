@@ -51,6 +51,8 @@ pub struct SerializedTaskContext {
     pub store_namespace: Option<String>,
     /// Whether LockBox is available for HMAC key resolution.
     pub lockbox_available: bool,
+    /// Whether application keystore is available for encrypt/decrypt.
+    pub keystore_available: bool,
     /// Inline source code (for testing — `_source` in args).
     pub inline_source: Option<String>,
     /// Pre-fetched DataView data (keyed by DataView name).
@@ -252,6 +254,7 @@ mod tests {
             storage_available: true,
             store_namespace: Some("app:app-1".into()),
             lockbox_available: false,
+            keystore_available: false,
             inline_source: None,
             prefetched_data: HashMap::new(),
             libs: vec![],

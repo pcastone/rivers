@@ -6,6 +6,18 @@
 
 ---
 
+## TaskContext & Engine SDK — Keystore Fields (2026-03-27)
+
+- **File:** `crates/rivers-runtime/src/process_pool/types.rs` — added `keystore: Option<Arc<rivers_keystore_engine::AppKeystore>>` field to `TaskContext` behind `#[cfg(feature = "keystore")]`. Updated Debug impl to include redacted keystore field.
+- **File:** `crates/rivers-engine-sdk/src/lib.rs` — added `keystore_available: bool` field to `SerializedTaskContext`. Updated round-trip test.
+- **File:** `crates/rivers-runtime/src/process_pool/bridge.rs` — added `keystore` field to `TaskContextBuilder` with `.keystore()` setter method. Updated `From<&TaskContext>` impl to serialize `keystore_available` using the same cfg-gated pattern as `lockbox_available`. Updated `build()` to pass keystore through.
+- **File:** `crates/rivers-engine-v8/src/lib.rs` — added `keystore_available: false` to test helper `make_ctx()`.
+- **File:** `crates/rivers-engine-wasm/src/lib.rs` — added `keystore_available: false` to test helper `make_ctx()`.
+- **Decision:** Builder method `.keystore()` is ready but not yet called at dispatch sites (view_engine, guard, etc.). The actual wiring will happen in Tasks 8-9 when V8/WASM host functions need the keystore context. This matches the lockbox pattern where the builder method exists but isn't wired at all dispatch sites yet.
+- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 7
+
+---
+
 ## Keystore Resolver — Startup Integration (2026-03-27)
 
 - **File:** `crates/riversd/src/keystore.rs` — new module containing `KeystoreResolver` type. Thin wrapper over `HashMap<String, Arc<AppKeystore>>` keyed by `"{entry_point}:{keystore_name}"`. Methods: `new()`, `insert()`, `get()`, `is_empty()`.

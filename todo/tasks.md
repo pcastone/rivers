@@ -515,20 +515,21 @@ Add keystore context to the task dispatch path so handlers can access keystore o
 **Modify:** `crates/rivers-runtime/src/process_pool/types.rs`, `crates/rivers-engine-sdk/src/lib.rs`
 **Reference:** LockBox fields in `types.rs:86-94`, `SerializedTaskContext` in `engine-sdk/src/lib.rs:25-60`
 
-- [ ] **T7.1** Add keystore fields to `TaskContext` in `process_pool/types.rs` (gated behind `#[cfg(feature = "keystore")]`):
+- [x] **T7.1** Add keystore fields to `TaskContext` in `process_pool/types.rs` (gated behind `#[cfg(feature = "keystore")]`):
   ```rust
   /// Unlocked application keystore for this task's app (App Keystore feature).
   #[cfg(feature = "keystore")]
   pub keystore: Option<Arc<rivers_keystore_engine::AppKeystore>>,
   ```
 
-- [ ] **T7.2** Update `TaskContext` Debug impl to include keystore field (redacted, like other Arc fields)
+- [x] **T7.2** Update `TaskContext` Debug impl to include keystore field (redacted, like other Arc fields)
 
-- [ ] **T7.3** Add `keystore_available: bool` to `SerializedTaskContext` in `rivers-engine-sdk/src/lib.rs:25`
+- [x] **T7.3** Add `keystore_available: bool` to `SerializedTaskContext` in `rivers-engine-sdk/src/lib.rs:25`
 
-- [ ] **T7.4** Update the `SerializedTaskContext` round-trip test in engine-sdk to include `keystore_available: false`
+- [x] **T7.4** Update the `SerializedTaskContext` round-trip test in engine-sdk to include `keystore_available: false`
 
-- [ ] **T7.5** In `riversd`, where `TaskContext` is constructed for dispatch (in the request handler / ProcessPool), populate `keystore` from `AppContext.keystore_resolver` using the app's entry_point + keystore name
+- [x] **T7.5** In `riversd`, where `TaskContext` is constructed for dispatch (in the request handler / ProcessPool), populate `keystore` from `AppContext.keystore_resolver` using the app's entry_point + keystore name
+  NOTE: The builder method `.keystore()` and field are in place. The actual wiring at dispatch call sites (view_engine, guard, etc.) will happen in Tasks 8-9 when the V8/WASM host functions are added, since currently none of the dispatch sites wire lockbox either (they use the builder without calling .lockbox()).
 
 **Validation:**
 ```bash

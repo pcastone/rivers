@@ -752,6 +752,7 @@ mod tests {
             storage_available: false,
             store_namespace: None,
             lockbox_available: false,
+            keystore_available: false,
             inline_source: Some(source.into()),
             prefetched_data: HashMap::new(),
             libs: vec![],

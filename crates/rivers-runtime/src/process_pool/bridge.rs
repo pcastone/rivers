@@ -49,6 +49,12 @@ impl From<&TaskContext> for crate::rivers_engine_sdk::SerializedTaskContext {
                 #[cfg(not(feature = "lockbox"))]
                 { false }
             },
+            keystore_available: {
+                #[cfg(feature = "keystore")]
+                { ctx.keystore.is_some() }
+                #[cfg(not(feature = "keystore"))]
+                { false }
+            },
             inline_source: ctx.args.get("_source").and_then(|v| v.as_str()).map(|s| s.to_string()),
             prefetched_data: HashMap::new(),
             libs: ctx.libs.iter()
@@ -87,6 +93,8 @@ pub struct TaskContextBuilder {
     lockbox_keystore_path: Option<std::path::PathBuf>,
     #[cfg(feature = "lockbox")]
     lockbox_identity: Option<String>,
+    #[cfg(feature = "keystore")]
+    keystore: Option<Arc<rivers_keystore_engine::AppKeystore>>,
     entrypoint: Option<Entrypoint>,
     args: serde_json::Value,
     trace_id: String,
@@ -113,6 +121,8 @@ impl TaskContextBuilder {
             lockbox_keystore_path: None,
             #[cfg(feature = "lockbox")]
             lockbox_identity: None,
+            #[cfg(feature = "keystore")]
+            keystore: None,
             entrypoint: None,
             args: serde_json::Value::Null,
             trace_id: String::new(),
@@ -172,6 +182,12 @@ impl TaskContextBuilder {
         self.lockbox = Some(resolver);
         self.lockbox_keystore_path = Some(keystore_path);
         self.lockbox_identity = Some(identity);
+        self
+    }
+
+    #[cfg(feature = "keystore")]
+    pub fn keystore(mut self, ks: Arc<rivers_keystore_engine::AppKeystore>) -> Self {
+        self.keystore = Some(ks);
         self
     }
 
@@ -237,6 +253,8 @@ impl TaskContextBuilder {
             lockbox_keystore_path: self.lockbox_keystore_path,
             #[cfg(feature = "lockbox")]
             lockbox_identity: self.lockbox_identity,
+            #[cfg(feature = "keystore")]
+            keystore: self.keystore,
         })
     }
 }
