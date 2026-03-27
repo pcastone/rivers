@@ -2,7 +2,54 @@
 
 **Project:** Rivers declarative app-service framework
 **Stack:** Rust, Axum 0.8, V8 (rusty_v8 130), Wasmtime 27, tokio
-**Status:** V1 feature-complete — 200+ tasks, 1382 tests, 15 crates, 4 binaries, 16 drivers
+**Status:** V1 feature-complete — 200+ tasks, 1400+ tests, 17 crates, 5 binaries, 16 drivers
+
+---
+
+## v0.51.0 — Application Keystore & Encryption API (2026-03-27)
+
+**Feature:** Per-app AES-256-GCM encryption keys with `Rivers.keystore` and `Rivers.crypto.encrypt/decrypt` handler APIs. Master key from LockBox. Key bytes never leave Rust memory.
+
+**New crates (2):**
+- `rivers-keystore-engine` — keystore file format (Age-encrypted TOML), key management, AES-256-GCM encrypt/decrypt
+- `rivers-keystore` — CLI binary: init, generate, list, info, delete, rotate
+
+**New handler APIs:**
+- `Rivers.keystore.has(name)` — check if a key exists (boolean)
+- `Rivers.keystore.info(name)` — key metadata: `{ name, type, version, created_at }`
+- `Rivers.crypto.encrypt(keyName, plaintext, options?)` — returns `{ ciphertext, nonce, key_version }`
+- `Rivers.crypto.decrypt(keyName, ciphertext, nonce, options?)` — returns plaintext string
+- Optional AAD support via `options.aad` for both encrypt and decrypt
+
+**New config:**
+- `[[keystores]]` in `resources.toml` — declares keystore with Lockbox alias for master key
+- `[data.keystore.*]` in `app.toml` — configures keystore file path
+
+**Startup integration:**
+- Keystore master keys resolved from LockBox after datasource credential resolution
+- Unlocked keystores held in `KeystoreResolver` scoped by `"{entry_point}:{keystore_name}"`
+- Shared resolver available to V8/WASM engines via `process_pool::get_keystore_resolver()`
+
+**Validation:**
+- `riversctl validate` checks: name match, non-empty lockbox alias, no duplicate names, file existence (warning)
+- Lockbox alias existence verified at startup (not offline — documented limitation)
+
+**Security invariants:**
+- AES-256-GCM with 96-bit random nonce (OsRng) per encrypt call
+- Key bytes stay in Rust memory — never cross to V8/WASM heap
+- All auth tag failures produce generic "decryption failed" (no padding oracle)
+- Keys scoped to declaring app — cross-app access prevented
+- Zeroize on drop for all key material
+- File permissions 0o600 enforced
+
+**Test coverage:**
+- 60 tests in `rivers-keystore-engine` (38 unit + 22 integration)
+- 10 V8 engine tests (keystore.has/info, encrypt/decrypt round-trip, AAD, errors, nonce uniqueness, full workflow)
+- 5 validation tests, 5 engine SDK tests, 3 config parsing tests
+
+**Files changed:** 30+ files across 17 commits on `feature/app-keystore`
+
+**Spec:** `docs/rivers-feature-request-app-keystore.md` — all 14 acceptance criteria met
 
 ---
 
