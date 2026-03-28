@@ -1328,4 +1328,592 @@ updated = "2026-01-01T00:00:00Z"
         assert_eq!(resolver.key_count(), 0);
         assert!(resolver.entry_names().is_empty());
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // T9.1: Key Source Resolution Tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn resolve_key_source_env_success() {
+        let (identity_str, _) = generate_keypair();
+        let env_var = "TEST_LOCKBOX_KEY_ENV_1";
+        // SAFETY: set_var is not thread-safe, but each test uses a unique var name.
+        unsafe { std::env::set_var(env_var, &identity_str); }
+
+        let config = LockBoxConfig {
+            key_source: "env".to_string(),
+            key_env_var: env_var.to_string(),
+            ..Default::default()
+        };
+
+        let result = resolve_key_source(&config).unwrap();
+        assert_eq!(result, identity_str);
+    }
+
+    #[test]
+    fn resolve_key_source_env_missing_var() {
+        let config = LockBoxConfig {
+            key_source: "env".to_string(),
+            key_env_var: "TEST_LOCKBOX_KEY_ENV_MISSING_9999".to_string(),
+            ..Default::default()
+        };
+
+        let result = resolve_key_source(&config);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            LockBoxError::KeySourceUnavailable { reason } => {
+                assert!(reason.contains("not set"), "reason was: {}", reason);
+            }
+            other => panic!("expected KeySourceUnavailable, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn resolve_key_source_env_empty_var() {
+        let env_var = "TEST_LOCKBOX_KEY_ENV_EMPTY_2";
+        unsafe { std::env::set_var(env_var, ""); }
+
+        let config = LockBoxConfig {
+            key_source: "env".to_string(),
+            key_env_var: env_var.to_string(),
+            ..Default::default()
+        };
+
+        let result = resolve_key_source(&config);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            LockBoxError::KeySourceUnavailable { reason } => {
+                assert!(reason.contains("empty"), "reason was: {}", reason);
+            }
+            other => panic!("expected KeySourceUnavailable, got: {:?}", other),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_key_source_file_success() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (identity_str, _) = generate_keypair();
+        let dir = tempfile::tempdir().unwrap();
+        let key_file = dir.path().join("age.key");
+        std::fs::write(&key_file, &identity_str).unwrap();
+        std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let config = LockBoxConfig {
+            key_source: "file".to_string(),
+            key_file: Some(key_file.to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+
+        let result = resolve_key_source(&config).unwrap();
+        assert_eq!(result, identity_str);
+    }
+
+    #[test]
+    fn resolve_key_source_file_missing_path() {
+        let config = LockBoxConfig {
+            key_source: "file".to_string(),
+            key_file: Some("/nonexistent/age.key".to_string()),
+            ..Default::default()
+        };
+
+        let result = resolve_key_source(&config);
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_key_source_file_insecure_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let key_file = dir.path().join("age.key");
+        std::fs::write(&key_file, "AGE-SECRET-KEY-DUMMY").unwrap();
+        std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let config = LockBoxConfig {
+            key_source: "file".to_string(),
+            key_file: Some(key_file.to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+
+        let result = resolve_key_source(&config);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            LockBoxError::InsecureFilePermissions { mode, .. } => {
+                assert_eq!(mode, 0o644);
+            }
+            other => panic!("expected InsecureFilePermissions, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn resolve_key_source_agent_unsupported() {
+        let config = LockBoxConfig {
+            key_source: "agent".to_string(),
+            agent_socket: Some("/tmp/age-agent.sock".to_string()),
+            ..Default::default()
+        };
+
+        let result = resolve_key_source(&config);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            LockBoxError::KeySourceUnavailable { reason } => {
+                assert!(reason.contains("not yet supported"), "reason was: {}", reason);
+            }
+            other => panic!("expected KeySourceUnavailable, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn resolve_key_source_unknown_source() {
+        let config = LockBoxConfig {
+            key_source: "magic".to_string(),
+            ..Default::default()
+        };
+
+        let result = resolve_key_source(&config);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            LockBoxError::KeySourceUnavailable { reason } => {
+                assert!(reason.contains("magic"), "reason was: {}", reason);
+            }
+            other => panic!("expected KeySourceUnavailable, got: {:?}", other),
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // T9.2: Startup Resolve Integration Tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_resolve_complete_sequence() {
+        let (identity_str, recipient_str) = generate_keypair();
+
+        // Create keystore on disk
+        let dir = tempfile::tempdir().unwrap();
+        let keystore_path = dir.path().join("startup.rkeystore");
+
+        let keystore = Keystore {
+            version: 1,
+            entries: vec![
+                make_entry("postgres/prod", "pg://secret", "string", &["pg-prod"]),
+                make_entry("redis/cache", "redis://secret", "string", &[]),
+            ],
+        };
+        encrypt_keystore(&keystore_path, &recipient_str, &keystore).unwrap();
+
+        // Set env var for key source
+        let env_var = "TEST_LOCKBOX_KEY_STARTUP_3";
+        unsafe { std::env::set_var(env_var, &identity_str); }
+
+        let config = LockBoxConfig {
+            path: Some(keystore_path.to_str().unwrap().to_string()),
+            key_source: "env".to_string(),
+            key_env_var: env_var.to_string(),
+            ..Default::default()
+        };
+
+        let references = vec![
+            LockBoxReference {
+                uri: "lockbox://postgres/prod".to_string(),
+                name: "postgres/prod".to_string(),
+                datasource: "primary_db".to_string(),
+            },
+            LockBoxReference {
+                uri: "lockbox://redis/cache".to_string(),
+                name: "redis/cache".to_string(),
+                datasource: "cache_store".to_string(),
+            },
+        ];
+
+        let (resolver, resolved) = startup_resolve(&config, &references).unwrap();
+
+        assert_eq!(resolver.key_count(), 3); // 2 names + 1 alias
+        assert!(resolver.contains("postgres/prod"));
+        assert!(resolver.contains("pg-prod"));
+        assert!(resolver.contains("redis/cache"));
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved["primary_db"].name, "postgres/prod");
+        assert_eq!(resolved["cache_store"].name, "redis/cache");
+    }
+
+    #[test]
+    fn startup_resolve_relative_path_rejected() {
+        let env_var = "TEST_LOCKBOX_KEY_RELPATH_4";
+        unsafe { std::env::set_var(env_var, "AGE-SECRET-KEY-DUMMY"); }
+
+        let config = LockBoxConfig {
+            path: Some("relative/path.rkeystore".to_string()),
+            key_source: "env".to_string(),
+            key_env_var: env_var.to_string(),
+            ..Default::default()
+        };
+
+        let result = startup_resolve(&config, &[]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            LockBoxError::MalformedKeystore { reason } => {
+                assert!(reason.contains("absolute"), "reason was: {}", reason);
+            }
+            other => panic!("expected MalformedKeystore (relative path), got: {:?}", other),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_resolve_file_not_found() {
+        let env_var = "TEST_LOCKBOX_KEY_NOTFOUND_5";
+        unsafe { std::env::set_var(env_var, "AGE-SECRET-KEY-DUMMY"); }
+
+        let config = LockBoxConfig {
+            path: Some("/tmp/nonexistent_lockbox_test.rkeystore".to_string()),
+            key_source: "env".to_string(),
+            key_env_var: env_var.to_string(),
+            ..Default::default()
+        };
+
+        let result = startup_resolve(&config, &[]);
+        assert!(result.is_err());
+        // Could be KeystoreNotFound or InsecureFilePermissions depending on
+        // whether check_file_permissions runs first (file doesn't exist).
+        match result.unwrap_err() {
+            LockBoxError::KeystoreNotFound { .. } => {} // expected
+            other => panic!("expected KeystoreNotFound, got: {:?}", other),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_resolve_wrong_key() {
+        let (_, recipient_str) = generate_keypair();
+        let (wrong_identity_str, _) = generate_keypair();
+
+        // Create keystore encrypted with one key
+        let dir = tempfile::tempdir().unwrap();
+        let keystore_path = dir.path().join("wrongkey.rkeystore");
+
+        let keystore = Keystore {
+            version: 1,
+            entries: vec![make_entry("secret", "value", "string", &[])],
+        };
+        encrypt_keystore(&keystore_path, &recipient_str, &keystore).unwrap();
+
+        // Provide the wrong key via env
+        let env_var = "TEST_LOCKBOX_KEY_WRONGKEY_6";
+        unsafe { std::env::set_var(env_var, &wrong_identity_str); }
+
+        let config = LockBoxConfig {
+            path: Some(keystore_path.to_str().unwrap().to_string()),
+            key_source: "env".to_string(),
+            key_env_var: env_var.to_string(),
+            ..Default::default()
+        };
+
+        let result = startup_resolve(&config, &[]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            LockBoxError::DecryptionFailed => {} // expected
+            other => panic!("expected DecryptionFailed, got: {:?}", other),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_resolve_missing_reference() {
+        let (identity_str, recipient_str) = generate_keypair();
+
+        let dir = tempfile::tempdir().unwrap();
+        let keystore_path = dir.path().join("missingref.rkeystore");
+
+        let keystore = Keystore {
+            version: 1,
+            entries: vec![make_entry("postgres/prod", "pg://secret", "string", &[])],
+        };
+        encrypt_keystore(&keystore_path, &recipient_str, &keystore).unwrap();
+
+        let env_var = "TEST_LOCKBOX_KEY_MISSINGREF_7";
+        unsafe { std::env::set_var(env_var, &identity_str); }
+
+        let config = LockBoxConfig {
+            path: Some(keystore_path.to_str().unwrap().to_string()),
+            key_source: "env".to_string(),
+            key_env_var: env_var.to_string(),
+            ..Default::default()
+        };
+
+        let references = vec![LockBoxReference {
+            uri: "lockbox://nonexistent".to_string(),
+            name: "nonexistent".to_string(),
+            datasource: "some_ds".to_string(),
+        }];
+
+        let result = startup_resolve(&config, &references);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            LockBoxError::EntryNotFound { uri, datasource } => {
+                assert_eq!(uri, "lockbox://nonexistent");
+                assert_eq!(datasource, "some_ds");
+            }
+            other => panic!("expected EntryNotFound, got: {:?}", other),
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // T9.3: Error Variant Coverage
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn error_malformed_keystore_invalid_toml() {
+        let (identity_str, recipient_str) = generate_keypair();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad_toml.rkeystore");
+
+        // Encrypt something that is valid UTF-8 but not valid TOML for Keystore
+        let garbage_toml = "this is not valid [[toml structure {{{";
+        let recipient: age::x25519::Recipient = recipient_str.parse().unwrap();
+        let encrypted = age::encrypt(&recipient, garbage_toml.as_bytes()).unwrap();
+        std::fs::write(&path, &encrypted).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let result = decrypt_keystore(&path, identity_str.trim());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            LockBoxError::MalformedKeystore { reason } => {
+                assert!(!reason.is_empty(), "reason should describe TOML parse error");
+            }
+            other => panic!("expected MalformedKeystore, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn error_malformed_keystore_invalid_utf8() {
+        let (identity_str, recipient_str) = generate_keypair();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad_utf8.rkeystore");
+
+        // Encrypt non-UTF8 bytes
+        let garbage_bytes: Vec<u8> = vec![0xFF, 0xFE, 0x80, 0x81, 0x00, 0xC0, 0xC1];
+        let recipient: age::x25519::Recipient = recipient_str.parse().unwrap();
+        let encrypted = age::encrypt(&recipient, &garbage_bytes).unwrap();
+        std::fs::write(&path, &encrypted).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let result = decrypt_keystore(&path, identity_str.trim());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            LockBoxError::MalformedKeystore { reason } => {
+                assert!(reason.contains("UTF-8"), "reason was: {}", reason);
+            }
+            other => panic!("expected MalformedKeystore, got: {:?}", other),
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // T9.4: fetch_secret_value Edge Cases
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn fetch_secret_value_entry_index_out_of_bounds() {
+        let (identity_str, recipient_str) = generate_keypair();
+
+        let keystore = Keystore {
+            version: 1,
+            entries: vec![
+                make_entry("first", "value-one", "string", &[]),
+                make_entry("second", "value-two", "string", &[]),
+            ],
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oob.rkeystore");
+        encrypt_keystore(&path, &recipient_str, &keystore).unwrap();
+
+        // Construct metadata with out-of-bounds entry_index
+        let bad_metadata = EntryMetadata {
+            name: "phantom".to_string(),
+            entry_type: EntryType::String,
+            entry_index: 99,
+            driver: None,
+            username: None,
+            hosts: vec![],
+            database: None,
+        };
+
+        let result = fetch_secret_value(&bad_metadata, &path, identity_str.trim());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            LockBoxError::MalformedKeystore { reason } => {
+                assert!(reason.contains("out of bounds"), "reason was: {}", reason);
+            }
+            other => panic!("expected MalformedKeystore (out of bounds), got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fetch_secret_value_with_alias() {
+        let (identity_str, recipient_str) = generate_keypair();
+
+        let keystore = Keystore {
+            version: 1,
+            entries: vec![
+                make_entry("postgres/prod", "pg://secret-password", "string", &["pg-prod"]),
+            ],
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("alias_fetch.rkeystore");
+        encrypt_keystore(&path, &recipient_str, &keystore).unwrap();
+
+        let resolver = LockBoxResolver::from_entries(&keystore.entries).unwrap();
+
+        // Resolve via alias, then fetch
+        let meta = resolver.resolve("pg-prod").unwrap();
+        let resolved = fetch_secret_value(meta, &path, identity_str.trim()).unwrap();
+        assert_eq!(resolved.name, "postgres/prod");
+        assert_eq!(resolved.value, "pg://secret-password");
+        assert_eq!(resolved.entry_type, EntryType::String);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // T9.5: Resolver & Reference Edge Cases
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn empty_resolver_key_count() {
+        let resolver = LockBoxResolver::from_entries(&[]).unwrap();
+        assert_eq!(resolver.key_count(), 0);
+    }
+
+    #[test]
+    fn empty_resolver_contains() {
+        let resolver = LockBoxResolver::from_entries(&[]).unwrap();
+        assert!(!resolver.contains("anything"));
+        assert!(!resolver.contains(""));
+        assert!(!resolver.contains("lockbox://test"));
+    }
+
+    #[test]
+    fn collect_references_empty_datasources() {
+        let refs = collect_lockbox_references(&[]);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn collect_references_no_lockbox_uris() {
+        let datasources = vec![
+            ("db", "env://DB_PASSWORD"),
+            ("cache", "plain-connection-string"),
+            ("broker", ""),
+        ];
+        let refs = collect_lockbox_references(&datasources);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn collect_references_mixed_uris() {
+        let datasources = vec![
+            ("db", "lockbox://postgres/prod"),
+            ("cache", "env://REDIS_URL"),
+            ("broker", "lockbox://kafka/cluster"),
+            ("static", "hardcoded-value"),
+        ];
+        let refs = collect_lockbox_references(&datasources);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].name, "postgres/prod");
+        assert_eq!(refs[0].datasource, "db");
+        assert_eq!(refs[1].name, "kafka/cluster");
+        assert_eq!(refs[1].datasource, "broker");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // T9.6: Encryption Edge Cases
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn encrypt_with_invalid_recipient() {
+        let keystore = Keystore {
+            version: 1,
+            entries: vec![make_entry("test", "value", "string", &[])],
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad_recipient.rkeystore");
+
+        let result = encrypt_keystore(&path, "not-a-valid-recipient-string", &keystore);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decrypt_with_invalid_identity() {
+        let (_, recipient_str) = generate_keypair();
+
+        let keystore = Keystore {
+            version: 1,
+            entries: vec![make_entry("test", "value", "string", &[])],
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad_identity.rkeystore");
+        encrypt_keystore(&path, &recipient_str, &keystore).unwrap();
+
+        let result = decrypt_keystore(&path, "garbage-identity-string");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            LockBoxError::DecryptionFailed => {} // expected — parse failure maps to DecryptionFailed
+            other => panic!("expected DecryptionFailed, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn encrypt_decrypt_value_with_newlines() {
+        let (identity_str, recipient_str) = generate_keypair();
+
+        let multiline_value = "line1\nline2\nline3\n";
+        let keystore = Keystore {
+            version: 1,
+            entries: vec![make_entry("multiline-key", multiline_value, "string", &[])],
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("newlines.rkeystore");
+
+        encrypt_keystore(&path, &recipient_str, &keystore).unwrap();
+        let decrypted = decrypt_keystore(&path, identity_str.trim()).unwrap();
+
+        assert_eq!(decrypted.entries[0].value, multiline_value);
+    }
+
+    #[test]
+    fn encrypt_decrypt_value_with_unicode() {
+        let (identity_str, recipient_str) = generate_keypair();
+
+        let unicode_value = "secret-\u{1F512}-key-\u{2603}-value-\u{00E9}\u{00F1}";
+        let keystore = Keystore {
+            version: 1,
+            entries: vec![make_entry("unicode-key", unicode_value, "string", &[])],
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unicode.rkeystore");
+
+        encrypt_keystore(&path, &recipient_str, &keystore).unwrap();
+        let decrypted = decrypt_keystore(&path, identity_str.trim()).unwrap();
+
+        assert_eq!(decrypted.entries[0].value, unicode_value);
+    }
 }

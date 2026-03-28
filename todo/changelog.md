@@ -6,6 +6,19 @@
 
 ---
 
+## Task 9: LockBox Engine — Expanded Test Coverage (2026-03-27)
+
+- `crates/rivers-lockbox-engine/src/lib.rs` — Added 26 new tests (28 existing → 54 total). Coverage now includes:
+  - **T9.1 Key Source Resolution (8 tests):** `resolve_key_source()` env success/missing/empty, file success/missing/insecure-perms, agent unsupported, unknown source.
+  - **T9.2 Startup Resolve Integration (5 tests):** Full end-to-end `startup_resolve()` with encrypted keystore + env key source, relative path rejection, file not found, wrong key, missing reference.
+  - **T9.3 Error Variants (2 tests):** `MalformedKeystore` for invalid TOML and invalid UTF-8 in decrypted payload.
+  - **T9.4 fetch_secret_value Edge Cases (2 tests):** Out-of-bounds entry index, alias-based fetch.
+  - **T9.5 Resolver & Reference Edge Cases (5 tests):** Empty resolver key_count/contains, empty datasources, no lockbox URIs, mixed URIs.
+  - **T9.6 Encryption Edge Cases (4 tests):** Invalid recipient, invalid identity, newline preservation, unicode preservation.
+- All 54 tests pass: `cargo test -p rivers-lockbox-engine`
+
+---
+
 ## Task 7: Application Keystore Tutorial (2026-03-27)
 
 - `docs/guide/tutorials/tutorial-app-keystore.md` — NEW. Step-by-step tutorial covering master key provisioning, keystore creation, resources.toml/app.toml config, encrypt/decrypt in handlers, key rotation with lazy re-encryption, AAD, keystore metadata APIs, complete bundle example, and security notes. Follows existing tutorial format (v0.52.5 header, step numbering, TOML/JS code blocks, complete example section).
