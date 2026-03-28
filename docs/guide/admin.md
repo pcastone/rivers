@@ -993,3 +993,47 @@ systemctl restart riversd
 ```
 
 Full restart is required for: connection pool config changes, plugin changes, TLS certificate changes, admin API config changes.
+
+---
+
+## ExecDriver Operations
+
+### Script Management
+
+Scripts executed by the ExecDriver must be:
+- Declared in datasource config with absolute path and SHA-256 hash
+- Owned by root or a deploy user (not by `run_as_user`)
+- Mode `0555` (read + execute, no write)
+
+Recommended layout:
+```
+/usr/lib/rivers/scripts/    # scripts (root-owned, 0555)
+/etc/rivers/exec-schemas/   # JSON Schema files (root-owned, 0444)
+/var/rivers/exec-scratch/   # working directory (rivers-exec-owned, 0700)
+```
+
+### Hash Management
+
+When updating a script, update the SHA-256 hash in the datasource config:
+
+```bash
+riversctl exec hash /usr/lib/rivers/scripts/netscan.py
+# Copy output into your TOML config
+```
+
+### Script Contract
+
+Scripts must follow this I/O contract:
+- **Input:** Read JSON from stdin (stdin mode) and/or parse argv (args mode)
+- **Output:** Write a single JSON document to stdout
+- **Errors:** Write diagnostics to stderr, exit with non-zero code
+- **No interactivity:** No TTY reads or prompts
+
+### Security Checklist
+
+- [ ] `run_as_user` is a dedicated restricted account (not root, not the riversd user)
+- [ ] Scripts are owned by root/deploy user, mode 0555
+- [ ] `env_clear = true` (default) — no env leakage
+- [ ] `integrity_check = "each_time"` for sensitive commands
+- [ ] JSON Schema validation enabled for all commands that accept user input
+- [ ] `max_concurrent` limits set to prevent resource exhaustion

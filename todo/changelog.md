@@ -6,6 +6,123 @@
 
 ---
 
+## ExecDriver Plugin — Task 11: Documentation Updates (2026-03-27)
+
+**Goal:** Update all 5 guide docs to document the ExecDriver feature.
+
+**Key changes:**
+- Modified `docs/guide/rivers-skill.md` — added `rivers-exec` row to datasource drivers table (before http and eventbus)
+- Modified `docs/guide/cli.md` — added `riversctl exec hash` and `exec verify` subcommands section after TLS commands
+- Modified `docs/guide/developer.md` — added ExecDriver (Script Execution) section with handler example showing ctx.dataview pattern
+- Modified `docs/guide/rivers-app-development.md` — added ExecDriver Datasource section with full resources.toml + app.toml config examples
+- Modified `docs/guide/admin.md` — added ExecDriver Operations section with script management, hash management, script contract, and security checklist
+
+**Decisions:**
+- Placed ExecDriver handler example in developer.md after Rivers.http section, consistent with the pattern of showing datasource access methods
+- Admin guide security checklist uses checkbox format for operators to track compliance
+- CLI docs show only hash and verify (list deferred, matching T9.3 status)
+
+---
+
+## ExecDriver Plugin — Tasks 8+9+10: Registration, CLI, Integration Tests (2026-03-27)
+
+**Goal:** Complete plugin registration, add riversctl exec commands, and write integration tests.
+
+**Key changes:**
+- Modified `crates/riversd/src/server.rs` — added `rivers-plugin-exec` (ExecDriver) to `register_all_drivers()` static plugins vector
+- Modified `crates/riversctl/Cargo.toml` — moved `sha2` from optional (admin-api) to required dependency for exec hash command
+- Modified `crates/riversctl/src/main.rs` — added `exec hash <path>` and `exec verify <path> <sha256>` subcommands; added `rivers-exec` to known drivers list in validate
+- Created `crates/rivers-plugin-exec/tests/integration_test.rs` — 8 integration tests exercising the full driver contract with real shell scripts
+
+**Decisions:**
+- T8: C ABI exports already existed in lib.rs behind `#[cfg(feature = "plugin-exports")]`; the missing piece was static registration in `register_all_drivers()` in server.rs
+- T9: Simplified `exec verify` to single-file verification (`exec verify <path> <sha256>`) instead of bundle-scanning; `exec list` deferred as follow-up since it requires parsing exec datasource configs from bundles
+- T10: Both mode, JSON schema validation, and output overflow are thoroughly covered in unit tests (connection.rs, executor.rs); integration tests focus on full round-trip scenarios that unit tests cannot cover (real process spawning, file tampering, timeouts)
+
+---
+
+## ExecDriver Plugin — Tasks 6+7: Concurrency Control + Connection Pipeline (2026-03-27)
+
+**Goal:** Wire the full 11-step pipeline via `DatabaseDriver` + `Connection` traits, with two-layer semaphore concurrency control.
+
+**Key changes:**
+- Created `crates/rivers-plugin-exec/src/connection.rs` — `ExecDriver` (DatabaseDriver), `ExecConnection` (Connection), `CommandRuntime`, full 11-step pipeline
+- Updated `crates/rivers-plugin-exec/src/lib.rs` — replaced placeholder `ExecDriver` with `pub use connection::ExecDriver`, added `pub mod connection`
+- 12 new tests in `connection::tests` covering: connect success/failure, full pipeline (stdin, args, statement-based command), unknown command, unsupported operation, missing command parameter, ping, global/per-command concurrency limits, schema validation, args mode
+
+**Decisions:**
+- `QueryResult` has no `raw_value` field; JSON result wrapped as single row: `{"result": QueryValue::Json(parsed_json)}`, `affected_rows: 1`
+- Concurrency: global semaphore on `ExecConnection`, per-command semaphore on `CommandRuntime`; `try_acquire()` for no-queue semantics; RAII drop handles release on per-command failure
+- Command name extracted from `query.parameters["command"]` (String variant) or `query.statement` as fallback
+- Args extracted from `query.parameters["args"]` (Json variant); defaults to empty object
+- Only `query` operation supported; all others return `DriverError::Unsupported`
+- Concurrency tests use direct `ExecConnection` construction (not `Box<dyn Connection>`) to access semaphore fields
+
+**Spec reference:** `docs/rivers-exec-driver-spec.md` sections 12, 13.4, 18
+
+---
+
+## ExecDriver Plugin — Task 5: Process Spawning (2026-03-27)
+
+**Goal:** Implement process spawning with full isolation per spec sections 10-11. No shell involved.
+
+**Key changes:**
+- Added `libc = "0.2"` to `crates/rivers-plugin-exec/Cargo.toml` (direct dep, not in workspace)
+- Created `crates/rivers-plugin-exec/src/executor.rs` with `execute_command()`, `evaluate_result()`, `kill_process_group()`, Unix helpers
+- Added `pub mod executor;` to `crates/rivers-plugin-exec/src/lib.rs`
+- 14 unit tests covering all input modes, error cases, timeout, env isolation, output overflow
+
+**Decisions:**
+- Used `libc` directly for setsid/kill/geteuid/getpwnam instead of the `nix` crate — minimal deps
+- Tokio Command has inherent pre_exec/uid/gid methods — no CommandExt import needed
+- Privilege drop only when running as root; non-root logs debug and skips
+- Process group kill via negative PID after setsid makes child session leader
+- All tests gated with `#[cfg(unix)]` — use real shell scripts
+- Stderr truncated to 1024 chars in error messages
+
+**Spec reference:** `docs/rivers-exec-driver-spec.md` sections 10-11
+
+---
+
+## ExecDriver Plugin — Task 4: JSON Schema Validation (2026-03-27)
+
+**Goal:** Integrate JSON Schema validation to validate handler args before process spawn per spec section 9.
+
+**Key changes:**
+- Added `jsonschema = "0.28"` to workspace `[workspace.dependencies]` in root `Cargo.toml`
+- Added `jsonschema = { workspace = true }` to `crates/rivers-plugin-exec/Cargo.toml`
+- Created `crates/rivers-plugin-exec/src/schema.rs` — `CompiledSchema` struct with `load(path)` and `validate(args)` methods
+- Added `pub mod schema;` to `crates/rivers-plugin-exec/src/lib.rs`
+- 8 unit tests: valid args pass, missing required field fails, invalid CIDR pattern fails, port out of range fails, extra properties fail (additionalProperties: false), load nonexistent file fails, load invalid JSON fails, load invalid schema fails
+
+**Decisions:**
+- Used `jsonschema` 0.28 crate — `validator_for()` API (0.26+ style, returns `Result<Validator, ValidationError>`)
+- `validate()` collects all errors via `iter_errors()` into a single `DriverError::Query` message so callers get a complete diagnostic
+- Manual `Debug` impl on `CompiledSchema` since `jsonschema::Validator` does not implement `Debug`
+- Validation timing documented but not enforced in this module — the pipeline in Task 7 will call schema validation at the right point (after command lookup, before integrity check)
+
+**Spec reference:** `docs/rivers-exec-driver-spec.md` section 9
+
+---
+
+## ExecDriver Plugin — Task 3: Argument Template Engine (2026-03-27)
+
+**Goal:** Implement placeholder interpolation for `args` and `both` input modes per spec section 8.2.
+
+**Key changes:**
+- Created `crates/rivers-plugin-exec/src/template.rs` — `interpolate()` function resolves `{key}` placeholders against query params
+- Added `pub mod template;` to `crates/rivers-plugin-exec/src/lib.rs`
+- 19 unit tests covering: basic interpolation, missing key error, number/boolean/null/float values, array/object rejection, extra keys ignored, special characters pass through, empty template, literal-only template, mixed literals and placeholders, bare braces edge case, partial brace edge case
+
+**Decisions:**
+- Placeholder detection uses simple bracket check: starts with `{` and ends with `}` with length > 2 (per spec "simple bracket detection")
+- Function signature uses `serde_json::Map<String, serde_json::Value>` (not `HashMap`) since that is the native JSON object type from serde_json
+- `{}` (empty braces) treated as literal, not a placeholder, since there is no key to extract
+
+**Spec reference:** `docs/rivers-exec-driver-spec.md` section 8.2
+
+---
+
 ## ExecDriver Plugin — Task 1: Crate Skeleton + Config Types (2026-03-27)
 
 **Goal:** Create `rivers-plugin-exec` crate with config types, parsing from `ConnectionParams.options`, and startup validation.

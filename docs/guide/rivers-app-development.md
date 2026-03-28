@@ -271,6 +271,36 @@ service = "{service-name}"
 
 `service` — logical service name from `resources.toml [[services]]`.
 
+### ExecDriver Datasource (Script Execution)
+
+For executing admin-declared scripts and binaries:
+
+```toml
+# resources.toml
+[[datasources]]
+name       = "ops_tools"
+driver     = "rivers-exec"
+x-type     = "exec"
+nopassword = true
+required   = true
+
+# app.toml
+[data.datasources.ops_tools]
+name     = "ops_tools"
+driver   = "rivers-exec"
+run_as_user       = "rivers-exec"
+working_directory = "/var/rivers/exec-scratch"
+max_concurrent    = 10
+
+[data.datasources.ops_tools.commands.network_scan]
+path       = "/usr/lib/rivers/scripts/netscan.py"
+sha256     = "a1b2c3d4e5f67890..."
+input_mode = "stdin"
+timeout_ms = 60000
+```
+
+Commands are pinned by SHA-256 hash. Input is validated against JSON Schema. Processes run as a restricted OS user.
+
 ---
 
 ## DataView Configuration

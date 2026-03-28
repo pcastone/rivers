@@ -54,6 +54,21 @@ riversctl tls list
 riversctl tls expire ./cert.pem
 ```
 
+### exec subcommands
+
+| Command | Description |
+|---------|-------------|
+| `riversctl exec hash <path>` | Print SHA-256 hash of file in TOML-ready format. |
+| `riversctl exec verify <path> <sha256>` | Verify file matches expected SHA-256 hash. |
+
+```sh
+riversctl exec hash /usr/lib/rivers/scripts/netscan.py
+# sha256 = "a1b2c3d4..."
+
+riversctl exec verify /usr/lib/rivers/scripts/netscan.py a1b2c3d4...
+# [OK] hash matches
+```
+
 ---
 
 ## rivers-lockbox

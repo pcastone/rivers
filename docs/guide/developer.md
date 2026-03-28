@@ -412,6 +412,25 @@ async function handler(ctx) {
 
 Methods: `get(url)`, `post(url, body)`, `put(url, body)`, `del(url)`.
 
+### ExecDriver (Script Execution)
+
+Execute admin-declared scripts via the standard datasource query pattern. The handler doesn't know it's running a script — it just queries a datasource.
+
+```javascript
+function handler(ctx) {
+    // Execute a declared command via datasource query
+    var result = ctx.dataview("run_network_scan");
+    // Or via direct datasource query:
+    // var result = ctx.datasource("ops_tools").query({
+    //     command: "network_scan",
+    //     args: { cidr: "10.0.1.0/24", ports: [22, 80] }
+    // });
+    ctx.resdata = result;
+}
+```
+
+The command, script path, integrity hash, and all security guardrails are admin-configured in TOML — not in handler code.
+
 ### Async Handlers
 
 ```javascript
