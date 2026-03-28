@@ -156,7 +156,7 @@ args_schema     = "exec_schemas/netscan_args.json"
 timeout_ms      = 60000
 max_stdout_bytes = 10485760
 max_concurrent  = 3
-integrity_check = "interval:50"
+integrity_check = "every:50"
 env_clear       = true
 env_allow       = ["PATH", "HOME"]
 env_set         = { SCAN_LOG = "/var/log/rivers/scan.log" }
@@ -575,14 +575,15 @@ The parsed JSON from stdout is wrapped in a `QueryResult`:
 
 ```rust
 QueryResult {
-    rows: vec![],                // not used — result is in raw_value
-    affected_rows: 0,
+    rows: vec![HashMap::from([
+        ("result".into(), QueryValue::Json(parsed_json)),
+    ])],
+    affected_rows: 1,
     last_insert_id: None,
-    raw_value: Some(parsed_json),  // the script's JSON output
 }
 ```
 
-The handler receives the parsed JSON directly via `Rivers.view.query()` return value.
+The handler receives the parsed JSON in `rows[0].result`. The `QueryResult` struct does not have a `raw_value` field, so the JSON output is wrapped as a single row with key `"result"`.
 
 ---
 
@@ -727,8 +728,10 @@ Scripts must follow this I/O contract:
 | Command | Description |
 |---|---|
 | `riversctl exec hash <path>` | Print SHA-256 hash of file in TOML-ready format |
-| `riversctl exec verify <datasource>` | Verify all command hashes for a datasource against current files on disk |
-| `riversctl exec list <datasource>` | List all declared commands with path, hash (first 16 chars), input mode, integrity mode |
+| `riversctl exec verify <path> <sha256>` | Verify a file matches an expected SHA-256 hash |
+| `riversctl exec list` | List declared exec commands *(planned — not yet implemented)* |
+
+**Note:** `exec verify` operates on a single file with an explicit hash. Bundle-level verification (scanning all exec datasources in a bundle) is a planned enhancement. `exec list` is stubbed — use the bundle TOML to review declared commands.
 
 ---
 
