@@ -6,6 +6,18 @@
 
 ---
 
+## Dream Pattern Fixes — Dead Code + AppContext Doc (2026-03-27)
+
+**Task 5: Dead Code Cleanup**
+- `crates/riversd/src/process_pool/v8_engine.rs` — gated `SCRIPT_CACHE` and `clear_script_cache()` behind `#[cfg(test)]` since they're only used in engine_tests. Dream analysis ref: Pattern 5.
+- `crates/riversd/src/process_pool/mod.rs` — removed re-exports of `SCRIPT_CACHE` and `clear_script_cache`; added direct import in `engine_tests.rs`. Added `#[allow(dead_code)]` with doc comments to `TaskTerminator::Callback` (used by dynamic engine plugins) and `ProcessPool.active_tasks` (used by watchdog thread at runtime, not read by Rust code).
+- Resolution: Zero `dead_code` warnings from process_pool modules.
+
+**Task 6: AppContext Decomposition Doc**
+- `crates/riversd/src/server.rs` — added planned decomposition comment block to `AppContext` struct documenting 7 logical sub-struct groupings for Wave 6. No code changes.
+
+---
+
 ## v0.52.5 — ExecDriver Plugin (2026-03-28)
 
 **Feature:** Controlled invocation of admin-declared, integrity-verified external commands from CodeComponent handlers via the standard datasource query pattern.

@@ -226,10 +226,10 @@ cargo build -p riversd
 
 **Modify:** `crates/riversd/src/process_pool/v8_engine.rs`, `crates/riversd/src/process_pool/mod.rs`
 
-- [ ] **T5.1** Move `SCRIPT_CACHE` and `clear_script_cache()` into `#[cfg(test)]` block since they're only used in tests
-- [ ] **T5.2** Add `#[allow(dead_code)]` to `TaskTerminator::Callback` with a comment explaining it's used by dynamic engine plugins
-- [ ] **T5.3** Add `#[allow(dead_code)]` to `ProcessPool.active_tasks` with a comment explaining it's used by the watchdog thread
-- [ ] **T5.4** Verify: `cargo build -p riversd 2>&1 | grep warning` shows no dead_code warnings from our code
+- [x] **T5.1** Move `SCRIPT_CACHE` and `clear_script_cache()` into `#[cfg(test)]` block since they're only used in tests
+- [x] **T5.2** Add `#[allow(dead_code)]` to `TaskTerminator::Callback` with a comment explaining it's used by dynamic engine plugins
+- [x] **T5.3** Add `#[allow(dead_code)]` to `ProcessPool.active_tasks` with a comment explaining it's used by the watchdog thread
+- [x] **T5.4** Verify: `cargo build -p riversd 2>&1 | grep warning` shows no dead_code warnings from our code
 
 **Validation:**
 ```bash
@@ -245,7 +245,7 @@ cargo build -p riversd 2>&1 | grep "dead_code" | grep -v "plugin"
 
 **Note:** This is documentation only — no code changes. The actual extraction should happen after Waves 0-5 complete (when all fields are finalized).
 
-- [ ] **T6.1** Add a `// TODO(wave-6): Extract into sub-structs` comment block at the top of AppContext with the planned grouping:
+- [x] **T6.1** Add a `// TODO(wave-6): Extract into sub-structs` comment block at the top of AppContext with the planned grouping:
   ```rust
   // Planned decomposition (after Wave 5):
   //   AppContext.security  → lockbox_resolver, keystore_resolver, csrf_manager, admin_auth_config, session_manager

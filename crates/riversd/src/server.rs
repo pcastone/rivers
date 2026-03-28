@@ -100,9 +100,20 @@ impl LogController {
 
 // ── AppContext ─────────────────────────────────────────────────────
 
-/// Shared application state, accessible by all handlers.
+/// Shared application context — passed to all request handlers.
 ///
 /// Per spec §2 step 16: all subsystems wired together.
+///
+/// # Planned Decomposition (after Wave 5)
+///
+/// This struct will be split into logical sub-structs:
+///   - `AppContext.security`  → lockbox_resolver, keystore_resolver, csrf_manager, admin_auth_config, session_manager
+///   - `AppContext.storage`   → storage_engine, event_bus
+///   - `AppContext.routing`   → view_router, dataview_executor, graphql_schema
+///   - `AppContext.engines`   → pool, driver_factory
+///   - `AppContext.streaming` → sse_manager, ws_manager
+///   - `AppContext.lifecycle` → shutdown, uptime, deployment_manager, hot_reload_state, config_path, loaded_bundle, guard_view_id, shutdown_tx
+///   - `AppContext.config`    → config, log_controller
 #[derive(Clone)]
 pub struct AppContext {
     pub config: ServerConfig,
