@@ -19,6 +19,7 @@ members = [
     "crates/rivers-plugin-cassandra",
     "crates/rivers-plugin-couchdb",
     "crates/rivers-plugin-ldap",
+    "crates/rivers-plugin-exec",
     "crates/rivers-engine-sdk",
     "crates/rivers-engine-v8",
     "crates/rivers-engine-wasm",

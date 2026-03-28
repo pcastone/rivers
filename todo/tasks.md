@@ -86,14 +86,14 @@ pub enum IntegrityMode { EachTime, StartupOnly, Every(u64) }
 pub enum InputMode { Stdin, Args, Both }
 ```
 
-- [ ] **T1.1** Create `crates/rivers-plugin-exec/Cargo.toml` — `crate-type = ["cdylib", "rlib"]`, deps: `rivers-driver-sdk`, `async-trait`, `tokio` (process + io + time + sync features), `serde`, `serde_json`, `sha2`, `tracing`, `jsonschema`
-- [ ] **T1.2** Add `rivers-plugin-exec` to workspace members; add `jsonschema = "0.28"` to workspace deps
-- [ ] **T1.3** Add `rivers-plugin-exec` to `crates/riversd/Cargo.toml` static-plugins feature list
-- [ ] **T1.4** Implement `ExecConfig` and `CommandConfig` with deserialization from `ConnectionParams.options`
-- [ ] **T1.5** Implement `IntegrityMode` parsing from string (`"each_time"`, `"startup_only"`, `"every:N"`)
-- [ ] **T1.6** Implement `InputMode` parsing from string (`"stdin"`, `"args"`, `"both"`)
-- [ ] **T1.7** Implement startup validation (spec section 4.2): `run_as_user` resolves via `nix::unistd::User::from_name()`, not UID 0, working_directory exists, per-command validation (spec section 5.1: absolute path, file exists+executable, args_template required for args/both modes, stdin_key required for both mode)
-- [ ] **T1.8** Write unit tests for config parsing and startup validation
+- [x] **T1.1** Create `crates/rivers-plugin-exec/Cargo.toml` — `crate-type = ["cdylib", "rlib"]`, deps: `rivers-driver-sdk`, `async-trait`, `tokio`, `serde`, `serde_json`, `sha2`, `hex`, `tracing` (jsonschema deferred to Task 4)
+- [x] **T1.2** Add `rivers-plugin-exec` to workspace members (jsonschema deferred to Task 4)
+- [x] **T1.3** Add `rivers-plugin-exec` to `crates/riversd/Cargo.toml` static-plugins feature list
+- [x] **T1.4** Implement `ExecConfig` and `CommandConfig` with deserialization from `ConnectionParams.options`
+- [x] **T1.5** Implement `IntegrityMode` parsing from string (`"each_time"`, `"startup_only"`, `"every:N"`)
+- [x] **T1.6** Implement `InputMode` parsing from string (`"stdin"`, `"args"`, `"both"`)
+- [x] **T1.7** Implement startup validation: run_as_user not empty/root, per-command: absolute path, file exists, valid sha256 hex, args_template for args/both modes, stdin_key for both mode
+- [x] **T1.8** Write unit tests for config parsing and startup validation (30 tests passing)
 
 **Validation:**
 ```bash

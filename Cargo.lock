@@ -5050,6 +5050,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rivers-plugin-exec"
+version = "0.50.2"
+dependencies = [
+ "async-trait",
+ "hex",
+ "rivers-driver-sdk",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rivers-plugin-influxdb"
 version = "0.50.2"
 dependencies = [
@@ -5228,6 +5242,7 @@ dependencies = [
  "rivers-plugin-cassandra",
  "rivers-plugin-couchdb",
  "rivers-plugin-elasticsearch",
+ "rivers-plugin-exec",
  "rivers-plugin-influxdb",
  "rivers-plugin-kafka",
  "rivers-plugin-ldap",

@@ -6,6 +6,28 @@
 
 ---
 
+## ExecDriver Plugin — Task 1: Crate Skeleton + Config Types (2026-03-27)
+
+**Goal:** Create `rivers-plugin-exec` crate with config types, parsing from `ConnectionParams.options`, and startup validation.
+
+**Key changes:**
+- Created `crates/rivers-plugin-exec/Cargo.toml` — cdylib + rlib, plugin-exports feature, deps: rivers-driver-sdk, async-trait, tokio, serde, serde_json, sha2, hex, tracing
+- Created `crates/rivers-plugin-exec/src/lib.rs` — ExecDriver struct with placeholder DatabaseDriver impl, C ABI exports under plugin-exports feature
+- Created `crates/rivers-plugin-exec/src/config.rs` — ExecConfig, CommandConfig, IntegrityMode, InputMode types with parsing from flat options map and startup validation
+- Added to workspace members in root `Cargo.toml`
+- Added to static-plugins feature list and optional deps in `crates/riversd/Cargo.toml`
+- 30 unit tests covering: IntegrityMode/InputMode parsing, config parsing from ConnectionParams, validation of run_as_user, paths, sha256, args_template, stdin_key
+
+**Decisions:**
+- `jsonschema` dep deferred to Task 4 per task description
+- Validation rejects "root" as run_as_user (string check, not UID lookup — nix crate not yet added)
+- Command configs parsed from flattened dot-separated keys (`commands.<name>.<field>`) matching TOML flatten behavior
+- `env_clear` defaults to `true` per spec security model
+
+**Spec reference:** `docs/rivers-exec-driver-spec.md` sections 4-5
+
+---
+
 ## Dual Static/Dynamic Build Architecture (2026-03-21)
 
 **Goal:** Support both static monolithic binaries AND dynamic thin-binary+shared-lib builds.

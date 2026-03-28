@@ -1,0 +1,21 @@
+[package]
+name = "rivers-plugin-exec"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+plugin-exports = []
+
+[dependencies]
+rivers-driver-sdk = { path = "../rivers-driver-sdk" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
