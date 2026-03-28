@@ -13,3 +13,7 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 rusqlite = { workspace = true }
 redis = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tempfile = { workspace = true }

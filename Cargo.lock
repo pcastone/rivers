@@ -5366,6 +5366,7 @@ dependencies = [
  "chrono",
  "rivers-core-config",
  "serde",
+ "tempfile",
  "thiserror 2.0.18",
  "toml 0.8.23",
  "zeroize",
@@ -5568,6 +5569,7 @@ dependencies = [
  "redis",
  "rivers-core-config",
  "rusqlite",
+ "tempfile",
  "tokio",
 ]
 

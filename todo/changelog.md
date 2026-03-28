@@ -28,6 +28,19 @@
 
 ---
 
+## Task 2: Storage Backend Tests (2026-03-27)
+
+**Pattern 4 fix — zero-test security-critical crate.**
+
+- `crates/rivers-storage-backends/src/sqlite_backend.rs` — Added 18 unit tests covering all `StorageEngine` trait methods: get/set round-trip, get nonexistent, delete, delete nonexistent, overwrite, list_keys (with and without prefix), TTL expiration (lazy delete on read), TTL exclusion from list_keys, empty value, binary value (0x00..0xFF), namespace isolation, set_if_absent (insert, no-overwrite, expired replacement), flush_expired (with and without expired entries), and file-based persistence (tempfile).
+- `crates/rivers-storage-backends/src/redis_backend.rs` — Added 14 unit tests covering the same StorageEngine trait surface. All gated with `#[ignore]` since they require a running Redis instance at 127.0.0.1:6379. Each test uses a unique key prefix to avoid collisions and includes cleanup.
+- `crates/rivers-storage-backends/Cargo.toml` — Added `[dev-dependencies]`: tokio (full features) and tempfile.
+- Decision: Used `:memory:` SQLite for most tests (fast, no file I/O). One test (`file_based_persistence`) uses tempfile to verify data survives across engine instances.
+- Decision: Redis tests use `#[ignore]` (not a feature flag) for simplicity — `cargo test -p rivers-storage-backends` runs SQLite tests; `cargo test -p rivers-storage-backends -- --ignored` runs Redis tests when a server is available.
+- Validation: 18 passed, 14 ignored, 0 failed.
+
+---
+
 ## Dream Pattern Fixes — Dead Code + AppContext Doc (2026-03-27)
 
 **Task 5: Dead Code Cleanup**
