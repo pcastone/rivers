@@ -17,7 +17,8 @@ drivers = ["rivers-core/drivers"]
 storage-backends = ["rivers-core/storage-backends"]
 lockbox = ["rivers-core/lockbox"]
 tls = ["rivers-core/tls"]
-full = ["drivers", "storage-backends", "lockbox", "tls"]
+keystore = ["rivers-keystore-engine"]
+full = ["drivers", "storage-backends", "lockbox", "tls", "keystore"]
 
 [dependencies]
 rivers-core = { path = "../rivers-core", default-features = false }
@@ -34,6 +35,7 @@ tracing = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 schemars = { workspace = true }
+rivers-keystore-engine = { path = "../rivers-keystore-engine", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

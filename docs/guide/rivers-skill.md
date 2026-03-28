@@ -12,7 +12,7 @@ Build and administer Rivers applications. Rivers is a declarative app-service fr
 - User asks to build a Rivers app, bundle, or endpoint
 - User asks to write a JavaScript or WASM handler for Rivers
 - User asks about Rivers DataViews, views, schemas, or config
-- User asks to configure riversd, riversctl, or rivers-lockbox
+- User asks to configure riversd, riversctl, rivers-lockbox, or rivers-keystore
 - User mentions TOML config for REST API, WebSocket, SSE, or GraphQL
 
 ---
@@ -24,9 +24,10 @@ Build and administer Rivers applications. Rivers is a declarative app-service fr
 ├── manifest.toml              # bundleName, bundleVersion, apps[]
 ├── {app-service}/
 │   ├── manifest.toml          # appName, appId, type="app-service", entryPoint
-│   ├── resources.toml         # [[datasources]], [[services]]
-│   ├── app.toml               # [data.datasources.*], [data.dataviews.*], [api.views.*]
+│   ├── resources.toml         # [[datasources]], [[keystores]], [[services]]
+│   ├── app.toml               # [data.datasources.*], [data.keystore.*], [data.dataviews.*], [api.views.*]
 │   ├── schemas/               # JSON schema files (.schema.json)
+│   ├── data/                  # Application keystore files (*.appkeystore)
 │   └── libraries/             # JS/TS/WASM handlers
 └── {app-main}/
     ├── manifest.toml          # type="app-main"
@@ -265,13 +266,26 @@ Rivers.log.info("user login", { userId: 123 });
 Rivers.log.warn("rate limit approaching");
 Rivers.log.error("payment failed", { reason: "declined" });
 
-// Crypto
+// Crypto — hashing, random, HMAC
 var hash = Rivers.crypto.hashPassword("secret");
 var valid = Rivers.crypto.verifyPassword("secret", hash);
 var hex = Rivers.crypto.randomHex(16);
 var token = Rivers.crypto.randomBase64url(32);
 var sig = Rivers.crypto.hmac("key", "data");
 var eq = Rivers.crypto.timingSafeEqual("a", "b");
+
+// Crypto — AES-256-GCM encrypt/decrypt (requires [[keystores]] in resources.toml)
+var enc = Rivers.crypto.encrypt("key-name", "plaintext");
+// enc = { ciphertext: "base64...", nonce: "base64...", key_version: 1 }
+var dec = Rivers.crypto.decrypt("key-name", enc.ciphertext, enc.nonce, {
+    key_version: enc.key_version
+});
+// With AAD:
+var enc = Rivers.crypto.encrypt("key-name", "data", { aad: "record-id" });
+
+// Keystore — key metadata (requires [[keystores]] in resources.toml)
+var exists = Rivers.keystore.has("key-name");       // boolean
+var info = Rivers.keystore.info("key-name");         // { name, type, version, created_at }
 
 // Outbound HTTP (requires allow_outbound_http = true on view)
 var resp = await Rivers.http.get("https://api.example.com/data");
@@ -434,6 +448,57 @@ task_timeout_ms          = 5000
 
 ---
 
+## Application Keystore
+
+Encrypt/decrypt data in handler code using app-scoped AES-256-GCM keys. Master key stored in Lockbox.
+
+### resources.toml
+
+```toml
+[[keystores]]
+name     = "app-keys"
+lockbox  = "myapp/keystore-master-key"   # Lockbox alias for master key
+required = true
+```
+
+### app.toml
+
+```toml
+[data.keystore.app-keys]
+path = "data/app.keystore"              # Relative to app directory
+```
+
+### Provisioning
+
+```bash
+# Ops: store master key in Lockbox (one-time)
+rivers-lockbox add myapp/keystore-master-key --value "$(age-keygen 2>&1 | grep 'AGE-SECRET-KEY')"
+
+# Developer: create keystore and generate keys
+export RIVERS_KEYSTORE_KEY="AGE-SECRET-KEY-..."   # Same key stored in Lockbox
+rivers-keystore init --path data/app.keystore
+rivers-keystore generate credential-key --type aes-256 --path data/app.keystore
+```
+
+### Handler Usage
+
+```javascript
+// Encrypt
+var enc = Rivers.crypto.encrypt("credential-key", password);
+// Store: enc.ciphertext, enc.nonce, enc.key_version in database
+
+// Decrypt
+var password = Rivers.crypto.decrypt("credential-key", ciphertext, nonce, {
+    key_version: stored_key_version
+});
+
+// Key rotation: rivers-keystore rotate credential-key --path data/app.keystore
+// New encrypts use latest version automatically
+// Old data decrypts with stored key_version
+```
+
+---
+
 ## Server Configuration (`riversd.toml`)
 
 ```toml
@@ -487,10 +552,17 @@ riversctl validate --schema server        # Output JSON Schema
 riversctl start --config riversd.toml     # Start via helper
 riversctl deploy my-bundle/               # Deploy via admin API
 
-rivers-lockbox init                       # Create keystore
+rivers-lockbox init                       # Create system keystore
 rivers-lockbox add db-password --value secret
 rivers-lockbox list                       # List entries (no values)
 rivers-lockbox show db-password           # Decrypt and display
+
+rivers-keystore init --path data/app.keystore     # Create app keystore
+rivers-keystore generate key-name --type aes-256 --path data/app.keystore
+rivers-keystore list --path data/app.keystore     # List keys (metadata only)
+rivers-keystore info key-name --path data/app.keystore
+rivers-keystore rotate key-name --path data/app.keystore
+rivers-keystore delete key-name --path data/app.keystore
 
 riverpackage validate my-bundle/          # Validate bundle structure
 ```

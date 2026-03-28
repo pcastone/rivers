@@ -59,6 +59,27 @@ use rivers_runtime::rivers_core::{DriverFactory, StorageEngine};
 
 
 
+// ── Shared Keystore Resolver ─────────────────────────────────
+//
+// Process-pool-level shared keystore resolver. Set once at startup after
+// bundle loading. V8/WASM engines fall back to this when TaskContext.keystore
+// is None (which is the common case since dispatch sites don't call
+// .keystore() on the builder).
+
+static SHARED_KEYSTORE_RESOLVER: std::sync::RwLock<Option<Arc<crate::keystore::KeystoreResolver>>> =
+    std::sync::RwLock::new(None);
+
+/// Set the shared keystore resolver. Called at startup after bundle loading.
+/// Can be called again on hot-reload or in tests.
+pub fn set_keystore_resolver(resolver: Arc<crate::keystore::KeystoreResolver>) {
+    *SHARED_KEYSTORE_RESOLVER.write().unwrap() = Some(resolver);
+}
+
+/// Get the shared keystore resolver. Returns None if no keystores are configured.
+pub fn get_keystore_resolver() -> Option<Arc<crate::keystore::KeystoreResolver>> {
+    SHARED_KEYSTORE_RESOLVER.read().unwrap().clone()
+}
+
 // ── Per-Pool Watchdog Types (Wave 10) ────────────────────────
 
 /// Active task entry tracked by the pool watchdog.

@@ -18,6 +18,7 @@ static-plugins = [
 [dependencies]
 rivers-runtime = { path = "../rivers-runtime", features = ["full"] }
 rivers-engine-sdk = { path = "../rivers-engine-sdk" }
+rivers-keystore-engine = { path = "../rivers-keystore-engine" }
 libloading = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }

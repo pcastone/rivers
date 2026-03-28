@@ -464,6 +464,7 @@ driver = "mysql"
 fn validate_bundle_catches_unknown_service_app_id() {
     let resources = ResourcesConfig {
         datasources: vec![],
+        keystores: vec![],
         services: vec![rivers_runtime::bundle::ServiceDependency {
             name: "backend-api".into(),
             app_id: "nonexistent-uuid".into(),
@@ -541,6 +542,7 @@ fn validate_bundle_allows_valid_service_reference() {
                 },
                 resources: ResourcesConfig {
                     datasources: vec![],
+                    keystores: vec![],
                     services: vec![rivers_runtime::bundle::ServiceDependency {
                         name: "backend".into(),
                         app_id: "backend-uuid".into(),
