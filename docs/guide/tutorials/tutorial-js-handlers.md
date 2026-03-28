@@ -109,6 +109,33 @@ var token = Rivers.crypto.randomBase64url(32);    // URL-safe base64
 // HMAC and timing-safe comparison
 var sig = Rivers.crypto.hmac("secret-key", "data-to-sign");
 var equal = Rivers.crypto.timingSafeEqual("a", "b");
+
+// Encrypt / Decrypt (requires [[keystores]] in resources.toml)
+var encrypted = Rivers.crypto.encrypt("my-key", "sensitive data");
+// Returns: { ciphertext: "base64...", nonce: "base64...", key_version: 1 }
+
+var plaintext = Rivers.crypto.decrypt("my-key", encrypted.ciphertext, encrypted.nonce, {
+    key_version: encrypted.key_version
+});
+
+// Encrypt with Additional Authenticated Data (AAD)
+var encrypted = Rivers.crypto.encrypt("my-key", "sensitive data", { aad: recordId });
+var plaintext = Rivers.crypto.decrypt("my-key", encrypted.ciphertext, encrypted.nonce, {
+    key_version: encrypted.key_version, aad: recordId
+});
+```
+
+### Keystore
+
+Requires `[[keystores]]` declared in `resources.toml` and `[data.keystore.*]` configured in `app.toml`. See the [Application Keystore tutorial](tutorial-app-keystore.md).
+
+```javascript
+// Check if a key exists
+var exists = Rivers.keystore.has("credential-key");
+
+// Get key metadata (never raw key bytes)
+var meta = Rivers.keystore.info("credential-key");
+// Returns: { name: "credential-key", type: "aes-256", version: 2, created_at: "..." }
 ```
 
 ### Outbound HTTP

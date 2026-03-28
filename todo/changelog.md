@@ -6,6 +6,22 @@
 
 ---
 
+## Task 7: Application Keystore Tutorial (2026-03-27)
+
+- `docs/guide/tutorials/tutorial-app-keystore.md` — NEW. Step-by-step tutorial covering master key provisioning, keystore creation, resources.toml/app.toml config, encrypt/decrypt in handlers, key rotation with lazy re-encryption, AAD, keystore metadata APIs, complete bundle example, and security notes. Follows existing tutorial format (v0.52.5 header, step numbering, TOML/JS code blocks, complete example section).
+- `docs/guide/tutorials/tutorial-js-handlers.md` — Added `Rivers.crypto.encrypt/decrypt` examples to Crypto section. Added new Keystore section with `Rivers.keystore.has/info` examples and link to keystore tutorial.
+- `docs/guide/tutorials/tutorial-ts-handlers.md` — Added `encrypt/decrypt` method signatures to `Rivers.crypto` interface. Added `Rivers.keystore` interface with `has/info` signatures. Added `EncryptResult` and `KeystoreKeyInfo` type definitions.
+- Source: `docs/rivers-feature-request-app-keystore.md` (feature spec for API signatures and design).
+
+---
+
+## Task 8: ExecDriver Datasource Tutorial (2026-03-27)
+
+- `docs/guide/tutorials/datasource-exec.md` — NEW. Step-by-step tutorial covering OS user setup, script contract (stdin JSON I/O), SHA-256 hashing with `riversctl exec hash`, resources.toml/app.toml config, command declarations (path, sha256, input_mode, timeout, concurrency, env control), JSON Schema validation, handler code using `ctx.datasource().fromQuery()`, args mode with template interpolation (DNS lookup example), verification/deployment, complete bundle with two commands, security checklist (12 controls with config references), and error reference table. Follows existing datasource tutorial format.
+- Source: `docs/rivers-exec-driver-spec.md` (full spec for config fields, pipeline, security model).
+
+---
+
 ## Task 1: TaskContext Auto-Enrichment Layer (2026-03-27)
 
 **Pattern 1 fix from dream analysis — dispatch wiring gap.**

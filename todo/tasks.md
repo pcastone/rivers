@@ -243,7 +243,7 @@ cargo build -p riversd 2>&1 | grep "dead_code" | grep -v "plugin"
 
 **Create:** `docs/guide/tutorials/tutorial-app-keystore.md`
 
-- [ ] **T7.1** Write tutorial covering:
+- [x] **T7.1** Write tutorial covering:
   - Provision master key in LockBox
   - Create keystore with `rivers-keystore` CLI (init, generate)
   - Declare `[[keystores]]` in `resources.toml`
@@ -256,11 +256,11 @@ cargo build -p riversd 2>&1 | grep "dead_code" | grep -v "plugin"
   - Complete example with full bundle structure
   - Security notes
 
-- [ ] **T7.2** Update `docs/guide/tutorials/tutorial-js-handlers.md`:
+- [x] **T7.2** Update `docs/guide/tutorials/tutorial-js-handlers.md`:
   - Add `Rivers.crypto.encrypt/decrypt` to crypto section
   - Add `Rivers.keystore.has/info` section
 
-- [ ] **T7.3** Update `docs/guide/tutorials/tutorial-ts-handlers.md`:
+- [x] **T7.3** Update `docs/guide/tutorials/tutorial-ts-handlers.md`:
   - Add `encrypt/decrypt` type signatures to `Rivers.crypto` interface
   - Add `keystore.has/info` type signatures to `Rivers` interface
 
@@ -278,7 +278,7 @@ cargo build -p riversd 2>&1 | grep "dead_code" | grep -v "plugin"
 
 **Create:** `docs/guide/tutorials/datasource-exec.md`
 
-- [ ] **T8.1** Write tutorial covering:
+- [x] **T8.1** Write tutorial covering:
   - Set up execution environment (restricted OS user, directories)
   - Create a script following the stdin JSON I/O contract
   - Compute SHA-256 hash with `riversctl exec hash`
@@ -312,9 +312,9 @@ cargo build -p riversd 2>&1 | grep "dead_code" | grep -v "plugin"
 - [ ] AC6: Zero `dead_code` warnings from riversd process_pool modules
 - [ ] AC7: AppContext decomposition plan documented as comments for Wave 6
 - [ ] AC8: All existing tests still pass (no regressions)
-- [ ] AC9: Application Keystore tutorial exists with encrypt/decrypt examples, key rotation, and AAD
-- [ ] AC10: ExecDriver tutorial exists with stdin/args mode examples, SHA-256 hashing, and security checklist
-- [ ] AC11: JS and TS handler tutorials updated with keystore and encrypt/decrypt APIs
+- [x] AC9: Application Keystore tutorial exists with encrypt/decrypt examples, key rotation, and AAD
+- [x] AC10: ExecDriver tutorial exists with stdin/args mode examples, SHA-256 hashing, and security checklist
+- [x] AC11: JS and TS handler tutorials updated with keystore and encrypt/decrypt APIs
 
 - [ ] AC1: All 18 production dispatch sites use `enrich_task_context()` — no manual capability wiring
 - [ ] AC2: New capabilities added to AppContext automatically flow to all handlers (verified by adding a test capability)
