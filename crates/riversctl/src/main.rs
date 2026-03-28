@@ -65,7 +65,7 @@ async fn main() {
         }
         "exec" => {
             if args.len() < 3 {
-                eprintln!("Usage: riversctl exec <hash|verify> [args]");
+                eprintln!("Usage: riversctl exec <hash|verify|list> [args]");
                 std::process::exit(1);
             }
             cmd_exec(&args[2..])
@@ -110,6 +110,7 @@ fn print_usage() {
     eprintln!("                  Compute SHA-256 of a file (TOML-ready output)");
     eprintln!("  exec verify <path> <sha256>");
     eprintln!("                  Verify a file matches an expected SHA-256 hash");
+    eprintln!("  exec list       List declared exec commands (planned — not yet implemented)");
     eprintln!("  validate <bundle_path>");
     eprintln!("                  Validate a bundle (schema refs, driver names, cross-app deps)");
     eprintln!("  validate --schema <server|app|bundle>");
@@ -493,7 +494,11 @@ fn cmd_exec(args: &[String]) -> Result<(), String> {
             }
             cmd_exec_verify(&args[1], &args[2])
         }
-        other => Err(format!("unknown exec subcommand: '{other}'\nUsage: riversctl exec <hash|verify> [args]")),
+        "list" => {
+            eprintln!("exec list: not yet implemented — use bundle TOML to review declared commands");
+            Err("exec list is planned for a future release".into())
+        }
+        other => Err(format!("unknown exec subcommand: '{other}'\nUsage: riversctl exec <hash|verify|list> [args]")),
     }
 }
 

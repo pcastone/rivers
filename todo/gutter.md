@@ -15,3 +15,7 @@ Carried over from previous sprint. All content tasks (T1–T4) completed; valida
 ## Application Keystore Gap Fixes (completed 2026-03-27)
 
 Moved from tasks.md. Gap fixes for keystore feature: dispatch wiring (G1), validate docs (G2), handler ref docs (G3). All resolved on `feature/app-keystore` branch.
+
+## ExecDriver Plugin — Implementation Tasks (completed 2026-03-27)
+
+Moved from tasks.md. All 11 implementation tasks (T1-T11) completed. See commits on `feature/app-keystore` branch. Remaining: gap analysis fixes (tracked in new tasks.md).

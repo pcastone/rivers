@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use tokio::sync::Semaphore;
@@ -69,6 +70,15 @@ impl DatabaseDriver for ExecDriver {
 
             // Log integrity mode
             integrity::log_integrity_mode("exec", name, mode);
+
+            // Warn if env_clear is false (spec S11.2, S15.1)
+            if !cmd_config.env_clear {
+                tracing::warn!(
+                    datasource = "exec",
+                    command = %name,
+                    "env_clear=false — host environment variables will be inherited, risk of credential leakage"
+                );
+            }
 
             // Load schema if declared
             let compiled_schema = if let Some(ref schema_path) = cmd_config.args_schema {
@@ -154,6 +164,25 @@ impl ExecConnection {
             })
             .ok_or_else(|| DriverError::Query("missing 'command' parameter".into()))?;
 
+        // Extract trace_id from query parameters (if provided), else use "-"
+        let trace_id = query
+            .parameters
+            .get("trace_id")
+            .and_then(|v| match v {
+                QueryValue::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "-".into());
+
+        let start = Instant::now();
+
+        tracing::info!(
+            datasource = "exec",
+            command = %command_name,
+            trace_id = %trace_id,
+            "exec: command start"
+        );
+
         // Step 2: Lookup command
         let cmd = self.commands.get(command_name).ok_or_else(|| {
             DriverError::Unsupported(format!("unknown command: '{command_name}'"))
@@ -176,11 +205,25 @@ impl ExecConnection {
 
         // Step 5: Integrity check (mode-dependent)
         if cmd.integrity.should_check() {
-            cmd.integrity.verify(&cmd.config.path)?;
+            if let Err(e) = cmd.integrity.verify(&cmd.config.path) {
+                tracing::error!(
+                    datasource = "exec",
+                    command = %command_name,
+                    trace_id = %trace_id,
+                    "exec: integrity check failed"
+                );
+                return Err(e);
+            }
         }
 
         // Step 6: Acquire global semaphore
         let _global_permit = self.global_semaphore.try_acquire().map_err(|_| {
+            tracing::warn!(
+                datasource = "exec",
+                command = %command_name,
+                trace_id = %trace_id,
+                "exec: concurrency limit reached"
+            );
             DriverError::Query(format!(
                 "concurrency limit reached for command '{command_name}'"
             ))
@@ -191,6 +234,12 @@ impl ExecConnection {
         // the global permit before the error propagates to the caller.
         let _cmd_permit = if let Some(ref sem) = cmd.semaphore {
             Some(sem.try_acquire().map_err(|_| {
+                tracing::warn!(
+                    datasource = "exec",
+                    command = %command_name,
+                    trace_id = %trace_id,
+                    "exec: concurrency limit reached"
+                );
                 DriverError::Query(format!(
                     "concurrency limit reached for command '{command_name}'"
                 ))
@@ -200,21 +249,70 @@ impl ExecConnection {
         };
 
         // Steps 8-11: Execute process (spawn, write stdin, read stdout, evaluate)
-        let result = executor::execute_command(&cmd.config, &self.config, &args).await?;
+        match executor::execute_command(&cmd.config, &self.config, &args).await {
+            Ok(result) => {
+                let duration = start.elapsed().as_millis();
+                tracing::info!(
+                    datasource = "exec",
+                    command = %command_name,
+                    trace_id = %trace_id,
+                    duration_ms = %duration,
+                    exit_code = 0,
+                    "exec: command success"
+                );
 
-        // Permits released automatically when _global_permit and _cmd_permit drop
+                // Permits released automatically when _global_permit and _cmd_permit drop
 
-        // Map JSON result to QueryResult.
-        // QueryResult has no raw_value field, so wrap as a single row with
-        // key "result" -> QueryValue::Json(parsed_json).
-        let mut row = HashMap::new();
-        row.insert("result".to_string(), QueryValue::Json(result));
+                // Map JSON result to QueryResult.
+                // QueryResult has no raw_value field, so wrap as a single row with
+                // key "result" -> QueryValue::Json(parsed_json).
+                let mut row = HashMap::new();
+                row.insert("result".to_string(), QueryValue::Json(result));
 
-        Ok(QueryResult {
-            rows: vec![row],
-            affected_rows: 1,
-            last_insert_id: None,
-        })
+                Ok(QueryResult {
+                    rows: vec![row],
+                    affected_rows: 1,
+                    last_insert_id: None,
+                })
+            }
+            Err(e) => {
+                let duration = start.elapsed().as_millis();
+                let err_msg = e.to_string();
+
+                // Categorize log level based on error type
+                if err_msg.contains("command timed out") {
+                    let timeout_ms = cmd
+                        .config
+                        .timeout_ms
+                        .unwrap_or(self.config.default_timeout_ms);
+                    tracing::warn!(
+                        datasource = "exec",
+                        command = %command_name,
+                        trace_id = %trace_id,
+                        timeout_ms = %timeout_ms,
+                        "exec: command timed out"
+                    );
+                } else if err_msg.contains("output exceeded limit") {
+                    tracing::warn!(
+                        datasource = "exec",
+                        command = %command_name,
+                        trace_id = %trace_id,
+                        "exec: output exceeded limit"
+                    );
+                } else {
+                    tracing::error!(
+                        datasource = "exec",
+                        command = %command_name,
+                        trace_id = %trace_id,
+                        duration_ms = %duration,
+                        error = %err_msg,
+                        "exec: command failed"
+                    );
+                }
+
+                Err(e)
+            }
+        }
     }
 }
 

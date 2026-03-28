@@ -174,6 +174,44 @@ impl ExecConfig {
             ));
         }
 
+        // run_as_user must resolve to a valid OS user (spec S4.2)
+        #[cfg(unix)]
+        {
+            let c_user = std::ffi::CString::new(self.run_as_user.as_str()).map_err(|_| {
+                DriverError::Connection(format!(
+                    "exec driver: invalid run_as_user: '{}'",
+                    self.run_as_user
+                ))
+            })?;
+            let pw = unsafe { libc::getpwnam(c_user.as_ptr()) };
+            if pw.is_null() {
+                return Err(DriverError::Connection(format!(
+                    "exec driver: run_as_user '{}' does not exist on this system",
+                    self.run_as_user
+                )));
+            }
+            let uid = unsafe { (*pw).pw_uid };
+            if uid == 0 {
+                return Err(DriverError::Connection(
+                    "exec driver: run_as_user must not be root (UID 0)".into(),
+                ));
+            }
+        }
+
+        // working_directory must exist and be a directory (spec S4.2)
+        if !self.working_directory.exists() {
+            return Err(DriverError::Connection(format!(
+                "exec driver: working_directory '{}' does not exist",
+                self.working_directory.display()
+            )));
+        }
+        if !self.working_directory.is_dir() {
+            return Err(DriverError::Connection(format!(
+                "exec driver: working_directory '{}' is not a directory",
+                self.working_directory.display()
+            )));
+        }
+
         // Validate each command
         for (name, cmd) in &self.commands {
             // Path must be absolute
@@ -190,6 +228,24 @@ impl ExecConfig {
                     "exec driver: command '{name}' path '{}' does not exist or is not a file",
                     cmd.path.display()
                 )));
+            }
+
+            // File must be executable (spec S5.1)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let meta = std::fs::metadata(&cmd.path).map_err(|e| {
+                    DriverError::Connection(format!(
+                        "exec driver: cannot stat {}: {e}",
+                        cmd.path.display()
+                    ))
+                })?;
+                if meta.permissions().mode() & 0o111 == 0 {
+                    return Err(DriverError::Connection(format!(
+                        "exec driver: command '{name}': file {} is not executable",
+                        cmd.path.display()
+                    )));
+                }
             }
 
             // sha256 must be non-empty and valid hex (64 hex chars for SHA-256)
@@ -616,6 +672,30 @@ mod tests {
 
     // ── Validation tests ───────────────────────────────────────────────
 
+    /// Return a username that exists on this system and is not root.
+    /// Falls back to "daemon" if "nobody" is not found.
+    fn non_root_user() -> String {
+        #[cfg(unix)]
+        {
+            for candidate in &["nobody", "daemon", "_nobody"] {
+                let c = std::ffi::CString::new(*candidate).unwrap();
+                let pw = unsafe { libc::getpwnam(c.as_ptr()) };
+                if !pw.is_null() {
+                    let uid = unsafe { (*pw).pw_uid };
+                    if uid != 0 {
+                        return candidate.to_string();
+                    }
+                }
+            }
+            // Last resort: use current user
+            std::env::var("USER").unwrap_or_else(|_| "nobody".into())
+        }
+        #[cfg(not(unix))]
+        {
+            "nobody".into()
+        }
+    }
+
     fn make_valid_config() -> ExecConfig {
         let mut commands = HashMap::new();
         commands.insert(
@@ -638,7 +718,7 @@ mod tests {
             },
         );
         ExecConfig {
-            run_as_user: "rivers".into(),
+            run_as_user: non_root_user(),
             working_directory: PathBuf::from("/tmp"),
             default_timeout_ms: 30000,
             max_stdout_bytes: 5_242_880,
@@ -751,5 +831,68 @@ mod tests {
         cmd.stdin_key = Some(String::new());
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("stdin_key must not be empty"));
+    }
+
+    // ── Gap fix tests ─────────────────────────────────────────────────
+
+    #[test]
+    #[cfg(unix)]
+    fn validate_run_as_user_not_found() {
+        let mut config = make_valid_config();
+        config.run_as_user = "nonexistent_user_xyz_12345".into();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("does not exist on this system"),
+            "unexpected: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_working_directory_not_exists() {
+        let mut config = make_valid_config();
+        config.working_directory = PathBuf::from("/nonexistent/dir/xyz");
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("working_directory")
+                && err.to_string().contains("does not exist"),
+            "unexpected: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_working_directory_not_a_dir() {
+        let mut config = make_valid_config();
+        // /bin/echo exists but is a file, not a directory
+        config.working_directory = PathBuf::from("/bin/echo");
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("is not a directory"),
+            "unexpected: {}",
+            err
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn validate_executable_permission_check() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("not_exec.sh");
+        std::fs::write(&script_path, "#!/bin/sh\necho ok\n").unwrap();
+        // Set permissions to 0o644 (not executable)
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let mut config = make_valid_config();
+        config.working_directory = dir.path().to_path_buf();
+        let cmd = config.commands.get_mut("echo").unwrap();
+        cmd.path = script_path;
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("is not executable"),
+            "unexpected: {}",
+            err
+        );
     }
 }

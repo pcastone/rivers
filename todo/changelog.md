@@ -6,6 +6,26 @@
 
 ---
 
+## ExecDriver Plugin — Gap Analysis Fixes (2026-03-27)
+
+**Goal:** Fix 11 gaps found in ExecDriver plugin gap analysis.
+
+**Key changes:**
+- Modified `config.rs` — added `getpwnam` resolution for `run_as_user` at startup (G2), `working_directory` existence/directory check (G3), executable permission check on command files (G4)
+- Modified `connection.rs` — added runtime logging with trace_id + duration for command start/success/failure/integrity/concurrency/timeout/overflow (G1), added `env_clear=false` WARN at startup (G5)
+- Modified `executor.rs` — `both` mode now removes `stdin_key` from params before template interpolation (G10), spawn failure uses `DriverError::Internal` instead of `Query` (G11)
+- Modified `riversctl/main.rs` — added `exec list` stub subcommand (G6)
+- Added 4 new unit tests: `validate_run_as_user_not_found`, `validate_working_directory_not_exists`, `validate_working_directory_not_a_dir`, `validate_executable_permission_check`
+
+**Decisions:**
+- `getpwnam` check wrapped in `#[cfg(unix)]` since it's Unix-only; also verifies UID != 0 (belt-and-suspenders with existing "root" string check)
+- Runtime logging extracts `trace_id` from query parameters (key `trace_id`) with fallback to `"-"`; uses `Instant::now()` for duration measurement
+- `both` mode interpolation: creates a filtered copy of params_obj without stdin_key before passing to `template::interpolate`, preserving original params for stdin
+- Test helper `non_root_user()` dynamically resolves an existing non-root user for getpwnam tests (tries nobody, daemon, _nobody, then $USER)
+- Gaps 7/8/9 confirmed as no-change-needed after review
+
+---
+
 ## ExecDriver Plugin — Task 11: Documentation Updates (2026-03-27)
 
 **Goal:** Update all 5 guide docs to document the ExecDriver feature.

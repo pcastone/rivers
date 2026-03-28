@@ -58,7 +58,18 @@ pub async fn execute_command(
     // Args from template interpolation (Args and Both modes)
     if config.input_mode == InputMode::Args || config.input_mode == InputMode::Both {
         if let Some(ref tmpl) = config.args_template {
-            let args = template::interpolate(tmpl, params_obj)?;
+            // For Both mode, remove stdin_key from params before template interpolation
+            // so the stdin value doesn't leak into CLI arguments (Gap 10)
+            let interpolation_params = if config.input_mode == InputMode::Both {
+                let mut filtered = params_obj.clone();
+                if let Some(ref key) = config.stdin_key {
+                    filtered.remove(key);
+                }
+                filtered
+            } else {
+                params_obj.clone()
+            };
+            let args = template::interpolate(tmpl, &interpolation_params)?;
             cmd.args(&args);
         }
     }
@@ -134,7 +145,7 @@ pub async fn execute_command(
     // ── Spawn ─────────────────────────────────────────────────────────
 
     let mut child = cmd.spawn().map_err(|e| {
-        DriverError::Query(format!("failed to spawn command '{}': {e}", config.path.display()))
+        DriverError::Internal(format!("failed to spawn command '{}': {e}", config.path.display()))
     })?;
 
     let child_pid = child.id();
