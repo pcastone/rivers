@@ -302,25 +302,94 @@ cargo build -p riversd 2>&1 | grep "dead_code" | grep -v "plugin"
 
 ---
 
+---
+
+## 9. LockBox Engine — Expanded Test Coverage
+
+**Problem:** Coverage scan found 5 untested public functions (25%), 3 untested error variants (30%), and ~80% of edge cases uncovered. The biggest gaps are `resolve_key_source()` (entirely untested) and `startup_resolve()` (never tested end-to-end).
+
+**Current state:** 28 tests cover happy paths and basic error cases. This task adds tests for the remaining public API surface, error paths, and edge cases.
+
+**Modify:** `crates/rivers-lockbox-engine/src/lib.rs`
+
+### T9.1: Key Source Resolution Tests (High Priority)
+
+`resolve_key_source()` is used at every startup but has zero tests.
+
+- [ ] `resolve_key_source_env_success` — set env var, resolve with `key_source = "env"`
+- [ ] `resolve_key_source_env_missing_var` — env var not set → `KeySourceUnavailable`
+- [ ] `resolve_key_source_env_empty_var` — env var set to "" → `KeySourceUnavailable`
+- [ ] `resolve_key_source_file_success` — write identity to temp file, resolve with `key_source = "file"`
+- [ ] `resolve_key_source_file_missing_path` — key_file path doesn't exist → error
+- [ ] `resolve_key_source_file_insecure_permissions` — key_file is 0o644 → `InsecureFilePermissions` (Unix)
+- [ ] `resolve_key_source_agent_unsupported` — `key_source = "agent"` → `KeySourceUnavailable`
+- [ ] `resolve_key_source_unknown_source` — `key_source = "magic"` → error
+- [ ] `resolve_key_source_missing_env_var_config` — `key_env_var` is None → error
+- [ ] `resolve_key_source_missing_file_path_config` — `key_file` is None → error
+
+### T9.2: Startup Resolve Integration Tests (High Priority)
+
+`startup_resolve()` runs the full 12-step sequence but is never tested end-to-end.
+
+- [ ] `startup_resolve_complete_sequence` — create a keystore with entries, write to disk, build config, resolve references → success
+- [ ] `startup_resolve_relative_path_rejected` — config path is `./lockbox.rkeystore` → error (must be absolute)
+- [ ] `startup_resolve_file_not_found` — absolute path doesn't exist → `KeystoreNotFound`
+- [ ] `startup_resolve_insecure_permissions` — keystore file is 0o644 → `InsecureFilePermissions` (Unix)
+- [ ] `startup_resolve_wrong_key` — correct path, wrong Age identity → `DecryptionFailed`
+- [ ] `startup_resolve_missing_reference` — reference to entry that doesn't exist → `EntryNotFound`
+
+### T9.3: Error Variant Coverage (Medium Priority)
+
+Fill the 3 untested error variants.
+
+- [ ] `error_config_missing` — call startup_resolve with None config → `ConfigMissing`
+  (Note: startup_resolve takes `&LockBoxConfig` not `Option`, so this may need to test the caller pattern. If not directly testable, test the error variant display string.)
+- [ ] `error_malformed_keystore_invalid_toml` — encrypt garbage bytes as Age ciphertext → `MalformedKeystore`
+- [ ] `error_malformed_keystore_invalid_utf8` — encrypt non-UTF8 bytes → `MalformedKeystore`
+
+### T9.4: fetch_secret_value Edge Cases (Medium Priority)
+
+- [ ] `fetch_secret_value_entry_index_out_of_bounds` — metadata with entry_index=99 on a 2-entry keystore
+- [ ] `fetch_secret_value_with_alias` — resolve alias, fetch by alias metadata → correct value
+- [ ] `fetch_secret_value_zeroize_after_use` — verify ResolvedEntry.value can be zeroized
+
+### T9.5: Resolver & Reference Edge Cases (Low Priority)
+
+- [ ] `empty_resolver_key_count` — resolver from empty entries → key_count() == 0
+- [ ] `empty_resolver_contains` — contains("anything") → false
+- [ ] `resolver_with_many_entries` — 50+ entries, verify all resolve correctly
+- [ ] `collect_references_empty_datasources` — empty input → empty output
+- [ ] `collect_references_no_lockbox_uris` — datasources without lockbox:// → empty output
+- [ ] `collect_references_mixed_uris` — mix of lockbox:// and plain values → only lockbox filtered
+
+### T9.6: Encryption Edge Cases (Low Priority)
+
+- [ ] `encrypt_with_invalid_recipient` — garbage string → error
+- [ ] `decrypt_with_invalid_identity` — garbage string → error
+- [ ] `encrypt_decrypt_value_with_newlines` — entry value contains \n → preserved
+- [ ] `encrypt_decrypt_value_with_unicode` — entry value contains emoji → preserved
+
+**Validation:**
+```bash
+cargo test -p rivers-lockbox-engine
+# Target: 55+ tests (28 existing + ~27 new)
+```
+
+---
+
 ## Acceptance Criteria
 
-- [ ] AC1: All 18 production dispatch sites use `enrich_task_context()` — no manual capability wiring
-- [ ] AC2: New capabilities added to AppContext automatically flow to all handlers (verified by adding a test capability)
-- [ ] AC3: `rivers-storage-backends` has unit tests for SQLite backend (get/set/del/TTL/list_keys)
-- [ ] AC4: `rivers-lockbox-engine` has unit tests for core operations
-- [ ] AC5: All error responses in riversd use `ErrorResponse` struct — no ad-hoc JSON construction
-- [ ] AC6: Zero `dead_code` warnings from riversd process_pool modules
-- [ ] AC7: AppContext decomposition plan documented as comments for Wave 6
-- [ ] AC8: All existing tests still pass (no regressions)
-- [x] AC9: Application Keystore tutorial exists with encrypt/decrypt examples, key rotation, and AAD
-- [x] AC10: ExecDriver tutorial exists with stdin/args mode examples, SHA-256 hashing, and security checklist
-- [x] AC11: JS and TS handler tutorials updated with keystore and encrypt/decrypt APIs
-
-- [ ] AC1: All 18 production dispatch sites use `enrich_task_context()` — no manual capability wiring
-- [ ] AC2: New capabilities added to AppContext automatically flow to all handlers (verified by adding a test capability)
-- [ ] AC3: `rivers-storage-backends` has unit tests for SQLite backend (get/set/del/TTL/list_keys)
-- [ ] AC4: `rivers-lockbox-engine` has unit tests for core operations
-- [ ] AC5: All error responses in riversd use `ErrorResponse` struct — no ad-hoc JSON construction
-- [ ] AC6: Zero `dead_code` warnings from riversd process_pool modules
-- [ ] AC7: AppContext decomposition plan documented as comments for Wave 6
-- [ ] AC8: All existing tests still pass (no regressions)
+- [x] AC1: All 19 production dispatch sites use `enrich_task_context()`
+- [ ] AC2: New capabilities added to AppContext automatically flow to all handlers
+- [x] AC3: `rivers-storage-backends` has unit tests for SQLite backend
+- [x] AC4: `rivers-lockbox-engine` has unit tests for core operations
+- [x] AC5: Error responses consolidated with named constructors
+- [x] AC6: Zero `dead_code` warnings from riversd process_pool modules
+- [x] AC7: AppContext decomposition plan documented
+- [x] AC8: All existing tests still pass
+- [x] AC9: Application Keystore tutorial exists
+- [x] AC10: ExecDriver tutorial exists
+- [x] AC11: JS and TS handler tutorials updated
+- [ ] AC12: `resolve_key_source()` has tests for all 3 key sources + error paths
+- [ ] AC13: `startup_resolve()` has end-to-end integration test
+- [ ] AC14: All 10 `LockBoxError` variants have at least one triggering test
