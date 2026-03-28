@@ -20,6 +20,7 @@ members = [
     "crates/rivers-plugin-cassandra",
     "crates/rivers-plugin-couchdb",
     "crates/rivers-plugin-ldap",
+    "crates/rivers-plugin-exec",
     "crates/rivers-engine-sdk",
     "crates/rivers-engine-v8",
     "crates/rivers-engine-wasm",
@@ -31,7 +32,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-version = "0.51.0"
+version = "0.52.5"
 license = "MIT"
 
 [workspace.dependencies]
@@ -94,6 +95,7 @@ wasmtime = "42"
 bcrypt = "0.15"
 aes-gcm = "0.10"
 percent-encoding = "2"
+jsonschema = "0.28"
 
 [profile.release]
 lto = "thin"

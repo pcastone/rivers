@@ -2,165 +2,218 @@
 
 **Project:** Rivers declarative app-service framework
 **Stack:** Rust, Axum 0.8, V8 (rusty_v8 130), Wasmtime 27, tokio
-**Status:** V1 feature-complete — 200+ tasks, 1400+ tests, 17 crates, 5 binaries, 16 drivers
+**Status:** V1 feature-complete — 200+ tasks, 1500+ tests, 18 crates, 5 binaries, 17 drivers
 
 ---
 
-## v0.51.0 — Application Keystore & Encryption API (2026-03-27)
+## v0.52.5 — ExecDriver Plugin (2026-03-28)
 
-**Feature:** Per-app AES-256-GCM encryption keys with `Rivers.keystore` and `Rivers.crypto.encrypt/decrypt` handler APIs. Master key from LockBox. Key bytes never leave Rust memory.
+**Feature:** Controlled invocation of admin-declared, integrity-verified external commands from CodeComponent handlers via the standard datasource query pattern.
 
-**New crates (2):**
-- `rivers-keystore-engine` — keystore file format (Age-encrypted TOML), key management, AES-256-GCM encrypt/decrypt
-- `rivers-keystore` — CLI binary: init, generate, list, info, delete, rotate
+**New crate:**
+- `rivers-plugin-exec` — cdylib + rlib plugin implementing `DatabaseDriver` for script/binary execution
 
-**New handler APIs:**
-- `Rivers.keystore.has(name)` — check if a key exists (boolean)
-- `Rivers.keystore.info(name)` — key metadata: `{ name, type, version, created_at }`
-- `Rivers.crypto.encrypt(keyName, plaintext, options?)` — returns `{ ciphertext, nonce, key_version }`
-- `Rivers.crypto.decrypt(keyName, ciphertext, nonce, options?)` — returns plaintext string
-- Optional AAD support via `options.aad` for both encrypt and decrypt
+**Security model (controlled RCE):**
+- Admin-declared command allowlist — handlers cannot specify arbitrary paths
+- SHA-256 integrity pinning with 3 check modes: `each_time`, `startup_only`, `every:N`
+- JSON Schema validation of handler args before process spawn
+- No shell involved — `tokio::process::Command` with explicit arg array
+- Privilege drop via `run_as_user` (setuid/setgid, must not be root)
+- Environment control: `env_clear` (default true) + `env_allow` + `env_set`
+- Process group isolation via `setsid` + SIGKILL on timeout/overflow
+- Bounded stdout (`max_stdout_bytes`) + stderr (64KB) + configurable timeout
+- Global + per-command concurrency semaphores (no queuing)
+- Runtime logging with trace_id for complete audit trail
 
-**New config:**
-- `[[keystores]]` in `resources.toml` — declares keystore with Lockbox alias for master key
-- `[data.keystore.*]` in `app.toml` — configures keystore file path
+**11-step execution pipeline:**
+1. Extract command name → 2. Lookup in allowlist → 3. Schema validation →
+4. Integrity check → 5. Global semaphore → 6. Per-command semaphore →
+7. Build process → 8. Write stdin → 9. Bounded I/O + timeout →
+10. Evaluate result → 11. Release semaphores
 
-**Startup integration:**
-- Keystore master keys resolved from LockBox after datasource credential resolution
-- Unlocked keystores held in `KeystoreResolver` scoped by `"{entry_point}:{keystore_name}"`
-- Shared resolver available to V8/WASM engines via `process_pool::get_keystore_resolver()`
+**Three input modes:**
+- `stdin` — handler args serialized as JSON on stdin
+- `args` — template interpolation to argv (fixed structure, no injection)
+- `both` — args on CLI + stdin_key value on stdin
 
-**Validation:**
-- `riversctl validate` checks: name match, non-empty lockbox alias, no duplicate names, file existence (warning)
-- Lockbox alias existence verified at startup (not offline — documented limitation)
+**New CLI commands:**
+- `riversctl exec hash <path>` — print SHA-256 in TOML-ready format
+- `riversctl exec verify <path> <sha256>` — verify file matches expected hash
 
-**Security invariants:**
-- AES-256-GCM with 96-bit random nonce (OsRng) per encrypt call
-- Key bytes stay in Rust memory — never cross to V8/WASM heap
-- All auth tag failures produce generic "decryption failed" (no padding oracle)
-- Keys scoped to declaring app — cross-app access prevented
-- Zeroize on drop for all key material
-- File permissions 0o600 enforced
+**Handler API:**
+```javascript
+var result = ctx.datasource("ops_tools")
+    .fromQuery("query", { command: "network_scan", args: { cidr: "10.0.1.0/24", ports: [22, 80] } })
+    .build();
+```
 
 **Test coverage:**
-- 60 tests in `rivers-keystore-engine` (38 unit + 22 integration)
-- 10 V8 engine tests (keystore.has/info, encrypt/decrypt round-trip, AAD, errors, nonce uniqueness, full workflow)
-- 5 validation tests, 5 engine SDK tests, 3 config parsing tests
+- 95 unit tests (config, integrity, template, schema, executor, connection pipeline)
+- 8 integration tests (stdin/args round-trip, integrity, timeout, errors, concurrency)
+- 4 V8 application-level tests (JS handler → datasource → ExecDriver → script → JSON back to JS)
 
-**Files changed:** 30+ files across 17 commits on `feature/app-keystore`
+**Documentation updated:** cli.md, developer.md, rivers-app-development.md, admin.md, rivers-skill.md
 
-**Spec:** `docs/rivers-feature-request-app-keystore.md` — all 14 acceptance criteria met
-
----
-
-## Engine SDK HostCallbacks — keystore/crypto slots (2026-03-27)
-
-- **File:** `crates/rivers-engine-sdk/src/lib.rs` — added `keystore_has`, `keystore_info`, `crypto_encrypt`, `crypto_decrypt` callback slots to `HostCallbacks` struct.
-- **File:** `crates/riversd/src/engine_loader.rs` — implemented `host_keystore_has`, `host_keystore_info`, `host_crypto_encrypt`, `host_crypto_decrypt` extern "C" callbacks. Added `HOST_KEYSTORE` static OnceLock and `set_host_keystore()` for wiring. Wired all four in `build_host_callbacks()`.
-- **Decision:** Keystore uses a separate `OnceLock<Arc<AppKeystore>>` (`HOST_KEYSTORE`) rather than adding to `HostContext`, because keystore resolution is per-app and may happen after `set_host_context`. `set_host_keystore()` is the public API for wiring.
-- **Security:** Same generic-error pattern for decrypt failures as V8/WASM — only `KeyNotFound` and `KeyVersionNotFound` produce specific errors.
-- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 11
+**Spec:** `docs/rivers-exec-driver-spec.md` — all 15 acceptance criteria met
 
 ---
 
-## WASM Host Function Bindings — keystore/crypto (2026-03-27)
+## ExecDriver Plugin — Gap Analysis Fixes (2026-03-27)
 
-- **File:** `crates/riversd/src/process_pool/wasm_engine.rs` — added `TASK_KEYSTORE` thread-local (mirrors V8 pattern), `KeystoreContext` struct, `KeystoreGuard` for cleanup. Added 4 WASM host functions: `rivers.keystore_has`, `rivers.keystore_info`, `rivers.crypto_encrypt`, `rivers.crypto_decrypt`.
-- **Decision:** WASM host functions use the same thread-local pattern as V8. The `KeystoreGuard` RAII struct ensures cleanup on all exit paths (success, error, panic). The keystore is set from `ctx.keystore` at the start of `execute_wasm_task` and cleared in the guard's `Drop`.
-- **Decision:** Return convention: `keystore_has` returns 1/0/-1 (true/false/error). `keystore_info`, `crypto_encrypt`, `crypto_decrypt` return bytes-written on success (>0), -1 on error. This differs from V8 (which uses exceptions) but is idiomatic for WASM imports.
-- **Security:** Same generic-error pattern for decrypt failures. Key bytes never cross to WASM linear memory.
-- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 10
+**Goal:** Fix 11 gaps found in ExecDriver plugin gap analysis.
 
----
+**Key changes:**
+- Modified `config.rs` — added `getpwnam` resolution for `run_as_user` at startup (G2), `working_directory` existence/directory check (G3), executable permission check on command files (G4)
+- Modified `connection.rs` — added runtime logging with trace_id + duration for command start/success/failure/integrity/concurrency/timeout/overflow (G1), added `env_clear=false` WARN at startup (G5)
+- Modified `executor.rs` — `both` mode now removes `stdin_key` from params before template interpolation (G10), spawn failure uses `DriverError::Internal` instead of `Query` (G11)
+- Modified `riversctl/main.rs` — added `exec list` stub subcommand (G6)
+- Added 4 new unit tests: `validate_run_as_user_not_found`, `validate_working_directory_not_exists`, `validate_working_directory_not_a_dir`, `validate_executable_permission_check`
 
-## V8 Host Functions — Rivers.crypto.encrypt/decrypt (2026-03-27)
-
-- **File:** `crates/riversd/src/process_pool/v8_engine.rs` — added `Rivers.crypto.encrypt(keyName, plaintext, options?)` and `Rivers.crypto.decrypt(keyName, ciphertext, nonce, options?)` V8 callbacks inside the existing `crypto_obj` block, after `hmac`.
-- **Decision:** Both functions are always registered on `Rivers.crypto` regardless of whether a keystore is configured. If called without a keystore, they throw "keystore not configured: no [[keystores]] resource declared". This matches the spec: encrypt/decrypt live on `Rivers.crypto`, but need a keystore to work.
-- **Decision:** No `aes-gcm` dependency needed in riversd — all crypto operations delegate to `rivers-keystore-engine::AppKeystore` methods (`encrypt_with_key`, `decrypt_with_key`) which handle key resolution and zeroization internally.
-- **Security:** Nonce generated by `OsRng` in `encrypt_with_key`, never caller-supplied. Key bytes resolved in Rust, never cross to V8. Plaintext not logged. Auth tag failures produce generic "decryption failed" message; only `KeyNotFound` and `KeyVersionNotFound` produce specific errors.
-- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 9
-
----
-
-## V8 Host Functions — Rivers.keystore.has/info (2026-03-27)
-
-- **File:** `crates/riversd/src/process_pool/v8_engine.rs` — added `KeystoreContext` struct (wraps `Arc<AppKeystore>`), `TASK_KEYSTORE` thread-local, population in `TaskLocals::set()` from `ctx.keystore`, cleanup in `TaskLocals::drop()`.
-- **File:** `crates/riversd/src/process_pool/v8_engine.rs` — added `Rivers.keystore` namespace in `inject_rivers_global()` between `Rivers.crypto` and `Rivers.http`. Two functions: `has(name)` returns boolean, `info(name)` returns `{name, type, version, created_at}` object or throws on key-not-found.
-- **Decision:** `Rivers.keystore` is only injected when `TASK_KEYSTORE` is `Some` — when the app has no keystore configured, `Rivers.keystore` is simply `undefined` (natural V8 behavior, same as `Rivers.http`).
-- **Decision:** No `#[cfg(feature = "keystore")]` gating needed in v8_engine.rs because riversd depends on rivers-runtime with `features = ["full"]` which includes `keystore`.
-- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 8
+**Decisions:**
+- `getpwnam` check wrapped in `#[cfg(unix)]` since it's Unix-only; also verifies UID != 0 (belt-and-suspenders with existing "root" string check)
+- Runtime logging extracts `trace_id` from query parameters (key `trace_id`) with fallback to `"-"`; uses `Instant::now()` for duration measurement
+- `both` mode interpolation: creates a filtered copy of params_obj without stdin_key before passing to `template::interpolate`, preserving original params for stdin
+- Test helper `non_root_user()` dynamically resolves an existing non-root user for getpwnam tests (tries nobody, daemon, _nobody, then $USER)
+- Gaps 7/8/9 confirmed as no-change-needed after review
 
 ---
 
-## TaskContext & Engine SDK — Keystore Fields (2026-03-27)
+## ExecDriver Plugin — Task 11: Documentation Updates (2026-03-27)
 
-- **File:** `crates/rivers-runtime/src/process_pool/types.rs` — added `keystore: Option<Arc<rivers_keystore_engine::AppKeystore>>` field to `TaskContext` behind `#[cfg(feature = "keystore")]`. Updated Debug impl to include redacted keystore field.
-- **File:** `crates/rivers-engine-sdk/src/lib.rs` — added `keystore_available: bool` field to `SerializedTaskContext`. Updated round-trip test.
-- **File:** `crates/rivers-runtime/src/process_pool/bridge.rs` — added `keystore` field to `TaskContextBuilder` with `.keystore()` setter method. Updated `From<&TaskContext>` impl to serialize `keystore_available` using the same cfg-gated pattern as `lockbox_available`. Updated `build()` to pass keystore through.
-- **File:** `crates/rivers-engine-v8/src/lib.rs` — added `keystore_available: false` to test helper `make_ctx()`.
-- **File:** `crates/rivers-engine-wasm/src/lib.rs` — added `keystore_available: false` to test helper `make_ctx()`.
-- **Decision:** Builder method `.keystore()` is ready but not yet called at dispatch sites (view_engine, guard, etc.). The actual wiring will happen in Tasks 8-9 when V8/WASM host functions need the keystore context. This matches the lockbox pattern where the builder method exists but isn't wired at all dispatch sites yet.
-- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 7
+**Goal:** Update all 5 guide docs to document the ExecDriver feature.
 
----
+**Key changes:**
+- Modified `docs/guide/rivers-skill.md` — added `rivers-exec` row to datasource drivers table (before http and eventbus)
+- Modified `docs/guide/cli.md` — added `riversctl exec hash` and `exec verify` subcommands section after TLS commands
+- Modified `docs/guide/developer.md` — added ExecDriver (Script Execution) section with handler example showing ctx.dataview pattern
+- Modified `docs/guide/rivers-app-development.md` — added ExecDriver Datasource section with full resources.toml + app.toml config examples
+- Modified `docs/guide/admin.md` — added ExecDriver Operations section with script management, hash management, script contract, and security checklist
 
-## Keystore Resolver — Startup Integration (2026-03-27)
-
-- **File:** `crates/riversd/src/keystore.rs` — new module containing `KeystoreResolver` type. Thin wrapper over `HashMap<String, Arc<AppKeystore>>` keyed by `"{entry_point}:{keystore_name}"`. Methods: `new()`, `insert()`, `get()`, `is_empty()`.
-- **File:** `crates/riversd/src/server.rs` — added `keystore_resolver: Option<Arc<KeystoreResolver>>` field to `AppContext`, initialized as `None`.
-- **File:** `crates/riversd/src/bundle_loader.rs` — added keystore resolution block after LockBox resolution and before the per-app DataView/datasource loop. For each `[[keystores]]` entry: validates app.toml config exists, resolves file path, fetches master key from LockBox, decrypts keystore file, stores in resolver. Handles required vs optional keystores, zeroizes master key after use.
-- **File:** `crates/riversd/src/lib.rs` — added `pub mod keystore;` declaration.
-- **File:** `crates/riversd/Cargo.toml` — added `rivers-keystore-engine` as direct dependency.
-- **Decision:** Placed `KeystoreResolver` in its own `keystore.rs` module rather than inline in `bundle_loader.rs` for reuse by later tasks (V8/WASM host functions).
-- **Decision:** Follows the exact LockBox credential fetch pattern: `resolve_key_source()` + `fetch_secret_value()` + `zeroize()`.
-- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 6
+**Decisions:**
+- Placed ExecDriver handler example in developer.md after Rivers.http section, consistent with the pattern of showing datasource access methods
+- Admin guide security checklist uses checkbox format for operators to track compliance
+- CLI docs show only hash and verify (list deferred, matching T9.3 status)
 
 ---
 
-## Bundle Validation — Keystore Checks (2026-03-27)
+## ExecDriver Plugin — Tasks 8+9+10: Registration, CLI, Integration Tests (2026-03-27)
 
-- **File:** `crates/rivers-runtime/src/validate.rs` — added `validate_keystores()` function with 3 checks: name match between app.toml and resources.toml, non-empty lockbox alias, duplicate keystore names. Wired into `validate_bundle()` per-app loop. Added 5 unit tests.
-- **File:** `crates/riversctl/src/main.rs` — added keystore file existence warning in `cmd_validate()` after bundle validation, before driver check. Warns (not errors) if keystore file missing at configured path.
-- **Decision:** Keystore validation follows the same `Vec<String>` helper pattern as `validate_schema_files()` and `validate_duplicate_resource_names()`, returning strings that get wrapped with app label in the caller.
-- **Decision:** File existence is a warning only (in riversctl), not a validation error, since keystore files may be created after bundle deployment via the `rivers-keystore` CLI.
-- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 5
+**Goal:** Complete plugin registration, add riversctl exec commands, and write integration tests.
 
----
+**Key changes:**
+- Modified `crates/riversd/src/server.rs` — added `rivers-plugin-exec` (ExecDriver) to `register_all_drivers()` static plugins vector
+- Modified `crates/riversctl/Cargo.toml` — moved `sha2` from optional (admin-api) to required dependency for exec hash command
+- Modified `crates/riversctl/src/main.rs` — added `exec hash <path>` and `exec verify <path> <sha256>` subcommands; added `rivers-exec` to known drivers list in validate
+- Created `crates/rivers-plugin-exec/tests/integration_test.rs` — 8 integration tests exercising the full driver contract with real shell scripts
 
-## rivers-keystore CLI Binary (2026-03-27)
-
-- **File:** `crates/rivers-keystore/Cargo.toml` — new crate manifest, binary, deps: rivers-keystore-engine, age, clap (derive)
-- **File:** `crates/rivers-keystore/src/main.rs` — CLI with clap derive: init, generate, list, info, delete, rotate commands
-- **File:** `Cargo.toml` (workspace root) — added `rivers-keystore` to workspace members
-- **Decision:** Used clap derive instead of manual arg parsing (unlike rivers-lockbox which uses manual parsing). Clap adds ~200KB but provides help, validation, and shell completions.
-- **Decision:** Dropped `base64` dependency from spec — engine handles all base64 internally, CLI never touches raw key material.
-- **Decision:** `read_identity()` returns both raw string and parsed identity to avoid `SecretBox<str>` issues with `age::x25519::Identity::to_string()` in age 0.11. The raw string is passed to `AppKeystore::load()`, the parsed identity is used for `to_public()`.
-- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 3
+**Decisions:**
+- T8: C ABI exports already existed in lib.rs behind `#[cfg(feature = "plugin-exports")]`; the missing piece was static registration in `register_all_drivers()` in server.rs
+- T9: Simplified `exec verify` to single-file verification (`exec verify <path> <sha256>`) instead of bundle-scanning; `exec list` deferred as follow-up since it requires parsing exec datasource configs from bundles
+- T10: Both mode, JSON schema validation, and output overflow are thoroughly covered in unit tests (connection.rs, executor.rs); integration tests focus on full round-trip scenarios that unit tests cannot cover (real process spawning, file tampering, timeouts)
 
 ---
 
-## AES-256-GCM Encrypt/Decrypt Operations (2026-03-27)
+## ExecDriver Plugin — Tasks 6+7: Concurrency Control + Connection Pipeline (2026-03-27)
 
-- **File:** `crates/rivers-keystore-engine/Cargo.toml` — added `aes-gcm = { workspace = true }` dependency
-- **File:** `crates/rivers-keystore-engine/src/lib.rs` — added standalone `encrypt()` and `decrypt()` functions, `encrypt_with_key()` and `decrypt_with_key()` convenience wrappers on `AppKeystore`, 17 new crypto unit tests (38 total)
-- **Decision:** Nonces always randomly generated via OsRng (never caller-supplied) per security spec
-- **Decision:** All crypto failures return generic `DecryptionFailed` to prevent padding oracle attacks
-- **Decision:** Convenience wrappers zeroize key bytes after use regardless of success/failure
-- **Decision:** Standalone functions accept raw key bytes (key_version=0), wrappers set real key_version
-- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 2
+**Goal:** Wire the full 11-step pipeline via `DatabaseDriver` + `Connection` traits, with two-layer semaphore concurrency control.
+
+**Key changes:**
+- Created `crates/rivers-plugin-exec/src/connection.rs` — `ExecDriver` (DatabaseDriver), `ExecConnection` (Connection), `CommandRuntime`, full 11-step pipeline
+- Updated `crates/rivers-plugin-exec/src/lib.rs` — replaced placeholder `ExecDriver` with `pub use connection::ExecDriver`, added `pub mod connection`
+- 12 new tests in `connection::tests` covering: connect success/failure, full pipeline (stdin, args, statement-based command), unknown command, unsupported operation, missing command parameter, ping, global/per-command concurrency limits, schema validation, args mode
+
+**Decisions:**
+- `QueryResult` has no `raw_value` field; JSON result wrapped as single row: `{"result": QueryValue::Json(parsed_json)}`, `affected_rows: 1`
+- Concurrency: global semaphore on `ExecConnection`, per-command semaphore on `CommandRuntime`; `try_acquire()` for no-queue semantics; RAII drop handles release on per-command failure
+- Command name extracted from `query.parameters["command"]` (String variant) or `query.statement` as fallback
+- Args extracted from `query.parameters["args"]` (Json variant); defaults to empty object
+- Only `query` operation supported; all others return `DriverError::Unsupported`
+- Concurrency tests use direct `ExecConnection` construction (not `Box<dyn Connection>`) to access semaphore fields
+
+**Spec reference:** `docs/rivers-exec-driver-spec.md` sections 12, 13.4, 18
 
 ---
 
-## Application Keystore Engine Crate (2026-03-27)
+## ExecDriver Plugin — Task 5: Process Spawning (2026-03-27)
 
-- **File:** `crates/rivers-keystore-engine/Cargo.toml` — new crate manifest, rlib only, deps: age, base64, chrono, rand, serde, thiserror, toml, zeroize
-- **File:** `crates/rivers-keystore-engine/src/lib.rs` — AppKeystore types, AppKeystoreError, Zeroize/Drop, Age encrypt/decrypt, key generate/rotate/delete, 21 unit tests
-- **File:** `Cargo.toml` (workspace root) — added `rivers-keystore-engine` to workspace members
-- **Decision:** Followed `rivers-lockbox-engine` pattern: Age-encrypted TOML, Zeroize on drop, 0o600 file permissions
-- **Decision:** Only `aes-256` key type supported; `aes-gcm` crate deferred to Task 2
-- **Decision:** `EncryptResult` struct defined but no encrypt/decrypt functions yet (Task 2)
-- **Spec:** `docs/rivers-feature-request-app-keystore.md`, Task 1
+**Goal:** Implement process spawning with full isolation per spec sections 10-11. No shell involved.
+
+**Key changes:**
+- Added `libc = "0.2"` to `crates/rivers-plugin-exec/Cargo.toml` (direct dep, not in workspace)
+- Created `crates/rivers-plugin-exec/src/executor.rs` with `execute_command()`, `evaluate_result()`, `kill_process_group()`, Unix helpers
+- Added `pub mod executor;` to `crates/rivers-plugin-exec/src/lib.rs`
+- 14 unit tests covering all input modes, error cases, timeout, env isolation, output overflow
+
+**Decisions:**
+- Used `libc` directly for setsid/kill/geteuid/getpwnam instead of the `nix` crate — minimal deps
+- Tokio Command has inherent pre_exec/uid/gid methods — no CommandExt import needed
+- Privilege drop only when running as root; non-root logs debug and skips
+- Process group kill via negative PID after setsid makes child session leader
+- All tests gated with `#[cfg(unix)]` — use real shell scripts
+- Stderr truncated to 1024 chars in error messages
+
+**Spec reference:** `docs/rivers-exec-driver-spec.md` sections 10-11
+
+---
+
+## ExecDriver Plugin — Task 4: JSON Schema Validation (2026-03-27)
+
+**Goal:** Integrate JSON Schema validation to validate handler args before process spawn per spec section 9.
+
+**Key changes:**
+- Added `jsonschema = "0.28"` to workspace `[workspace.dependencies]` in root `Cargo.toml`
+- Added `jsonschema = { workspace = true }` to `crates/rivers-plugin-exec/Cargo.toml`
+- Created `crates/rivers-plugin-exec/src/schema.rs` — `CompiledSchema` struct with `load(path)` and `validate(args)` methods
+- Added `pub mod schema;` to `crates/rivers-plugin-exec/src/lib.rs`
+- 8 unit tests: valid args pass, missing required field fails, invalid CIDR pattern fails, port out of range fails, extra properties fail (additionalProperties: false), load nonexistent file fails, load invalid JSON fails, load invalid schema fails
+
+**Decisions:**
+- Used `jsonschema` 0.28 crate — `validator_for()` API (0.26+ style, returns `Result<Validator, ValidationError>`)
+- `validate()` collects all errors via `iter_errors()` into a single `DriverError::Query` message so callers get a complete diagnostic
+- Manual `Debug` impl on `CompiledSchema` since `jsonschema::Validator` does not implement `Debug`
+- Validation timing documented but not enforced in this module — the pipeline in Task 7 will call schema validation at the right point (after command lookup, before integrity check)
+
+**Spec reference:** `docs/rivers-exec-driver-spec.md` section 9
+
+---
+
+## ExecDriver Plugin — Task 3: Argument Template Engine (2026-03-27)
+
+**Goal:** Implement placeholder interpolation for `args` and `both` input modes per spec section 8.2.
+
+**Key changes:**
+- Created `crates/rivers-plugin-exec/src/template.rs` — `interpolate()` function resolves `{key}` placeholders against query params
+- Added `pub mod template;` to `crates/rivers-plugin-exec/src/lib.rs`
+- 19 unit tests covering: basic interpolation, missing key error, number/boolean/null/float values, array/object rejection, extra keys ignored, special characters pass through, empty template, literal-only template, mixed literals and placeholders, bare braces edge case, partial brace edge case
+
+**Decisions:**
+- Placeholder detection uses simple bracket check: starts with `{` and ends with `}` with length > 2 (per spec "simple bracket detection")
+- Function signature uses `serde_json::Map<String, serde_json::Value>` (not `HashMap`) since that is the native JSON object type from serde_json
+- `{}` (empty braces) treated as literal, not a placeholder, since there is no key to extract
+
+**Spec reference:** `docs/rivers-exec-driver-spec.md` section 8.2
+
+---
+
+## ExecDriver Plugin — Task 1: Crate Skeleton + Config Types (2026-03-27)
+
+**Goal:** Create `rivers-plugin-exec` crate with config types, parsing from `ConnectionParams.options`, and startup validation.
+
+**Key changes:**
+- Created `crates/rivers-plugin-exec/Cargo.toml` — cdylib + rlib, plugin-exports feature, deps: rivers-driver-sdk, async-trait, tokio, serde, serde_json, sha2, hex, tracing
+- Created `crates/rivers-plugin-exec/src/lib.rs` — ExecDriver struct with placeholder DatabaseDriver impl, C ABI exports under plugin-exports feature
+- Created `crates/rivers-plugin-exec/src/config.rs` — ExecConfig, CommandConfig, IntegrityMode, InputMode types with parsing from flat options map and startup validation
+- Added to workspace members in root `Cargo.toml`
+- Added to static-plugins feature list and optional deps in `crates/riversd/Cargo.toml`
+- 30 unit tests covering: IntegrityMode/InputMode parsing, config parsing from ConnectionParams, validation of run_as_user, paths, sha256, args_template, stdin_key
+
+**Decisions:**
+- `jsonschema` dep deferred to Task 4 per task description
+- Validation rejects "root" as run_as_user (string check, not UID lookup — nix crate not yet added)
+- Command configs parsed from flattened dot-separated keys (`commands.<name>.<field>`) matching TOML flatten behavior
+- `env_clear` defaults to `true` per spec security model
+
+**Spec reference:** `docs/rivers-exec-driver-spec.md` sections 4-5
 
 ---
 

@@ -12,7 +12,7 @@ static-plugins = [
     "rivers-plugin-cassandra", "rivers-plugin-couchdb", "rivers-plugin-mongodb",
     "rivers-plugin-elasticsearch", "rivers-plugin-influxdb", "rivers-plugin-kafka",
     "rivers-plugin-rabbitmq", "rivers-plugin-nats", "rivers-plugin-redis-streams",
-    "rivers-plugin-ldap",
+    "rivers-plugin-ldap", "rivers-plugin-exec",
 ]
 
 [dependencies]
@@ -73,6 +73,7 @@ rivers-plugin-rabbitmq = { path = "../rivers-plugin-rabbitmq", optional = true, 
 rivers-plugin-nats = { path = "../rivers-plugin-nats", optional = true, default-features = false }
 rivers-plugin-redis-streams = { path = "../rivers-plugin-redis-streams", optional = true, default-features = false }
 rivers-plugin-ldap = { path = "../rivers-plugin-ldap", optional = true, default-features = false }
+rivers-plugin-exec = { path = "../rivers-plugin-exec", optional = true, default-features = false }
 
 [dev-dependencies]
 async-trait = { workspace = true }

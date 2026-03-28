@@ -442,6 +442,7 @@ task_timeout_ms          = 5000
 | `rabbitmq` | Broker (plugin) | lockbox | Message queuing |
 | `nats` | Broker (plugin) | lockbox | Message pub/sub |
 | `redis-streams` | Broker (plugin) | lockbox | Stream processing |
+| `rivers-exec` | Plugin | exec | Controlled invocation of admin-declared scripts/binaries |
 | `http` | HTTP | optional | Inter-service proxy |
 | `eventbus` | Internal | none | Pub/sub via standard interface |
 
