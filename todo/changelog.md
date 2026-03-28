@@ -2,7 +2,59 @@
 
 **Project:** Rivers declarative app-service framework
 **Stack:** Rust, Axum 0.8, V8 (rusty_v8 130), Wasmtime 27, tokio
-**Status:** V1 feature-complete — 200+ tasks, 1382 tests, 15 crates, 4 binaries, 16 drivers
+**Status:** V1 feature-complete — 200+ tasks, 1500+ tests, 18 crates, 5 binaries, 17 drivers
+
+---
+
+## v0.52.5 — ExecDriver Plugin (2026-03-28)
+
+**Feature:** Controlled invocation of admin-declared, integrity-verified external commands from CodeComponent handlers via the standard datasource query pattern.
+
+**New crate:**
+- `rivers-plugin-exec` — cdylib + rlib plugin implementing `DatabaseDriver` for script/binary execution
+
+**Security model (controlled RCE):**
+- Admin-declared command allowlist — handlers cannot specify arbitrary paths
+- SHA-256 integrity pinning with 3 check modes: `each_time`, `startup_only`, `every:N`
+- JSON Schema validation of handler args before process spawn
+- No shell involved — `tokio::process::Command` with explicit arg array
+- Privilege drop via `run_as_user` (setuid/setgid, must not be root)
+- Environment control: `env_clear` (default true) + `env_allow` + `env_set`
+- Process group isolation via `setsid` + SIGKILL on timeout/overflow
+- Bounded stdout (`max_stdout_bytes`) + stderr (64KB) + configurable timeout
+- Global + per-command concurrency semaphores (no queuing)
+- Runtime logging with trace_id for complete audit trail
+
+**11-step execution pipeline:**
+1. Extract command name → 2. Lookup in allowlist → 3. Schema validation →
+4. Integrity check → 5. Global semaphore → 6. Per-command semaphore →
+7. Build process → 8. Write stdin → 9. Bounded I/O + timeout →
+10. Evaluate result → 11. Release semaphores
+
+**Three input modes:**
+- `stdin` — handler args serialized as JSON on stdin
+- `args` — template interpolation to argv (fixed structure, no injection)
+- `both` — args on CLI + stdin_key value on stdin
+
+**New CLI commands:**
+- `riversctl exec hash <path>` — print SHA-256 in TOML-ready format
+- `riversctl exec verify <path> <sha256>` — verify file matches expected hash
+
+**Handler API:**
+```javascript
+var result = ctx.datasource("ops_tools")
+    .fromQuery("query", { command: "network_scan", args: { cidr: "10.0.1.0/24", ports: [22, 80] } })
+    .build();
+```
+
+**Test coverage:**
+- 95 unit tests (config, integrity, template, schema, executor, connection pipeline)
+- 8 integration tests (stdin/args round-trip, integrity, timeout, errors, concurrency)
+- 4 V8 application-level tests (JS handler → datasource → ExecDriver → script → JSON back to JS)
+
+**Documentation updated:** cli.md, developer.md, rivers-app-development.md, admin.md, rivers-skill.md
+
+**Spec:** `docs/rivers-exec-driver-spec.md` — all 15 acceptance criteria met
 
 ---
 
