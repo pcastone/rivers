@@ -126,7 +126,7 @@ cargo test -p riversd --lib -- engine_tests
 
 **Modify:** `crates/rivers-storage-backends/src/redis_backend.rs`, `crates/rivers-storage-backends/src/sqlite_backend.rs`
 
-- [ ] **T2.1** Add unit tests to `sqlite_backend.rs`:
+- [x] **T2.1** Add unit tests to `sqlite_backend.rs`:
   - `get`/`set`/`del` round-trip
   - TTL expiration (set with TTL, verify expiry)
   - `list_keys` with prefix filtering
@@ -134,12 +134,12 @@ cargo test -p riversd --lib -- engine_tests
   - Overwrite existing key
   - Binary value storage (Bytes)
 
-- [ ] **T2.2** Add unit tests to `redis_backend.rs` (using mock or conditional on Redis availability):
+- [x] **T2.2** Add unit tests to `redis_backend.rs` (using mock or conditional on Redis availability):
   - Same test scenarios as SQLite
   - Gate live tests behind `#[cfg(feature = "redis-live-test")]` or `#[ignore]`
   - At minimum: test the `StorageEngine` trait interface consistency
 
-- [ ] **T2.3** Verify: `cargo test -p rivers-storage-backends`
+- [x] **T2.3** Verify: `cargo test -p rivers-storage-backends`
 
 **Validation:**
 ```bash
@@ -156,7 +156,7 @@ cargo test -p rivers-storage-backends
 
 **Modify:** `crates/rivers-lockbox-engine/src/lib.rs`
 
-- [ ] **T3.1** Add unit tests to `rivers-lockbox-engine`:
+- [x] **T3.1** Add unit tests to `rivers-lockbox-engine`:
   - Create/load keystore round-trip (same pattern as keystore-engine tests)
   - Entry add/resolve/fetch round-trip
   - Alias resolution
@@ -166,7 +166,7 @@ cargo test -p rivers-storage-backends
   - LockBoxResolver metadata-only model (no values in memory)
   - File permission enforcement (Unix)
 
-- [ ] **T3.2** Verify: `cargo test -p rivers-lockbox-engine`
+- [x] **T3.2** Verify: `cargo test -p rivers-lockbox-engine` — 28 tests pass
 
 **Validation:**
 ```bash
