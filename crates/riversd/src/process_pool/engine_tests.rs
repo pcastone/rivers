@@ -2166,4 +2166,295 @@ mod engine_tests {
             result.value["type"]
         );
     }
+
+    // ── ExecDriver Application-Level Tests ──────────────────────────
+    //
+    // Tests the full flow: JS handler → ctx.datasource().build() →
+    // DriverFactory → ExecDriver.connect() → ExecConnection.execute()
+    // → script execution → JSON result back to JS.
+
+    #[cfg(unix)]
+    fn make_exec_script(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn sha256_file(path: &std::path::Path) -> String {
+        use sha2::{Sha256, Digest};
+        let bytes = std::fs::read(path).unwrap();
+        hex::encode(Sha256::digest(&bytes))
+    }
+
+    #[cfg(unix)]
+    fn make_exec_params(
+        dir: &std::path::Path,
+        commands: &[(&str, &std::path::Path, &str, &str)],
+    ) -> rivers_runtime::rivers_driver_sdk::ConnectionParams {
+        let user = std::env::var("USER").unwrap_or_else(|_| "nobody".into());
+        let mut options = HashMap::new();
+        options.insert("run_as_user".into(), user);
+        options.insert("working_directory".into(), dir.to_str().unwrap().into());
+
+        for (name, path, sha256, input_mode) in commands {
+            options.insert(format!("commands.{name}.path"), path.to_str().unwrap().into());
+            options.insert(format!("commands.{name}.sha256"), sha256.to_string());
+            options.insert(format!("commands.{name}.input_mode"), input_mode.to_string());
+        }
+
+        rivers_runtime::rivers_driver_sdk::ConnectionParams {
+            host: String::new(),
+            port: 0,
+            database: String::new(),
+            username: String::new(),
+            password: String::new(),
+            options,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_driver_base_test_no_params() {
+        // Base test: script with no parameters, just returns a fixed JSON response
+        use rivers_runtime::rivers_core::DriverFactory;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = make_exec_script(dir.path(), "hello.sh",
+            "#!/bin/sh\necho '{\"status\":\"ok\",\"message\":\"hello from exec driver\"}'\n"
+        );
+        let hash = sha256_file(&script);
+        let params = make_exec_params(dir.path(), &[("hello", &script, &hash, "stdin")]);
+
+        let mut factory = DriverFactory::new();
+        factory.register_database_driver(std::sync::Arc::new(rivers_plugin_exec::ExecDriver));
+
+        let ctx = TaskContextBuilder::new()
+            .entrypoint(Entrypoint {
+                module: "inline".into(),
+                function: "handler".into(),
+                language: "javascript".into(),
+            })
+            .datasource("ops".into(), DatasourceToken("ops".into()))
+            .datasource_config("ops".into(), ResolvedDatasource {
+                driver_name: "rivers-exec".into(),
+                params,
+            })
+            .driver_factory(std::sync::Arc::new(factory))
+            .args(serde_json::json!({
+                "_source": r#"function handler(ctx) {
+                    var result = ctx.datasource("ops")
+                        .fromQuery("query", { command: "hello" })
+                        .build();
+                    // result.rows[0].result contains the script's JSON output
+                    var output = result.rows[0].result;
+                    return {
+                        status: output.status,
+                        message: output.message,
+                        has_rows: result.rows.length === 1
+                    };
+                }"#
+            }))
+            .trace_id("exec-base".into())
+            .build()
+            .unwrap();
+
+        let result = execute_js_task(ctx, 10000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
+        assert_eq!(result.value["status"], "ok");
+        assert_eq!(result.value["message"], "hello from exec driver");
+        assert_eq!(result.value["has_rows"], true);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_driver_parameter_test_stdin() {
+        // Parameter test: view sends parameters to the script via stdin
+        // Script reads JSON from stdin, processes it, returns enriched JSON
+        use rivers_runtime::rivers_core::DriverFactory;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = make_exec_script(dir.path(), "process.sh",
+            r#"#!/bin/sh
+# Read JSON from stdin, extract fields, return processed result
+INPUT=$(cat)
+# Use simple shell to echo back with added field
+echo "{\"received\":$INPUT,\"processed\":true}"
+"#
+        );
+        let hash = sha256_file(&script);
+        let params = make_exec_params(dir.path(), &[("process", &script, &hash, "stdin")]);
+
+        let mut factory = DriverFactory::new();
+        factory.register_database_driver(std::sync::Arc::new(rivers_plugin_exec::ExecDriver));
+
+        let ctx = TaskContextBuilder::new()
+            .entrypoint(Entrypoint {
+                module: "inline".into(),
+                function: "handler".into(),
+                language: "javascript".into(),
+            })
+            .datasource("tools".into(), DatasourceToken("tools".into()))
+            .datasource_config("tools".into(), ResolvedDatasource {
+                driver_name: "rivers-exec".into(),
+                params,
+            })
+            .driver_factory(std::sync::Arc::new(factory))
+            .args(serde_json::json!({
+                "_source": r#"function handler(ctx) {
+                    // Handler sends parameters to the exec command
+                    var result = ctx.datasource("tools")
+                        .fromQuery("query", {
+                            command: "process",
+                            args: { cidr: "10.0.1.0/24", ports: [22, 80, 443] }
+                        })
+                        .build();
+
+                    var output = result.rows[0].result;
+                    return {
+                        received_cidr: output.received.cidr,
+                        received_ports: output.received.ports,
+                        processed: output.processed
+                    };
+                }"#
+            }))
+            .trace_id("exec-params".into())
+            .build()
+            .unwrap();
+
+        let result = execute_js_task(ctx, 10000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
+        assert_eq!(result.value["received_cidr"], "10.0.1.0/24");
+        assert_eq!(result.value["received_ports"][0], 22);
+        assert_eq!(result.value["received_ports"][1], 80);
+        assert_eq!(result.value["received_ports"][2], 443);
+        assert_eq!(result.value["processed"], true);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_driver_parameter_test_args_mode() {
+        // Parameter test with args mode: view sends parameters via CLI args
+        use rivers_runtime::rivers_core::DriverFactory;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = make_exec_script(dir.path(), "lookup.sh",
+            r#"#!/bin/sh
+# Receives arguments: $1=domain, $2=record_type
+echo "{\"domain\":\"$1\",\"type\":\"$2\",\"resolved\":true}"
+"#
+        );
+        let hash = sha256_file(&script);
+
+        // Build params with args_template for this command
+        let user = std::env::var("USER").unwrap_or_else(|_| "nobody".into());
+        let mut options = HashMap::new();
+        options.insert("run_as_user".into(), user);
+        options.insert("working_directory".into(), dir.path().to_str().unwrap().into());
+        options.insert("commands.dns_lookup.path".into(), script.to_str().unwrap().into());
+        options.insert("commands.dns_lookup.sha256".into(), hash);
+        options.insert("commands.dns_lookup.input_mode".into(), "args".into());
+        // args_template uses indexed keys: .0, .1, etc.
+        options.insert("commands.dns_lookup.args_template.0".into(), "{domain}".into());
+        options.insert("commands.dns_lookup.args_template.1".into(), "{record_type}".into());
+
+        let params = rivers_runtime::rivers_driver_sdk::ConnectionParams {
+            host: String::new(), port: 0, database: String::new(),
+            username: String::new(), password: String::new(), options,
+        };
+
+        let mut factory = DriverFactory::new();
+        factory.register_database_driver(std::sync::Arc::new(rivers_plugin_exec::ExecDriver));
+
+        let ctx = TaskContextBuilder::new()
+            .entrypoint(Entrypoint {
+                module: "inline".into(),
+                function: "handler".into(),
+                language: "javascript".into(),
+            })
+            .datasource("dns".into(), DatasourceToken("dns".into()))
+            .datasource_config("dns".into(), ResolvedDatasource {
+                driver_name: "rivers-exec".into(),
+                params,
+            })
+            .driver_factory(std::sync::Arc::new(factory))
+            .args(serde_json::json!({
+                "_source": r#"function handler(ctx) {
+                    var result = ctx.datasource("dns")
+                        .fromQuery("query", {
+                            command: "dns_lookup",
+                            args: { domain: "example.com", record_type: "A" }
+                        })
+                        .build();
+
+                    var output = result.rows[0].result;
+                    return {
+                        domain: output.domain,
+                        type: output.type,
+                        resolved: output.resolved
+                    };
+                }"#
+            }))
+            .trace_id("exec-args".into())
+            .build()
+            .unwrap();
+
+        let result = execute_js_task(ctx, 10000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
+        assert_eq!(result.value["domain"], "example.com");
+        assert_eq!(result.value["type"], "A");
+        assert_eq!(result.value["resolved"], true);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_driver_error_propagation() {
+        // Test that script errors propagate correctly back to JS handler
+        use rivers_runtime::rivers_core::DriverFactory;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = make_exec_script(dir.path(), "fail.sh",
+            "#!/bin/sh\necho 'script error: invalid input' >&2\nexit 1\n"
+        );
+        let hash = sha256_file(&script);
+        let params = make_exec_params(dir.path(), &[("failing", &script, &hash, "stdin")]);
+
+        let mut factory = DriverFactory::new();
+        factory.register_database_driver(std::sync::Arc::new(rivers_plugin_exec::ExecDriver));
+
+        let ctx = TaskContextBuilder::new()
+            .entrypoint(Entrypoint {
+                module: "inline".into(),
+                function: "handler".into(),
+                language: "javascript".into(),
+            })
+            .datasource("ops".into(), DatasourceToken("ops".into()))
+            .datasource_config("ops".into(), ResolvedDatasource {
+                driver_name: "rivers-exec".into(),
+                params,
+            })
+            .driver_factory(std::sync::Arc::new(factory))
+            .args(serde_json::json!({
+                "_source": r#"function handler(ctx) {
+                    try {
+                        ctx.datasource("ops")
+                            .fromQuery("query", { command: "failing" })
+                            .build();
+                        return { threw: false };
+                    } catch (e) {
+                        return {
+                            threw: true,
+                            message: e.message,
+                            has_stderr: e.message.indexOf("script error") !== -1
+                        };
+                    }
+                }"#
+            }))
+            .trace_id("exec-error".into())
+            .build()
+            .unwrap();
+
+        let result = execute_js_task(ctx, 10000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
+        assert_eq!(result.value["threw"], true);
+        assert_eq!(result.value["has_stderr"], true);
+    }
 }
