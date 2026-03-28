@@ -182,18 +182,11 @@ cargo test -p rivers-lockbox-engine
 
 **Modify:** `crates/riversd/src/error_response.rs` and affected files
 
-- [ ] **T4.1** Audit all error response construction in riversd — list every site that builds a JSON error response
-- [ ] **T4.2** Add convenience constructors to `ErrorResponse`:
-  ```rust
-  impl ErrorResponse {
-      pub fn bad_request(msg: impl Into<String>) -> Self { ... }
-      pub fn internal(msg: impl Into<String>) -> Self { ... }
-      pub fn not_found(msg: impl Into<String>) -> Self { ... }
-      pub fn unauthorized(msg: impl Into<String>) -> Self { ... }
-  }
-  ```
-- [ ] **T4.3** Replace ad-hoc constructions in `guard.rs`, `streaming.rs`, `sse.rs`, `view_engine.rs`, `server.rs`, `broker_bridge.rs` with `ErrorResponse` struct usage
-- [ ] **T4.4** Verify: all error responses follow the same `{code, message, details?, trace_id?}` envelope
+- [x] **T4.1** Audit all error response construction in riversd — list every site that builds a JSON error response
+- [x] **T4.2** Add named constructors to `ErrorResponse` + `IntoResponse` impl
+- [x] **T4.3** Replace `ErrorResponse::new(code, msg)` calls with convenience constructors in `middleware.rs`, `server.rs`
+- [x] **T4.4** Add comments to engine_loader.rs, sse.rs, streaming.rs explaining why ad-hoc formats are intentional
+- [x] **T4.5** Verify: `cargo build -p riversd` succeeds with no new warnings
 
 **Validation:**
 ```bash

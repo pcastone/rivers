@@ -53,6 +53,50 @@ impl ErrorResponse {
         let status = StatusCode::from_u16(self.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         (status, Json(self)).into_response()
     }
+
+    // ── Named Constructors ──────────────────────────────────────
+
+    /// 400 Bad Request
+    pub fn bad_request(msg: impl Into<String>) -> Self {
+        Self::new(400, msg)
+    }
+
+    /// 401 Unauthorized
+    pub fn unauthorized(msg: impl Into<String>) -> Self {
+        Self::new(401, msg)
+    }
+
+    /// 403 Forbidden
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        Self::new(403, msg)
+    }
+
+    /// 404 Not Found
+    pub fn not_found(msg: impl Into<String>) -> Self {
+        Self::new(404, msg)
+    }
+
+    /// 500 Internal Server Error
+    pub fn internal(msg: impl Into<String>) -> Self {
+        Self::new(500, msg)
+    }
+
+    /// 503 Service Unavailable
+    pub fn unavailable(msg: impl Into<String>) -> Self {
+        Self::new(503, msg)
+    }
+}
+
+// ── IntoResponse ───────────────────────────────────────────────
+
+/// Allows `ErrorResponse` to be returned directly from axum handlers.
+///
+/// Equivalent to calling `into_axum_response()` — sets the HTTP status
+/// code from `self.code` and serializes the envelope as JSON.
+impl IntoResponse for ErrorResponse {
+    fn into_response(self) -> Response {
+        self.into_axum_response()
+    }
 }
 
 // ── Status Code Mapping ─────────────────────────────────────────

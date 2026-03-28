@@ -418,6 +418,8 @@ pub async fn run_sse_push_loop(
                 }
             }
             Err(TaskError::EngineUnavailable(_)) => {
+                // NOTE: SSE event payload — intentionally ad-hoc `{"error": ...}` format.
+                // This is an SSE `event: error` data payload, not an HTTP response body.
                 let event = SseEvent::typed(
                     "error".to_string(),
                     serde_json::json!({"error": "CodeComponent engine not available"}).to_string(),
@@ -428,6 +430,7 @@ pub async fn run_sse_push_loop(
                 return Err(StreamingError::CodeComponentRequired);
             }
             Err(e) => {
+                // NOTE: SSE event payload — intentionally ad-hoc format (not HTTP body).
                 let event = SseEvent::typed(
                     "error".to_string(),
                     serde_json::json!({"error": e.to_string()}).to_string(),

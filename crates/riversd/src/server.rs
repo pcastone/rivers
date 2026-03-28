@@ -792,7 +792,7 @@ async fn execute_sse_view(
     let mut sse_rx = match channel.subscribe() {
         Ok(rx) => rx,
         Err(e) => {
-            return error_response::ErrorResponse::new(503, e.to_string())
+            return error_response::service_unavailable(e.to_string())
                 .with_trace_id(trace_id)
                 .into_axum_response();
         }
@@ -1002,7 +1002,7 @@ async fn execute_ws_view(
         Ok(ws) => ws,
         Err(e) => {
             tracing::warn!(view_id = %view_id, error = %e, "WebSocket upgrade failed");
-            return error_response::ErrorResponse::new(400, format!("WebSocket upgrade failed: {}", e))
+            return error_response::bad_request(format!("WebSocket upgrade failed: {}", e))
                 .with_trace_id(trace_id)
                 .into_axum_response();
         }

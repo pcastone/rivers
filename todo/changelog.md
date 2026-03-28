@@ -28,6 +28,22 @@
 
 ---
 
+## Task 4: Error Response Consolidation (2026-03-27)
+
+**Pattern 2 fix from dream analysis — ad-hoc error construction.**
+
+- `crates/riversd/src/error_response.rs` — Added named constructors as methods on `ErrorResponse` (`bad_request`, `unauthorized`, `forbidden`, `not_found`, `internal`, `unavailable`). Added `impl IntoResponse for ErrorResponse` so handlers can return it directly without calling `.into_axum_response()`.
+- `crates/riversd/src/middleware.rs` — Replaced `ErrorResponse::new(408, "request timeout")` with `error_response::request_timeout(...)`.
+- `crates/riversd/src/server.rs` — Replaced `ErrorResponse::new(503, ...)` with `error_response::service_unavailable(...)` at SSE subscription failure. Replaced `ErrorResponse::new(400, ...)` with `error_response::bad_request(...)` at WebSocket upgrade failure.
+- `crates/riversd/src/engine_loader.rs` — Added comment explaining FFI callback `{"error": ...}` format is an engine plugin protocol contract; must not be changed.
+- `crates/riversd/src/sse.rs` — Added comments on SSE event payload error sites explaining they use ad-hoc format intentionally (SSE protocol, not HTTP response body).
+- `crates/riversd/src/streaming.rs` — Added comment on poison chunk functions explaining they use ad-hoc format intentionally (streaming protocol payloads).
+- Decision: The codebase was already in good shape. All HTTP error responses already used `ErrorResponse` or the free-function constructors. The three remaining `ErrorResponse::new(code, msg)` calls were the only sites that could be improved. Ad-hoc `{"error": ...}` patterns in engine_loader, SSE events, and streaming poison chunks are NOT HTTP response bodies — they are FFI/protocol payloads and must stay as-is.
+- Decision: Added both free-function constructors (already existed) and method constructors on the struct. The free functions (`error_response::bad_request(...)`) are the primary API; the methods (`ErrorResponse::bad_request(...)`) provide an alternative style.
+- Validation: `cargo build -p riversd` succeeds with no new warnings.
+
+---
+
 ## Task 2: Storage Backend Tests (2026-03-27)
 
 **Pattern 4 fix — zero-test security-critical crate.**

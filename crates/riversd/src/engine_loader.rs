@@ -307,6 +307,11 @@ pub fn set_host_keystore(keystore: Arc<rivers_keystore_engine::AppKeystore>) {
 }
 
 // ── Host Callback Implementations ───────────────────────────────
+//
+// NOTE: The callbacks below return JSON over FFI boundaries using `{"error": ...}`
+// format. This is an FFI protocol contract with cdylib engine plugins (V8, WASM).
+// Do NOT replace with ErrorResponse — changing the shape would break dynamic
+// engine plugins that parse these responses.
 
 /// Build the HostCallbacks table with all callbacks wired.
 pub fn build_host_callbacks() -> HostCallbacks {
