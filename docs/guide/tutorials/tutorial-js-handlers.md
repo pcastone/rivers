@@ -109,7 +109,30 @@ var token = Rivers.crypto.randomBase64url(32);    // URL-safe base64
 // HMAC and timing-safe comparison
 var sig = Rivers.crypto.hmac("secret-key", "data-to-sign");
 var equal = Rivers.crypto.timingSafeEqual("a", "b");
+
+// AES-256-GCM encrypt/decrypt (requires [[keystores]] in resources.toml)
+var enc = Rivers.crypto.encrypt("key-name", "plaintext");
+// enc = { ciphertext: "base64...", nonce: "base64...", key_version: 1 }
+var dec = Rivers.crypto.decrypt("key-name", enc.ciphertext, enc.nonce, {
+    key_version: enc.key_version
+});
+// With AAD: Rivers.crypto.encrypt("key-name", "data", { aad: "record-id" })
 ```
+
+### Application Keystore
+
+Requires `[[keystores]]` declared in `resources.toml`. Key bytes never leave Rust memory.
+
+```javascript
+// Check if a key exists
+var exists = Rivers.keystore.has("credential-key");     // boolean
+
+// Get key metadata (never raw key bytes)
+var info = Rivers.keystore.info("credential-key");
+// info = { name: "credential-key", type: "aes-256", version: 2, created_at: "..." }
+```
+
+See the [Application Keystore Tutorial](tutorial-app-keystore.md) for full setup and usage.
 
 ### Outbound HTTP
 

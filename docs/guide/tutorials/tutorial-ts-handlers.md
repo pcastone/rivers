@@ -107,6 +107,12 @@ declare const Rivers: {
         randomBase64url(bytes: number): string;
         hmac(key: string, data: string): string;
         timingSafeEqual(a: string, b: string): boolean;
+        encrypt(keyName: string, plaintext: string, options?: { aad?: string }): { ciphertext: string; nonce: string; key_version: number };
+        decrypt(keyName: string, ciphertext: string, nonce: string, options: { key_version: number; aad?: string }): string;
+    };
+    keystore: {
+        has(name: string): boolean;
+        info(name: string): { name: string; type: string; version: number; created_at: string };
     };
     http: {
         get(url: string): Promise<HttpResponse>;
