@@ -261,7 +261,84 @@ cargo build -p riversd 2>&1 | grep "dead_code" | grep -v "plugin"
 
 ---
 
+## 7. Tutorial: Application Keystore
+
+**Problem:** No tutorial exists for the Application Keystore feature (v0.52.2). Developers need a step-by-step guide covering provisioning, encryption, decryption, key rotation, and AAD.
+
+**Create:** `docs/guide/tutorials/tutorial-app-keystore.md`
+
+- [ ] **T7.1** Write tutorial covering:
+  - Provision master key in LockBox
+  - Create keystore with `rivers-keystore` CLI (init, generate)
+  - Declare `[[keystores]]` in `resources.toml`
+  - Configure `[data.keystore.*]` in `app.toml`
+  - Handler: encrypt data with `Rivers.crypto.encrypt()`
+  - Handler: decrypt data with `Rivers.crypto.decrypt()`
+  - Key rotation with `rivers-keystore rotate` + lazy re-encryption pattern
+  - AAD (Additional Authenticated Data) binding to record IDs
+  - Key metadata with `Rivers.keystore.has()` and `.info()`
+  - Complete example with full bundle structure
+  - Security notes
+
+- [ ] **T7.2** Update `docs/guide/tutorials/tutorial-js-handlers.md`:
+  - Add `Rivers.crypto.encrypt/decrypt` to crypto section
+  - Add `Rivers.keystore.has/info` section
+
+- [ ] **T7.3** Update `docs/guide/tutorials/tutorial-ts-handlers.md`:
+  - Add `encrypt/decrypt` type signatures to `Rivers.crypto` interface
+  - Add `keystore.has/info` type signatures to `Rivers` interface
+
+**Validation:**
+```bash
+# Review tutorial follows existing format (heading structure, TOML/JS blocks, step numbering)
+# All code examples reference correct API signatures from v0.52.5
+```
+
+---
+
+## 8. Tutorial: ExecDriver Datasource
+
+**Problem:** No tutorial exists for the ExecDriver plugin (v0.52.5). Operators and developers need a guide covering script setup, integrity hashing, datasource configuration, input modes, and security hardening.
+
+**Create:** `docs/guide/tutorials/datasource-exec.md`
+
+- [ ] **T8.1** Write tutorial covering:
+  - Set up execution environment (restricted OS user, directories)
+  - Create a script following the stdin JSON I/O contract
+  - Compute SHA-256 hash with `riversctl exec hash`
+  - Declare `[[datasources]]` with `driver = "rivers-exec"` in `resources.toml`
+  - Configure commands in `app.toml` (path, sha256, input_mode, timeout, concurrency)
+  - JSON Schema validation for input parameters (optional)
+  - Handler: query the exec datasource with `ctx.datasource().fromQuery()`
+  - View configuration with CodeComponent handler
+  - Args mode example with `args_template` (DNS lookup use case)
+  - Both mode example (args + stdin combined)
+  - Verification and deployment (`riversctl exec verify`, `riversctl validate`)
+  - Complete example with full bundle structure and two commands
+  - Security checklist (run_as_user, file permissions, env_clear, integrity mode)
+
+**Validation:**
+```bash
+# Review tutorial follows existing datasource tutorial format
+# TOML config examples match actual rivers-plugin-exec config parsing
+# Handler examples match the tested patterns from engine_tests.rs
+```
+
+---
+
 ## Acceptance Criteria
+
+- [ ] AC1: All 18 production dispatch sites use `enrich_task_context()` — no manual capability wiring
+- [ ] AC2: New capabilities added to AppContext automatically flow to all handlers (verified by adding a test capability)
+- [ ] AC3: `rivers-storage-backends` has unit tests for SQLite backend (get/set/del/TTL/list_keys)
+- [ ] AC4: `rivers-lockbox-engine` has unit tests for core operations
+- [ ] AC5: All error responses in riversd use `ErrorResponse` struct — no ad-hoc JSON construction
+- [ ] AC6: Zero `dead_code` warnings from riversd process_pool modules
+- [ ] AC7: AppContext decomposition plan documented as comments for Wave 6
+- [ ] AC8: All existing tests still pass (no regressions)
+- [ ] AC9: Application Keystore tutorial exists with encrypt/decrypt examples, key rotation, and AAD
+- [ ] AC10: ExecDriver tutorial exists with stdin/args mode examples, SHA-256 hashing, and security checklist
+- [ ] AC11: JS and TS handler tutorials updated with keystore and encrypt/decrypt APIs
 
 - [ ] AC1: All 18 production dispatch sites use `enrich_task_context()` — no manual capability wiring
 - [ ] AC2: New capabilities added to AppContext automatically flow to all handlers (verified by adding a test capability)
