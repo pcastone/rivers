@@ -1030,10 +1030,12 @@ impl rivers_runtime::rivers_core::eventbus::EventHandler for DatasourceEventBusH
             "timestamp": event.timestamp.to_rfc3339(),
         });
 
-        let task_ctx = crate::process_pool::TaskContextBuilder::new()
+        let builder = crate::process_pool::TaskContextBuilder::new()
             .entrypoint(entrypoint)
             .args(args)
-            .trace_id(event.trace_id.clone().unwrap_or_default())
+            .trace_id(event.trace_id.clone().unwrap_or_default());
+        let builder = crate::task_enrichment::enrich(builder, "");
+        let task_ctx = builder
             .build()
             .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
 

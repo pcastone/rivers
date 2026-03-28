@@ -452,11 +452,12 @@ pub async fn execute_ws_on_stream(
         "connection_id": connection_id.0,
     });
 
-    let ctx = TaskContextBuilder::new()
+    let builder = TaskContextBuilder::new()
         .entrypoint(entrypoint.clone())
         .args(args)
-        .trace_id(trace_id.to_string())
-        .build()?;
+        .trace_id(trace_id.to_string());
+    let builder = crate::task_enrichment::enrich(builder, "");
+    let ctx = builder.build()?;
 
     let result = pool.dispatch("default", ctx).await?;
 
@@ -495,11 +496,12 @@ pub async fn dispatch_ws_lifecycle(
         "trace_id": trace_id,
     });
 
-    let task_ctx = TaskContextBuilder::new()
+    let builder = TaskContextBuilder::new()
         .entrypoint(entrypoint)
         .args(args)
-        .trace_id(trace_id.to_string())
-        .build()?;
+        .trace_id(trace_id.to_string());
+    let builder = crate::task_enrichment::enrich(builder, "");
+    let task_ctx = builder.build()?;
 
     let result = pool.dispatch("default", task_ctx).await?;
     Ok(result.value)

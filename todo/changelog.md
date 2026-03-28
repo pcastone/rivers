@@ -6,6 +6,28 @@
 
 ---
 
+## Task 1: TaskContext Auto-Enrichment Layer (2026-03-27)
+
+**Pattern 1 fix from dream analysis — dispatch wiring gap.**
+
+- `crates/riversd/src/task_enrichment.rs` — NEW. Single `enrich()` function that wires keystore (and future capabilities) from shared state onto any TaskContextBuilder. Reads from `process_pool::get_keystore_resolver()` global. All 19 production dispatch sites call this before `.build()`.
+- `crates/riversd/src/lib.rs` — added `pub mod task_enrichment;`
+- `crates/riversd/src/view_engine.rs` — 6 dispatch sites enriched. ViewContext provides `app_id` for keystore scoping.
+- `crates/riversd/src/guard.rs` — 3 dispatch sites enriched (pass `""` since guards lack app_id).
+- `crates/riversd/src/graphql.rs` — 1 dispatch site enriched.
+- `crates/riversd/src/websocket.rs` — 2 dispatch sites enriched.
+- `crates/riversd/src/sse.rs` — 1 dispatch site enriched.
+- `crates/riversd/src/streaming.rs` — 1 dispatch site enriched.
+- `crates/riversd/src/polling.rs` — 1 dispatch site enriched.
+- `crates/riversd/src/message_consumer.rs` — 2 dispatch sites enriched.
+- `crates/riversd/src/deployment.rs` — 1 dispatch site enriched (already had `app_context.app_id`, now wires keystore too).
+- `crates/riversd/src/bundle_loader.rs` — 1 dispatch site enriched (datasource event handler, discovered during audit).
+- Decision: KEPT shared `OnceLock<KeystoreResolver>` fallback in `process_pool/mod.rs` for defense in depth. The v8_engine.rs `TaskLocals::set()` still reads it as a secondary path when `TaskContext.keystore` is None.
+- Decision: Named the function `enrich()` (not `enrich_task_context()`) since module path `task_enrichment::enrich` is self-documenting.
+- Validation: `cargo build -p riversd` clean, `cargo test -p riversd --lib -- engine_tests` passes all 119 tests.
+
+---
+
 ## Dream Pattern Fixes — Dead Code + AppContext Doc (2026-03-27)
 
 **Task 5: Dead Code Cleanup**

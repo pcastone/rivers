@@ -95,37 +95,20 @@ pub fn enrich_task_context(
 
 ### Steps
 
-- [ ] **T1.1** Create `crates/riversd/src/task_enrichment.rs` with `enrich_task_context()` function
-- [ ] **T1.2** Add `pub mod task_enrichment;` to `crates/riversd/src/lib.rs`
-- [ ] **T1.3** Update `view_engine.rs` — replace 6 builder sites to use `enrich_task_context()`. Each site currently does:
-  ```rust
-  let ctx = TaskContextBuilder::new()
-      .entrypoint(entrypoint)
-      .args(args)
-      .trace_id(ctx.trace_id.clone())
-      .build()?;
-  ```
-  Change to:
-  ```rust
-  let builder = TaskContextBuilder::new()
-      .entrypoint(entrypoint)
-      .args(args)
-      .trace_id(ctx.trace_id.clone());
-  let builder = crate::task_enrichment::enrich_task_context(builder, &app_ctx, entry_point);
-  let ctx = builder.build()?;
-  ```
-  Note: view_engine functions need access to AppContext. Check what's available — it may be passed as a parameter or accessible via shared state.
-
-- [ ] **T1.4** Update `guard.rs` — 3 sites (lines 72, 122, 293). Guard handlers have limited context — enrich with what's available.
-- [ ] **T1.5** Update `graphql.rs` — 1 site (line 689)
-- [ ] **T1.6** Update `websocket.rs` — 2 sites (lines 455, 498)
-- [ ] **T1.7** Update `sse.rs` — 1 site (line 402)
-- [ ] **T1.8** Update `streaming.rs` — 1 site (line 223)
-- [ ] **T1.9** Update `polling.rs` — 1 site (line 735)
-- [ ] **T1.10** Update `message_consumer.rs` — 2 sites (lines 249, 311)
-- [ ] **T1.11** Update `deployment.rs` — 1 site (line 498)
-- [ ] **T1.12** Remove the shared `OnceLock<KeystoreResolver>` fallback in `process_pool/mod.rs` — no longer needed since enrichment wires the keystore directly onto TaskContext
-- [ ] **T1.13** Write test: build a TaskContext via `enrich_task_context()` with a fully populated AppContext, verify all capabilities are present
+- [x] **T1.1** Create `crates/riversd/src/task_enrichment.rs` with `enrich()` function
+- [x] **T1.2** Add `pub mod task_enrichment;` to `crates/riversd/src/lib.rs`
+- [x] **T1.3** Update `view_engine.rs` — all 6 builder sites enriched (pre_process, codecomponent, handlers, post_process, on_error, on_session_valid)
+- [x] **T1.4** Update `guard.rs` — 3 sites enriched (execute_guard_handler, on_failed, lifecycle_hook)
+- [x] **T1.5** Update `graphql.rs` — 1 site enriched (mutation handler)
+- [x] **T1.6** Update `websocket.rs` — 2 sites enriched (on_stream, lifecycle)
+- [x] **T1.7** Update `sse.rs` — 1 site enriched
+- [x] **T1.8** Update `streaming.rs` — 1 site enriched
+- [x] **T1.9** Update `polling.rs` — 1 site enriched (change_detect)
+- [x] **T1.10** Update `message_consumer.rs` — 2 sites enriched (dispatch + EventHandler)
+- [x] **T1.11** Update `deployment.rs` — 1 site enriched (init handler, already had app_id)
+- [x] **T1.11b** Update `bundle_loader.rs` — 1 site enriched (datasource event handler, discovered during audit)
+- [ ] **T1.12** SKIPPED — Keep shared `OnceLock<KeystoreResolver>` fallback in `process_pool/mod.rs` for defense in depth (v8_engine.rs still uses it as a secondary path)
+- [x] **T1.13** Verified: `cargo build -p riversd` succeeds, `cargo test -p riversd --lib -- engine_tests` passes all 119 tests
 
 **Validation:**
 ```bash

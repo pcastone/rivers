@@ -69,10 +69,12 @@ pub async fn execute_guard_handler(
         "session": session,
     });
 
-    let ctx = TaskContextBuilder::new()
+    let builder = TaskContextBuilder::new()
         .entrypoint(entrypoint.clone())
         .args(args)
-        .trace_id(trace_id.to_string())
+        .trace_id(trace_id.to_string());
+    let builder = crate::task_enrichment::enrich(builder, "");
+    let ctx = builder
         .build()
         .map_err(|e| GuardError::DispatchError(e))?;
 
@@ -119,10 +121,12 @@ pub async fn execute_guard_on_failed(
         "error": error,
     });
 
-    let ctx = TaskContextBuilder::new()
+    let builder = TaskContextBuilder::new()
         .entrypoint(entrypoint.clone())
         .args(args)
-        .trace_id(trace_id.to_string())
+        .trace_id(trace_id.to_string());
+    let builder = crate::task_enrichment::enrich(builder, "");
+    let ctx = builder
         .build()
         .map_err(|e| GuardError::DispatchError(e))?;
 
@@ -290,10 +294,12 @@ pub async fn execute_guard_lifecycle_hook(
         })),
     });
 
-    let ctx = TaskContextBuilder::new()
+    let builder = TaskContextBuilder::new()
         .entrypoint(entrypoint)
         .args(args)
-        .trace_id(trace_id.to_string())
+        .trace_id(trace_id.to_string());
+    let builder = crate::task_enrichment::enrich(builder, "");
+    let ctx = builder
         .build()
         .map_err(|e| GuardError::DispatchError(e))?;
 

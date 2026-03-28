@@ -220,10 +220,12 @@ pub async fn run_streaming_generator(
                 "state": previous_result,
             });
 
-            let ctx = TaskContextBuilder::new()
+            let builder = TaskContextBuilder::new()
                 .entrypoint(entrypoint.clone())
                 .args(args)
-                .trace_id(format!("{}-{}", trace_id, iteration))
+                .trace_id(format!("{}-{}", trace_id, iteration));
+            let builder = crate::task_enrichment::enrich(builder, "");
+            let ctx = builder
                 .build()
                 .map_err(|e| StreamingError::GeneratorError(e.to_string()))?;
 

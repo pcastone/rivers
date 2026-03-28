@@ -399,10 +399,12 @@ pub async fn run_sse_push_loop(
             },
         });
 
-        let ctx = TaskContextBuilder::new()
+        let builder = TaskContextBuilder::new()
             .entrypoint(entrypoint.clone())
             .args(args)
-            .trace_id(trace_id.to_string())
+            .trace_id(trace_id.to_string());
+        let builder = crate::task_enrichment::enrich(builder, "");
+        let ctx = builder
             .build()
             .map_err(|e| StreamingError::GeneratorError(e.to_string()))?;
 

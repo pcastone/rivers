@@ -33,5 +33,6 @@ pub mod sse;
 pub mod shutdown;
 pub mod streaming;
 pub mod static_files;
+pub mod task_enrichment;
 pub mod view_engine;
 pub mod websocket;
