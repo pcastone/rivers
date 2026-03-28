@@ -7,34 +7,18 @@
 //! env-controlled), bounded I/O with timeout, JSON result parsing.
 
 pub mod config;
+pub mod connection;
+pub mod executor;
+pub mod integrity;
+pub mod schema;
+pub mod template;
 
-use async_trait::async_trait;
-use rivers_driver_sdk::{Connection, ConnectionParams, DatabaseDriver, DriverError};
+pub use connection::ExecDriver;
+
 #[cfg(feature = "plugin-exports")]
 use rivers_driver_sdk::{ABI_VERSION, DriverRegistrar};
 #[cfg(feature = "plugin-exports")]
 use std::sync::Arc;
-
-// ── Driver ─────────────────────────────────────────────────────────────
-
-pub struct ExecDriver;
-
-// Placeholder — full implementation in Task 7
-#[async_trait]
-impl DatabaseDriver for ExecDriver {
-    fn name(&self) -> &str {
-        "rivers-exec"
-    }
-
-    async fn connect(
-        &self,
-        _params: &ConnectionParams,
-    ) -> Result<Box<dyn Connection>, DriverError> {
-        Err(DriverError::NotImplemented(
-            "exec driver connect not yet implemented".into(),
-        ))
-    }
-}
 
 // ── Plugin ABI ─────────────────────────────────────────────────────────
 
@@ -56,7 +40,7 @@ pub extern "C" fn _rivers_register_driver(registrar: &mut dyn DriverRegistrar) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rivers_driver_sdk::ABI_VERSION;
+    use rivers_driver_sdk::{ABI_VERSION, ConnectionParams, DatabaseDriver};
 
     #[test]
     fn driver_name_is_rivers_exec() {
@@ -70,7 +54,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_returns_not_implemented() {
+    async fn connect_without_run_as_user_fails() {
         let driver = ExecDriver;
         let params = ConnectionParams {
             host: "localhost".into(),
@@ -81,12 +65,7 @@ mod tests {
             options: std::collections::HashMap::new(),
         };
         let result = driver.connect(&params).await;
-        match result {
-            Err(DriverError::NotImplemented(msg)) => {
-                assert!(msg.contains("not yet implemented"));
-            }
-            Err(other) => panic!("expected NotImplemented, got error: {other}"),
-            Ok(_) => panic!("expected NotImplemented error, got Ok"),
-        }
+        // Without run_as_user, config parsing should fail
+        assert!(result.is_err(), "expected error without run_as_user");
     }
 }
