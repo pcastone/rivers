@@ -6,6 +6,20 @@
 
 ---
 
+## Task 10: Split rivers-runtime/tests/config_tests.rs into 4 test modules (2026-03-29)
+
+| File | Decision | Resolution |
+|------|----------|------------|
+| `tests/server_config_tests.rs` | ServerConfig parsing (minimal/full), validation (port zero, admin port conflict, CORS), env overrides, cache config | New file, 9 tests |
+| `tests/app_config_tests.rs` | AppConfig validation — unknown datasource, valid config, unknown dataview, view types, invalidates targets | New file, 7 tests |
+| `tests/bundle_tests.rs` | Bundle manifest parsing, resources config, duplicate datasources, cross-app service refs, known drivers, TOML parse errors, schema file existence | New file, 10 tests |
+| `tests/config_schema_tests.rs` | JSON Schema generation tests (schemars) for ServerConfig, AppConfig, BundleManifest | New file, 4 tests — named `config_schema_tests` to avoid collision with existing `schema_tests.rs` |
+| `tests/config_tests.rs` | Removed — all 30 tests distributed across 4 new files | Deleted |
+
+**Note:** Pre-existing compile errors in `cache_bench.rs` and `dataview_engine_tests.rs` (missing `drivers` feature flag) — not introduced by this refactor.
+
+---
+
 ## Task 9: Split rivers-plugin-influxdb/src/lib.rs into 4 modules (2026-03-29)
 
 | File | Decision | Resolution |
