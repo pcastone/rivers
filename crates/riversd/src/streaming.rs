@@ -81,6 +81,10 @@ impl StreamChunk {
 /// A poison chunk sent on mid-stream errors.
 ///
 /// Per spec: NDJSON uses `stream_terminated` field, SSE uses `event: error`.
+///
+/// NOTE: These use ad-hoc `{"error": ...}` format intentionally — they are
+/// SSE/NDJSON streaming payloads, not HTTP response bodies. Changing the
+/// shape would break client-side streaming consumers.
 pub fn poison_chunk_ndjson(error: &str) -> String {
     let chunk = serde_json::json!({
         "stream_terminated": true,
@@ -220,10 +224,12 @@ pub async fn run_streaming_generator(
                 "state": previous_result,
             });
 
-            let ctx = TaskContextBuilder::new()
+            let builder = TaskContextBuilder::new()
                 .entrypoint(entrypoint.clone())
                 .args(args)
-                .trace_id(format!("{}-{}", trace_id, iteration))
+                .trace_id(format!("{}-{}", trace_id, iteration));
+            let builder = crate::task_enrichment::enrich(builder, "");
+            let ctx = builder
                 .build()
                 .map_err(|e| StreamingError::GeneratorError(e.to_string()))?;
 

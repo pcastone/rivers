@@ -84,7 +84,7 @@ pub async fn timeout_middleware(
     match tokio::time::timeout(timeout, next.run(request)).await {
         Ok(response) => response,
         Err(_elapsed) => {
-            let mut err = error_response::ErrorResponse::new(408, "request timeout");
+            let mut err = error_response::request_timeout("request timeout");
             if let Some(id) = trace_id {
                 err = err.with_trace_id(id);
             }

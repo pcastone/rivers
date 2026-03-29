@@ -732,12 +732,12 @@ async fn dispatch_change_detect(
         "current": current_data,
     });
 
-    let task_ctx = match TaskContextBuilder::new()
+    let builder = TaskContextBuilder::new()
         .entrypoint(entrypoint)
         .args(args)
-        .trace_id("change_detect".to_string())
-        .build()
-    {
+        .trace_id("change_detect".to_string());
+    let builder = crate::task_enrichment::enrich(builder, "");
+    let task_ctx = match builder.build() {
         Ok(ctx) => ctx,
         Err(_) => {
             // Build failed — fall back to hash diff

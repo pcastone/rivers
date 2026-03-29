@@ -223,12 +223,15 @@ fn release_isolate(isolate: v8::OwnedIsolate) {
 }
 
 // ── V2.9: Script Source Cache ───────────────────────────────────
+//
+// SCRIPT_CACHE and clear_script_cache() are test-only — moved to #[cfg(test)]
+// at the bottom of this file. No production code path uses them.
 
-/// Global source-text cache: module path -> JavaScript source.
+#[cfg(test)]
 pub(crate) static SCRIPT_CACHE: std::sync::LazyLock<StdMutex<HashMap<String, String>>> =
     std::sync::LazyLock::new(|| StdMutex::new(HashMap::new()));
 
-/// Clear the script source cache (called on hot reload).
+#[cfg(test)]
 pub(crate) fn clear_script_cache() {
     if let Ok(mut cache) = SCRIPT_CACHE.lock() {
         cache.clear();
