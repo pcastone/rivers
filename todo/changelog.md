@@ -6,6 +6,45 @@
 
 ---
 
+## Task 9: Split rivers-plugin-influxdb/src/lib.rs into 4 modules (2026-03-29)
+
+| File | Decision | Resolution |
+|------|----------|------------|
+| `src/protocol.rs` | `urlencoded()`, `parse_csv_response()`, `build_line_protocol()`, escape/format helpers | New module, all items `pub(crate)`, 22 protocol tests |
+| `src/connection.rs` | `InfluxConnection` struct + `impl Connection` + internal helpers (`exec_query`, `exec_write`, `exec_ping`) | New module, struct `pub`, fields `pub(crate)` for driver/batching access |
+| `src/batching.rs` | `BatchingInfluxConnection` struct + `impl Connection` + `Drop` + flush/timer helpers | New module, struct `pub(crate)`, imports connection + protocol |
+| `src/driver.rs` | `InfluxDriver` struct + `impl DatabaseDriver` (connect with batching config) | New module, struct `pub`, 2 driver tests |
+| `src/lib.rs` | Module declarations, `pub use` re-exports (`InfluxConnection`, `InfluxDriver`), ABI exports (`_rivers_abi_version`, `_rivers_register_driver`) | Reduced from 898 to ~45 lines |
+
+**Note:** Pre-existing compile error in `tests/lockbox_helper.rs` (missing `ConnectionParams` import) — not introduced by this refactor.
+
+---
+
+## Task 7: Split rivers-plugin-exec/src/config.rs into 3 modules (2026-03-29)
+
+| File | Decision | Resolution |
+|------|----------|------------|
+| `config.rs` -> `config/mod.rs` | Module declarations + glob re-export (`pub use types::*`) | Preserves `crate::config::{ExecConfig, CommandConfig, ...}` import paths |
+| `config/types.rs` | `ExecConfig`, `CommandConfig`, `IntegrityMode`, `InputMode` structs/enums + `parse()` impls on enums | Type definitions with their inherent parsing methods |
+| `config/parser.rs` | `impl ExecConfig { fn parse() }` + helper fns (`parse_u64_opt`, `parse_usize_opt`, `parse_commands`, `parse_indexed_list`, `parse_env_set`) | Uses `use super::types::*` for access |
+| `config/validator.rs` | `impl ExecConfig { fn validate() }` with OS-level checks (user lookup, file perms) | Uses `use super::types::*` for access |
+| Tests | Distributed into respective modules — type tests in `types.rs`, parse tests in `parser.rs`, validation tests in `validator.rs` | All 95 unit + 8 integration tests pass |
+
+---
+
+## Task 5: Split rivers-engine-v8/src/lib.rs into 3 modules (2026-03-29)
+
+| File | Decision | Resolution |
+|------|----------|------------|
+| `crates/rivers-engine-v8/src/task_context.rs` | Extract 8 thread-local declarations + setup/clear functions | New module, all items `pub(crate)` |
+| `crates/rivers-engine-v8/src/v8_runtime.rs` | Extract V8 init, isolate pool, script cache, helpers | New module, all items `pub(crate)` |
+| `crates/rivers-engine-v8/src/execution.rs` | Extract execute_js, ctx injection, store/dataview callbacks, crypto, logging, buffer helpers | New module, `execute_js`/`write_output`/`write_error` are `pub(crate)` |
+| `crates/rivers-engine-v8/src/lib.rs` | Keep HOST_CALLBACKS static, 6 C-ABI exports, tests | Reduced from 854 to ~220 lines |
+
+**Cross-module references:** execution.rs imports from task_context.rs, v8_runtime.rs, and crate::HOST_CALLBACKS. All resolved via `pub(crate)` visibility.
+
+---
+
 ## Task 4: Split rivers-driver-sdk/src/http_executor.rs into 5 modules (2026-03-29)
 
 - **Pure structural refactor** — no behavioral changes, all pub items remain importable at `rivers_driver_sdk::http_executor::ItemName`.
