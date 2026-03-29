@@ -6,6 +6,24 @@
 
 ---
 
+## Task 4: Split rivers-driver-sdk/src/http_executor.rs into 5 modules (2026-03-29)
+
+- **Pure structural refactor** — no behavioral changes, all pub items remain importable at `rivers_driver_sdk::http_executor::ItemName`.
+- Split 1,314 LOC monolithic `http_executor.rs` into 5 focused source modules + mod.rs facade:
+  - `circuit_breaker.rs` — `CircuitState` enum, `CircuitBreaker` struct (internal `pub(crate)`)
+  - `oauth2.rs` — `CachedToken`, `OAuth2Credentials`, `TokenResponse`, `fetch_oauth2_token()` (internal `pub(crate)`)
+  - `connection.rs` — `ReqwestHttpConnection` struct + `impl HttpConnection` (pub re-exported)
+  - `sse_stream.rs` — `SseStreamConnection` struct + `impl HttpStreamConnection`, `parse_sse_event()` (pub re-exported)
+  - `driver.rs` — `ReqwestHttpDriver` struct + `impl HttpDriver` + `impl Default` (pub re-exported)
+  - `mod.rs` — module declarations, selective re-exports, `build_connection()` public helper, all unit tests
+- All 60 unit tests + 12 integration tests continue to pass
+- External import path `rivers_driver_sdk::http_executor::{build_connection, ReqwestHttpDriver}` unchanged
+- **Decision:** `circuit_breaker` and `oauth2` modules are `pub(crate)` internal — not exported outside the crate
+- **Decision:** `should_retry_status()` and `should_retry_timeout()` promoted to `pub(crate)` for test access from mod.rs
+- **Decision:** `ReqwestHttpDriver::oauth2_cache` field promoted to `pub(super)` for `build_connection()` in mod.rs
+
+---
+
 ## Task 2: Split rivers-lockbox-engine/src/lib.rs into 7 modules + 4 test modules (2026-03-29)
 
 - **Pure structural refactor** — no behavioral changes, all pub items remain importable at `rivers_lockbox_engine::ItemName`.
