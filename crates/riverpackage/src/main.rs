@@ -24,6 +24,18 @@ fn main() {
             let output = if args.len() >= 4 { &args[3] } else { "bundle.zip" };
             cmd_pack(bundle_dir, output)
         }
+        "import-exec" => {
+            let name = if args.len() >= 3 { &args[2] } else {
+                eprintln!("Usage: riverpackage import-exec <command-name> <script-path> [--input-mode stdin|args|both]");
+                std::process::exit(1);
+            };
+            let script_path = if args.len() >= 4 { &args[3] } else {
+                eprintln!("Usage: riverpackage import-exec <command-name> <script-path> [--input-mode stdin|args|both]");
+                std::process::exit(1);
+            };
+            let input_mode = if args.len() >= 6 && args[4] == "--input-mode" { &args[5] } else { "stdin" };
+            cmd_import_exec(name, script_path, input_mode)
+        }
         "help" | "--help" | "-h" => { print_usage(); Ok(()) }
         other => { eprintln!("Unknown command: {other}"); print_usage(); std::process::exit(1); }
     };
@@ -40,9 +52,10 @@ fn print_usage() {
     eprintln!("Usage: riverpackage <command> [bundle_dir] [options]");
     eprintln!();
     eprintln!("Commands:");
-    eprintln!("  validate [dir]         Validate bundle structure and configs");
-    eprintln!("  preflight [dir]        Validate + check schema/parameter orphans");
-    eprintln!("  pack [dir] [output]    Package bundle into a .zip file");
+    eprintln!("  validate [dir]              Validate bundle structure and configs");
+    eprintln!("  preflight [dir]             Validate + check schema/parameter orphans");
+    eprintln!("  pack [dir] [output]         Package bundle into a .zip file");
+    eprintln!("  import-exec <name> <path>   Generate ExecDriver TOML config for a script");
 }
 
 fn cmd_validate(bundle_dir: &str) -> Result<(), String> {
@@ -214,6 +227,68 @@ fn preflight_app(bundle_path: &Path, app_name: &str, warnings: &mut Vec<String>)
             }
         }
     }
+}
+
+fn cmd_import_exec(name: &str, script_path: &str, input_mode: &str) -> Result<(), String> {
+    use sha2::{Sha256, Digest};
+
+    let path = Path::new(script_path);
+    let abs_path = std::fs::canonicalize(path)
+        .map_err(|e| format!("cannot resolve path '{}': {e}", script_path))?;
+
+    if !abs_path.is_file() {
+        return Err(format!("'{}' is not a file", abs_path.display()));
+    }
+
+    // Validate input_mode
+    match input_mode {
+        "stdin" | "args" | "both" => {}
+        other => return Err(format!("invalid input_mode '{other}' — must be stdin, args, or both")),
+    }
+
+    // Compute SHA-256
+    let bytes = std::fs::read(&abs_path)
+        .map_err(|e| format!("cannot read '{}': {e}", abs_path.display()))?;
+    let hash = hex::encode(Sha256::digest(&bytes));
+
+    // Print resources.toml snippet
+    println!("# --- Add to resources.toml ---");
+    println!();
+    println!("[[datasources]]");
+    println!("name       = \"exec_tools\"");
+    println!("driver     = \"rivers-exec\"");
+    println!("nopassword = true");
+    println!("required   = true");
+
+    // Print app.toml snippet
+    println!();
+    println!("# --- Add to app.toml ---");
+    println!();
+    println!("[data.datasources.exec_tools]");
+    println!("name              = \"exec_tools\"");
+    println!("driver            = \"rivers-exec\"");
+    println!("run_as_user       = \"rivers-exec\"");
+    println!("working_directory = \"/var/rivers/exec-scratch\"");
+    println!("max_concurrent    = 10");
+    println!();
+    println!("[data.datasources.exec_tools.commands.{name}]");
+    println!("path       = \"{}\"", abs_path.display());
+    println!("sha256     = \"{hash}\"");
+    println!("input_mode = \"{input_mode}\"");
+
+    if input_mode == "args" || input_mode == "both" {
+        println!("# args_template.0 = \"{{param1}}\"  # uncomment and edit");
+        println!("# args_template.1 = \"--flag\"");
+        println!("# args_template.2 = \"{{param2}}\"");
+    }
+    if input_mode == "both" {
+        println!("# stdin_key     = \"data\"  # uncomment — key whose value is sent on stdin");
+    }
+
+    println!();
+    println!("# SHA-256: {hash}");
+
+    Ok(())
 }
 
 #[cfg(test)]

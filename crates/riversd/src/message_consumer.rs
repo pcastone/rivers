@@ -246,11 +246,12 @@ pub async fn dispatch_message_event(
         "timestamp": payload.timestamp,
     });
 
-    let ctx = TaskContextBuilder::new()
+    let builder = TaskContextBuilder::new()
         .entrypoint(entrypoint)
         .args(args)
-        .trace_id(trace_id.to_string())
-        .build()?;
+        .trace_id(trace_id.to_string());
+    let builder = crate::task_enrichment::enrich(builder, "");
+    let ctx = builder.build()?;
 
     let result = pool.dispatch("default", ctx).await?;
     Ok(result.value)
@@ -308,10 +309,12 @@ impl EventHandler for MessageConsumerHandler {
             "timestamp": event.timestamp.to_rfc3339(),
         });
 
-        let task_ctx = TaskContextBuilder::new()
+        let builder = TaskContextBuilder::new()
             .entrypoint(entrypoint)
             .args(args)
-            .trace_id(event.trace_id.clone().unwrap_or_default())
+            .trace_id(event.trace_id.clone().unwrap_or_default());
+        let builder = crate::task_enrichment::enrich(builder, "");
+        let task_ctx = builder
             .build()
             .map_err(|e| {
                 Box::new(std::io::Error::new(

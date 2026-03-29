@@ -107,12 +107,12 @@ declare const Rivers: {
         randomBase64url(bytes: number): string;
         hmac(key: string, data: string): string;
         timingSafeEqual(a: string, b: string): boolean;
-        encrypt(keyName: string, plaintext: string, options?: { aad?: string }): { ciphertext: string; nonce: string; key_version: number };
+        encrypt(keyName: string, plaintext: string, options?: { aad?: string }): EncryptResult;
         decrypt(keyName: string, ciphertext: string, nonce: string, options: { key_version: number; aad?: string }): string;
     };
     keystore: {
         has(name: string): boolean;
-        info(name: string): { name: string; type: string; version: number; created_at: string };
+        info(name: string): KeystoreKeyInfo;
     };
     http: {
         get(url: string): Promise<HttpResponse>;
@@ -121,6 +121,19 @@ declare const Rivers: {
         del(url: string): Promise<HttpResponse>;
     };
 };
+
+interface EncryptResult {
+    ciphertext: string;
+    nonce: string;
+    key_version: number;
+}
+
+interface KeystoreKeyInfo {
+    name: string;
+    type: string;
+    version: number;
+    created_at: string;
+}
 
 interface HttpResponse {
     status: number;

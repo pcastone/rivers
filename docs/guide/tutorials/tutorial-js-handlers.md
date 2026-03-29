@@ -110,29 +110,33 @@ var token = Rivers.crypto.randomBase64url(32);    // URL-safe base64
 var sig = Rivers.crypto.hmac("secret-key", "data-to-sign");
 var equal = Rivers.crypto.timingSafeEqual("a", "b");
 
-// AES-256-GCM encrypt/decrypt (requires [[keystores]] in resources.toml)
-var enc = Rivers.crypto.encrypt("key-name", "plaintext");
-// enc = { ciphertext: "base64...", nonce: "base64...", key_version: 1 }
-var dec = Rivers.crypto.decrypt("key-name", enc.ciphertext, enc.nonce, {
-    key_version: enc.key_version
+// Encrypt / Decrypt (requires [[keystores]] in resources.toml)
+var encrypted = Rivers.crypto.encrypt("my-key", "sensitive data");
+// Returns: { ciphertext: "base64...", nonce: "base64...", key_version: 1 }
+
+var plaintext = Rivers.crypto.decrypt("my-key", encrypted.ciphertext, encrypted.nonce, {
+    key_version: encrypted.key_version
 });
-// With AAD: Rivers.crypto.encrypt("key-name", "data", { aad: "record-id" })
+
+// Encrypt with Additional Authenticated Data (AAD)
+var encrypted = Rivers.crypto.encrypt("my-key", "sensitive data", { aad: recordId });
+var plaintext = Rivers.crypto.decrypt("my-key", encrypted.ciphertext, encrypted.nonce, {
+    key_version: encrypted.key_version, aad: recordId
+});
 ```
 
-### Application Keystore
+### Keystore
 
-Requires `[[keystores]]` declared in `resources.toml`. Key bytes never leave Rust memory.
+Requires `[[keystores]]` declared in `resources.toml` and `[data.keystore.*]` configured in `app.toml`. See the [Application Keystore tutorial](tutorial-app-keystore.md).
 
 ```javascript
 // Check if a key exists
-var exists = Rivers.keystore.has("credential-key");     // boolean
+var exists = Rivers.keystore.has("credential-key");
 
 // Get key metadata (never raw key bytes)
-var info = Rivers.keystore.info("credential-key");
-// info = { name: "credential-key", type: "aes-256", version: 2, created_at: "..." }
+var meta = Rivers.keystore.info("credential-key");
+// Returns: { name: "credential-key", type: "aes-256", version: 2, created_at: "..." }
 ```
-
-See the [Application Keystore Tutorial](tutorial-app-keystore.md) for full setup and usage.
 
 ### Outbound HTTP
 

@@ -495,11 +495,12 @@ pub async fn execute_init_handler(
         "config": app_context.config,
     });
 
-    let task_ctx = TaskContextBuilder::new()
+    let builder = TaskContextBuilder::new()
         .entrypoint(entrypoint)
         .args(args)
-        .app_id(app_context.app_id.clone())
-        .trace_id(format!("init:{}", app_context.app_id))
+        .trace_id(format!("init:{}", app_context.app_id));
+    let builder = crate::task_enrichment::enrich(builder, &app_context.app_id);
+    let task_ctx = builder
         .build()
         .map_err(|e| format!("init handler context build: {e}"))?;
 

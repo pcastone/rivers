@@ -473,10 +473,12 @@ pub async fn execute_rest_view(
                     "data": ctx.data,
                     "resdata": ctx.resdata,
                 });
-                let task_ctx = TaskContextBuilder::new()
+                let builder = TaskContextBuilder::new()
                     .entrypoint(entrypoint)
                     .args(args)
-                    .trace_id(ctx.trace_id.clone())
+                    .trace_id(ctx.trace_id.clone());
+                let builder = crate::task_enrichment::enrich(builder, &ctx.app_id);
+                let task_ctx = builder
                     .build()
                     .map_err(|e| ViewError::Pipeline(format!("pre_process build: {e}")))?;
                 // Fire and forget — pre_process is observer
@@ -540,6 +542,7 @@ pub async fn execute_rest_view(
                     if config.allow_outbound_http {
                         builder = builder.http(crate::process_pool::HttpToken);
                     }
+                    let builder = crate::task_enrichment::enrich(builder, &ctx.app_id);
                     let task_ctx = builder
                         .build()
                         .map_err(|e| ViewError::Handler(format!("codecomponent build: {e}")))?;
@@ -583,10 +586,12 @@ pub async fn execute_rest_view(
                     "data": ctx.data,
                     "resdata": ctx.resdata,
                 });
-                let task_ctx = TaskContextBuilder::new()
+                let builder = TaskContextBuilder::new()
                     .entrypoint(entrypoint)
                     .args(args)
-                    .trace_id(ctx.trace_id.clone())
+                    .trace_id(ctx.trace_id.clone());
+                let builder = crate::task_enrichment::enrich(builder, &ctx.app_id);
+                let task_ctx = builder
                     .build()
                     .map_err(|e| ViewError::Pipeline(format!("handler build: {e}")))?;
 
@@ -619,10 +624,12 @@ pub async fn execute_rest_view(
                     "data": ctx.data,
                     "resdata": ctx.resdata,
                 });
-                let task_ctx = TaskContextBuilder::new()
+                let builder = TaskContextBuilder::new()
                     .entrypoint(entrypoint)
                     .args(args)
-                    .trace_id(ctx.trace_id.clone())
+                    .trace_id(ctx.trace_id.clone());
+                let builder = crate::task_enrichment::enrich(builder, &ctx.app_id);
+                let task_ctx = builder
                     .build()
                     .map_err(|e| ViewError::Pipeline(format!("post_process build: {e}")))?;
                 // Fire and forget — post_process is observer
@@ -863,12 +870,12 @@ pub async fn execute_on_error_handlers(
             "trace_id": ctx.trace_id,
         });
 
-        let task_ctx = match TaskContextBuilder::new()
+        let builder = TaskContextBuilder::new()
             .entrypoint(entrypoint)
             .args(args)
-            .trace_id(ctx.trace_id.clone())
-            .build()
-        {
+            .trace_id(ctx.trace_id.clone());
+        let builder = crate::task_enrichment::enrich(builder, &ctx.app_id);
+        let task_ctx = match builder.build() {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -912,10 +919,12 @@ pub async fn execute_on_session_valid(
         "session": session,
     });
 
-    let task_ctx = TaskContextBuilder::new()
+    let builder = TaskContextBuilder::new()
         .entrypoint(entrypoint)
         .args(args)
-        .trace_id(trace_id.to_string())
+        .trace_id(trace_id.to_string());
+    let builder = crate::task_enrichment::enrich(builder, "");
+    let task_ctx = builder
         .build()
         .map_err(|e| ViewError::Pipeline(format!("session valid context build: {}", e)))?;
 

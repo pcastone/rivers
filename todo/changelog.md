@@ -6,6 +6,98 @@
 
 ---
 
+## Task 9: LockBox Engine — Expanded Test Coverage (2026-03-27)
+
+- `crates/rivers-lockbox-engine/src/lib.rs` — Added 26 new tests (28 existing → 54 total). Coverage now includes:
+  - **T9.1 Key Source Resolution (8 tests):** `resolve_key_source()` env success/missing/empty, file success/missing/insecure-perms, agent unsupported, unknown source.
+  - **T9.2 Startup Resolve Integration (5 tests):** Full end-to-end `startup_resolve()` with encrypted keystore + env key source, relative path rejection, file not found, wrong key, missing reference.
+  - **T9.3 Error Variants (2 tests):** `MalformedKeystore` for invalid TOML and invalid UTF-8 in decrypted payload.
+  - **T9.4 fetch_secret_value Edge Cases (2 tests):** Out-of-bounds entry index, alias-based fetch.
+  - **T9.5 Resolver & Reference Edge Cases (5 tests):** Empty resolver key_count/contains, empty datasources, no lockbox URIs, mixed URIs.
+  - **T9.6 Encryption Edge Cases (4 tests):** Invalid recipient, invalid identity, newline preservation, unicode preservation.
+- All 54 tests pass: `cargo test -p rivers-lockbox-engine`
+
+---
+
+## Task 7: Application Keystore Tutorial (2026-03-27)
+
+- `docs/guide/tutorials/tutorial-app-keystore.md` — NEW. Step-by-step tutorial covering master key provisioning, keystore creation, resources.toml/app.toml config, encrypt/decrypt in handlers, key rotation with lazy re-encryption, AAD, keystore metadata APIs, complete bundle example, and security notes. Follows existing tutorial format (v0.52.5 header, step numbering, TOML/JS code blocks, complete example section).
+- `docs/guide/tutorials/tutorial-js-handlers.md` — Added `Rivers.crypto.encrypt/decrypt` examples to Crypto section. Added new Keystore section with `Rivers.keystore.has/info` examples and link to keystore tutorial.
+- `docs/guide/tutorials/tutorial-ts-handlers.md` — Added `encrypt/decrypt` method signatures to `Rivers.crypto` interface. Added `Rivers.keystore` interface with `has/info` signatures. Added `EncryptResult` and `KeystoreKeyInfo` type definitions.
+- Source: `docs/rivers-feature-request-app-keystore.md` (feature spec for API signatures and design).
+
+---
+
+## Task 8: ExecDriver Datasource Tutorial (2026-03-27)
+
+- `docs/guide/tutorials/datasource-exec.md` — NEW. Step-by-step tutorial covering OS user setup, script contract (stdin JSON I/O), SHA-256 hashing with `riversctl exec hash`, resources.toml/app.toml config, command declarations (path, sha256, input_mode, timeout, concurrency, env control), JSON Schema validation, handler code using `ctx.datasource().fromQuery()`, args mode with template interpolation (DNS lookup example), verification/deployment, complete bundle with two commands, security checklist (12 controls with config references), and error reference table. Follows existing datasource tutorial format.
+- Source: `docs/rivers-exec-driver-spec.md` (full spec for config fields, pipeline, security model).
+
+---
+
+## Task 1: TaskContext Auto-Enrichment Layer (2026-03-27)
+
+**Pattern 1 fix from dream analysis — dispatch wiring gap.**
+
+- `crates/riversd/src/task_enrichment.rs` — NEW. Single `enrich()` function that wires keystore (and future capabilities) from shared state onto any TaskContextBuilder. Reads from `process_pool::get_keystore_resolver()` global. All 19 production dispatch sites call this before `.build()`.
+- `crates/riversd/src/lib.rs` — added `pub mod task_enrichment;`
+- `crates/riversd/src/view_engine.rs` — 6 dispatch sites enriched. ViewContext provides `app_id` for keystore scoping.
+- `crates/riversd/src/guard.rs` — 3 dispatch sites enriched (pass `""` since guards lack app_id).
+- `crates/riversd/src/graphql.rs` — 1 dispatch site enriched.
+- `crates/riversd/src/websocket.rs` — 2 dispatch sites enriched.
+- `crates/riversd/src/sse.rs` — 1 dispatch site enriched.
+- `crates/riversd/src/streaming.rs` — 1 dispatch site enriched.
+- `crates/riversd/src/polling.rs` — 1 dispatch site enriched.
+- `crates/riversd/src/message_consumer.rs` — 2 dispatch sites enriched.
+- `crates/riversd/src/deployment.rs` — 1 dispatch site enriched (already had `app_context.app_id`, now wires keystore too).
+- `crates/riversd/src/bundle_loader.rs` — 1 dispatch site enriched (datasource event handler, discovered during audit).
+- Decision: KEPT shared `OnceLock<KeystoreResolver>` fallback in `process_pool/mod.rs` for defense in depth. The v8_engine.rs `TaskLocals::set()` still reads it as a secondary path when `TaskContext.keystore` is None.
+- Decision: Named the function `enrich()` (not `enrich_task_context()`) since module path `task_enrichment::enrich` is self-documenting.
+- Validation: `cargo build -p riversd` clean, `cargo test -p riversd --lib -- engine_tests` passes all 119 tests.
+
+---
+
+## Task 4: Error Response Consolidation (2026-03-27)
+
+**Pattern 2 fix from dream analysis — ad-hoc error construction.**
+
+- `crates/riversd/src/error_response.rs` — Added named constructors as methods on `ErrorResponse` (`bad_request`, `unauthorized`, `forbidden`, `not_found`, `internal`, `unavailable`). Added `impl IntoResponse for ErrorResponse` so handlers can return it directly without calling `.into_axum_response()`.
+- `crates/riversd/src/middleware.rs` — Replaced `ErrorResponse::new(408, "request timeout")` with `error_response::request_timeout(...)`.
+- `crates/riversd/src/server.rs` — Replaced `ErrorResponse::new(503, ...)` with `error_response::service_unavailable(...)` at SSE subscription failure. Replaced `ErrorResponse::new(400, ...)` with `error_response::bad_request(...)` at WebSocket upgrade failure.
+- `crates/riversd/src/engine_loader.rs` — Added comment explaining FFI callback `{"error": ...}` format is an engine plugin protocol contract; must not be changed.
+- `crates/riversd/src/sse.rs` — Added comments on SSE event payload error sites explaining they use ad-hoc format intentionally (SSE protocol, not HTTP response body).
+- `crates/riversd/src/streaming.rs` — Added comment on poison chunk functions explaining they use ad-hoc format intentionally (streaming protocol payloads).
+- Decision: The codebase was already in good shape. All HTTP error responses already used `ErrorResponse` or the free-function constructors. The three remaining `ErrorResponse::new(code, msg)` calls were the only sites that could be improved. Ad-hoc `{"error": ...}` patterns in engine_loader, SSE events, and streaming poison chunks are NOT HTTP response bodies — they are FFI/protocol payloads and must stay as-is.
+- Decision: Added both free-function constructors (already existed) and method constructors on the struct. The free functions (`error_response::bad_request(...)`) are the primary API; the methods (`ErrorResponse::bad_request(...)`) provide an alternative style.
+- Validation: `cargo build -p riversd` succeeds with no new warnings.
+
+---
+
+## Task 2: Storage Backend Tests (2026-03-27)
+
+**Pattern 4 fix — zero-test security-critical crate.**
+
+- `crates/rivers-storage-backends/src/sqlite_backend.rs` — Added 18 unit tests covering all `StorageEngine` trait methods: get/set round-trip, get nonexistent, delete, delete nonexistent, overwrite, list_keys (with and without prefix), TTL expiration (lazy delete on read), TTL exclusion from list_keys, empty value, binary value (0x00..0xFF), namespace isolation, set_if_absent (insert, no-overwrite, expired replacement), flush_expired (with and without expired entries), and file-based persistence (tempfile).
+- `crates/rivers-storage-backends/src/redis_backend.rs` — Added 14 unit tests covering the same StorageEngine trait surface. All gated with `#[ignore]` since they require a running Redis instance at 127.0.0.1:6379. Each test uses a unique key prefix to avoid collisions and includes cleanup.
+- `crates/rivers-storage-backends/Cargo.toml` — Added `[dev-dependencies]`: tokio (full features) and tempfile.
+- Decision: Used `:memory:` SQLite for most tests (fast, no file I/O). One test (`file_based_persistence`) uses tempfile to verify data survives across engine instances.
+- Decision: Redis tests use `#[ignore]` (not a feature flag) for simplicity — `cargo test -p rivers-storage-backends` runs SQLite tests; `cargo test -p rivers-storage-backends -- --ignored` runs Redis tests when a server is available.
+- Validation: 18 passed, 14 ignored, 0 failed.
+
+---
+
+## Dream Pattern Fixes — Dead Code + AppContext Doc (2026-03-27)
+
+**Task 5: Dead Code Cleanup**
+- `crates/riversd/src/process_pool/v8_engine.rs` — gated `SCRIPT_CACHE` and `clear_script_cache()` behind `#[cfg(test)]` since they're only used in engine_tests. Dream analysis ref: Pattern 5.
+- `crates/riversd/src/process_pool/mod.rs` — removed re-exports of `SCRIPT_CACHE` and `clear_script_cache`; added direct import in `engine_tests.rs`. Added `#[allow(dead_code)]` with doc comments to `TaskTerminator::Callback` (used by dynamic engine plugins) and `ProcessPool.active_tasks` (used by watchdog thread at runtime, not read by Rust code).
+- Resolution: Zero `dead_code` warnings from process_pool modules.
+
+**Task 6: AppContext Decomposition Doc**
+- `crates/riversd/src/server.rs` — added planned decomposition comment block to `AppContext` struct documenting 7 logical sub-struct groupings for Wave 6. No code changes.
+
+---
+
 ## v0.52.5 — ExecDriver Plugin (2026-03-28)
 
 **Feature:** Controlled invocation of admin-declared, integrity-verified external commands from CodeComponent handlers via the standard datasource query pattern.

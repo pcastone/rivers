@@ -686,13 +686,15 @@ fn build_mutation_type_with_pool(
 
                     let trace_id = format!("gql-mut-{}", uuid::Uuid::new_v4());
 
-                    let task_ctx = crate::process_pool::TaskContextBuilder::new()
+                    let builder = crate::process_pool::TaskContextBuilder::new()
                         .entrypoint(entrypoint)
                         .args(serde_json::json!({
                             "request": { "body": input_json, "method": http_method },
                             "view_id": view_id,
                         }))
-                        .trace_id(trace_id)
+                        .trace_id(trace_id);
+                    let builder = crate::task_enrichment::enrich(builder, "");
+                    let task_ctx = builder
                         .build()
                         .map_err(|e| async_graphql::Error::new(e.to_string()))?;
 

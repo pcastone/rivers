@@ -32,13 +32,9 @@ pub use wasm_config::*;
 #[cfg(feature = "static-engines")]
 pub(crate) use v8_engine::execute_js_task;
 #[cfg(feature = "static-engines")]
-pub(crate) use v8_engine::clear_script_cache;
-#[cfg(feature = "static-engines")]
 pub(crate) use v8_engine::ensure_v8_initialized;
 #[cfg(feature = "static-engines")]
 pub(crate) use v8_engine::DEFAULT_HEAP_LIMIT;
-#[cfg(feature = "static-engines")]
-pub(crate) use v8_engine::SCRIPT_CACHE;
 #[cfg(feature = "static-engines")]
 pub(crate) use v8_engine::is_module_syntax;
 #[cfg(feature = "static-engines")]
@@ -99,6 +95,8 @@ pub(crate) enum TaskTerminator {
     V8(v8::IsolateHandle),
     #[cfg(feature = "static-engines")]
     WasmEpoch(Arc<wasmtime::Engine>),
+    /// Generic callback terminator — used by dynamically loaded engine plugins.
+    #[allow(dead_code)]
     Callback(Box<dyn FnOnce() + Send>),
 }
 
@@ -121,6 +119,8 @@ pub struct ProcessPool {
     queue_depth: Arc<AtomicUsize>,
     effective_max_queue: usize,
     _worker_handles: Vec<tokio::task::JoinHandle<()>>,
+    /// Wave 10 watchdog registry — tracks active tasks for timeout enforcement.
+    #[allow(dead_code)]
     active_tasks: ActiveTaskRegistry,
     _watchdog_cancel: Option<std::sync::mpsc::Sender<()>>,
 }

@@ -4,90 +4,85 @@
 
 ## Overview
 
-The Application Keystore provides application-scoped encryption keys for encrypting and decrypting data in handler code. Keys are managed per-application, versioned for rotation, and never exposed as raw bytes to JavaScript or WASM handlers.
+The Application Keystore provides per-app encryption keys for field-level encryption in handler code. Keys are managed through the `rivers-keystore` CLI, stored in an encrypted keystore file that ships with the bundle, and unlocked at startup by a master key held in LockBox.
 
 Use the Application Keystore when:
-- Storing credentials or secrets in a database (encrypt at rest, decrypt on retrieval)
-- Encrypting PII fields to meet compliance requirements
-- Managing OAuth tokens or API keys for third-party integrations
-- Implementing per-tenant data encryption in multi-tenant applications
+- You need to encrypt credentials, tokens, or PII before storing them in a database
+- You need reversible encryption (not just hashing) -- e.g., retrieving a stored password for automation
+- You need key rotation without re-encrypting all existing data at once
+- You need application-scoped keys isolated from other apps in the same bundle
 
-The keystore follows the standard Rivers resource pattern: the master key lives in **LockBox** (just like a database password), and the keystore itself is declared in `resources.toml` and configured in `app.toml`. Handler code references keys by name -- raw key bytes never leave Rust memory.
+The keystore uses AES-256-GCM with randomly generated 96-bit nonces. Key bytes never leave Rust memory -- handlers reference keys by name, and all encryption operations happen on the host side.
 
----
+LockBox's role is narrow: it holds the master key that unlocks the keystore, the same way it holds a password that unlocks a PostgreSQL connection. LockBox does not store application encryption keys or participate in encrypt/decrypt operations.
 
 ## Prerequisites
 
-- A Rivers app bundle with a valid `manifest.toml`
-- LockBox configured and accessible (`rivers-lockbox` CLI installed)
+- LockBox initialized and accessible
 - `rivers-keystore` CLI installed
+- An app bundle with at least one datasource for persisting ciphertext
 
 ---
 
 ## Step 1: Provision the Master Key in LockBox
 
-The master key unlocks the application keystore at startup. Ops provisions it once -- the same way they provision a database password.
+The master key encrypts the keystore file at rest. Operations provisions it once -- everything after that is the app developer's domain.
 
 ```bash
-# Generate a 256-bit master key (hex-encoded)
-rivers-lockbox add \
-    --name myapp/keystore-master-key \
-    --type string \
-    --alias myapp/keystore-master-key
-# Value: **** (enter or paste a 64-char hex string at the hidden prompt)
-```
-
-Alternatively, generate and store in one step:
-
-```bash
-rivers-lockbox add \
-    --name myapp/keystore-master-key \
-    --type string \
-    --alias myapp/keystore-master-key \
+# Generate a random 256-bit master key and store it in LockBox
+rivers-lockbox add netinventory/keystore-master-key \
     --value "$(openssl rand -hex 32)"
+
+# Verify the entry exists
+rivers-lockbox list
 ```
 
-After this step, `rivers-lockbox list` should show the entry:
-
-```
-myapp/keystore-master-key   string   alias=myapp/keystore-master-key
-```
+This is the only step that requires LockBox access. The master key alias (`netinventory/keystore-master-key`) is referenced in `resources.toml`.
 
 ---
 
-## Step 2: Create the Application Keystore
+## Step 2: Create the Keystore
 
-The `rivers-keystore` CLI manages the keystore file. Set the master key in the environment so the CLI can encrypt/decrypt the keystore.
+Use the `rivers-keystore` CLI to initialize a keystore file and generate encryption keys.
 
 ```bash
-# Export the master key (same value stored in LockBox)
-export RIVERS_KEYSTORE_KEY="<64-char-hex-master-key>"
-
-# Initialize a new keystore file
+# Initialize an empty keystore
 rivers-keystore init --path data/app.keystore
 
-# Generate an AES-256 encryption key named "credential-key"
-rivers-keystore generate credential-key --type aes-256 --path data/app.keystore
+# Generate an AES-256 encryption key for credential storage
+rivers-keystore generate credential-key \
+    --type aes-256 \
+    --path data/app.keystore
 
 # Verify the key was created
 rivers-keystore list --path data/app.keystore
 # Output:
-# NAME              TYPE      VERSION   CREATED
-# credential-key    aes-256   1         2026-03-27T14:30:00Z
+#   credential-key  aes-256  version=1  created=2026-03-27T14:30:00Z
 
-# View key metadata (never shows raw bytes)
+# Show detailed metadata
 rivers-keystore info credential-key --path data/app.keystore
 # Output:
-# name=credential-key type=aes-256 version=1 created=2026-03-27T14:30:00Z
+#   name=credential-key type=aes-256 version=1 created=2026-03-27T14:30:00Z
 ```
 
-The keystore file (`data/app.keystore`) ships with your app bundle. It is encrypted at rest using the master key.
+The keystore file (`data/app.keystore`) ships with the app bundle. It contains encrypted key material -- the master key from LockBox is required to unlock it at runtime.
+
+### CLI Reference
+
+| Command | Description |
+|---------|-------------|
+| `rivers-keystore init --path <file>` | Create an empty keystore file |
+| `rivers-keystore generate <name> --type aes-256 --path <file>` | Generate and store a new encryption key |
+| `rivers-keystore list --path <file>` | List all keys (names and metadata only) |
+| `rivers-keystore info <name> --path <file>` | Show detailed metadata for a key |
+| `rivers-keystore rotate <name> --path <file>` | Create a new version of a key (see Step 7) |
+| `rivers-keystore delete <name> --path <file>` | Delete a key and all its versions |
 
 ---
 
 ## Step 3: Declare the Keystore in resources.toml
 
-Declare the keystore as a resource, just like a datasource. The `lockbox` field tells Rivers which LockBox entry holds the master key.
+Declare the keystore as a resource, just like a datasource. The `lockbox` field references the master key alias provisioned in Step 1.
 
 ```toml
 # resources.toml
@@ -101,7 +96,7 @@ required   = true
 
 [[keystores]]
 name     = "app-keys"
-lockbox  = "myapp/keystore-master-key"
+lockbox  = "netinventory/keystore-master-key"
 required = true
 ```
 
@@ -115,7 +110,7 @@ required = true
 
 ## Step 4: Configure the Keystore in app.toml
 
-Point the keystore to its file path:
+Point the keystore to the file created in Step 2.
 
 ```toml
 # app.toml
@@ -128,13 +123,13 @@ path = "data/app.keystore"
 |-------|----------|-------------|
 | `path` | yes | Path to the keystore file, relative to the app directory |
 
-At startup, Rivers resolves the master key from LockBox, decrypts the keystore file, and holds the decrypted keys in Rust memory for the app's lifetime.
+At startup, Rivers resolves the master key from LockBox, unlocks the keystore file, and holds the decrypted keys in Rust memory for the app lifetime.
 
 ---
 
-## Step 5: Use in Handler Code -- Encrypt
+## Step 5: Encrypt Data in a Handler
 
-Create a handler that encrypts a credential before storing it in the database.
+Use `Rivers.crypto.encrypt()` to encrypt plaintext using a named key from the application keystore.
 
 ```javascript
 // libraries/handlers/credentials.js
@@ -142,28 +137,31 @@ Create a handler that encrypts a credential before storing it in the database.
 function createCredential(ctx) {
     var body = ctx.request.body;
 
-    if (!body) throw new Error("request body required");
-    if (!body.id) throw new Error("id is required");
+    if (!body.device_id) throw new Error("device_id is required");
     if (!body.password) throw new Error("password is required");
 
-    // Encrypt the password using the application keystore key
-    var enc = Rivers.crypto.encrypt("credential-key", body.password);
+    // Encrypt the password using the "credential-key" from the keystore
+    var encrypted = Rivers.crypto.encrypt("credential-key", body.password);
 
-    // Store ciphertext + nonce + key_version in the database
-    ctx.dataview("save_credential", {
-        id: body.id,
-        encrypted_pass: enc.ciphertext,
-        pass_nonce: enc.nonce,
-        pass_key_ver: enc.key_version
+    // Store ciphertext, nonce, and key version in the database
+    var result = ctx.dataview("insert_credential", {
+        device_id:      body.device_id,
+        encrypted_pass: encrypted.ciphertext,
+        pass_nonce:     encrypted.nonce,
+        pass_key_ver:   encrypted.key_version
     });
 
-    Rivers.log.info("credential created", { id: body.id, key_version: enc.key_version });
+    Rivers.log.info("credential created", { device_id: body.device_id });
 
-    ctx.resdata = { success: true, id: body.id };
+    ctx.resdata = {
+        id: result.id,
+        device_id: body.device_id,
+        key_version: encrypted.key_version
+    };
 }
 ```
 
-`Rivers.crypto.encrypt` returns:
+### encrypt() Return Value
 
 ```json
 {
@@ -173,13 +171,28 @@ function createCredential(ctx) {
 }
 ```
 
-All three values must be stored in the database. The `key_version` is critical for decryption after key rotation.
+All three values must be stored alongside the ciphertext in your database. The `key_version` is critical for decryption after key rotation.
+
+### Database Schema
+
+Store the encryption metadata alongside the ciphertext:
+
+```sql
+CREATE TABLE credentials (
+    id             TEXT PRIMARY KEY,
+    device_id      TEXT NOT NULL,
+    encrypted_pass TEXT NOT NULL,       -- base64 ciphertext
+    pass_nonce     TEXT NOT NULL,       -- base64 nonce
+    pass_key_ver   INTEGER NOT NULL,    -- key version used for encryption
+    created_at     TEXT NOT NULL
+);
+```
 
 ---
 
-## Step 6: Use in Handler Code -- Decrypt
+## Step 6: Decrypt Data in a Handler
 
-Retrieve the ciphertext from the database and decrypt it:
+Use `Rivers.crypto.decrypt()` to recover plaintext. Pass the `key_version` that was stored alongside the ciphertext.
 
 ```javascript
 // libraries/handlers/credentials.js (continued)
@@ -190,56 +203,70 @@ function getCredential(ctx) {
     var cred = ctx.dataview("get_credential", { id: id });
     if (!cred) throw new Error("credential not found");
 
-    // Decrypt using the stored key version
-    var password = Rivers.crypto.decrypt(
+    // Decrypt using the key version that was used during encryption
+    var plaintext = Rivers.crypto.decrypt(
         "credential-key",
         cred.encrypted_pass,
         cred.pass_nonce,
         { key_version: cred.pass_key_ver }
     );
 
-    ctx.resdata = { id: cred.id, password: password };
+    Rivers.log.info("credential retrieved", { device_id: cred.device_id });
+
+    ctx.resdata = {
+        id: cred.id,
+        device_id: cred.device_id,
+        password: plaintext
+    };
 }
 ```
 
-`Rivers.crypto.decrypt` returns the plaintext string, or throws a generic error on authentication failure (wrong key, wrong version, tampered ciphertext, or AAD mismatch).
+### decrypt() Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `keyName` | string | Key name in the application keystore |
+| `ciphertext` | string | Base64-encoded ciphertext from encrypt() |
+| `nonce` | string | Base64-encoded nonce from encrypt() |
+| `options.key_version` | integer | Key version from encrypt() (required) |
+| `options.aad` | string | Additional authenticated data (must match what was used during encryption) |
+
+Decryption with a wrong key, wrong version, or tampered ciphertext throws a generic `DecryptionFailed` error. The error message does not reveal which component failed -- this prevents padding oracle attacks.
 
 ---
 
 ## Step 7: Key Rotation
 
-Rotate the key to create a new version. Old versions are retained for decrypting existing data.
+Key rotation creates a new version of a key without destroying previous versions. Existing ciphertext remains decryptable using the old version.
+
+### Rotate the Key
 
 ```bash
-export RIVERS_KEYSTORE_KEY="<64-char-hex-master-key>"
 rivers-keystore rotate credential-key --path data/app.keystore
 
 # Verify
 rivers-keystore info credential-key --path data/app.keystore
 # Output:
-# name=credential-key type=aes-256 version=2 created=2026-03-27T14:30:00Z
+#   name=credential-key type=aes-256 version=2 created=2026-03-27T14:30:00Z
 ```
 
 After rotation:
-- New `encrypt()` calls automatically use the latest version (version 2)
-- Existing ciphertext still decrypts using the stored `key_version` (version 1)
-- No downtime, no bulk re-encryption required
+- New `encrypt()` calls automatically use version 2
+- Old ciphertext encrypted with version 1 is still decryptable (the `key_version` stored with the ciphertext tells the runtime which version to use)
+- Version 1 is retained read-only
 
-### Lazy Re-encryption Pattern
+### Lazy Re-encryption
 
-Re-encrypt old data on read to migrate to the latest key version over time:
+Re-encrypt old data on read to migrate to the latest key version:
 
 ```javascript
-// libraries/handlers/credentials.js (continued)
-
-function getCredentialWithReencrypt(ctx) {
+function getCredential(ctx) {
     var id = ctx.request.path_params.id;
-
     var cred = ctx.dataview("get_credential", { id: id });
     if (!cred) throw new Error("credential not found");
 
-    // Decrypt using the stored key version
-    var password = Rivers.crypto.decrypt(
+    // Decrypt with the original key version
+    var plaintext = Rivers.crypto.decrypt(
         "credential-key",
         cred.encrypted_pass,
         cred.pass_nonce,
@@ -249,97 +276,101 @@ function getCredentialWithReencrypt(ctx) {
     // Re-encrypt if using an old key version
     var currentVersion = Rivers.keystore.info("credential-key").version;
     if (cred.pass_key_ver < currentVersion) {
-        var reencrypted = Rivers.crypto.encrypt("credential-key", password);
+        var reencrypted = Rivers.crypto.encrypt("credential-key", plaintext);
         ctx.dataview("update_credential_encryption", {
-            id: cred.id,
+            id:             cred.id,
             encrypted_pass: reencrypted.ciphertext,
-            pass_nonce: reencrypted.nonce,
-            pass_key_ver: reencrypted.key_version
+            pass_nonce:     reencrypted.nonce,
+            pass_key_ver:   reencrypted.key_version
         });
-        Rivers.log.info("re-encrypted credential", {
-            id: cred.id,
+        Rivers.log.info("credential re-encrypted", {
+            device_id: cred.device_id,
             old_version: cred.pass_key_ver,
             new_version: reencrypted.key_version
         });
     }
 
-    ctx.resdata = { id: cred.id, password: password };
+    ctx.resdata = {
+        id: cred.id,
+        device_id: cred.device_id,
+        password: plaintext
+    };
 }
 ```
+
+This pattern migrates data incrementally -- each read upgrades one record. No downtime, no batch migration required.
 
 ---
 
-## Step 8: Using AAD (Additional Authenticated Data)
+## Step 8: Additional Authenticated Data (AAD)
 
-AAD binds ciphertext to a specific context -- typically a record ID. If someone copies ciphertext from one record to another, decryption fails because the AAD does not match.
+AAD binds ciphertext to a context value (e.g., a record ID). The AAD is authenticated but not encrypted -- if the ciphertext is moved to a different record, decryption fails.
 
 ```javascript
-// Encrypt with AAD bound to the device ID
-function createDeviceCredential(ctx) {
+function createCredential(ctx) {
     var body = ctx.request.body;
-    var deviceId = body.device_id;
 
-    var enc = Rivers.crypto.encrypt("credential-key", body.password, {
-        aad: deviceId
+    // Bind the ciphertext to the device ID
+    var encrypted = Rivers.crypto.encrypt("credential-key", body.password, {
+        aad: body.device_id
     });
 
-    ctx.dataview("save_device_credential", {
-        device_id: deviceId,
-        encrypted_pass: enc.ciphertext,
-        pass_nonce: enc.nonce,
-        pass_key_ver: enc.key_version
+    var result = ctx.dataview("insert_credential", {
+        device_id:      body.device_id,
+        encrypted_pass: encrypted.ciphertext,
+        pass_nonce:     encrypted.nonce,
+        pass_key_ver:   encrypted.key_version
     });
 
-    ctx.resdata = { success: true, device_id: deviceId };
+    ctx.resdata = { id: result.id, device_id: body.device_id };
 }
 
-// Decrypt with the same AAD
-function getDeviceCredential(ctx) {
-    var deviceId = ctx.request.path_params.device_id;
-
-    var cred = ctx.dataview("get_device_credential", { device_id: deviceId });
+function getCredential(ctx) {
+    var id = ctx.request.path_params.id;
+    var cred = ctx.dataview("get_credential", { id: id });
     if (!cred) throw new Error("credential not found");
 
-    var password = Rivers.crypto.decrypt(
+    // Must provide the same AAD used during encryption
+    var plaintext = Rivers.crypto.decrypt(
         "credential-key",
         cred.encrypted_pass,
         cred.pass_nonce,
-        { key_version: cred.pass_key_ver, aad: deviceId }
+        { key_version: cred.pass_key_ver, aad: cred.device_id }
     );
 
-    ctx.resdata = { device_id: deviceId, password: password };
+    ctx.resdata = {
+        id: cred.id,
+        device_id: cred.device_id,
+        password: plaintext
+    };
 }
 ```
 
-The AAD is authenticated but not encrypted. If the `aad` value provided during decrypt does not match the value used during encrypt, the decryption fails with a generic `DecryptionFailed` error.
+If someone copies a ciphertext from one record to another, decryption fails because the AAD (device ID) no longer matches. The error is the same generic `DecryptionFailed` -- no oracle.
 
 ---
 
 ## Step 9: Key Metadata
 
-Query key existence and metadata from handler code. Raw key bytes are never exposed.
+Use `Rivers.keystore.has()` and `Rivers.keystore.info()` to check key existence and read metadata from handler code. These never expose raw key bytes.
 
 ```javascript
-function checkKeyStatus(ctx) {
-    // Check if a key exists
-    var exists = Rivers.keystore.has("credential-key");
-
-    if (!exists) {
-        throw new Error("credential-key not found in keystore");
-    }
-
-    // Get key metadata
-    var meta = Rivers.keystore.info("credential-key");
-    // Returns: { name: "credential-key", type: "aes-256", version: 2, created_at: "..." }
-
-    ctx.resdata = {
-        key_name: meta.name,
-        key_type: meta.type,
-        current_version: meta.version,
-        created_at: meta.created_at
-    };
+// Check if a key exists before using it
+if (!Rivers.keystore.has("credential-key")) {
+    throw new Error("encryption key not configured");
 }
+
+// Get key metadata
+var meta = Rivers.keystore.info("credential-key");
+// Returns: { name: "credential-key", type: "aes-256", version: 2, created_at: "2026-03-27T..." }
+
+Rivers.log.info("using key", { name: meta.name, version: meta.version });
 ```
+
+| Function | Returns |
+|----------|---------|
+| `Rivers.keystore.has(name)` | `true` if the key exists, `false` otherwise |
+| `Rivers.keystore.info(name)` | `{ name, type, version, created_at }` or throws if key not found |
 
 ---
 
@@ -348,9 +379,9 @@ function checkKeyStatus(ctx) {
 ### Bundle Structure
 
 ```
-myapp-bundle/
+netinventory-bundle/
 ├── manifest.toml
-├── myapp-service/
+├── netinventory-service/
 │   ├── manifest.toml
 │   ├── resources.toml
 │   ├── app.toml
@@ -361,28 +392,38 @@ myapp-bundle/
 │   └── libraries/
 │       └── handlers/
 │           └── credentials.js
+└── netinventory-main/
+    ├── manifest.toml
+    ├── resources.toml
+    ├── app.toml
+    └── libraries/
+        └── spa/
 ```
 
 ### manifest.toml (bundle)
 
 ```toml
 [bundle]
-name    = "myapp-bundle"
+name    = "netinventory"
 version = "1.0.0"
 
 [[apps]]
-name = "myapp-service"
-path = "myapp-service"
+name = "netinventory-service"
+path = "netinventory-service"
+
+[[apps]]
+name = "netinventory-main"
+path = "netinventory-main"
 ```
 
-### manifest.toml (app)
+### manifest.toml (service app)
 
 ```toml
 [app]
-appId   = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-appName = "myapp-service"
-type    = "service"
-port    = 9200
+appId = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+name  = "netinventory-service"
+type  = "service"
+port  = 9100
 ```
 
 ### resources.toml
@@ -397,84 +438,77 @@ required   = true
 
 [[keystores]]
 name     = "app-keys"
-lockbox  = "myapp/keystore-master-key"
+lockbox  = "netinventory/keystore-master-key"
 required = true
 ```
 
 ### app.toml
 
 ```toml
-# ─────────────────────────
+# ─────────────────────────────────────────────
 # Datasource
-# ─────────────────────────
+# ─────────────────────────────────────────────
 
 [data.datasources.inventory_db]
 name       = "inventory_db"
 driver     = "sqlite"
+path       = "data/inventory.db"
 nopassword = true
 
-[data.datasources.inventory_db.config]
-path = "data/inventory.db"
-
-# ─────────────────────────
+# ─────────────────────────────────────────────
 # Keystore
-# ─────────────────────────
+# ─────────────────────────────────────────────
 
 [data.keystore.app-keys]
 path = "data/app.keystore"
 
-# ─────────────────────────
+# ─────────────────────────────────────────────
 # DataViews
-# ─────────────────────────
+# ─────────────────────────────────────────────
 
-[data.dataviews.save_credential]
-name       = "save_credential"
+[data.dataviews.insert_credential]
+name       = "insert_credential"
 datasource = "inventory_db"
-query      = "INSERT INTO credentials (id, encrypted_pass, pass_nonce, pass_key_ver) VALUES (:id, :encrypted_pass, :pass_nonce, :pass_key_ver)"
+query      = "INSERT INTO credentials (id, device_id, encrypted_pass, pass_nonce, pass_key_ver, created_at) VALUES (hex(randomblob(16)), $1, $2, $3, $4, datetime('now')) RETURNING id, device_id, created_at"
 
-[[data.dataviews.save_credential.parameters]]
-name     = "id"
+[[data.dataviews.insert_credential.parameters]]
+name     = "device_id"
 type     = "string"
 required = true
 
-[[data.dataviews.save_credential.parameters]]
+[[data.dataviews.insert_credential.parameters]]
 name     = "encrypted_pass"
 type     = "string"
 required = true
 
-[[data.dataviews.save_credential.parameters]]
+[[data.dataviews.insert_credential.parameters]]
 name     = "pass_nonce"
 type     = "string"
 required = true
 
-[[data.dataviews.save_credential.parameters]]
+[[data.dataviews.insert_credential.parameters]]
 name     = "pass_key_ver"
 type     = "integer"
 required = true
 
-# ─────────────────────────
+# ─────────────────────────────────────────────
 
 [data.dataviews.get_credential]
 name       = "get_credential"
 datasource = "inventory_db"
-query      = "SELECT id, encrypted_pass, pass_nonce, pass_key_ver FROM credentials WHERE id = :id"
+query      = "SELECT id, device_id, encrypted_pass, pass_nonce, pass_key_ver FROM credentials WHERE id = $1"
 
 [[data.dataviews.get_credential.parameters]]
 name     = "id"
 type     = "string"
 required = true
 
-# ─────────────────────────
+# ─────────────────────────────────────────────
 
 [data.dataviews.update_credential_encryption]
 name       = "update_credential_encryption"
 datasource = "inventory_db"
-query      = "UPDATE credentials SET encrypted_pass = :encrypted_pass, pass_nonce = :pass_nonce, pass_key_ver = :pass_key_ver WHERE id = :id"
-
-[[data.dataviews.update_credential_encryption.parameters]]
-name     = "id"
-type     = "string"
-required = true
+query      = "UPDATE credentials SET encrypted_pass = $1, pass_nonce = $2, pass_key_ver = $3 WHERE id = $4"
 
 [[data.dataviews.update_credential_encryption.parameters]]
 name     = "encrypted_pass"
@@ -491,9 +525,33 @@ name     = "pass_key_ver"
 type     = "integer"
 required = true
 
-# ─────────────────────────
+[[data.dataviews.update_credential_encryption.parameters]]
+name     = "id"
+type     = "string"
+required = true
+
+# ─────────────────────────────────────────────
+
+[data.dataviews.list_credentials]
+name       = "list_credentials"
+datasource = "inventory_db"
+query      = "SELECT id, device_id, pass_key_ver, created_at FROM credentials ORDER BY created_at DESC LIMIT $1 OFFSET $2"
+
+[[data.dataviews.list_credentials.parameters]]
+name     = "limit"
+type     = "integer"
+required = false
+default  = 20
+
+[[data.dataviews.list_credentials.parameters]]
+name     = "offset"
+type     = "integer"
+required = false
+default  = 0
+
+# ─────────────────────────────────────────────
 # Views
-# ─────────────────────────
+# ─────────────────────────────────────────────
 
 [api.views.create_credential]
 path            = "credentials"
@@ -509,7 +567,7 @@ module     = "libraries/handlers/credentials.js"
 entrypoint = "createCredential"
 resources  = ["inventory_db"]
 
-# ─────────────────────────
+# ─────────────────────────────────────────────
 
 [api.views.get_credential]
 path            = "credentials/{id}"
@@ -525,32 +583,65 @@ module     = "libraries/handlers/credentials.js"
 entrypoint = "getCredential"
 resources  = ["inventory_db"]
 
-[api.views.get_credential.parameter_mapping.path]
-id = "id"
+# ─────────────────────────────────────────────
+
+[api.views.list_credentials]
+path            = "credentials"
+method          = "GET"
+view_type       = "Rest"
+response_format = "envelope"
+auth            = "none"
+
+[api.views.list_credentials.handler]
+type     = "dataview"
+dataview = "list_credentials"
+
+[api.views.list_credentials.parameter_mapping.query]
+limit  = "limit"
+offset = "offset"
+
+# ─────────────────────────────────────────────
+# ProcessPool
+# ─────────────────────────────────────────────
+
+[runtime.process_pools.default]
+engine          = "v8"
+workers         = 4
+task_timeout_ms = 5000
+max_heap_mb     = 128
 ```
 
 ### libraries/handlers/credentials.js
 
 ```javascript
+// libraries/handlers/credentials.js
+
 function createCredential(ctx) {
     var body = ctx.request.body;
 
-    if (!body) throw new Error("request body required");
-    if (!body.id) throw new Error("id is required");
+    if (!body.device_id) throw new Error("device_id is required");
     if (!body.password) throw new Error("password is required");
 
-    var enc = Rivers.crypto.encrypt("credential-key", body.password);
-
-    ctx.dataview("save_credential", {
-        id: body.id,
-        encrypted_pass: enc.ciphertext,
-        pass_nonce: enc.nonce,
-        pass_key_ver: enc.key_version
+    // Encrypt the password
+    var encrypted = Rivers.crypto.encrypt("credential-key", body.password, {
+        aad: body.device_id
     });
 
-    Rivers.log.info("credential created", { id: body.id, key_version: enc.key_version });
+    // Store ciphertext in the database
+    var result = ctx.dataview("insert_credential", {
+        device_id:      body.device_id,
+        encrypted_pass: encrypted.ciphertext,
+        pass_nonce:     encrypted.nonce,
+        pass_key_ver:   encrypted.key_version
+    });
 
-    ctx.resdata = { success: true, id: body.id };
+    Rivers.log.info("credential created", { device_id: body.device_id });
+
+    ctx.resdata = {
+        id: result.id,
+        device_id: body.device_id,
+        key_version: encrypted.key_version
+    };
 }
 
 function getCredential(ctx) {
@@ -559,68 +650,94 @@ function getCredential(ctx) {
     var cred = ctx.dataview("get_credential", { id: id });
     if (!cred) throw new Error("credential not found");
 
-    var password = Rivers.crypto.decrypt(
+    // Decrypt with the original key version and AAD
+    var plaintext = Rivers.crypto.decrypt(
         "credential-key",
         cred.encrypted_pass,
         cred.pass_nonce,
-        { key_version: cred.pass_key_ver }
+        { key_version: cred.pass_key_ver, aad: cred.device_id }
     );
 
-    // Re-encrypt if using an old key version
+    // Lazy re-encryption to latest key version
     var currentVersion = Rivers.keystore.info("credential-key").version;
     if (cred.pass_key_ver < currentVersion) {
-        var reencrypted = Rivers.crypto.encrypt("credential-key", password);
-        ctx.dataview("update_credential_encryption", {
-            id: cred.id,
-            encrypted_pass: reencrypted.ciphertext,
-            pass_nonce: reencrypted.nonce,
-            pass_key_ver: reencrypted.key_version
+        var reencrypted = Rivers.crypto.encrypt("credential-key", plaintext, {
+            aad: cred.device_id
         });
-        Rivers.log.info("re-encrypted credential", {
-            id: cred.id,
+        ctx.dataview("update_credential_encryption", {
+            id:             cred.id,
+            encrypted_pass: reencrypted.ciphertext,
+            pass_nonce:     reencrypted.nonce,
+            pass_key_ver:   reencrypted.key_version
+        });
+        Rivers.log.info("credential re-encrypted", {
+            device_id: cred.device_id,
             old_version: cred.pass_key_ver,
             new_version: reencrypted.key_version
         });
     }
 
-    ctx.resdata = { id: cred.id, password: password };
+    Rivers.log.info("credential retrieved", { device_id: cred.device_id });
+
+    ctx.resdata = {
+        id: cred.id,
+        device_id: cred.device_id,
+        password: plaintext
+    };
 }
 ```
 
-### Testing
+## Testing
 
 ```bash
 # Create a credential
-curl -X POST http://localhost:9200/credentials \
+curl -X POST http://localhost:9100/credentials \
   -H "Content-Type: application/json" \
-  -d '{"id":"switch-core-01","password":"s3cret-p@ss"}'
+  -d '{"device_id":"switch-core-01","password":"s3cret-p@ss"}'
 
-# Retrieve the credential (decrypted)
-curl http://localhost:9200/credentials/switch-core-01
+# Retrieve and decrypt a credential
+curl http://localhost:9100/credentials/abc123
+
+# List credentials (metadata only -- no plaintext)
+curl http://localhost:9100/credentials
 ```
-
----
 
 ## Security Notes
 
-- **Key bytes never enter handler memory.** Handlers reference keys by name. `Rivers.crypto.encrypt` and `Rivers.crypto.decrypt` execute in Rust -- the V8/WASM isolate never sees raw key material.
-- **Nonce is random per call.** Every `encrypt()` call generates a fresh 96-bit random nonce via `OsRng`. Callers cannot supply their own nonce.
-- **Errors are generic.** Decryption failures (wrong key, tampered ciphertext, AAD mismatch) all produce the same `DecryptionFailed` error. No padding oracle.
-- **Algorithm.** AES-256-GCM with 256-bit keys, 96-bit random nonces, and 128-bit authentication tags. Ciphertext and nonces are base64-encoded.
-- **Store `key_version` alongside ciphertext.** This is required for decryption after key rotation. If you lose the key version, you must try all versions -- which is slow and may fail silently if multiple versions produce valid plaintext (extremely unlikely with AES-GCM, but store the version anyway).
-- **Keystore scope.** Each application has its own keystore instance. Other apps in the same bundle cannot access another app's keys.
-- **Plaintext never logged.** Rivers' structured logging never captures plaintext passed to `encrypt()` or returned by `decrypt()`. Log the operation and the record ID, not the data.
+1. **Key bytes never enter handler memory.** Handlers reference keys by name. All AES-256-GCM operations happen in Rust. Raw key material never crosses the FFI boundary into the V8 heap.
 
----
+2. **Nonces are randomly generated per call.** The runtime generates a fresh 96-bit nonce via `OsRng` for every `encrypt()` call. Callers cannot supply their own nonce.
 
-## Error Reference
+3. **Decryption errors are generic.** Wrong key, wrong version, tampered ciphertext, and AAD mismatch all produce the same `DecryptionFailed` error. No padding oracle.
+
+4. **Plaintext is never logged.** The encrypt/decrypt host functions do not emit plaintext in structured logs or trace spans.
+
+5. **App isolation.** Each app's keystore is scoped to its `appId`. Other apps in the same bundle cannot access another app's keys.
+
+6. **Keystore is encrypted at rest.** The keystore file is encrypted using the LockBox-provided master key. Without the master key, the file is opaque.
+
+7. **Key rotation is non-destructive.** Old key versions are retained for decryption. Only new `encrypt()` calls use the latest version. Migrate data at your own pace using lazy re-encryption.
+
+### Error Reference
 
 | Condition | Error |
 |-----------|-------|
 | No keystore declared for this app | `KeystoreNotConfigured: no keystore resource declared` |
-| Keystore file not found | `KeystoreNotFound: keystore file 'X' does not exist` |
-| Master key not in LockBox | `KeystoreLocked: lockbox alias 'X' not found` |
-| Key name not found | `KeyNotFound: key 'X' does not exist in application keystore` |
-| Key version not found | `KeyVersionNotFound: key 'X' version N does not exist` |
+| Keystore file not found | `KeystoreNotFound: keystore file does not exist` |
+| Master key not in LockBox | `KeystoreLocked: lockbox alias not found` |
+| Key name not found | `KeyNotFound: key does not exist in application keystore` |
+| Key version not found | `KeyVersionNotFound: key version N does not exist` |
+| Wrong key type for operation | `InvalidKeyType: encrypt requires an AES key` |
 | Decryption failure (any cause) | `DecryptionFailed: authentication tag mismatch` |
 | Nonce missing or malformed | `InvalidNonce: expected 12-byte base64-encoded nonce` |
+
+### Algorithm Specification
+
+| Property | Value |
+|----------|-------|
+| Algorithm | AES-256-GCM |
+| Key size | 256 bits (32 bytes) |
+| Nonce size | 96 bits (12 bytes), randomly generated per encrypt call |
+| Auth tag size | 128 bits (appended to ciphertext) |
+| Encoding | Base64 for ciphertext and nonce |
+| Key versioning | Integer version, monotonically increasing |

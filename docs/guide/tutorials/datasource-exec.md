@@ -4,34 +4,34 @@
 
 ## Overview
 
-The ExecDriver is a plugin that exposes admin-declared scripts and binaries through the standard datasource query pattern. Handlers call commands by name -- they do not know a script is being executed, what language it is written in, or what OS user runs it. Those are all admin-side concerns configured in TOML.
+The ExecDriver plugin (`rivers-plugin-exec`) exposes controlled execution of admin-declared external scripts and binaries through the standard `DatabaseDriver` contract. Handlers call commands by name via the datasource query interface. The driver handles execution, isolation, integrity verification, and all guardrails.
 
 Use the ExecDriver when:
-- You need to run network scanning tools (nmap, custom probes) from handler code
-- You need to execute DNS lookups, certificate checks, or LDAP queries via existing scripts
-- You have operational scripts in Python, Bash, or Go that should be accessible from an API
-- You want controlled execution of host-level tools without embedding them in the framework
+- You need to run existing host-level tools (network scanners, DNS lookups, certificate checks, system probes)
+- The tools already exist as scripts in Python, Bash, Go, or compiled binaries
+- Rewriting the tool as a Rivers driver or embedding it in the framework is wasteful
+- You need controlled, audited command execution from handler code
 
-The ExecDriver is a **controlled RCE service**. Every command is admin-declared, pinned by SHA-256 hash, validated against JSON Schema, and executed as a restricted OS user. Handlers cannot specify arbitrary paths or inject commands.
+The ExecDriver is a plugin, not a built-in driver. Operators opt into it explicitly. The plugin must be present in the configured plugin directory.
 
----
+**Design principle:** The ExecDriver is a controlled RCE service. Only admin-declared commands execute. Commands are pinned by SHA-256 hash. Input is validated against JSON Schema before the process spawns. Scripts run as a restricted OS user, not as the `riversd` process user.
 
 ## Prerequisites
 
-- A dedicated OS user for script execution (e.g., `rivers-exec`)
-- Scripts or binaries installed at known absolute paths
-- SHA-256 hashes computed for each script
-- The `rivers-exec` plugin enabled in your Rivers deployment
+- The `rivers-plugin-exec` plugin present in the configured plugin directory
+- A restricted OS user for running scripts (not root, not the `riversd` user)
+- Scripts installed and accessible on the host filesystem
+- `riversctl` CLI for computing SHA-256 hashes
 
 ---
 
 ## Step 1: Set Up the Execution Environment
 
-Create a dedicated OS user and directory structure for script execution.
+Create a restricted OS user, script directory, and working directory.
 
 ```bash
-# Create a restricted user (no login shell)
-sudo useradd -r -s /usr/sbin/nologin rivers-exec
+# Create a restricted user for script execution
+sudo useradd --system --shell /usr/sbin/nologin --no-create-home rivers-exec
 
 # Create the script directory (root-owned, read+execute only)
 sudo mkdir -p /usr/lib/rivers/scripts
@@ -41,117 +41,149 @@ sudo chmod 0555 /usr/lib/rivers/scripts
 sudo mkdir -p /var/rivers/exec-scratch
 sudo chown rivers-exec:rivers-exec /var/rivers/exec-scratch
 sudo chmod 0700 /var/rivers/exec-scratch
+
+# Create the schema directory (root-owned, read only)
+sudo mkdir -p /etc/rivers/exec-schemas
+sudo chmod 0444 /etc/rivers/exec-schemas
 ```
 
-The `run_as_user` must not be root. The driver rejects UID 0 at startup.
+The `rivers-exec` user should have minimal permissions:
+- Read + execute on script directories
+- Write only to the working directory and designated log paths
+- No access to `riversd` config, LockBox files, or TLS material
 
 ---
 
 ## Step 2: Create a Script
 
-Scripts follow a simple I/O contract: read JSON from stdin (or parse argv), do work, write JSON to stdout. Errors go to stderr with a non-zero exit code.
+Scripts must follow the stdin JSON contract: read JSON from stdin, do work, write JSON to stdout.
 
-Create a network scan script at `/usr/lib/rivers/scripts/netscan.sh`:
+Create a network scan script at `/usr/lib/rivers/scripts/netscan.py`:
 
-```bash
-#!/bin/bash
-# netscan.sh — reads CIDR and ports from stdin, returns scan results as JSON
-set -euo pipefail
+```python
+#!/usr/bin/env python3
+"""Network scan — reads JSON from stdin, writes JSON to stdout."""
 
-INPUT=$(cat)
-CIDR=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['cidr'])")
-PORTS=$(echo "$INPUT" | python3 -c "import sys,json; print(','.join(str(p) for p in json.load(sys.stdin)['ports']))")
+import json
+import sys
+import subprocess
 
-# Run the scan (simplified — replace with your actual scan logic)
-RESULTS=$(nmap -sT -p "$PORTS" "$CIDR" -oX - 2>/dev/null | python3 -c "
-import sys, xml.etree.ElementTree as ET, json
-tree = ET.parse(sys.stdin)
-hosts = []
-for host in tree.findall('.//host'):
-    addr = host.find('address').get('addr', '')
-    ports = []
-    for port in host.findall('.//port'):
-        if port.find('state').get('state') == 'open':
-            ports.append(int(port.get('portid')))
-    if ports:
-        hosts.append({'ip': addr, 'ports': ports})
-print(json.dumps({'hosts': hosts, 'scanned': True}))
-")
+def main():
+    params = json.load(sys.stdin)
+    cidr = params["cidr"]
+    ports = params.get("ports", [22, 80, 443])
 
-echo "$RESULTS"
-```
+    # Run nmap (must be installed and accessible to rivers-exec)
+    port_arg = ",".join(str(p) for p in ports)
+    result = subprocess.run(
+        ["nmap", "-sT", "-p", port_arg, "--open", "-oX", "-", cidr],
+        capture_output=True, text=True, timeout=55
+    )
 
-Make it executable:
+    if result.returncode != 0:
+        print(json.dumps({"error": result.stderr.strip()}), file=sys.stderr)
+        sys.exit(1)
 
-```bash
-sudo cp netscan.sh /usr/lib/rivers/scripts/netscan.sh
-sudo chmod 0555 /usr/lib/rivers/scripts/netscan.sh
+    # Parse and return results
+    hosts = parse_nmap_xml(result.stdout)
+    json.dump({"hosts": hosts, "cidr": cidr, "ports_scanned": ports}, sys.stdout)
+
+def parse_nmap_xml(xml_output):
+    # Simplified — real implementation would parse XML
+    return [{"ip": "10.0.1.1", "open_ports": [22, 80]}]
+
+if __name__ == "__main__":
+    main()
 ```
 
 ### Script Contract
 
-| Requirement | Description |
-|-------------|-------------|
-| **Input** | Read JSON from stdin (`stdin` mode) and/or parse argv (`args` mode) |
+| Rule | Description |
+|------|-------------|
+| **Input** | Read JSON from stdin (stdin mode) and/or parse argv (args mode) |
 | **Output** | Write a single JSON document to stdout on success |
-| **Errors** | Write diagnostics to stderr, exit with non-zero code |
-| **No interactivity** | Never read from TTY or prompt for input |
+| **Errors** | Write diagnostics to stderr. Exit with non-zero code |
+| **No interactivity** | Must not read from TTY or prompt for input |
+| **Deterministic structure** | Same input should produce the same output structure (values may differ) |
+
+Install the script:
+
+```bash
+sudo cp netscan.py /usr/lib/rivers/scripts/netscan.py
+sudo chmod 0555 /usr/lib/rivers/scripts/netscan.py
+sudo chown root:root /usr/lib/rivers/scripts/netscan.py
+```
 
 ---
 
 ## Step 3: Compute the SHA-256 Hash
 
-The SHA-256 hash is the authorization mechanism. It pins exactly which bytes at which path are approved for execution.
+The SHA-256 hash pins the exact script content. If the file on disk does not match the declared hash, execution is refused.
 
 ```bash
-riversctl exec hash /usr/lib/rivers/scripts/netscan.sh
+riversctl exec hash /usr/lib/rivers/scripts/netscan.py
 # Output:
 # sha256 = "a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef1234567890"
 ```
 
-Copy the hash value into your TOML configuration. When the script is updated, the hash must be updated too -- the driver never auto-updates hashes.
+Copy the hash value into your configuration. Hash updates are always an explicit admin action -- the driver never auto-updates hashes.
+
+To verify a file matches an expected hash:
+
+```bash
+riversctl exec verify /usr/lib/rivers/scripts/netscan.py \
+    "a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef1234567890"
+```
 
 ---
 
-## Step 4: Declare the Datasource
-
-In your app's `resources.toml`, declare an exec datasource.
+## Step 4: Declare the Datasource in resources.toml
 
 ```toml
 # resources.toml
 
 [[datasources]]
-name       = "ops_tools"
-driver     = "plugin:rivers-exec"
-nopassword = true
-required   = true
+name     = "ops_tools"
+driver   = "rivers-exec"
+x-type   = "database"
+required = true
 ```
 
-- `driver = "plugin:rivers-exec"` -- the exec driver is a plugin, not a built-in driver
-- `nopassword = true` -- the exec driver has no credentials
-- `required = true` -- app startup fails if the driver cannot initialize (hash mismatches, missing scripts, invalid user)
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Datasource name, referenced in app.toml and handler `resources` |
+| `driver` | yes | Must be `"rivers-exec"` |
+| `x-type` | yes | Must be `"database"` (ExecDriver implements DatabaseDriver) |
+| `required` | no | Whether the app fails to start without this datasource |
 
 ---
 
 ## Step 5: Configure Commands in app.toml
 
-Each command is a named entry under `[data.datasources.<name>.commands.<command_name>]`.
+Configure the datasource with global settings and per-command declarations.
 
 ```toml
 # app.toml
 
+# ─────────────────────────────────────────────
+# Datasource: ExecDriver
+# ─────────────────────────────────────────────
+
 [data.datasources.ops_tools]
-name              = "ops_tools"
-driver            = "plugin:rivers-exec"
-run_as_user       = "rivers-exec"
-working_directory = "/var/rivers/exec-scratch"
+driver             = "rivers-exec"
+run_as_user        = "rivers-exec"
+working_directory  = "/var/rivers/exec-scratch"
 default_timeout_ms = 30000
-max_stdout_bytes  = 5242880
-max_concurrent    = 10
-integrity_check   = "each_time"
+max_stdout_bytes   = 5242880
+max_concurrent     = 10
+integrity_check    = "each_time"
+
+# ─────────────────────────────────────────────
+# Command: Network Scan (stdin mode)
+# ─────────────────────────────────────────────
 
 [data.datasources.ops_tools.commands.network_scan]
-path             = "/usr/lib/rivers/scripts/netscan.sh"
+path             = "/usr/lib/rivers/scripts/netscan.py"
 sha256           = "a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef1234567890"
 input_mode       = "stdin"
 args_schema      = "exec_schemas/netscan_args.json"
@@ -169,42 +201,43 @@ env_set          = { SCAN_LOG = "/var/log/rivers/scan.log" }
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `run_as_user` | yes | -- | OS user for spawned processes. Must exist. Must not be root. |
-| `working_directory` | no | `/tmp` | Working directory for spawned processes. Must be writable by `run_as_user`. |
-| `default_timeout_ms` | no | `30000` | Default timeout for command execution. |
-| `max_stdout_bytes` | no | `5242880` | Default stdout read cap in bytes (5MB). |
-| `max_concurrent` | no | `10` | Global concurrency limit across all commands. |
-| `integrity_check` | no | `"each_time"` | Default integrity check mode. |
+| `working_directory` | no | `/tmp` | Working directory for spawned processes |
+| `default_timeout_ms` | no | `30000` | Default timeout for command execution |
+| `max_stdout_bytes` | no | `5242880` | Default stdout read cap in bytes (5MB) |
+| `max_concurrent` | no | `10` | Global concurrency limit across all commands |
+| `integrity_check` | no | `"each_time"` | Default integrity check mode |
 
 ### Per-Command Configuration
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `path` | yes | -- | Absolute path to the executable. |
-| `sha256` | yes | -- | SHA-256 hex digest of the file at `path`. |
-| `input_mode` | no | `"stdin"` | How parameters are delivered: `stdin`, `args`, or `both`. |
-| `args_template` | conditional | -- | Required when `input_mode` is `args` or `both`. |
-| `args_schema` | no | -- | Path to JSON Schema file for input validation. |
-| `timeout_ms` | no | global default | Timeout for this command's execution. |
-| `max_stdout_bytes` | no | global default | Stdout read cap for this command. |
-| `max_concurrent` | no | unlimited | Per-command concurrency limit. |
-| `integrity_check` | no | global default | Per-command integrity check mode override. |
-| `env_clear` | no | `true` | Clear environment before spawning. |
-| `env_allow` | no | `[]` | Environment variables inherited from host (only when `env_clear = true`). |
-| `env_set` | no | `{}` | Environment variables explicitly set for this command. |
+| `path` | yes | -- | Absolute path to the executable |
+| `sha256` | yes | -- | SHA-256 hex digest of the file at `path` |
+| `input_mode` | no | `"stdin"` | `"stdin"`, `"args"`, or `"both"` |
+| `args_template` | conditional | -- | Required when `input_mode` is `"args"` or `"both"` |
+| `stdin_key` | conditional | -- | Required when `input_mode` is `"both"` |
+| `args_schema` | no | -- | Path to JSON Schema file for input validation |
+| `timeout_ms` | no | global default | Timeout for this command |
+| `max_stdout_bytes` | no | global default | Stdout cap for this command |
+| `max_concurrent` | no | unlimited | Per-command concurrency limit (in addition to global) |
+| `integrity_check` | no | global default | `"each_time"`, `"startup_only"`, or `"every:N"` |
+| `env_clear` | no | `true` | Clear environment before spawning |
+| `env_allow` | no | `[]` | Environment variables inherited from host (only when `env_clear = true`) |
+| `env_set` | no | `{}` | Environment variables explicitly set for this command |
 
 ### Integrity Check Modes
 
-| Mode | Description |
-|------|-------------|
-| `"each_time"` | Hash the file before every execution. Zero tamper window. Default. |
-| `"startup_only"` | Hash once at driver init. For immutable deployments (containers, read-only filesystems). |
-| `"every:N"` | Hash every Nth execution. Balance between security and performance for high-frequency commands. |
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `"each_time"` | Hash before every execution | High-security commands (default) |
+| `"startup_only"` | Hash once at driver init | Immutable deployments (containers, read-only filesystems) |
+| `"every:N"` | Hash every Nth execution | High-frequency commands where per-execution hashing is measurable |
 
 ---
 
-## Step 6: Create a JSON Schema
+## Step 6: JSON Schema Validation (Optional)
 
-Input validation happens before the process spawns. Create a schema at `exec_schemas/netscan_args.json`:
+Create a JSON Schema file to validate input parameters before the script executes.
 
 ```json
 {
@@ -227,73 +260,52 @@ Input validation happens before the process spawns. Create a schema at `exec_sch
 }
 ```
 
-This is where domain-specific guardrails live. CIDR format restrictions, port range limits, allowed values -- all enforced as JSON Schema constraints before the script ever runs. Invalid input returns a `DriverError::Query` without spawning a process.
+Save as `exec_schemas/netscan_args.json` in your app directory. Schema validation occurs before the process spawns -- invalid requests never trigger execution.
 
 ---
 
-## Step 7: Write the Handler
+## Step 7: Write a Handler
 
-From the handler's perspective, the ExecDriver is just another datasource. The handler does not know a script is being executed.
+The handler calls the exec datasource using `ctx.datasource()`. The ExecDriver is accessed like any other datasource -- the handler does not know a script is being executed.
 
 ```javascript
 // libraries/handlers/ops.js
 
-function onScanNetwork(ctx) {
+function scanNetwork(ctx) {
     var body = ctx.request.body;
 
-    if (!body) throw new Error("request body required");
     if (!body.cidr) throw new Error("cidr is required");
-    if (!body.ports) throw new Error("ports is required");
+    if (!body.ports) throw new Error("ports array is required");
 
-    var result = ctx.dataview("run_network_scan", {
-        command: "network_scan",
-        args: {
+    // Execute the network_scan command
+    var result = ctx.datasource("ops_tools")
+        .fromQuery("network_scan", {
             cidr: body.cidr,
             ports: body.ports
-        }
+        })
+        .build();
+
+    Rivers.log.info("network scan complete", {
+        cidr: body.cidr,
+        host_count: result.hosts.length
     });
 
-    Rivers.log.info("network scan completed", { cidr: body.cidr });
-
-    ctx.resdata = result.rows[0].result;
+    ctx.resdata = result;
 }
 ```
 
-The `query` operation expects:
-- `command` -- the declared command name (e.g., `"network_scan"`)
-- `args` -- the parameter object passed to the script
-
-The script's stdout JSON is returned in `rows[0].result`.
+The handler passes `command` as the query name and the parameters as the args object. The driver handles command lookup, integrity verification, schema validation, process spawning, and output parsing.
 
 ---
 
-## Step 8: Configure the View and DataView
+## Step 8: Configure the View
 
 ```toml
 # app.toml (continued)
 
-# ─────────────────────────
-# DataView for the scan command
-# ─────────────────────────
-
-[data.dataviews.run_network_scan]
-name       = "run_network_scan"
-datasource = "ops_tools"
-query      = "query"
-
-[[data.dataviews.run_network_scan.parameters]]
-name     = "command"
-type     = "string"
-required = true
-
-[[data.dataviews.run_network_scan.parameters]]
-name     = "args"
-type     = "object"
-required = true
-
-# ─────────────────────────
-# View
-# ─────────────────────────
+# ─────────────────────────────────────────────
+# Views
+# ─────────────────────────────────────────────
 
 [api.views.scan_network]
 path            = "ops/scan"
@@ -306,36 +318,44 @@ auth            = "none"
 type       = "codecomponent"
 language   = "javascript"
 module     = "libraries/handlers/ops.js"
-entrypoint = "onScanNetwork"
+entrypoint = "scanNetwork"
 resources  = ["ops_tools"]
 ```
 
-The `resources` array must include `"ops_tools"`. Accessing an undeclared datasource from handler code throws `CapabilityError`.
+The `resources` list must include the exec datasource. Accessing an undeclared datasource throws `CapabilityError`.
 
 ---
 
-## Step 9: Args Mode Example -- DNS Lookup
+## Step 9: Args Mode Example (DNS Lookup)
 
-For scripts that take command-line arguments instead of stdin, use `input_mode = "args"` with an `args_template`.
+For scripts that accept command-line arguments instead of stdin, use `input_mode = "args"` with an `args_template`.
 
 ### The Script
 
 ```bash
-#!/bin/bash
-# dns_lookup.sh — DNS lookup via dig, returns JSON
-set -euo pipefail
+#!/usr/bin/env bash
+# dns_lookup.sh — DNS lookup with JSON output
+# Usage: dns_lookup.sh <domain> --type <type> --timeout <seconds>
 
 DOMAIN="$1"
-TYPE="$3"      # after --type flag
-TIMEOUT="$5"   # after --timeout flag
+TYPE="$3"     # after --type flag
+TIMEOUT="$5"  # after --timeout flag
 
 RESULT=$(dig +short "$DOMAIN" "$TYPE" +time="$TIMEOUT" 2>/dev/null)
 
-python3 -c "
-import json, sys
-records = [r.strip() for r in '''$RESULT'''.strip().split('\n') if r.strip()]
-print(json.dumps({'domain': '$DOMAIN', 'type': '$TYPE', 'records': records}))
-"
+if [ $? -ne 0 ]; then
+    echo "DNS lookup failed" >&2
+    exit 1
+fi
+
+# Build JSON output
+echo "{\"domain\":\"$DOMAIN\",\"type\":\"$TYPE\",\"records\":["
+FIRST=true
+while IFS= read -r line; do
+    if [ "$FIRST" = true ]; then FIRST=false; else echo ","; fi
+    echo "  \"$line\""
+done <<< "$RESULT"
+echo "]}"
 ```
 
 ### Command Configuration
@@ -343,7 +363,7 @@ print(json.dumps({'domain': '$DOMAIN', 'type': '$TYPE', 'records': records}))
 ```toml
 [data.datasources.ops_tools.commands.dns_lookup]
 path            = "/usr/lib/rivers/scripts/dns_lookup.sh"
-sha256           = "b2c3d4e5f6a17890abcdef1234567890abcdef1234567890abcdef1234567890"
+sha256          = "b2c3d4e5f6a17890abcdef1234567890abcdef1234567890abcdef1234567890"
 input_mode      = "args"
 args_template   = ["{domain}", "--type", "{record_type}", "--timeout", "{timeout}"]
 args_schema     = "exec_schemas/dns_args.json"
@@ -353,32 +373,7 @@ env_clear       = true
 env_allow       = ["PATH"]
 ```
 
-### Template Rules
-
-- Each element in `args_template` is either a literal string (`"--type"`) or a placeholder (`"{domain}"`).
-- Placeholders are replaced with the string value of the corresponding key from the handler's `args` object.
-- Each placeholder produces exactly **one** argument. No whitespace splitting, no glob expansion, no shell interpretation.
-- Array and object values are not permitted in template placeholders -- only scalar values.
-- No shell is involved. `tokio::process::Command` passes each element directly to `execve`.
-
-### Handler
-
-```javascript
-function onDnsLookup(ctx) {
-    var result = ctx.dataview("run_dns_lookup", {
-        command: "dns_lookup",
-        args: {
-            domain: ctx.request.body.domain,
-            record_type: ctx.request.body.type || "A",
-            timeout: ctx.request.body.timeout || "5"
-        }
-    });
-
-    ctx.resdata = result.rows[0].result;
-}
-```
-
-### Schema
+### Args Schema
 
 ```json
 {
@@ -393,38 +388,77 @@ function onDnsLookup(ctx) {
     },
     "record_type": {
       "type": "string",
-      "enum": ["A", "AAAA", "MX", "CNAME", "TXT", "NS", "SOA", "PTR"]
+      "enum": ["A", "AAAA", "MX", "CNAME", "TXT", "NS", "SOA"]
     },
     "timeout": {
-      "type": "string",
-      "pattern": "^[0-9]{1,3}$"
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 30,
+      "default": 5
     }
   }
 }
 ```
 
+### Handler
+
+```javascript
+function dnsLookup(ctx) {
+    var body = ctx.request.body;
+
+    var result = ctx.datasource("ops_tools")
+        .fromQuery("dns_lookup", {
+            domain: body.domain,
+            record_type: body.record_type || "A",
+            timeout: body.timeout || 5
+        })
+        .build();
+
+    ctx.resdata = result;
+}
+```
+
+### Template Interpolation Rules
+
+- Each `{key}` placeholder is replaced with the string value of the corresponding parameter
+- Each placeholder produces exactly one argument -- no splitting on whitespace, no glob expansion
+- Array and object values are not permitted in template placeholders
+- Extra keys in params that do not appear in any placeholder are silently ignored
+- No shell involved -- `tokio::process::Command` passes args directly to `execve`
+
 ---
 
 ## Step 10: Verify and Deploy
 
-Before deploying, verify script integrity and validate the bundle.
+### Verify Script Integrity
 
 ```bash
-# Verify a script matches its declared hash
-riversctl exec verify /usr/lib/rivers/scripts/netscan.sh \
-    a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef1234567890
-# Output: OK
+# Verify each script matches its declared hash
+riversctl exec verify /usr/lib/rivers/scripts/netscan.py \
+    "a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef1234567890"
 
-# Validate the bundle configuration
-riversctl validate my-ops-bundle/
+riversctl exec verify /usr/lib/rivers/scripts/dns_lookup.sh \
+    "b2c3d4e5f6a17890abcdef1234567890abcdef1234567890abcdef1234567890"
 ```
 
-When a script is updated, recompute the hash and update the TOML config:
+### Validate the Bundle
 
 ```bash
-# Recompute hash after a script update
-riversctl exec hash /usr/lib/rivers/scripts/netscan.sh
-# Update sha256 in app.toml, then reload riversd
+riversctl validate
+```
+
+### Test the Endpoints
+
+```bash
+# Network scan (stdin mode)
+curl -X POST http://localhost:9100/ops/scan \
+  -H "Content-Type: application/json" \
+  -d '{"cidr":"10.0.1.0/24","ports":[22,80,443]}'
+
+# DNS lookup (args mode)
+curl -X POST http://localhost:9100/ops/dns \
+  -H "Content-Type: application/json" \
+  -d '{"domain":"example.com","record_type":"A","timeout":5}'
 ```
 
 ---
@@ -434,7 +468,7 @@ riversctl exec hash /usr/lib/rivers/scripts/netscan.sh
 ### Bundle Structure
 
 ```
-ops-bundle/
+ops-tools-bundle/
 ├── manifest.toml
 ├── ops-service/
 │   ├── manifest.toml
@@ -446,13 +480,17 @@ ops-bundle/
 │   └── libraries/
 │       └── handlers/
 │           └── ops.js
+├── /usr/lib/rivers/scripts/          (host filesystem)
+│   ├── netscan.py
+│   └── dns_lookup.sh
+└── /var/rivers/exec-scratch/         (host filesystem)
 ```
 
 ### manifest.toml (bundle)
 
 ```toml
 [bundle]
-name    = "ops-bundle"
+name    = "ops-tools"
 version = "1.0.0"
 
 [[apps]]
@@ -460,36 +498,35 @@ name = "ops-service"
 path = "ops-service"
 ```
 
-### manifest.toml (app)
+### manifest.toml (service app)
 
 ```toml
 [app]
-appId   = "f1e2d3c4-b5a6-7890-abcd-ef1234567890"
-appName = "ops-service"
-type    = "service"
-port    = 9300
+appId = "d4e5f6a1-b2c3-7890-abcd-ef1234567890"
+name  = "ops-service"
+type  = "service"
+port  = 9100
 ```
 
 ### resources.toml
 
 ```toml
 [[datasources]]
-name       = "ops_tools"
-driver     = "plugin:rivers-exec"
-nopassword = true
-required   = true
+name     = "ops_tools"
+driver   = "rivers-exec"
+x-type   = "database"
+required = true
 ```
 
 ### app.toml
 
 ```toml
-# ─────────────────────────
-# ExecDriver Datasource
-# ─────────────────────────
+# ─────────────────────────────────────────────
+# Datasource: ExecDriver
+# ─────────────────────────────────────────────
 
 [data.datasources.ops_tools]
-name               = "ops_tools"
-driver             = "plugin:rivers-exec"
+driver             = "rivers-exec"
 run_as_user        = "rivers-exec"
 working_directory  = "/var/rivers/exec-scratch"
 default_timeout_ms = 30000
@@ -497,8 +534,10 @@ max_stdout_bytes   = 5242880
 max_concurrent     = 10
 integrity_check    = "each_time"
 
+# ── Command: Network Scan (stdin mode) ──
+
 [data.datasources.ops_tools.commands.network_scan]
-path             = "/usr/lib/rivers/scripts/netscan.sh"
+path             = "/usr/lib/rivers/scripts/netscan.py"
 sha256           = "a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef1234567890"
 input_mode       = "stdin"
 args_schema      = "exec_schemas/netscan_args.json"
@@ -509,6 +548,8 @@ integrity_check  = "every:50"
 env_clear        = true
 env_allow        = ["PATH", "HOME"]
 env_set          = { SCAN_LOG = "/var/log/rivers/scan.log" }
+
+# ── Command: DNS Lookup (args mode) ──
 
 [data.datasources.ops_tools.commands.dns_lookup]
 path            = "/usr/lib/rivers/scripts/dns_lookup.sh"
@@ -521,45 +562,9 @@ integrity_check = "startup_only"
 env_clear       = true
 env_allow       = ["PATH"]
 
-# ─────────────────────────
-# DataViews
-# ─────────────────────────
-
-[data.dataviews.run_network_scan]
-name       = "run_network_scan"
-datasource = "ops_tools"
-query      = "query"
-
-[[data.dataviews.run_network_scan.parameters]]
-name     = "command"
-type     = "string"
-required = true
-
-[[data.dataviews.run_network_scan.parameters]]
-name     = "args"
-type     = "object"
-required = true
-
-# ─────────────────────────
-
-[data.dataviews.run_dns_lookup]
-name       = "run_dns_lookup"
-datasource = "ops_tools"
-query      = "query"
-
-[[data.dataviews.run_dns_lookup.parameters]]
-name     = "command"
-type     = "string"
-required = true
-
-[[data.dataviews.run_dns_lookup.parameters]]
-name     = "args"
-type     = "object"
-required = true
-
-# ─────────────────────────
+# ─────────────────────────────────────────────
 # Views
-# ─────────────────────────
+# ─────────────────────────────────────────────
 
 [api.views.scan_network]
 path            = "ops/scan"
@@ -572,10 +577,10 @@ auth            = "none"
 type       = "codecomponent"
 language   = "javascript"
 module     = "libraries/handlers/ops.js"
-entrypoint = "onScanNetwork"
+entrypoint = "scanNetwork"
 resources  = ["ops_tools"]
 
-# ─────────────────────────
+# ─────────────────────────────────────────────
 
 [api.views.dns_lookup]
 path            = "ops/dns"
@@ -588,103 +593,207 @@ auth            = "none"
 type       = "codecomponent"
 language   = "javascript"
 module     = "libraries/handlers/ops.js"
-entrypoint = "onDnsLookup"
+entrypoint = "dnsLookup"
 resources  = ["ops_tools"]
+
+# ─────────────────────────────────────────────
+# ProcessPool
+# ─────────────────────────────────────────────
+
+[runtime.process_pools.default]
+engine          = "v8"
+workers         = 4
+task_timeout_ms = 5000
+max_heap_mb     = 128
 ```
 
 ### libraries/handlers/ops.js
 
 ```javascript
-function onScanNetwork(ctx) {
+// libraries/handlers/ops.js
+
+function scanNetwork(ctx) {
     var body = ctx.request.body;
 
-    if (!body) throw new Error("request body required");
     if (!body.cidr) throw new Error("cidr is required");
-    if (!body.ports) throw new Error("ports is required");
+    if (!body.ports) throw new Error("ports array is required");
 
-    var result = ctx.dataview("run_network_scan", {
-        command: "network_scan",
-        args: {
+    var result = ctx.datasource("ops_tools")
+        .fromQuery("network_scan", {
             cidr: body.cidr,
             ports: body.ports
-        }
+        })
+        .build();
+
+    Rivers.log.info("network scan complete", {
+        cidr: body.cidr,
+        host_count: result.hosts.length
     });
 
-    Rivers.log.info("network scan completed", { cidr: body.cidr });
-
-    ctx.resdata = result.rows[0].result;
+    ctx.resdata = result;
 }
 
-function onDnsLookup(ctx) {
+function dnsLookup(ctx) {
     var body = ctx.request.body;
 
-    if (!body) throw new Error("request body required");
     if (!body.domain) throw new Error("domain is required");
 
-    var result = ctx.dataview("run_dns_lookup", {
-        command: "dns_lookup",
-        args: {
+    var result = ctx.datasource("ops_tools")
+        .fromQuery("dns_lookup", {
             domain: body.domain,
-            record_type: body.type || "A",
-            timeout: body.timeout || "5"
-        }
+            record_type: body.record_type || "A",
+            timeout: body.timeout || 5
+        })
+        .build();
+
+    Rivers.log.info("dns lookup complete", {
+        domain: body.domain,
+        record_count: result.records.length
     });
 
-    Rivers.log.info("dns lookup completed", { domain: body.domain });
-
-    ctx.resdata = result.rows[0].result;
+    ctx.resdata = result;
 }
 ```
 
-### Testing
+### exec_schemas/netscan_args.json
 
-```bash
-# Run a network scan
-curl -X POST http://localhost:9300/ops/scan \
-  -H "Content-Type: application/json" \
-  -d '{"cidr":"10.0.1.0/24","ports":[22,80,443]}'
-
-# Run a DNS lookup
-curl -X POST http://localhost:9300/ops/dns \
-  -H "Content-Type: application/json" \
-  -d '{"domain":"example.com","type":"A"}'
-
-# DNS lookup with MX records
-curl -X POST http://localhost:9300/ops/dns \
-  -H "Content-Type: application/json" \
-  -d '{"domain":"example.com","type":"MX"}'
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["cidr", "ports"],
+  "additionalProperties": false,
+  "properties": {
+    "cidr": {
+      "type": "string",
+      "pattern": "^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}/[0-9]{1,2}$"
+    },
+    "ports": {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 1, "maximum": 65535 },
+      "minItems": 1,
+      "maxItems": 20
+    }
+  }
+}
 ```
 
----
+### exec_schemas/dns_args.json
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["domain", "record_type"],
+  "additionalProperties": false,
+  "properties": {
+    "domain": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.-]+[a-zA-Z]{2,}$"
+    },
+    "record_type": {
+      "type": "string",
+      "enum": ["A", "AAAA", "MX", "CNAME", "TXT", "NS", "SOA"]
+    },
+    "timeout": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 30,
+      "default": 5
+    }
+  }
+}
+```
 
 ## Security Checklist
 
-| Concern | Recommended Configuration |
-|---------|--------------------------|
-| **Privilege drop** | `run_as_user = "rivers-exec"` -- a dedicated, non-root, no-login-shell user |
-| **File permissions** | Scripts owned by root, mode `0555`. `rivers-exec` cannot write to script directories. |
-| **Environment** | `env_clear = true` (default). Explicitly allowlist only needed variables via `env_allow`. |
-| **Integrity mode** | `"each_time"` for high-security commands. `"startup_only"` only for immutable deployments. |
-| **Concurrency** | Set `max_concurrent` at both global and per-command levels to prevent resource exhaustion. |
-| **Timeouts** | Set `timeout_ms` per command. The driver kills the entire process group on timeout. |
-| **Output limits** | Set `max_stdout_bytes` to prevent memory exhaustion from runaway scripts. |
-| **Input validation** | Always declare `args_schema` with tight constraints (patterns, enums, bounds). |
-| **Working directory** | Use a dedicated scratch directory writable only by `rivers-exec`. No access to `riversd` config, LockBox files, or TLS material. |
-| **No shell** | All process spawning uses `tokio::process::Command` with an explicit argument array. Shell metacharacters are inert. |
+| Control | Configuration | Purpose |
+|---------|--------------|---------|
+| Restricted OS user | `run_as_user = "rivers-exec"` | Privilege drop -- scripts never run as root or riversd user |
+| Script permissions | `chmod 0555`, `chown root:root` | Scripts are read-only, owned by root -- `rivers-exec` cannot modify them |
+| SHA-256 pinning | `sha256 = "..."` on every command | Tampered or updated scripts are rejected |
+| Integrity frequency | `integrity_check = "each_time"` | Hash verified before every execution (default) |
+| Environment clearing | `env_clear = true` | Prevents leaking riversd credentials to scripts |
+| Environment allowlist | `env_allow = ["PATH"]` | Explicit list of inherited environment variables |
+| Input validation | `args_schema = "exec_schemas/..."` | JSON Schema enforced before process spawn |
+| No shell | `tokio::process::Command` arg array | No shell interpretation -- metacharacters are inert |
+| Fixed argument shape | `args_template = [...]` | Handler controls values, not argument structure |
+| Output cap | `max_stdout_bytes = 5242880` | Process killed if output exceeds limit |
+| Timeout | `timeout_ms = 60000` | Process group killed on timeout |
+| Concurrency limits | `max_concurrent = 10` (global), `3` (per-command) | Prevents fork-bombing from request bursts |
+| Process group isolation | `setsid` on spawn | Timeout kills the entire process group, including children |
+| Audit trail | Structured logging with `trace_id` | Every execution logged with request correlation |
 
----
+### When to Use `startup_only` Integrity
 
-## Error Reference
+Use `integrity_check = "startup_only"` only when:
+- The host filesystem is read-only (containers, immutable deployments)
+- The per-execution hash cost is measurable for high-frequency commands
+- File permissions and ownership prevent modification by non-root users
+
+For all other cases, use the default `"each_time"` mode.
+
+### Script Update Workflow
+
+When a script is updated:
+
+```bash
+# 1. Deploy the new script
+sudo cp netscan_v2.py /usr/lib/rivers/scripts/netscan.py
+sudo chmod 0555 /usr/lib/rivers/scripts/netscan.py
+
+# 2. Compute the new hash
+riversctl exec hash /usr/lib/rivers/scripts/netscan.py
+
+# 3. Update sha256 in app.toml
+
+# 4. Reload or restart riversd
+```
+
+Hash updates are always an explicit admin action. The driver never auto-updates hashes.
+
+## Configuration Reference
+
+### Execution Pipeline
+
+```
+1. Extract "command" from params
+2. Lookup command in allowlist
+3. Validate args against JSON Schema (if declared)
+4. Integrity check (mode-dependent)
+5. Acquire semaphores (global + per-command)
+6. Spawn process (privilege-dropped, env-controlled)
+7. Write stdin / set args (mode-dependent)
+8. Bounded read with timeout
+9. Parse JSON stdout
+10. Release semaphores
+```
+
+### Error Reference
 
 | Condition | Error |
 |-----------|-------|
 | Missing `command` parameter | `DriverError::Query("missing 'command' parameter")` |
-| Unknown command name | `DriverError::Unsupported("unknown command: '<name>'")` |
-| Schema validation failed | `DriverError::Query("schema validation failed: <details>")` |
-| Integrity check failed | `DriverError::Internal("integrity check failed for command '<name>': ...")` |
-| Concurrency limit reached | `DriverError::Query("concurrency limit reached for command '<name>'")` |
+| Unknown command name | `DriverError::Unsupported("unknown command")` |
+| Schema validation failed | `DriverError::Query("schema validation failed: ...")` |
+| Integrity hash mismatch | `DriverError::Internal("integrity check failed")` |
+| Concurrency limit reached | `DriverError::Query("concurrency limit reached")` |
 | Command timed out | `DriverError::Query("command timed out")` |
 | Output exceeded limit | `DriverError::Query("output exceeded limit")` |
-| Non-zero exit code | `DriverError::Query("command failed: exit <code>: <stderr>")` |
+| Non-zero exit code | `DriverError::Query("command failed: exit N: stderr")` |
 | Invalid JSON output | `DriverError::Query("command produced invalid JSON")` |
 | Empty output | `DriverError::Query("command produced no output")` |
+| `run_as_user` is root | `DriverError::Connection("run_as_user must not be root")` |
+| `read` / `write` / `delete` ops | `DriverError::Unsupported("exec driver does not support ...")` |
+
+### Driver Capabilities
+
+| Capability | Supported |
+|------------|-----------|
+| Query (command execution) | Yes |
+| Read / Write / Delete | No |
+| Transactions | No |
+| Connection pooling | No (process-per-execution) |
+| Concurrency control | Yes (global + per-command semaphores) |
+| Input validation | Yes (JSON Schema) |
+| Integrity verification | Yes (SHA-256) |

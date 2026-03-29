@@ -1,6 +1,7 @@
 //! ProcessPool engine tests — V8 JavaScript and Wasmtime WASM execution.
 
 use super::*;
+use super::v8_engine::{SCRIPT_CACHE, clear_script_cache};
 use rivers_runtime::rivers_core::DriverFactory;
 use rivers_runtime::tiered_cache::NoopDataViewCache;
 use rivers_runtime::DataViewExecutor;
