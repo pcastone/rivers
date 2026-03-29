@@ -9,312 +9,12 @@
 //! - Acquisition order: global first, then per-command.
 //! - `try_acquire()` — no queuing, immediate error if full.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Instant;
+pub mod driver;
+pub mod exec_connection;
+pub mod pipeline;
 
-use async_trait::async_trait;
-use tokio::sync::Semaphore;
-
-use rivers_driver_sdk::{
-    Connection, ConnectionParams, DatabaseDriver, DriverError, Query, QueryResult, QueryValue,
-};
-
-use crate::config::{CommandConfig, ExecConfig};
-use crate::integrity::{self, CommandIntegrity};
-use crate::schema::CompiledSchema;
-use crate::{executor, schema};
-
-// ── Per-command runtime state ─────────────────────────────────────────
-
-/// Per-command runtime state including integrity checker and semaphore.
-pub struct CommandRuntime {
-    pub config: CommandConfig,
-    pub integrity: CommandIntegrity,
-    pub schema: Option<CompiledSchema>,
-    pub semaphore: Option<Arc<Semaphore>>,
-}
-
-// ── ExecDriver (DatabaseDriver) ──────────────────────────────────────
-
-/// Factory that creates `ExecConnection` instances from datasource config.
-pub struct ExecDriver;
-
-#[async_trait]
-impl DatabaseDriver for ExecDriver {
-    fn name(&self) -> &str {
-        "rivers-exec"
-    }
-
-    async fn connect(
-        &self,
-        params: &ConnectionParams,
-    ) -> Result<Box<dyn Connection>, DriverError> {
-        // 1. Parse config from params.options
-        let config = ExecConfig::parse(params)?;
-
-        // 2. Validate config
-        config.validate()?;
-
-        // 3. Startup integrity check — hash all command files
-        let mut commands = HashMap::new();
-        for (name, cmd_config) in &config.commands {
-            let mode = cmd_config
-                .integrity_check
-                .as_ref()
-                .unwrap_or(&config.integrity_check);
-
-            // Verify hash at startup
-            let pinned = integrity::verify_at_startup(&cmd_config.path, &cmd_config.sha256)?;
-            let integrity = CommandIntegrity::new(mode.clone(), pinned);
-
-            // Log integrity mode
-            integrity::log_integrity_mode("exec", name, mode);
-
-            // Warn if env_clear is false (spec S11.2, S15.1)
-            if !cmd_config.env_clear {
-                tracing::warn!(
-                    datasource = "exec",
-                    command = %name,
-                    "env_clear=false — host environment variables will be inherited, risk of credential leakage"
-                );
-            }
-
-            // Load schema if declared
-            let compiled_schema = if let Some(ref schema_path) = cmd_config.args_schema {
-                Some(schema::CompiledSchema::load(schema_path)?)
-            } else {
-                None
-            };
-
-            // Build per-command semaphore
-            let semaphore = cmd_config.max_concurrent.map(|n| Arc::new(Semaphore::new(n)));
-
-            commands.insert(
-                name.clone(),
-                CommandRuntime {
-                    config: cmd_config.clone(),
-                    integrity,
-                    schema: compiled_schema,
-                    semaphore,
-                },
-            );
-        }
-
-        // 4. Build global semaphore
-        let global_semaphore = Arc::new(Semaphore::new(config.max_concurrent));
-
-        Ok(Box::new(ExecConnection {
-            config,
-            commands,
-            global_semaphore,
-        }))
-    }
-}
-
-// ── ExecConnection (Connection) ──────────────────────────────────────
-
-/// A live connection to the exec driver, holding all command runtimes
-/// and the global concurrency semaphore.
-pub struct ExecConnection {
-    config: ExecConfig,
-    commands: HashMap<String, CommandRuntime>,
-    global_semaphore: Arc<Semaphore>,
-}
-
-#[async_trait]
-impl Connection for ExecConnection {
-    async fn execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
-        // Only "query" operation supported
-        match query.operation.as_str() {
-            "query" => self.execute_command(query).await,
-            other => Err(DriverError::Unsupported(format!(
-                "exec driver does not support '{other}' -- only 'query' is supported"
-            ))),
-        }
-    }
-
-    async fn ping(&mut self) -> Result<(), DriverError> {
-        Ok(())
-    }
-
-    fn driver_name(&self) -> &str {
-        "rivers-exec"
-    }
-}
-
-// ── 11-Step Pipeline ─────────────────────────────────────────────────
-
-impl ExecConnection {
-    async fn execute_command(&self, query: &Query) -> Result<QueryResult, DriverError> {
-        // Step 1: Extract command name from query
-        let command_name = query
-            .parameters
-            .get("command")
-            .and_then(|v| match v {
-                QueryValue::String(s) => Some(s.as_str()),
-                _ => None,
-            })
-            .or_else(|| {
-                if !query.statement.is_empty() {
-                    Some(query.statement.as_str())
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| DriverError::Query("missing 'command' parameter".into()))?;
-
-        // Extract trace_id from query parameters (if provided), else use "-"
-        let trace_id = query
-            .parameters
-            .get("trace_id")
-            .and_then(|v| match v {
-                QueryValue::String(s) => Some(s.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| "-".into());
-
-        let start = Instant::now();
-
-        tracing::info!(
-            datasource = "exec",
-            command = %command_name,
-            trace_id = %trace_id,
-            "exec: command start"
-        );
-
-        // Step 2: Lookup command
-        let cmd = self.commands.get(command_name).ok_or_else(|| {
-            DriverError::Unsupported(format!("unknown command: '{command_name}'"))
-        })?;
-
-        // Step 3: Extract args from query parameters
-        let args = query
-            .parameters
-            .get("args")
-            .and_then(|v| match v {
-                QueryValue::Json(j) => Some(j.clone()),
-                _ => None,
-            })
-            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-
-        // Step 4: Schema validation (if declared)
-        if let Some(ref compiled_schema) = cmd.schema {
-            compiled_schema.validate(&args)?;
-        }
-
-        // Step 5: Integrity check (mode-dependent)
-        if cmd.integrity.should_check() {
-            if let Err(e) = cmd.integrity.verify(&cmd.config.path) {
-                tracing::error!(
-                    datasource = "exec",
-                    command = %command_name,
-                    trace_id = %trace_id,
-                    "exec: integrity check failed"
-                );
-                return Err(e);
-            }
-        }
-
-        // Step 6: Acquire global semaphore
-        let _global_permit = self.global_semaphore.try_acquire().map_err(|_| {
-            tracing::warn!(
-                datasource = "exec",
-                command = %command_name,
-                trace_id = %trace_id,
-                "exec: concurrency limit reached"
-            );
-            DriverError::Query(format!(
-                "concurrency limit reached for command '{command_name}'"
-            ))
-        })?;
-
-        // Step 7: Acquire per-command semaphore (if configured)
-        // On failure, _global_permit is dropped automatically (RAII), releasing
-        // the global permit before the error propagates to the caller.
-        let _cmd_permit = if let Some(ref sem) = cmd.semaphore {
-            Some(sem.try_acquire().map_err(|_| {
-                tracing::warn!(
-                    datasource = "exec",
-                    command = %command_name,
-                    trace_id = %trace_id,
-                    "exec: concurrency limit reached"
-                );
-                DriverError::Query(format!(
-                    "concurrency limit reached for command '{command_name}'"
-                ))
-            })?)
-        } else {
-            None
-        };
-
-        // Steps 8-11: Execute process (spawn, write stdin, read stdout, evaluate)
-        match executor::execute_command(&cmd.config, &self.config, &args).await {
-            Ok(result) => {
-                let duration = start.elapsed().as_millis();
-                tracing::info!(
-                    datasource = "exec",
-                    command = %command_name,
-                    trace_id = %trace_id,
-                    duration_ms = %duration,
-                    exit_code = 0,
-                    "exec: command success"
-                );
-
-                // Permits released automatically when _global_permit and _cmd_permit drop
-
-                // Map JSON result to QueryResult.
-                // QueryResult has no raw_value field, so wrap as a single row with
-                // key "result" -> QueryValue::Json(parsed_json).
-                let mut row = HashMap::new();
-                row.insert("result".to_string(), QueryValue::Json(result));
-
-                Ok(QueryResult {
-                    rows: vec![row],
-                    affected_rows: 1,
-                    last_insert_id: None,
-                })
-            }
-            Err(e) => {
-                let duration = start.elapsed().as_millis();
-                let err_msg = e.to_string();
-
-                // Categorize log level based on error type
-                if err_msg.contains("command timed out") {
-                    let timeout_ms = cmd
-                        .config
-                        .timeout_ms
-                        .unwrap_or(self.config.default_timeout_ms);
-                    tracing::warn!(
-                        datasource = "exec",
-                        command = %command_name,
-                        trace_id = %trace_id,
-                        timeout_ms = %timeout_ms,
-                        "exec: command timed out"
-                    );
-                } else if err_msg.contains("output exceeded limit") {
-                    tracing::warn!(
-                        datasource = "exec",
-                        command = %command_name,
-                        trace_id = %trace_id,
-                        "exec: output exceeded limit"
-                    );
-                } else {
-                    tracing::error!(
-                        datasource = "exec",
-                        command = %command_name,
-                        trace_id = %trace_id,
-                        duration_ms = %duration,
-                        error = %err_msg,
-                        "exec: command failed"
-                    );
-                }
-
-                Err(e)
-            }
-        }
-    }
-}
+pub use driver::{CommandRuntime, ExecDriver};
+pub use exec_connection::ExecConnection;
 
 // ── Tests ─────────────────────────────────────────────────────────────
 
@@ -322,13 +22,18 @@ impl ExecConnection {
 #[cfg(unix)]
 mod tests {
     use super::*;
-    use rivers_driver_sdk::ConnectionParams;
+    use rivers_driver_sdk::{Connection, ConnectionParams, DatabaseDriver, Query, QueryValue};
     use sha2::{Digest, Sha256};
     #[allow(unused_imports)]
     use std::collections::HashMap;
     use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+
+    use crate::integrity::{self, CommandIntegrity};
+    use crate::schema::CompiledSchema;
 
     /// Create a test script, make it executable, and return (path, sha256_hex).
     fn create_test_script(dir: &Path, name: &str, content: &str) -> (std::path::PathBuf, String) {
@@ -515,7 +220,7 @@ mod tests {
 
         let err = conn.execute(&query).await.unwrap_err();
         match err {
-            DriverError::Unsupported(msg) => {
+            rivers_driver_sdk::DriverError::Unsupported(msg) => {
                 assert!(
                     msg.contains("unknown command: 'nonexistent'"),
                     "unexpected: {msg}"
@@ -548,7 +253,7 @@ mod tests {
         let query = Query::with_operation("insert", "", "echo");
         let err = conn.execute(&query).await.unwrap_err();
         match err {
-            DriverError::Unsupported(msg) => {
+            rivers_driver_sdk::DriverError::Unsupported(msg) => {
                 assert!(
                     msg.contains("does not support 'insert'"),
                     "unexpected: {msg}"
