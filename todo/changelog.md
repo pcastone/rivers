@@ -6,6 +6,28 @@
 
 ---
 
+## Task 2: Split rivers-lockbox-engine/src/lib.rs into 7 modules + 4 test modules (2026-03-29)
+
+- **Pure structural refactor** — no behavioral changes, all pub items remain importable at `rivers_lockbox_engine::ItemName`.
+- Split 1,920 LOC monolithic `lib.rs` into 6 focused source modules + thin facade:
+  - `types.rs` — `LockBoxError`, `Keystore`, `KeystoreEntry` (with Zeroize/Drop), `EntryType`, `LockBoxConfig` re-export
+  - `validation.rs` — `validate_entry_name()`, `parse_lockbox_uri()`, `is_lockbox_uri()`
+  - `resolver.rs` — `EntryMetadata`, `ResolvedEntry`, `LockBoxResolver`, `fetch_secret_value()`
+  - `crypto.rs` — `decrypt_keystore()`, `encrypt_keystore()`
+  - `key_source.rs` — `resolve_key_source()`, `check_file_permissions()`
+  - `startup.rs` — `LockBoxReference`, `collect_lockbox_references()`, `resolve_all_references()`, `startup_resolve()`
+  - `lib.rs` — thin facade with `pub mod` + `pub use *` re-exports
+- Moved inline `#[cfg(test)] mod tests` (54 tests) to 4 integration test files:
+  - `tests/crypto_tests.rs` (18 tests)
+  - `tests/resolver_tests.rs` (18 tests)
+  - `tests/key_source_tests.rs` (8 tests)
+  - `tests/startup_tests.rs` (10 tests)
+- Added `age`, `chrono`, `toml` to `[dev-dependencies]` for integration test direct imports.
+- Dependents `rivers-lockbox` and `rivers-core` verified compiling.
+- All 54 tests pass.
+
+---
+
 ## Task 9: LockBox Engine — Expanded Test Coverage (2026-03-27)
 
 - `crates/rivers-lockbox-engine/src/lib.rs` — Added 26 new tests (28 existing → 54 total). Coverage now includes:

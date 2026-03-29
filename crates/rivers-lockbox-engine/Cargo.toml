@@ -17,4 +17,7 @@ toml = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+age = { workspace = true }
+chrono = { workspace = true }
 tempfile = { workspace = true }
+toml = { workspace = true }
