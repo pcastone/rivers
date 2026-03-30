@@ -6,6 +6,21 @@
 
 ---
 
+## Task 11: Split riversd/src/graphql.rs into 4 modules (2026-03-29)
+
+| File | Decision | Resolution |
+|------|----------|------------|
+| `graphql/config.rs` (71 LOC) | `GraphqlConfig` struct, defaults, `impl Default`, `impl From<GraphqlServerConfig>` | Extracted from config section |
+| `graphql/types.rs` (168 LOC) | `ResolverMapping`, `GraphqlType`, `GraphqlField`, `GraphqlFieldType` enum + impls, `generate_graphql_types()`, `to_pascal_case()` | Extracted from resolver bridge + schema generation sections |
+| `graphql/schema_builder.rs` (366 LOC) | `GraphqlError` enum, `json_to_gql_value()`, `build_dynamic_schema()`, `gql_value_to_json()`, `graphql_router()`, `build_schema_with_executor()`, `validate_graphql_config()` | Core schema building, router, and validation |
+| `graphql/mutations.rs` (277 LOC) | `MutationMapping`, `build_mutation_mappings_from_views()`, `build_resolver_mappings_from_dataviews()`, `build_mutation_type_with_pool()`, `SubscriptionMapping`, `build_subscription_mappings_from_views()`, `build_subscription_type()` | Extracted because schema_builder.rs exceeded 400 lines without this split |
+| `graphql/mod.rs` (16 LOC) | Module declarations + glob re-exports (`pub use *`) | All pub items remain importable at `crate::graphql::*` |
+| `graphql.rs` | Removed — replaced by `graphql/` directory | Deleted |
+
+**Note:** `build_mutation_type_with_pool` and `build_subscription_type` are `pub(super)` — called from `schema_builder.rs` but not exposed outside the module.
+
+---
+
 ## Task 10: Split rivers-runtime/tests/config_tests.rs into 4 test modules (2026-03-29)
 
 | File | Decision | Resolution |
