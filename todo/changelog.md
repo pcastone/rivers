@@ -6,6 +6,20 @@
 
 ---
 
+## Task 15: Split riversd/src/bundle_loader.rs into 5 modules (2026-03-29)
+
+| File | Decision | Resolution |
+|------|----------|------------|
+| `bundle_loader/types.rs` (~94 LOC) | `SseTriggerHandler`, `ReloadSummary`, `DatasourceEventBusHandler` + EventHandler impls | Extracted from lines 19-45, 785-790, 1009-1056 |
+| `bundle_loader/load.rs` (~436 LOC) | `load_and_wire_bundle()` first half: bundle parsing, LockBox resolution, keystore unlock, DataView registration, ConnectionParams, driver validation, cache, executor, GraphQL schema, guard views | Extracted from lines 47-443; calls `wire::wire_streaming_and_events()` for phase 2 |
+| `bundle_loader/wire.rs` (~347 LOC) | `wire_streaming_and_events()`: broker bridges, message consumers, SSE/WS managers, datasource event handlers | Extracted from lines 445-778; receives `ctx`, `bundle`, `factory`, `ds_params`, `shutdown_rx` as parameters |
+| `bundle_loader/reload.rs` (~226 LOC) | `rebuild_views_and_dataviews()`, `build_cache_policy_from_bundle()` | Extracted from lines 797-1005 |
+| `bundle_loader/mod.rs` (~14 LOC) | Module declarations + re-exports of `load_and_wire_bundle`, `rebuild_views_and_dataviews`, `ReloadSummary` | All pub items remain importable at `crate::bundle_loader::*` |
+
+**Note:** The original 1056-line `load_and_wire_bundle()` was successfully split at the natural boundary after GraphQL/guard setup. The second half was extracted as `wire_streaming_and_events()` with explicit parameters for the shared state (`factory`, `ds_params`, `bundle`, `shutdown_rx`). All 249 lib tests pass.
+
+---
+
 ## Task 13: Split riversd/src/view_engine.rs into 5 modules (2026-03-29)
 
 | File | Decision | Resolution |
