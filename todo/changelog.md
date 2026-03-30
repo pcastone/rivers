@@ -6,6 +6,22 @@
 
 ---
 
+## Task 12: Split riversd/src/engine_loader.rs into 5 modules (2026-03-29)
+
+| File | Decision | Resolution |
+|------|----------|------------|
+| `engine_loader/loaded_engine.rs` (~80 LOC) | `LoadedEngine` struct + impl (`execute()`, `cancel()`) | Extracted from lines 15-88 |
+| `engine_loader/registry.rs` (~58 LOC) | Global engine registry: `ENGINE_REGISTRY` OnceLock, `registry()`, `get_engine()`, `is_engine_available()`, `execute_on_engine()`, `loaded_engines()` | Extracted from lines 90-136 |
+| `engine_loader/loader.rs` (~130 LOC) | `EngineLoadResult` enum, `load_engines()`, `load_single_engine()` | Extracted from lines 138-266 |
+| `engine_loader/host_context.rs` (~75 LOC) | `HostContext` struct, `HOST_CONTEXT` + `HOST_KEYSTORE` OnceLocks, `set_host_context()`, `set_host_keystore()`, `build_host_callbacks()` | Extracted from lines 268-332; callbacks delegated to host_callbacks module |
+| `engine_loader/host_callbacks.rs` (~380 LOC) | All `extern "C"` FFI callbacks: `host_dataview_execute`, `host_store_get/set/del`, `host_datasource_build`, `host_http_request`, `host_log_message`, `host_free_buffer`, `host_keystore_has/info`, `host_crypto_encrypt/decrypt` + helpers `write_output`, `read_input` | Extracted from lines 334-861; split from host_context per task suggestion |
+| `engine_loader/mod.rs` (18 LOC) | Module declarations + glob re-exports (`pub use *`) | All pub items remain importable at `crate::engine_loader::*` |
+| `engine_loader.rs` | Removed — replaced by `engine_loader/` directory | Deleted |
+
+**Note:** Split host_context into two files (host_context.rs ~75 LOC + host_callbacks.rs ~380 LOC) as suggested in the task description — `HostContext` struct + setup is cleaner when separated from the 14 FFI callback implementations. Struct fields use `pub(super)` visibility so callbacks can access them from the sibling module.
+
+---
+
 ## Task 11: Split riversd/src/graphql.rs into 4 modules (2026-03-29)
 
 | File | Decision | Resolution |

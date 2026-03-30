@@ -1,335 +1,12 @@
-//! Dynamic engine loader — loads V8/Wasmtime engine shared libraries at startup.
+//! FFI host callback implementations for engine plugins (V8, WASM).
 //!
-//! Scans the `[engines].dir` directory for `librivers_*.dylib` (macOS) or
-//! `librivers_*.so` (Linux), loads each via `libloading`, checks ABI version,
-//! and initializes with host callback function pointers.
+//! All `extern "C"` functions referenced in `HostCallbacks` live here.
+//! They access subsystem state via `HOST_CONTEXT` and `HOST_KEYSTORE`
+//! defined in the sibling `host_context` module.
 
 use std::collections::HashMap;
-use std::path::Path;
-use std::sync::{Arc, OnceLock, RwLock};
 
-use rivers_engine_sdk::{ENGINE_ABI_VERSION, HostCallbacks, SerializedTaskContext, SerializedTaskResult};
-
-// ── Loaded Engine ───────────────────────────────────────────────
-
-/// A loaded engine shared library with resolved function pointers.
-pub struct LoadedEngine {
-    /// Engine name (e.g., "v8", "wasm").
-    pub name: String,
-    /// Held to keep the library loaded.
-    _library: libloading::Library,
-    /// Execute function pointer.
-    execute_fn: unsafe extern "C" fn(
-        ctx_ptr: *const u8, ctx_len: usize,
-        out_ptr: *mut *mut u8, out_len: *mut usize,
-    ) -> i32,
-    /// Cancel function pointer (for watchdog termination).
-    cancel_fn: Option<unsafe extern "C" fn(task_id: usize) -> i32>,
-}
-
-impl LoadedEngine {
-    /// Execute a task via the engine dylib.
-    ///
-    /// Serializes `ctx` to JSON, calls the engine, deserializes the result.
-    pub fn execute(&self, ctx: &SerializedTaskContext) -> Result<SerializedTaskResult, String> {
-        let ctx_json = serde_json::to_vec(ctx)
-            .map_err(|e| format!("serialize task context: {}", e))?;
-
-        let mut out_ptr: *mut u8 = std::ptr::null_mut();
-        let mut out_len: usize = 0;
-
-        let result = unsafe {
-            (self.execute_fn)(
-                ctx_json.as_ptr(), ctx_json.len(),
-                &mut out_ptr, &mut out_len,
-            )
-        };
-
-        if result != 0 {
-            // Error — read error message from output buffer
-            let err_msg = if !out_ptr.is_null() && out_len > 0 {
-                let msg = unsafe {
-                    String::from_utf8_lossy(std::slice::from_raw_parts(out_ptr, out_len)).to_string()
-                };
-                unsafe { rivers_engine_sdk::free_json_buffer(out_ptr, out_len) };
-                msg
-            } else {
-                format!("engine returned error code {}", result)
-            };
-            return Err(err_msg);
-        }
-
-        // Success — deserialize result
-        if out_ptr.is_null() || out_len == 0 {
-            return Ok(SerializedTaskResult {
-                value: serde_json::Value::Null,
-                duration_ms: 0,
-            });
-        }
-
-        let result_bytes = unsafe { std::slice::from_raw_parts(out_ptr, out_len) };
-        let task_result: SerializedTaskResult = serde_json::from_slice(result_bytes)
-            .map_err(|e| format!("deserialize task result: {}", e))?;
-
-        // Free the buffer allocated by the engine
-        unsafe { rivers_engine_sdk::free_json_buffer(out_ptr, out_len) };
-
-        Ok(task_result)
-    }
-
-    /// Cancel a running task (called by watchdog).
-    pub fn cancel(&self, task_id: usize) -> bool {
-        if let Some(cancel_fn) = self.cancel_fn {
-            unsafe { cancel_fn(task_id) == 0 }
-        } else {
-            false
-        }
-    }
-}
-
-// ── Engine Registry ─────────────────────────────────────────────
-
-/// Global engine registry — populated at startup, read on every task dispatch.
-static ENGINE_REGISTRY: OnceLock<RwLock<HashMap<String, LoadedEngine>>> = OnceLock::new();
-
-fn registry() -> &'static RwLock<HashMap<String, LoadedEngine>> {
-    ENGINE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
-}
-
-/// Get an engine by name from the global registry.
-pub fn get_engine(name: &str) -> Option<std::sync::RwLockReadGuard<'static, HashMap<String, LoadedEngine>>> {
-    let guard = registry().read().ok()?;
-    if guard.contains_key(name) {
-        Some(guard)
-    } else {
-        None
-    }
-}
-
-/// Check if an engine is loaded.
-pub fn is_engine_available(name: &str) -> bool {
-    registry().read().ok()
-        .map(|r| r.contains_key(name))
-        .unwrap_or(false)
-}
-
-/// Execute a task on a named engine.
-///
-/// Acquires a read lock on the registry, finds the engine, and calls execute.
-/// This function is designed to be called from `spawn_blocking`.
-pub fn execute_on_engine(
-    name: &str,
-    ctx: &rivers_engine_sdk::SerializedTaskContext,
-) -> Result<rivers_engine_sdk::SerializedTaskResult, String> {
-    let guard = registry().read()
-        .map_err(|_| "engine registry lock poisoned".to_string())?;
-    let engine = guard.get(name)
-        .ok_or_else(|| format!("engine '{}' not loaded", name))?;
-    engine.execute(ctx)
-}
-
-/// List all loaded engine names.
-pub fn loaded_engines() -> Vec<String> {
-    registry().read().ok()
-        .map(|r| r.keys().cloned().collect())
-        .unwrap_or_default()
-}
-
-// ── Engine Loading ──────────────────────────────────────────────
-
-/// Load result for a single engine.
-#[derive(Debug)]
-pub enum EngineLoadResult {
-    Success { name: String, path: String },
-    Failed { path: String, reason: String },
-}
-
-/// Scan a directory for engine shared libraries and load them.
-///
-/// Looks for files matching `librivers_v8.*` and `librivers_wasm.*`.
-/// Each is loaded, ABI-checked, and initialized.
-pub fn load_engines(lib_dir: &Path, callbacks: &HostCallbacks) -> Vec<EngineLoadResult> {
-    let mut results = Vec::new();
-
-    if !lib_dir.is_dir() {
-        tracing::info!(dir = %lib_dir.display(), "engine lib directory not found — no engines loaded");
-        return results;
-    }
-
-    let entries = match std::fs::read_dir(lib_dir) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(dir = %lib_dir.display(), error = %e, "failed to read engine lib directory");
-            return results;
-        }
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let file_name = path.file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or("");
-
-        // Match librivers_v8.* or librivers_wasm.*
-        let engine_name = if file_name.starts_with("librivers_v8") {
-            "v8"
-        } else if file_name.starts_with("librivers_wasm") {
-            "wasm"
-        } else {
-            continue; // Not an engine library
-        };
-
-        let path_str = path.display().to_string();
-        match load_single_engine(&path, engine_name, callbacks) {
-            Ok(engine) => {
-                tracing::info!(engine = engine_name, path = %path_str, "engine loaded");
-                let mut registry = registry().write().unwrap();
-                registry.insert(engine_name.to_string(), engine);
-                results.push(EngineLoadResult::Success {
-                    name: engine_name.to_string(),
-                    path: path_str,
-                });
-            }
-            Err(reason) => {
-                tracing::warn!(engine = engine_name, path = %path_str, reason = %reason, "engine load failed");
-                results.push(EngineLoadResult::Failed {
-                    path: path_str,
-                    reason,
-                });
-            }
-        }
-    }
-
-    results
-}
-
-/// Load a single engine shared library.
-fn load_single_engine(
-    path: &Path,
-    name: &str,
-    _callbacks: &HostCallbacks,
-) -> Result<LoadedEngine, String> {
-    // Load the library
-    let lib = unsafe {
-        libloading::Library::new(path)
-            .map_err(|e| format!("dlopen failed: {}", e))?
-    };
-
-    // Check ABI version
-    let abi_version: u32 = unsafe {
-        let func: libloading::Symbol<unsafe extern "C" fn() -> u32> = lib
-            .get(b"_rivers_engine_abi_version")
-            .map_err(|e| format!("missing _rivers_engine_abi_version: {}", e))?;
-        func()
-    };
-
-    if abi_version != ENGINE_ABI_VERSION {
-        return Err(format!(
-            "ABI version mismatch: engine has {}, expected {}",
-            abi_version, ENGINE_ABI_VERSION
-        ));
-    }
-
-    // Resolve execute function
-    let execute_fn = unsafe {
-        let func: libloading::Symbol<
-            unsafe extern "C" fn(*const u8, usize, *mut *mut u8, *mut usize) -> i32
-        > = lib
-            .get(b"_rivers_engine_execute")
-            .map_err(|e| format!("missing _rivers_engine_execute: {}", e))?;
-        *func
-    };
-
-    // Resolve cancel function (optional)
-    let cancel_fn = unsafe {
-        lib.get::<unsafe extern "C" fn(usize) -> i32>(b"_rivers_engine_cancel")
-            .ok()
-            .map(|f| *f)
-    };
-
-    // Call init (optional)
-    unsafe {
-        if let Ok(init_fn) = lib.get::<unsafe extern "C" fn() -> i32>(b"_rivers_engine_init") {
-            let result = init_fn();
-            if result != 0 {
-                return Err(format!("_rivers_engine_init returned {}", result));
-            }
-        }
-    }
-
-    Ok(LoadedEngine {
-        name: name.to_string(),
-        _library: lib,
-        execute_fn,
-        cancel_fn,
-    })
-}
-
-// ── Host Context (OnceLock subsystem references) ────────────────
-
-/// Subsystem references for host callbacks. Set once after server init.
-struct HostContext {
-    dataview_executor: Arc<tokio::sync::RwLock<Option<rivers_runtime::DataViewExecutor>>>,
-    storage_engine: Option<Arc<dyn rivers_runtime::rivers_core::storage::StorageEngine>>,
-    driver_factory: Option<Arc<rivers_runtime::rivers_core::DriverFactory>>,
-    http_client: reqwest::Client,
-    rt_handle: tokio::runtime::Handle,
-}
-
-static HOST_CONTEXT: OnceLock<HostContext> = OnceLock::new();
-
-/// Application keystore for dynamic engine callbacks (App Keystore feature).
-/// Separate OnceLock because keystore resolution happens per-app and may
-/// occur after the main host context is wired.
-static HOST_KEYSTORE: OnceLock<Arc<rivers_keystore_engine::AppKeystore>> = OnceLock::new();
-
-/// Wire host subsystem references so callbacks can reach DataViewExecutor,
-/// StorageEngine, DriverFactory, and HTTP client. Called once during server
-/// startup after all subsystems are initialized.
-pub fn set_host_context(
-    dataview_executor: Arc<tokio::sync::RwLock<Option<rivers_runtime::DataViewExecutor>>>,
-    storage_engine: Option<Arc<dyn rivers_runtime::rivers_core::storage::StorageEngine>>,
-    driver_factory: Option<Arc<rivers_runtime::rivers_core::DriverFactory>>,
-) {
-    let _ = HOST_CONTEXT.set(HostContext {
-        dataview_executor,
-        storage_engine,
-        driver_factory,
-        http_client: reqwest::Client::new(),
-        rt_handle: tokio::runtime::Handle::current(),
-    });
-}
-
-/// Set the application keystore for dynamic engine callbacks.
-/// Called after `set_host_context` when an app has [[keystores]] declared.
-pub fn set_host_keystore(keystore: Arc<rivers_keystore_engine::AppKeystore>) {
-    let _ = HOST_KEYSTORE.set(keystore);
-}
-
-// ── Host Callback Implementations ───────────────────────────────
-//
-// NOTE: The callbacks below return JSON over FFI boundaries using `{"error": ...}`
-// format. This is an FFI protocol contract with cdylib engine plugins (V8, WASM).
-// Do NOT replace with ErrorResponse — changing the shape would break dynamic
-// engine plugins that parse these responses.
-
-/// Build the HostCallbacks table with all callbacks wired.
-pub fn build_host_callbacks() -> HostCallbacks {
-    HostCallbacks {
-        dataview_execute: Some(host_dataview_execute),
-        store_get: Some(host_store_get),
-        store_set: Some(host_store_set),
-        store_del: Some(host_store_del),
-        datasource_build: Some(host_datasource_build),
-        http_request: Some(host_http_request),
-        log_message: Some(host_log_message),
-        free_buffer: Some(host_free_buffer),
-        keystore_has: Some(host_keystore_has),
-        keystore_info: Some(host_keystore_info),
-        crypto_encrypt: Some(host_crypto_encrypt),
-        crypto_decrypt: Some(host_crypto_decrypt),
-    }
-}
+use super::host_context::{HOST_CONTEXT, HOST_KEYSTORE};
 
 /// Helper: write a JSON value into the output buffer pointers.
 fn write_output(out_ptr: *mut *mut u8, out_len: *mut usize, value: &serde_json::Value) {
@@ -347,7 +24,7 @@ fn read_input(input_ptr: *const u8, input_len: usize) -> Result<serde_json::Valu
 
 // ── dataview_execute ────────────────────────────────────────────
 
-extern "C" fn host_dataview_execute(
+pub(super) extern "C" fn host_dataview_execute(
     input_ptr: *const u8, input_len: usize,
     out_ptr: *mut *mut u8, out_len: *mut usize,
 ) -> i32 {
@@ -376,8 +53,10 @@ extern "C" fn host_dataview_execute(
 
     let executor_lock = ctx.dataview_executor.clone();
     match ctx.rt_handle.block_on(async {
-        let guard = executor_lock.read().await;
-        let executor = guard.as_ref().ok_or_else(|| "DataViewExecutor not initialized".to_string())?;
+        let executor = {
+            let guard = executor_lock.read().await;
+            guard.clone().ok_or_else(|| "DataViewExecutor not initialized".to_string())?
+        };
         executor.execute(&name, params, "GET", &trace_id).await.map_err(|e| e.to_string())
     }) {
         Ok(response) => {
@@ -401,7 +80,7 @@ extern "C" fn host_dataview_execute(
 
 // ── store_get ───────────────────────────────────────────────────
 
-extern "C" fn host_store_get(
+pub(super) extern "C" fn host_store_get(
     input_ptr: *const u8, input_len: usize,
     out_ptr: *mut *mut u8, out_len: *mut usize,
 ) -> i32 {
@@ -451,7 +130,7 @@ extern "C" fn host_store_get(
 
 // ── store_set ───────────────────────────────────────────────────
 
-extern "C" fn host_store_set(
+pub(super) extern "C" fn host_store_set(
     input_ptr: *const u8, input_len: usize,
 ) -> i32 {
     let ctx = match HOST_CONTEXT.get() {
@@ -485,7 +164,7 @@ extern "C" fn host_store_set(
 
 // ── store_del ───────────────────────────────────────────────────
 
-extern "C" fn host_store_del(
+pub(super) extern "C" fn host_store_del(
     input_ptr: *const u8, input_len: usize,
 ) -> i32 {
     let ctx = match HOST_CONTEXT.get() {
@@ -517,7 +196,7 @@ extern "C" fn host_store_del(
 
 // ── datasource_build ────────────────────────────────────────────
 
-extern "C" fn host_datasource_build(
+pub(super) extern "C" fn host_datasource_build(
     input_ptr: *const u8, input_len: usize,
     out_ptr: *mut *mut u8, out_len: *mut usize,
 ) -> i32 {
@@ -583,7 +262,7 @@ extern "C" fn host_datasource_build(
 
 // ── http_request ────────────────────────────────────────────────
 
-extern "C" fn host_http_request(
+pub(super) extern "C" fn host_http_request(
     input_ptr: *const u8, input_len: usize,
     out_ptr: *mut *mut u8, out_len: *mut usize,
 ) -> i32 {
@@ -661,7 +340,7 @@ extern "C" fn host_http_request(
 
 // ── log_message ─────────────────────────────────────────────────
 
-extern "C" fn host_log_message(
+pub(super) extern "C" fn host_log_message(
     level: u8, msg_ptr: *const u8, msg_len: usize,
 ) {
     if msg_ptr.is_null() || msg_len == 0 {
@@ -682,13 +361,13 @@ extern "C" fn host_log_message(
 
 // ── free_buffer ─────────────────────────────────────────────────
 
-extern "C" fn host_free_buffer(ptr: *mut u8, len: usize) {
+pub(super) extern "C" fn host_free_buffer(ptr: *mut u8, len: usize) {
     unsafe { rivers_engine_sdk::free_json_buffer(ptr, len) };
 }
 
 // ── keystore_has ────────────────────────────────────────────────
 
-extern "C" fn host_keystore_has(
+pub(super) extern "C" fn host_keystore_has(
     input_ptr: *const u8, input_len: usize,
     out_ptr: *mut *mut u8, out_len: *mut usize,
 ) -> i32 {
@@ -719,7 +398,7 @@ extern "C" fn host_keystore_has(
 
 // ── keystore_info ───────────────────────────────────────────────
 
-extern "C" fn host_keystore_info(
+pub(super) extern "C" fn host_keystore_info(
     input_ptr: *const u8, input_len: usize,
     out_ptr: *mut *mut u8, out_len: *mut usize,
 ) -> i32 {
@@ -759,7 +438,7 @@ extern "C" fn host_keystore_info(
 
 // ── crypto_encrypt ──────────────────────────────────────────────
 
-extern "C" fn host_crypto_encrypt(
+pub(super) extern "C" fn host_crypto_encrypt(
     input_ptr: *const u8, input_len: usize,
     out_ptr: *mut *mut u8, out_len: *mut usize,
 ) -> i32 {
@@ -804,7 +483,7 @@ extern "C" fn host_crypto_encrypt(
 
 // ── crypto_decrypt ──────────────────────────────────────────────
 
-extern "C" fn host_crypto_decrypt(
+pub(super) extern "C" fn host_crypto_decrypt(
     input_ptr: *const u8, input_len: usize,
     out_ptr: *mut *mut u8, out_len: *mut usize,
 ) -> i32 {
