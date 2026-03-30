@@ -536,7 +536,7 @@ pub fn build_resolver_mappings_from_dataviews(
 pub fn build_schema_with_executor(
     config: &GraphqlConfig,
     resolvers: &[ResolverMapping],
-    executor: std::sync::Arc<tokio::sync::RwLock<Option<rivers_runtime::DataViewExecutor>>>,
+    executor: std::sync::Arc<tokio::sync::RwLock<Option<std::sync::Arc<rivers_runtime::DataViewExecutor>>>>,
     mutations: &[MutationMapping],
     pool: std::sync::Arc<crate::process_pool::ProcessPoolManager>,
     subscriptions: &[SubscriptionMapping],
