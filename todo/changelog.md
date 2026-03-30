@@ -6,6 +6,22 @@
 
 ---
 
+## Task 20: Split riversctl/src/main.rs into 6 modules (2026-03-29)
+
+| File | Decision | Resolution |
+|------|----------|------------|
+| `commands/mod.rs` (5 LOC) | Module declarations for start, doctor, validate, exec, admin | New file |
+| `commands/start.rs` (119 LOC) | `cmd_start()`, `launch_riversd()` (unix/windows), `riversd_binary_name()`, `find_riversd_binary()`, `find_in_path()` | Extracted from lines 136-255 |
+| `commands/doctor.rs` (154 LOC) | `cmd_doctor()`, `check_lockbox_permissions()` (unix/not-unix), `discover_config()`, `load_config_for_tls()` | Extracted from lines 256-408 |
+| `commands/validate.rs` (85 LOC) | `cmd_validate()` bundle + schema validation | Extracted from lines 539-625 |
+| `commands/exec.rs` (56 LOC) | `cmd_exec()`, `cmd_exec_hash()`, `cmd_exec_verify()` | Extracted from lines 480-537 |
+| `commands/admin.rs` (287 LOC) | `sign_request()`, `admin_get()`, `admin_post()`, all admin cmd_* functions, Signal, signal_riversd, find_riversd_pids, kill_pid | Extracted from lines 410-840 |
+| `main.rs` (210 LOC) | Entry point with match dispatch, print_usage, tests referencing submodules | Reduced from 913 to 210 LOC |
+
+**Note:** Pure structural refactor. All 11 tests pass. CLI behavior unchanged. doctor::discover_config and start::find_riversd_binary made pub for cross-module use. Tests updated to reference functions via commands::* paths.
+
+---
+
 ## Task 15: Split riversd/src/bundle_loader.rs into 5 modules (2026-03-29)
 
 | File | Decision | Resolution |
