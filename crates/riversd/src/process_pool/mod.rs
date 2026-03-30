@@ -21,7 +21,7 @@ pub mod wasm_engine;
 pub mod wasm_config;
 #[cfg(test)]
 #[cfg(feature = "static-engines")]
-mod engine_tests;
+mod tests;
 
 // Re-export all public types from submodules
 pub use types::*;

@@ -6,6 +6,174 @@
 
 ---
 
+## Task 20: Split riversctl/src/main.rs into 6 modules (2026-03-29)
+
+| File | Decision | Resolution |
+|------|----------|------------|
+| `commands/mod.rs` (5 LOC) | Module declarations for start, doctor, validate, exec, admin | New file |
+| `commands/start.rs` (119 LOC) | `cmd_start()`, `launch_riversd()` (unix/windows), `riversd_binary_name()`, `find_riversd_binary()`, `find_in_path()` | Extracted from lines 136-255 |
+| `commands/doctor.rs` (154 LOC) | `cmd_doctor()`, `check_lockbox_permissions()` (unix/not-unix), `discover_config()`, `load_config_for_tls()` | Extracted from lines 256-408 |
+| `commands/validate.rs` (85 LOC) | `cmd_validate()` bundle + schema validation | Extracted from lines 539-625 |
+| `commands/exec.rs` (56 LOC) | `cmd_exec()`, `cmd_exec_hash()`, `cmd_exec_verify()` | Extracted from lines 480-537 |
+| `commands/admin.rs` (287 LOC) | `sign_request()`, `admin_get()`, `admin_post()`, all admin cmd_* functions, Signal, signal_riversd, find_riversd_pids, kill_pid | Extracted from lines 410-840 |
+| `main.rs` (210 LOC) | Entry point with match dispatch, print_usage, tests referencing submodules | Reduced from 913 to 210 LOC |
+
+**Note:** Pure structural refactor. All 11 tests pass. CLI behavior unchanged. doctor::discover_config and start::find_riversd_binary made pub for cross-module use. Tests updated to reference functions via commands::* paths.
+
+---
+
+## Task 15: Split riversd/src/bundle_loader.rs into 5 modules (2026-03-29)
+
+| File | Decision | Resolution |
+|------|----------|------------|
+| `bundle_loader/types.rs` (~94 LOC) | `SseTriggerHandler`, `ReloadSummary`, `DatasourceEventBusHandler` + EventHandler impls | Extracted from lines 19-45, 785-790, 1009-1056 |
+| `bundle_loader/load.rs` (~436 LOC) | `load_and_wire_bundle()` first half: bundle parsing, LockBox resolution, keystore unlock, DataView registration, ConnectionParams, driver validation, cache, executor, GraphQL schema, guard views | Extracted from lines 47-443; calls `wire::wire_streaming_and_events()` for phase 2 |
+| `bundle_loader/wire.rs` (~347 LOC) | `wire_streaming_and_events()`: broker bridges, message consumers, SSE/WS managers, datasource event handlers | Extracted from lines 445-778; receives `ctx`, `bundle`, `factory`, `ds_params`, `shutdown_rx` as parameters |
+| `bundle_loader/reload.rs` (~226 LOC) | `rebuild_views_and_dataviews()`, `build_cache_policy_from_bundle()` | Extracted from lines 797-1005 |
+| `bundle_loader/mod.rs` (~14 LOC) | Module declarations + re-exports of `load_and_wire_bundle`, `rebuild_views_and_dataviews`, `ReloadSummary` | All pub items remain importable at `crate::bundle_loader::*` |
+
+**Note:** The original 1056-line `load_and_wire_bundle()` was successfully split at the natural boundary after GraphQL/guard setup. The second half was extracted as `wire_streaming_and_events()` with explicit parameters for the shared state (`factory`, `ds_params`, `bundle`, `shutdown_rx`). All 249 lib tests pass.
+
+---
+
+## Task 13: Split riversd/src/view_engine.rs into 5 modules (2026-03-29)
+
+| File | Decision | Resolution |
+|------|----------|------------|
+| `view_engine/types.rs` (~130 LOC) | `ParsedRequest`, `StoreHandle`, `ViewContext`, `ViewResult`, `ViewError` | Extracted from lines 11-108, 428-442, 1013-1036 |
+| `view_engine/router.rs` (~240 LOC) | `PathSegment` enum, `ViewRoute` struct, `build_namespaced_path()`, `ViewRouter` struct + impl, `parse_path_pattern()` | Extracted from lines 110-362 |
+| `view_engine/pipeline.rs` (~270 LOC) | `apply_parameter_mapping()`, `json_value_to_query_value()`, `execute_rest_view()`, `serialize_view_result()` | Extracted from lines 364-685 |
+| `view_engine/validation.rs` (~280 LOC) | `validate_views()`, `execute_on_error_handlers()`, `execute_on_session_valid()`, `parse_handler_view_result()`, `validate_input()`, `validate_output()` | Extracted from lines 686-1012 |
+| `view_engine/mod.rs` (~290 LOC) | Module declarations + glob re-exports, tests remain here | All pub items remain importable at `crate::view_engine::*` |
+
+**Note:** `PathSegment` placed in `router.rs` alongside `ViewRoute` and `parse_path_pattern()` which create it. `parse_handler_view_result` given `pub(super)` visibility since it is used by both `pipeline.rs` and `validation.rs` (on_error handlers). All 249 lib tests pass.
+
+---
+
+## Task 12: Split riversd/src/engine_loader.rs into 5 modules (2026-03-29)
+
+| File | Decision | Resolution |
+|------|----------|------------|
+| `engine_loader/loaded_engine.rs` (~80 LOC) | `LoadedEngine` struct + impl (`execute()`, `cancel()`) | Extracted from lines 15-88 |
+| `engine_loader/registry.rs` (~58 LOC) | Global engine registry: `ENGINE_REGISTRY` OnceLock, `registry()`, `get_engine()`, `is_engine_available()`, `execute_on_engine()`, `loaded_engines()` | Extracted from lines 90-136 |
+| `engine_loader/loader.rs` (~130 LOC) | `EngineLoadResult` enum, `load_engines()`, `load_single_engine()` | Extracted from lines 138-266 |
+| `engine_loader/host_context.rs` (~75 LOC) | `HostContext` struct, `HOST_CONTEXT` + `HOST_KEYSTORE` OnceLocks, `set_host_context()`, `set_host_keystore()`, `build_host_callbacks()` | Extracted from lines 268-332; callbacks delegated to host_callbacks module |
+| `engine_loader/host_callbacks.rs` (~380 LOC) | All `extern "C"` FFI callbacks: `host_dataview_execute`, `host_store_get/set/del`, `host_datasource_build`, `host_http_request`, `host_log_message`, `host_free_buffer`, `host_keystore_has/info`, `host_crypto_encrypt/decrypt` + helpers `write_output`, `read_input` | Extracted from lines 334-861; split from host_context per task suggestion |
+| `engine_loader/mod.rs` (18 LOC) | Module declarations + glob re-exports (`pub use *`) | All pub items remain importable at `crate::engine_loader::*` |
+| `engine_loader.rs` | Removed — replaced by `engine_loader/` directory | Deleted |
+
+**Note:** Split host_context into two files (host_context.rs ~75 LOC + host_callbacks.rs ~380 LOC) as suggested in the task description — `HostContext` struct + setup is cleaner when separated from the 14 FFI callback implementations. Struct fields use `pub(super)` visibility so callbacks can access them from the sibling module.
+
+---
+
+## Task 11: Split riversd/src/graphql.rs into 4 modules (2026-03-29)
+
+| File | Decision | Resolution |
+|------|----------|------------|
+| `graphql/config.rs` (71 LOC) | `GraphqlConfig` struct, defaults, `impl Default`, `impl From<GraphqlServerConfig>` | Extracted from config section |
+| `graphql/types.rs` (168 LOC) | `ResolverMapping`, `GraphqlType`, `GraphqlField`, `GraphqlFieldType` enum + impls, `generate_graphql_types()`, `to_pascal_case()` | Extracted from resolver bridge + schema generation sections |
+| `graphql/schema_builder.rs` (366 LOC) | `GraphqlError` enum, `json_to_gql_value()`, `build_dynamic_schema()`, `gql_value_to_json()`, `graphql_router()`, `build_schema_with_executor()`, `validate_graphql_config()` | Core schema building, router, and validation |
+| `graphql/mutations.rs` (277 LOC) | `MutationMapping`, `build_mutation_mappings_from_views()`, `build_resolver_mappings_from_dataviews()`, `build_mutation_type_with_pool()`, `SubscriptionMapping`, `build_subscription_mappings_from_views()`, `build_subscription_type()` | Extracted because schema_builder.rs exceeded 400 lines without this split |
+| `graphql/mod.rs` (16 LOC) | Module declarations + glob re-exports (`pub use *`) | All pub items remain importable at `crate::graphql::*` |
+| `graphql.rs` | Removed — replaced by `graphql/` directory | Deleted |
+
+**Note:** `build_mutation_type_with_pool` and `build_subscription_type` are `pub(super)` — called from `schema_builder.rs` but not exposed outside the module.
+
+---
+
+## Task 10: Split rivers-runtime/tests/config_tests.rs into 4 test modules (2026-03-29)
+
+| File | Decision | Resolution |
+|------|----------|------------|
+| `tests/server_config_tests.rs` | ServerConfig parsing (minimal/full), validation (port zero, admin port conflict, CORS), env overrides, cache config | New file, 9 tests |
+| `tests/app_config_tests.rs` | AppConfig validation — unknown datasource, valid config, unknown dataview, view types, invalidates targets | New file, 7 tests |
+| `tests/bundle_tests.rs` | Bundle manifest parsing, resources config, duplicate datasources, cross-app service refs, known drivers, TOML parse errors, schema file existence | New file, 10 tests |
+| `tests/config_schema_tests.rs` | JSON Schema generation tests (schemars) for ServerConfig, AppConfig, BundleManifest | New file, 4 tests — named `config_schema_tests` to avoid collision with existing `schema_tests.rs` |
+| `tests/config_tests.rs` | Removed — all 30 tests distributed across 4 new files | Deleted |
+
+**Note:** Pre-existing compile errors in `cache_bench.rs` and `dataview_engine_tests.rs` (missing `drivers` feature flag) — not introduced by this refactor.
+
+---
+
+## Task 9: Split rivers-plugin-influxdb/src/lib.rs into 4 modules (2026-03-29)
+
+| File | Decision | Resolution |
+|------|----------|------------|
+| `src/protocol.rs` | `urlencoded()`, `parse_csv_response()`, `build_line_protocol()`, escape/format helpers | New module, all items `pub(crate)`, 22 protocol tests |
+| `src/connection.rs` | `InfluxConnection` struct + `impl Connection` + internal helpers (`exec_query`, `exec_write`, `exec_ping`) | New module, struct `pub`, fields `pub(crate)` for driver/batching access |
+| `src/batching.rs` | `BatchingInfluxConnection` struct + `impl Connection` + `Drop` + flush/timer helpers | New module, struct `pub(crate)`, imports connection + protocol |
+| `src/driver.rs` | `InfluxDriver` struct + `impl DatabaseDriver` (connect with batching config) | New module, struct `pub`, 2 driver tests |
+| `src/lib.rs` | Module declarations, `pub use` re-exports (`InfluxConnection`, `InfluxDriver`), ABI exports (`_rivers_abi_version`, `_rivers_register_driver`) | Reduced from 898 to ~45 lines |
+
+**Note:** Pre-existing compile error in `tests/lockbox_helper.rs` (missing `ConnectionParams` import) — not introduced by this refactor.
+
+---
+
+## Task 7: Split rivers-plugin-exec/src/config.rs into 3 modules (2026-03-29)
+
+| File | Decision | Resolution |
+|------|----------|------------|
+| `config.rs` -> `config/mod.rs` | Module declarations + glob re-export (`pub use types::*`) | Preserves `crate::config::{ExecConfig, CommandConfig, ...}` import paths |
+| `config/types.rs` | `ExecConfig`, `CommandConfig`, `IntegrityMode`, `InputMode` structs/enums + `parse()` impls on enums | Type definitions with their inherent parsing methods |
+| `config/parser.rs` | `impl ExecConfig { fn parse() }` + helper fns (`parse_u64_opt`, `parse_usize_opt`, `parse_commands`, `parse_indexed_list`, `parse_env_set`) | Uses `use super::types::*` for access |
+| `config/validator.rs` | `impl ExecConfig { fn validate() }` with OS-level checks (user lookup, file perms) | Uses `use super::types::*` for access |
+| Tests | Distributed into respective modules — type tests in `types.rs`, parse tests in `parser.rs`, validation tests in `validator.rs` | All 95 unit + 8 integration tests pass |
+
+---
+
+## Task 5: Split rivers-engine-v8/src/lib.rs into 3 modules (2026-03-29)
+
+| File | Decision | Resolution |
+|------|----------|------------|
+| `crates/rivers-engine-v8/src/task_context.rs` | Extract 8 thread-local declarations + setup/clear functions | New module, all items `pub(crate)` |
+| `crates/rivers-engine-v8/src/v8_runtime.rs` | Extract V8 init, isolate pool, script cache, helpers | New module, all items `pub(crate)` |
+| `crates/rivers-engine-v8/src/execution.rs` | Extract execute_js, ctx injection, store/dataview callbacks, crypto, logging, buffer helpers | New module, `execute_js`/`write_output`/`write_error` are `pub(crate)` |
+| `crates/rivers-engine-v8/src/lib.rs` | Keep HOST_CALLBACKS static, 6 C-ABI exports, tests | Reduced from 854 to ~220 lines |
+
+**Cross-module references:** execution.rs imports from task_context.rs, v8_runtime.rs, and crate::HOST_CALLBACKS. All resolved via `pub(crate)` visibility.
+
+---
+
+## Task 4: Split rivers-driver-sdk/src/http_executor.rs into 5 modules (2026-03-29)
+
+- **Pure structural refactor** — no behavioral changes, all pub items remain importable at `rivers_driver_sdk::http_executor::ItemName`.
+- Split 1,314 LOC monolithic `http_executor.rs` into 5 focused source modules + mod.rs facade:
+  - `circuit_breaker.rs` — `CircuitState` enum, `CircuitBreaker` struct (internal `pub(crate)`)
+  - `oauth2.rs` — `CachedToken`, `OAuth2Credentials`, `TokenResponse`, `fetch_oauth2_token()` (internal `pub(crate)`)
+  - `connection.rs` — `ReqwestHttpConnection` struct + `impl HttpConnection` (pub re-exported)
+  - `sse_stream.rs` — `SseStreamConnection` struct + `impl HttpStreamConnection`, `parse_sse_event()` (pub re-exported)
+  - `driver.rs` — `ReqwestHttpDriver` struct + `impl HttpDriver` + `impl Default` (pub re-exported)
+  - `mod.rs` — module declarations, selective re-exports, `build_connection()` public helper, all unit tests
+- All 60 unit tests + 12 integration tests continue to pass
+- External import path `rivers_driver_sdk::http_executor::{build_connection, ReqwestHttpDriver}` unchanged
+- **Decision:** `circuit_breaker` and `oauth2` modules are `pub(crate)` internal — not exported outside the crate
+- **Decision:** `should_retry_status()` and `should_retry_timeout()` promoted to `pub(crate)` for test access from mod.rs
+- **Decision:** `ReqwestHttpDriver::oauth2_cache` field promoted to `pub(super)` for `build_connection()` in mod.rs
+
+---
+
+## Task 2: Split rivers-lockbox-engine/src/lib.rs into 7 modules + 4 test modules (2026-03-29)
+
+- **Pure structural refactor** — no behavioral changes, all pub items remain importable at `rivers_lockbox_engine::ItemName`.
+- Split 1,920 LOC monolithic `lib.rs` into 6 focused source modules + thin facade:
+  - `types.rs` — `LockBoxError`, `Keystore`, `KeystoreEntry` (with Zeroize/Drop), `EntryType`, `LockBoxConfig` re-export
+  - `validation.rs` — `validate_entry_name()`, `parse_lockbox_uri()`, `is_lockbox_uri()`
+  - `resolver.rs` — `EntryMetadata`, `ResolvedEntry`, `LockBoxResolver`, `fetch_secret_value()`
+  - `crypto.rs` — `decrypt_keystore()`, `encrypt_keystore()`
+  - `key_source.rs` — `resolve_key_source()`, `check_file_permissions()`
+  - `startup.rs` — `LockBoxReference`, `collect_lockbox_references()`, `resolve_all_references()`, `startup_resolve()`
+  - `lib.rs` — thin facade with `pub mod` + `pub use *` re-exports
+- Moved inline `#[cfg(test)] mod tests` (54 tests) to 4 integration test files:
+  - `tests/crypto_tests.rs` (18 tests)
+  - `tests/resolver_tests.rs` (18 tests)
+  - `tests/key_source_tests.rs` (8 tests)
+  - `tests/startup_tests.rs` (10 tests)
+- Added `age`, `chrono`, `toml` to `[dev-dependencies]` for integration test direct imports.
+- Dependents `rivers-lockbox` and `rivers-core` verified compiling.
+- All 54 tests pass.
+
+---
+
 ## Task 9: LockBox Engine — Expanded Test Coverage (2026-03-27)
 
 - `crates/rivers-lockbox-engine/src/lib.rs` — Added 26 new tests (28 existing → 54 total). Coverage now includes:
