@@ -6,6 +6,20 @@
 
 ---
 
+## Task 13: Split riversd/src/view_engine.rs into 5 modules (2026-03-29)
+
+| File | Decision | Resolution |
+|------|----------|------------|
+| `view_engine/types.rs` (~130 LOC) | `ParsedRequest`, `StoreHandle`, `ViewContext`, `ViewResult`, `ViewError` | Extracted from lines 11-108, 428-442, 1013-1036 |
+| `view_engine/router.rs` (~240 LOC) | `PathSegment` enum, `ViewRoute` struct, `build_namespaced_path()`, `ViewRouter` struct + impl, `parse_path_pattern()` | Extracted from lines 110-362 |
+| `view_engine/pipeline.rs` (~270 LOC) | `apply_parameter_mapping()`, `json_value_to_query_value()`, `execute_rest_view()`, `serialize_view_result()` | Extracted from lines 364-685 |
+| `view_engine/validation.rs` (~280 LOC) | `validate_views()`, `execute_on_error_handlers()`, `execute_on_session_valid()`, `parse_handler_view_result()`, `validate_input()`, `validate_output()` | Extracted from lines 686-1012 |
+| `view_engine/mod.rs` (~290 LOC) | Module declarations + glob re-exports, tests remain here | All pub items remain importable at `crate::view_engine::*` |
+
+**Note:** `PathSegment` placed in `router.rs` alongside `ViewRoute` and `parse_path_pattern()` which create it. `parse_handler_view_result` given `pub(super)` visibility since it is used by both `pipeline.rs` and `validation.rs` (on_error handlers). All 249 lib tests pass.
+
+---
+
 ## Task 12: Split riversd/src/engine_loader.rs into 5 modules (2026-03-29)
 
 | File | Decision | Resolution |
