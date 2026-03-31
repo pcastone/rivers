@@ -22,6 +22,9 @@ view_type      = "Websocket"
 auth           = "none"
 websocket_mode = "Broadcast"
 
+[api.views.chat.handler]
+type = "none"
+
 [api.views.chat.ws_hooks]
 on_connect.module        = "libraries/handlers/chat.js"
 on_connect.entrypoint    = "onConnect"

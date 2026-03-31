@@ -55,13 +55,14 @@ type     = "string"
 required = true
 
 [api.views.orders]
-path     = "orders"
-method   = "POST"
-auth     = "none"
-dataview = "publish_order"
+path      = "orders"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
 
 [api.views.orders.handler]
-type = "dataview"
+type     = "dataview"
+dataview = "publish_order"
 
 [api.views.orders.parameter_mapping.body]
 payload = "payload"

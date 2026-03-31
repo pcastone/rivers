@@ -25,6 +25,7 @@ pub enum WebSocketMode {
 }
 
 impl WebSocketMode {
+    /// Parse a WebSocket mode from an optional string, defaulting to Broadcast.
     pub fn from_str_opt(s: Option<&str>) -> Self {
         match s {
             Some(s) if s.eq_ignore_ascii_case("direct") => WebSocketMode::Direct,
@@ -40,6 +41,7 @@ impl WebSocketMode {
 pub struct ConnectionId(pub String);
 
 impl ConnectionId {
+    /// Generate a new random connection ID (UUIDv4).
     pub fn new() -> Self {
         Self(uuid::Uuid::new_v4().to_string())
     }
@@ -54,10 +56,15 @@ impl Default for ConnectionId {
 /// Metadata about a single WebSocket connection.
 #[derive(Debug, Clone)]
 pub struct ConnectionInfo {
+    /// Unique identifier for this connection.
     pub id: ConnectionId,
+    /// View ID this connection is associated with.
     pub view_id: String,
+    /// Timestamp when the connection was established.
     pub connected_at: chrono::DateTime<chrono::Utc>,
+    /// Optional session ID if the connection is authenticated.
     pub session_id: Option<String>,
+    /// Path parameters extracted from the WebSocket route.
     pub path_params: HashMap<String, String>,
 }
 
@@ -78,6 +85,7 @@ struct ConnectionEntry {
 }
 
 impl ConnectionRegistry {
+    /// Create a new connection registry with an optional connection limit.
     pub fn new(max_connections: Option<usize>) -> Self {
         Self {
             connections: RwLock::new(HashMap::new()),
@@ -182,6 +190,7 @@ pub struct BroadcastHub {
 }
 
 impl BroadcastHub {
+    /// Create a new broadcast hub with an optional connection limit.
     pub fn new(max_connections: Option<usize>) -> Self {
         let (sender, _) = broadcast::channel(1024);
         Self {
@@ -229,11 +238,14 @@ impl BroadcastHub {
 /// A WebSocket message envelope.
 #[derive(Debug, Clone)]
 pub struct WebSocketMessage {
+    /// The message text payload.
     pub payload: String,
+    /// Target connection ID for directed messages, or `None` for broadcast.
     pub connection_id: Option<String>,
 }
 
 impl WebSocketMessage {
+    /// Create a broadcast text message (no target connection).
     pub fn text(payload: String) -> Self {
         Self {
             payload,
@@ -241,6 +253,7 @@ impl WebSocketMessage {
         }
     }
 
+    /// Create a message directed at a specific connection.
     pub fn directed(payload: String, connection_id: String) -> Self {
         Self {
             payload,
@@ -302,10 +315,12 @@ impl WsRateLimiter {
         }
     }
 
+    /// Configured messages-per-second rate.
     pub fn messages_per_sec(&self) -> f64 {
         self.messages_per_sec
     }
 
+    /// Configured burst size (max tokens).
     pub fn burst(&self) -> u32 {
         self.burst
     }
@@ -323,6 +338,7 @@ pub struct BinaryFrameTracker {
 }
 
 impl BinaryFrameTracker {
+    /// Create a new binary frame tracker with zeroed counters.
     pub fn new() -> Self {
         Self {
             count: std::sync::atomic::AtomicU64::new(0),
@@ -380,6 +396,7 @@ pub struct WebSocketRouteManager {
 }
 
 impl WebSocketRouteManager {
+    /// Create a new route manager with empty hub and registry maps.
     pub fn new() -> Self {
         Self {
             broadcast_hubs: RwLock::new(HashMap::new()),
@@ -589,24 +606,31 @@ impl LagDetector {
 /// WebSocket errors.
 #[derive(Debug, thiserror::Error)]
 pub enum WebSocketError {
+    /// Maximum connection count has been reached.
     #[error("connection limit exceeded: max {0}")]
     ConnectionLimitExceeded(usize),
 
+    /// Target connection ID does not exist in the registry.
     #[error("connection not found: {0}")]
     ConnectionNotFound(String),
 
+    /// Failed to send a message to a connection or broadcast channel.
     #[error("send failed: {0}")]
     SendFailed(String),
 
+    /// HTTP-to-WebSocket upgrade failed.
     #[error("upgrade failed: {0}")]
     UpgradeFailed(String),
 
+    /// Handler requires a CodeComponent that is not loaded.
     #[error("handler requires CodeComponent (not yet available)")]
     CodeComponentRequired,
 
+    /// Message was rejected by the per-connection rate limiter.
     #[error("rate limited")]
     RateLimited,
 
+    /// The associated session has expired.
     #[error("session expired")]
     SessionExpired,
 }

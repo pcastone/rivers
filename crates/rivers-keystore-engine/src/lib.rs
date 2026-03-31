@@ -9,6 +9,8 @@
 //! AES-256-GCM encrypt/decrypt operations are standalone functions
 //! (`encrypt`, `decrypt`) plus convenience wrappers on `AppKeystore`.
 
+#![warn(missing_docs)]
+
 mod types;
 mod io;
 mod key_management;

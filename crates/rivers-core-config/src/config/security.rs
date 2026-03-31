@@ -10,38 +10,50 @@ use super::tls::default_cookie_name;
 /// `[security]` -- CORS, rate limiting, IP allowlists.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SecurityConfig {
+    /// Enable CORS header injection (default: `false`).
     #[serde(default)]
     pub cors_enabled: bool,
 
+    /// Allowed CORS origins (empty = allow all when enabled).
     #[serde(default)]
     pub cors_allowed_origins: Vec<String>,
 
+    /// Allowed CORS methods (empty = default set).
     #[serde(default)]
     pub cors_allowed_methods: Vec<String>,
 
+    /// Allowed CORS headers (empty = default set).
     #[serde(default)]
     pub cors_allowed_headers: Vec<String>,
 
+    /// Whether CORS responses include `Access-Control-Allow-Credentials`.
     #[serde(default)]
     pub cors_allow_credentials: bool,
 
+    /// Maximum requests per minute per key (default: `120`).
     #[serde(default = "default_rate_limit")]
     pub rate_limit_per_minute: u32,
 
+    /// Token bucket burst size (default: `60`).
     #[serde(default = "default_burst_size")]
     pub rate_limit_burst_size: u32,
 
+    /// Rate limit key strategy: `"ip"`, `"header"`, or `"session"` (default: `"ip"`).
     #[serde(default = "default_rate_strategy")]
     pub rate_limit_strategy: String,
 
+    /// Custom header name for rate limit keying (when strategy = `"header"`).
     pub rate_limit_custom_header: Option<String>,
 
+    /// IP addresses allowed to access the admin API.
     #[serde(default)]
     pub admin_ip_allowlist: Vec<String>,
 
+    /// Session management configuration.
     #[serde(default)]
     pub session: SessionConfig,
 
+    /// CSRF protection configuration.
     #[serde(default)]
     pub csrf: CsrfConfig,
 }
@@ -102,6 +114,7 @@ impl Default for CsrfConfig {
 /// Per `rivers-auth-session-spec.md` S4.3, S8.1.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SessionConfig {
+    /// Enable server-side sessions (default: `false`).
     #[serde(default)]
     pub enabled: bool,
 
@@ -113,6 +126,7 @@ pub struct SessionConfig {
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout_s: u64,
 
+    /// Session cookie attributes.
     #[serde(default)]
     pub cookie: SessionCookieConfig,
 
@@ -159,6 +173,7 @@ fn default_idle_timeout() -> u64 {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct SessionCookieConfig {
+    /// Cookie name (default: `"rivers_session"`).
     pub name: String,
 
     /// Always true -- enforced. Config validation rejects false.
@@ -170,6 +185,7 @@ pub struct SessionCookieConfig {
     /// "Strict" | "Lax" | "None". Default: "Lax".
     pub same_site: String,
 
+    /// Cookie path scope (default: `"/"`).
     pub path: String,
 
     /// Not set by default (current domain only).

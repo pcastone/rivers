@@ -212,6 +212,33 @@ fn resolver_metadata_only() {
     assert_eq!(resolver.entry_names(), vec!["postgres/prod"]);
 }
 
+#[test]
+fn resolver_with_many_entries() {
+    let mut entries = Vec::new();
+    for index in 0..64 {
+        entries.push(make_entry(
+            &format!("service/{index}"),
+            &format!("secret-{index}"),
+            "string",
+            &[&format!("svc-{index}")],
+        ));
+    }
+
+    let resolver = LockBoxResolver::from_entries(&entries).unwrap();
+    assert_eq!(resolver.key_count(), 128);
+
+    for index in 0..64 {
+        let name = format!("service/{index}");
+        let alias = format!("svc-{index}");
+
+        let name_meta = resolver.resolve(&name).unwrap();
+        let alias_meta = resolver.resolve(&alias).unwrap();
+        assert_eq!(name_meta.entry_index, index as usize);
+        assert_eq!(alias_meta.entry_index, index as usize);
+        assert_eq!(alias_meta.name, name);
+    }
+}
+
 // ── Entry Types Stored Correctly ─────────────────────────────────
 
 #[test]

@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! MongoDB plugin driver (DatabaseDriver).
 //!
 //! Implements `DatabaseDriver` using the official `mongodb` 3.x driver.
@@ -24,6 +25,7 @@ use rivers_driver_sdk::{
 
 // ── Driver ─────────────────────────────────────────────────────────────
 
+/// MongoDB driver factory — creates connections via the official `mongodb` crate.
 pub struct MongoDriver;
 
 #[async_trait]
@@ -83,6 +85,7 @@ impl DatabaseDriver for MongoDriver {
 
 // ── Connection ─────────────────────────────────────────────────────────
 
+/// Active MongoDB connection wrapping a database handle.
 pub struct MongoConnection {
     db: Database,
 }

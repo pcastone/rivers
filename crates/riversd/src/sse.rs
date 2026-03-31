@@ -117,6 +117,7 @@ pub fn session_expired_event() -> SseEvent {
 /// Default event buffer capacity for Last-Event-ID reconnection.
 const DEFAULT_BUFFER_CAPACITY: usize = 100;
 
+/// Broadcast channel for a single SSE route.
 pub struct SseChannel {
     sender: broadcast::Sender<SseEvent>,
     connection_count: AtomicUsize,
@@ -134,6 +135,7 @@ pub struct SseChannel {
 }
 
 impl SseChannel {
+    /// Create a new SSE channel with the given limits and trigger config.
     pub fn new(
         max_connections: Option<usize>,
         tick_interval_ms: u64,
@@ -142,6 +144,7 @@ impl SseChannel {
         Self::with_buffer_capacity(max_connections, tick_interval_ms, trigger_events, DEFAULT_BUFFER_CAPACITY)
     }
 
+    /// Create a new SSE channel with a custom event buffer capacity.
     pub fn with_buffer_capacity(
         max_connections: Option<usize>,
         tick_interval_ms: u64,
@@ -249,6 +252,7 @@ pub struct SseRouteManager {
 }
 
 impl SseRouteManager {
+    /// Create a new route manager with no registered channels.
     pub fn new() -> Self {
         Self {
             channels: tokio::sync::RwLock::new(HashMap::new()),
@@ -550,15 +554,19 @@ pub async fn drive_sse_push_loop(
 /// SSE errors.
 #[derive(Debug, thiserror::Error)]
 pub enum SseError {
+    /// Maximum connection count has been reached.
     #[error("connection limit exceeded: max {0}")]
     ConnectionLimitExceeded(usize),
 
+    /// No clients are subscribed to receive events.
     #[error("no active clients")]
     NoActiveClients,
 
+    /// Handler requires a CodeComponent that is not loaded.
     #[error("handler requires CodeComponent (not yet available)")]
     CodeComponentRequired,
 
+    /// The associated session has expired.
     #[error("session expired")]
     SessionExpired,
 }

@@ -13,8 +13,11 @@ use super::diff::{DiffStrategy, PollLoopKey};
 
 /// State of a single poll loop instance.
 pub struct PollLoopState {
+    /// Key identifying this poll loop (dataview + params).
     pub key: PollLoopKey,
+    /// Strategy for detecting data changes between ticks.
     pub diff_strategy: DiffStrategy,
+    /// Milliseconds between poll ticks.
     pub tick_interval_ms: u64,
     /// Previous data hash (for Hash strategy).
     pub prev_hash: RwLock<Option<String>>,
@@ -27,11 +30,14 @@ pub struct PollLoopState {
 /// An update pushed to poll loop clients.
 #[derive(Debug, Clone)]
 pub struct PollUpdate {
+    /// The polled data payload.
     pub data: serde_json::Value,
+    /// Whether the data changed since the last tick.
     pub changed: bool,
 }
 
 impl PollLoopState {
+    /// Create a new poll loop state with the given key, diff strategy, and interval.
     pub fn new(
         key: PollLoopKey,
         diff_strategy: DiffStrategy,
@@ -86,6 +92,7 @@ pub struct PollLoopRegistry {
 }
 
 impl PollLoopRegistry {
+    /// Create an empty poll loop registry.
     pub fn new() -> Self {
         Self {
             loops: RwLock::new(HashMap::new()),
@@ -154,18 +161,23 @@ impl Default for PollLoopRegistry {
 /// Polling errors.
 #[derive(Debug, thiserror::Error)]
 pub enum PollError {
+    /// No clients are subscribed to receive updates.
     #[error("no active clients")]
     NoActiveClients,
 
+    /// The requested poll loop was not found in the registry.
     #[error("poll loop not found: {0}")]
     NotFound(String),
 
+    /// A tick execution failed.
     #[error("tick execution failed: {0}")]
     TickFailed(String),
 
+    /// Storage backend error.
     #[error("storage error: {0}")]
     StorageError(String),
 
+    /// DataView query execution error.
     #[error("dataview execution error: {0}")]
     DataViewError(String),
 }
@@ -196,6 +208,7 @@ pub struct DataViewPollExecutor {
 }
 
 impl DataViewPollExecutor {
+    /// Create a new executor adapter wrapping a shared `DataViewExecutor`.
     pub fn new(executor: Arc<tokio::sync::RwLock<Option<Arc<rivers_runtime::DataViewExecutor>>>>) -> Self {
         Self { executor }
     }

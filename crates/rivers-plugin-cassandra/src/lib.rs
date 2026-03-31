@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! Cassandra plugin driver (DatabaseDriver).
 //!
 //! Implements `DatabaseDriver` using the `scylla` crate (pure Rust async driver).
@@ -19,6 +20,7 @@ use rivers_driver_sdk::{
 
 // ── Driver ─────────────────────────────────────────────────────────────
 
+/// Cassandra driver factory — creates connections via the `scylla` async driver.
 pub struct CassandraDriver;
 
 #[async_trait]
@@ -60,6 +62,7 @@ impl DatabaseDriver for CassandraDriver {
 
 // ── Connection ─────────────────────────────────────────────────────────
 
+/// Active Cassandra connection wrapping a scylla session.
 pub struct CassandraConnection {
     session: Session,
 }

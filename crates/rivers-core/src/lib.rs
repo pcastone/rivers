@@ -1,17 +1,34 @@
+//! Rivers Core — driver registry, EventBus, storage factory, logging, and TLS.
+//!
+//! This crate wires together the lightweight types from `rivers-core-config`
+//! with runtime infrastructure: plugin loading, event dispatch, structured
+//! logging, sentinel key management, and certificate generation. Everything
+//! that `riversd` and `riversctl` share but that doesn't belong in the thin
+//! config crate lives here.
+
+#![warn(missing_docs)]
+
 // Re-export everything from rivers-core-config for backward compat
 pub use rivers_core_config::config;
 pub use rivers_core_config::error;
 pub use rivers_core_config::event;
 pub use rivers_core_config::lockbox_config;
 
+/// Driver registry and plugin loading.
 pub mod driver_factory;
+/// Built-in driver re-exports (feature-gated).
 #[cfg(feature = "drivers")]
 pub mod drivers;
+/// In-process pub/sub EventBus with priority-tiered dispatch.
 pub mod eventbus;
+/// LockBox re-exports (feature-gated).
 #[cfg(feature = "lockbox")]
 pub mod lockbox;
+/// Structured logging via EventBus.
 pub mod logging;
+/// Storage factory, sentinel keys, and sweep tasks.
 pub mod storage;
+/// TLS certificate generation and inspection.
 #[cfg(feature = "tls")]
 pub mod tls;
 

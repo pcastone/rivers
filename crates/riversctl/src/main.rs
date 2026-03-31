@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! riversctl — Rivers control CLI.
 //!
 //! Starts and manages riversd, runs health checks, and communicates with

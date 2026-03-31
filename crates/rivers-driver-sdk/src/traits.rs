@@ -12,8 +12,11 @@ use crate::types::{Query, QueryResult};
 /// Driver category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriverType {
+    /// Request/response drivers (PostgreSQL, MySQL, SQLite, Redis, Faker, etc.).
     Database,
+    /// Continuous-push drivers (Kafka, RabbitMQ, NATS, Redis Streams).
     MessageBroker,
+    /// HTTP/HTTP2/SSE/WebSocket as a datasource.
     Http,
 }
 
@@ -27,13 +30,18 @@ pub enum DriverType {
 /// method to enforce method-specific rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpMethod {
+    /// HTTP GET.
     GET,
+    /// HTTP POST.
     POST,
+    /// HTTP PUT.
     PUT,
+    /// HTTP DELETE.
     DELETE,
 }
 
 impl HttpMethod {
+    /// Return the method as a static string slice.
     pub fn as_str(&self) -> &'static str {
         match self {
             HttpMethod::GET => "GET",
@@ -43,6 +51,7 @@ impl HttpMethod {
         }
     }
 
+    /// Parse a string into an `HttpMethod`. Case-insensitive.
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_uppercase().as_str() {
             "GET" => Some(HttpMethod::GET),
@@ -87,129 +96,225 @@ impl std::fmt::Display for ValidationDirection {
 /// Error from schema syntax validation (build/deploy time).
 #[derive(Debug, thiserror::Error)]
 pub enum SchemaSyntaxError {
+    /// Schema declares a different driver than the datasource provides.
     #[error("schema driver mismatch: expected '{expected}', got '{actual}' in {schema_file}")]
     DriverMismatch {
+        /// Driver name the schema was written for.
         expected: String,
+        /// Driver name the datasource actually uses.
         actual: String,
+        /// Path to the schema file.
         schema_file: String,
     },
 
+    /// A field required by the driver is not declared in the schema.
     #[error("missing required field '{field}' for driver '{driver}' in {schema_file}")]
     MissingRequiredField {
+        /// The missing field name.
         field: String,
+        /// Driver that requires the field.
         driver: String,
+        /// Path to the schema file.
         schema_file: String,
     },
 
+    /// A field attribute is not recognized by the target driver.
     #[error("unsupported attribute '{attribute}' on field '{field}' for driver '{driver}' in {schema_file}. Supported: {supported:?}")]
     UnsupportedAttribute {
+        /// The unrecognized attribute name.
         attribute: String,
+        /// Field the attribute was declared on.
         field: String,
+        /// Driver that rejected the attribute.
         driver: String,
+        /// Attributes this driver accepts.
         supported: Vec<String>,
+        /// Path to the schema file.
         schema_file: String,
     },
 
+    /// Schema type is not supported by the driver.
     #[error("unsupported schema type '{schema_type}' for driver '{driver}' in {schema_file}. Supported: {supported:?}")]
     UnsupportedType {
+        /// The rejected schema type.
         schema_type: String,
+        /// Driver that rejected the type.
         driver: String,
+        /// Types this driver accepts.
         supported: Vec<String>,
+        /// Path to the schema file.
         schema_file: String,
     },
 
+    /// HTTP method is not supported by the driver for this schema.
     #[error("method {method} not supported by driver '{driver}' in {schema_file}")]
     UnsupportedMethod {
+        /// The rejected HTTP method.
         method: String,
+        /// Driver that rejected the method.
         driver: String,
+        /// Path to the schema file.
         schema_file: String,
     },
 
+    /// A field declares a type the driver does not recognize.
     #[error("invalid field type '{field_type}' on field '{field}' in {schema_file}")]
     InvalidFieldType {
+        /// Field with the invalid type.
         field: String,
+        /// The unrecognized type string.
         field_type: String,
+        /// Path to the schema file.
         schema_file: String,
     },
 
+    /// A `$variable` in the query has no corresponding parameter declaration.
     #[error("query variable '${variable}' has no matching parameter in {schema_file}")]
     OrphanVariable {
+        /// The unmatched variable name.
         variable: String,
+        /// The query containing the orphan.
         query: String,
+        /// Path to the schema file.
         schema_file: String,
     },
 
+    /// A declared parameter has no corresponding `$variable` in the query.
     #[error("parameter '{parameter}' has no matching $variable in query in {schema_file}")]
     OrphanParameter {
+        /// The unmatched parameter name.
         parameter: String,
+        /// The query that should reference it.
         query: String,
+        /// Path to the schema file.
         schema_file: String,
     },
 
+    /// General structural issue with the schema.
     #[error("{message} (driver: {driver}, schema: {schema_file})")]
     StructuralError {
+        /// Description of the structural problem.
         message: String,
+        /// Driver that detected the issue.
         driver: String,
+        /// Path to the schema file.
         schema_file: String,
     },
 
-    // Keep the old variants for backward compatibility during migration
+    /// Legacy: invalid schema structure (kept for migration compatibility).
     #[error("invalid schema structure for driver '{driver}': {reason}")]
-    InvalidStructure { driver: String, reason: String },
+    InvalidStructure {
+        /// Driver name.
+        driver: String,
+        /// Reason for rejection.
+        reason: String,
+    },
 
+    /// Legacy: unknown field type (kept for migration compatibility).
     #[error("unknown field type '{field_type}' for driver '{driver}'")]
-    UnknownFieldType { driver: String, field_type: String },
+    UnknownFieldType {
+        /// Driver name.
+        driver: String,
+        /// The unrecognized type.
+        field_type: String,
+    },
 
+    /// Legacy: missing required field (kept for migration compatibility).
     #[error("missing required schema field '{field}' for driver '{driver}'")]
-    MissingField { driver: String, field: String },
+    MissingField {
+        /// Driver name.
+        driver: String,
+        /// The missing field.
+        field: String,
+    },
 }
 
 /// Error from data validation (request time).
 #[derive(Debug, thiserror::Error)]
 pub enum ValidationError {
+    /// A required field is absent from the data.
     #[error("required field '{field}' is missing (direction: {direction})")]
     MissingRequired {
+        /// Name of the missing field.
         field: String,
+        /// Whether this was input or output validation.
         direction: ValidationDirection,
     },
 
+    /// A field value does not match the declared type.
     #[error("type mismatch on field '{field}': expected {expected}, got {actual} (direction: {direction})")]
     TypeMismatch {
+        /// Field with the type mismatch.
         field: String,
+        /// Type declared in the schema.
         expected: String,
+        /// Type of the actual value.
         actual: String,
+        /// Whether this was input or output validation.
         direction: ValidationDirection,
     },
 
+    /// A field value violates a declared constraint (min, max, length, pattern, enum).
     #[error("constraint violation on field '{field}': {constraint} — value {value}, limit {limit} (direction: {direction})")]
     ConstraintViolation {
+        /// Field with the violation.
         field: String,
+        /// Which constraint was violated.
         constraint: String,
+        /// The actual value that failed.
         value: String,
+        /// The constraint limit.
         limit: String,
+        /// Whether this was input or output validation.
         direction: ValidationDirection,
     },
 
+    /// Type coercion between compatible types failed.
     #[error("coercion failed on field '{field}': cannot coerce {from_type} to {to_type} (direction: {direction})")]
     CoercionFailed {
+        /// Field where coercion was attempted.
         field: String,
+        /// Source type.
         from_type: String,
+        /// Target type.
         to_type: String,
+        /// Whether this was input or output validation.
         direction: ValidationDirection,
     },
 
+    /// The driver does not implement schema validation.
     #[error("driver '{driver}' validation not implemented")]
-    DriverNotImplemented { driver: String },
+    DriverNotImplemented {
+        /// Driver name.
+        driver: String,
+    },
 
-    // Keep old variants for backward compatibility during migration
+    /// Legacy: value out of range (kept for migration compatibility).
     #[error("value out of range on field '{field}': {reason}")]
-    OutOfRange { field: String, reason: String },
+    OutOfRange {
+        /// Field name.
+        field: String,
+        /// Description of the range violation.
+        reason: String,
+    },
 
+    /// Legacy: pattern mismatch (kept for migration compatibility).
     #[error("pattern mismatch on field '{field}': value does not match '{pattern}'")]
-    PatternMismatch { field: String, pattern: String },
+    PatternMismatch {
+        /// Field name.
+        field: String,
+        /// The expected pattern.
+        pattern: String,
+    },
 
+    /// Legacy: column count mismatch (kept for migration compatibility).
     #[error("column count mismatch: schema defines {expected} fields, result has {actual}")]
-    ColumnCountMismatch { expected: usize, actual: usize },
+    ColumnCountMismatch {
+        /// Number of fields in the schema.
+        expected: usize,
+        /// Number of columns in the result.
+        actual: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -244,11 +349,15 @@ pub struct SchemaDefinition {
 /// A field definition within a schema.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SchemaFieldDef {
+    /// Field name (matches a column or property in the data).
     pub name: String,
+    /// Rivers primitive type (e.g. `"string"`, `"integer"`, `"uuid"`, `"email"`).
     #[serde(rename = "type")]
     pub field_type: String,
+    /// Whether this field must be present in the data.
     #[serde(default)]
     pub required: bool,
+    /// Driver-specific constraints (min, max, min_length, max_length, pattern, enum).
     #[serde(flatten)]
     pub constraints: HashMap<String, serde_json::Value>,
 }
@@ -263,11 +372,17 @@ pub struct SchemaFieldDef {
 /// happens before `connect()` is called. Drivers never interact with LockBox.
 #[derive(Debug, Clone)]
 pub struct ConnectionParams {
+    /// Hostname or IP address.
     pub host: String,
+    /// Port number.
     pub port: u16,
+    /// Database, bucket, or keyspace name.
     pub database: String,
+    /// Authentication username.
     pub username: String,
+    /// Authentication password (resolved from LockBox before reaching the driver).
     pub password: String,
+    /// Driver-specific connection options.
     pub options: HashMap<String, String>,
 }
 

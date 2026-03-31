@@ -22,6 +22,7 @@ pub struct DatasourceBuilder {
 }
 
 impl DatasourceBuilder {
+    /// Create a new builder targeting the named datasource.
     pub fn new(datasource: String) -> Self {
         Self {
             datasource,
@@ -50,21 +51,25 @@ impl DatasourceBuilder {
         self
     }
 
+    /// Set the GET-method inline schema.
     pub fn with_get_schema(mut self, schema: serde_json::Value) -> Self {
         self.get_schema = Some(schema);
         self
     }
 
+    /// Set the POST-method inline schema.
     pub fn with_post_schema(mut self, schema: serde_json::Value) -> Self {
         self.post_schema = Some(schema);
         self
     }
 
+    /// Set the PUT-method inline schema.
     pub fn with_put_schema(mut self, schema: serde_json::Value) -> Self {
         self.put_schema = Some(schema);
         self
     }
 
+    /// Set the DELETE-method inline schema.
     pub fn with_delete_schema(mut self, schema: serde_json::Value) -> Self {
         self.delete_schema = Some(schema);
         self
@@ -112,14 +117,23 @@ impl DatasourceBuilder {
 /// Per spec §6.4: no caching, no cache invalidation, no streaming, no EventBus registration.
 #[derive(Debug, Clone)]
 pub struct PseudoDataView {
+    /// Target datasource name.
     pub datasource: String,
+    /// Raw query string (from `fromQuery()`).
     pub query: Option<String>,
+    /// Positional query parameters.
     pub query_params: Option<Vec<serde_json::Value>>,
+    /// Schema-based query definition (from `fromSchema()`).
     pub schema: Option<serde_json::Value>,
+    /// Named schema parameters.
     pub schema_params: Option<HashMap<String, serde_json::Value>>,
+    /// GET-method inline schema.
     pub get_schema: Option<serde_json::Value>,
+    /// POST-method inline schema.
     pub post_schema: Option<serde_json::Value>,
+    /// PUT-method inline schema.
     pub put_schema: Option<serde_json::Value>,
+    /// DELETE-method inline schema.
     pub delete_schema: Option<serde_json::Value>,
 }
 
@@ -162,12 +176,15 @@ fn validate_inline_schema(
 /// Errors from pseudo DataView construction.
 #[derive(Debug, thiserror::Error)]
 pub enum PseudoDataViewError {
+    /// Neither `fromQuery()` nor `fromSchema()` was called before `build()`.
     #[error("pseudo DataView requires either fromQuery() or fromSchema()")]
     NoQueryOrSchema,
 
+    /// Inline schema failed build-time syntax validation.
     #[error("schema syntax error: {0}")]
     SchemaSyntax(String),
 
+    /// Referenced datasource is not configured.
     #[error("unknown datasource: {0}")]
     UnknownDatasource(String),
 }

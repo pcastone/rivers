@@ -20,11 +20,19 @@ pub enum LockBoxError {
 
     /// Keystore file not found at configured path.
     #[error("keystore not found: {path}")]
-    KeystoreNotFound { path: String },
+    KeystoreNotFound {
+        /// Filesystem path.
+        path: String,
+    },
 
     /// File permissions are not 600.
     #[error("{path} has insecure permissions (mode {mode:04o}) -- chmod 0600 {path}")]
-    InsecureFilePermissions { path: String, mode: u32 },
+    InsecureFilePermissions {
+        /// Filesystem path.
+        path: String,
+        /// Actual file mode bits.
+        mode: u32,
+    },
 
     /// Age decryption failed -- wrong key or corrupted file.
     #[error("decryption failed -- check key source matches keystore")]
@@ -32,23 +40,40 @@ pub enum LockBoxError {
 
     /// Decrypted payload is not valid TOML.
     #[error("malformed keystore: {reason}")]
-    MalformedKeystore { reason: String },
+    MalformedKeystore {
+        /// Parse error details.
+        reason: String,
+    },
 
     /// Duplicate entry name or alias.
     #[error("\"{name}\" appears in multiple entries")]
-    DuplicateEntry { name: String },
+    DuplicateEntry {
+        /// The duplicate name or alias.
+        name: String,
+    },
 
-    /// lockbox:// URI references a name/alias that doesn't exist.
+    /// `lockbox://` URI references a name/alias that doesn't exist.
     #[error("\"{uri}\" referenced by datasource \"{datasource}\" -- entry not found")]
-    EntryNotFound { uri: String, datasource: String },
+    EntryNotFound {
+        /// The unresolved `lockbox://` URI.
+        uri: String,
+        /// Datasource that declared this reference.
+        datasource: String,
+    },
 
     /// Entry name fails naming rules.
-    #[error("\"{name}\" -- must match [a-z][a-z0-9_/.-]* (max 128 chars)")]
-    InvalidEntryName { name: String },
+    #[error("\"{name}\" -- must match `[a-z][a-z0-9_/.-]*` (max 128 chars)")]
+    InvalidEntryName {
+        /// The invalid name.
+        name: String,
+    },
 
     /// Key source is unavailable (env var missing, file unreadable, agent unreachable).
     #[error("key source unavailable: {reason}")]
-    KeySourceUnavailable { reason: String },
+    KeySourceUnavailable {
+        /// Details about the unavailable key source.
+        reason: String,
+    },
 
     /// I/O error.
     #[error("I/O error: {0}")]
@@ -70,8 +95,10 @@ pub use rivers_core_config::LockBoxConfig;
 /// Per spec S2.2.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Keystore {
+    /// Schema version (currently 1).
     #[serde(default = "default_version")]
     pub version: u32,
+    /// Secret entries in the keystore.
     #[serde(default)]
     pub entries: Vec<KeystoreEntry>,
 }
@@ -100,44 +127,46 @@ pub(crate) fn default_version() -> u32 {
 /// Per spec S3.1.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeystoreEntry {
-    /// Canonical name. Unique within keystore. Used in lockbox:// URIs.
+    /// Registry key for this entry within the keystore. Must be unique.
+    /// Used in `lockbox://` URIs to reference secrets from datasource configs.
     pub name: String,
 
-    /// The secret value (plaintext inside the encrypted envelope).
+    /// Inner secret material (plaintext inside the encrypted envelope).
     /// Zeroized on drop to prevent secret material from lingering in memory.
     pub value: String,
 
-    /// Value type hint: "string", "base64url", "pem", "json".
+    /// Value type hint: `"string"`, `"base64url"`, `"pem"`, `"json"`.
     #[serde(rename = "type")]
     pub entry_type: String,
 
-    /// Alternative names that resolve to this entry.
+    /// Extra names that resolve to this same entry for convenience.
     #[serde(default)]
     pub aliases: Vec<String>,
 
-    /// Creation timestamp.
+    /// Records the timestamp when this entry was first added to the keystore.
     pub created: DateTime<Utc>,
 
-    /// Last update timestamp.
+    /// Signals the most recent modification timestamp for this entry.
     pub updated: DateTime<Utc>,
 
     // ── Credential record fields (optional, not secret) ──
 
-    /// Driver name (e.g. "postgres", "redis", "kafka"). Enables validation
+    /// For driver-specific entries, indicates which driver consumes this
+    /// secret (e.g. `"postgres"`, `"redis"`, `"kafka"`). Enables validation
     /// that the credential matches the expected datasource type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub driver: Option<String>,
 
-    /// Database username.
+    /// Login credential — the database username associated with this secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
 
-    /// Host list as "host:port" strings. Supports clusters (Redis, Kafka, etc.).
-    /// Single-node datasources use a one-element list.
+    /// Origin servers as `"host:port"` strings. Supports clusters
+    /// (Redis, Kafka, etc.). Single-node datasources use a one-element list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<String>,
 
-    /// Database or bucket name.
+    /// Where this credential's target database or bucket resides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database: Option<String>,
 }
@@ -159,13 +188,18 @@ impl Drop for KeystoreEntry {
 /// Per spec S3.2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryType {
+    /// Plain UTF-8 string (default).
     String,
+    /// Base64url-encoded binary data.
     Base64Url,
+    /// PEM-encoded certificate or key.
     Pem,
+    /// Arbitrary JSON value.
     Json,
 }
 
 impl EntryType {
+    /// Parse a type string into an `EntryType`, returning `None` for unknown values.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "string" => Some(EntryType::String),

@@ -2,6 +2,10 @@
 //!
 //! Per `rivers-data-layer-spec.md` §7, `rivers-storage-engine-spec.md` §5.
 //!
+//! Swift the current flows,
+//! through tiers of warm remembrance —
+//! deep pools hold the rest.
+//!
 //! L1 is fast, per-node, bounded by entry count with LRU eviction and lazy TTL.
 //! L2 is shared via StorageEngine, using KV get/set with JSON serialization.
 //! Cache keys are stable across nodes: `SHA-256(view_name:sorted_params_json)`.
@@ -27,6 +31,7 @@ use crate::dataview_engine::DataViewError;
 /// Per spec §7.2 / §5.6.
 #[derive(Debug, Clone)]
 pub struct DataViewCachingPolicy {
+    /// Time-to-live in seconds. 0 disables caching.
     pub ttl_seconds: u64,
     /// L1 in-process LRU cache enabled. Default: true.
     pub l1_enabled: bool,

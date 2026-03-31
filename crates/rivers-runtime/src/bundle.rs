@@ -20,12 +20,15 @@ use crate::view::ApiViewConfig;
 /// Bundle-level `manifest.toml` at the root of a bundle directory.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct BundleManifest {
+    /// Human-readable bundle name.
     #[serde(alias = "bundleName")]
     pub bundle_name: String,
 
+    /// Semantic version of this bundle.
     #[serde(alias = "bundleVersion")]
     pub bundle_version: String,
 
+    /// Source repository URL or reference.
     pub source: Option<String>,
 
     /// List of app directory names contained in this bundle.
@@ -37,10 +40,13 @@ pub struct BundleManifest {
 /// Per-app `manifest.toml` inside `{app-name}/manifest.toml`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct AppManifest {
+    /// Human-readable application name.
     #[serde(alias = "appName")]
     pub app_name: String,
 
+    /// Optional description.
     pub description: Option<String>,
+    /// App version string.
     pub version: Option<String>,
 
     /// "app-main" | "app-service"
@@ -56,9 +62,11 @@ pub struct AppManifest {
     #[serde(alias = "entryPoint")]
     pub entry_point: Option<String>,
 
+    /// Deprecated alias for `entry_point`.
     #[serde(alias = "appEntryPoint")]
     pub app_entry_point: Option<String>,
 
+    /// Source repository URL or reference.
     pub source: Option<String>,
 
     /// SPA configuration (app-main only).
@@ -68,11 +76,15 @@ pub struct AppManifest {
 /// SPA serving config in the app manifest.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SpaConfig {
+    /// Root directory containing the SPA build output.
     pub root: String,
+    /// Index file name. Default: "index.html".
     #[serde(default = "default_index")]
     pub index_file: String,
+    /// Enable SPA fallback (serve index for unmatched routes). Default: false.
     #[serde(default)]
     pub fallback: bool,
+    /// Cache-Control max-age header value in seconds.
     pub max_age: Option<u64>,
 }
 
@@ -87,12 +99,15 @@ fn default_index() -> String {
 /// Per `rivers-application-spec.md` §6.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct ResourcesConfig {
+    /// Datasource declarations.
     #[serde(default)]
     pub datasources: Vec<ResourceDatasource>,
 
+    /// Application keystore declarations.
     #[serde(default)]
     pub keystores: Vec<ResourceKeystore>,
 
+    /// Inter-app service dependencies.
     #[serde(default)]
     pub services: Vec<ServiceDependency>,
 }
@@ -102,13 +117,19 @@ pub struct ResourcesConfig {
 /// This is a lightweight reference — the full config lives in `app.toml`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ResourceDatasource {
+    /// Datasource name (matches `[data.datasources.{name}]` in app.toml).
     pub name: String,
+    /// Driver name: "postgres", "mysql", "sqlite", "http", "faker", etc.
     pub driver: String,
+    /// LockBox alias for credentials (e.g. "lockbox://db/myapp-postgres").
     pub lockbox: Option<String>,
+    /// If true, no password/credentials required (e.g. faker driver).
     #[serde(default)]
     pub nopassword: bool,
+    /// Build-time type hint for validation tools.
     #[serde(rename = "x-type")]
     pub x_type: Option<String>,
+    /// Whether this datasource is required for app startup. Default: true.
     #[serde(default = "default_true")]
     pub required: bool,
 }
@@ -134,9 +155,12 @@ fn default_true() -> bool {
 /// A service dependency declared in `resources.toml`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ServiceDependency {
+    /// Logical service name used in code references.
     pub name: String,
+    /// UUID of the depended-upon app.
     #[serde(alias = "appId")]
     pub app_id: String,
+    /// Whether this dependency is required for app startup. Default: true.
     #[serde(default = "default_true")]
     pub required: bool,
 }
@@ -147,12 +171,15 @@ pub struct ServiceDependency {
 /// and static file settings for a single app.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct AppConfig {
+    /// `[data]` section — datasources, DataViews, keystores.
     #[serde(default)]
     pub data: AppDataConfig,
 
+    /// `[api]` section — view (endpoint) definitions.
     #[serde(default)]
     pub api: AppApiConfig,
 
+    /// Optional static file serving configuration.
     #[serde(default)]
     pub static_files: Option<AppStaticFilesConfig>,
 }
@@ -193,10 +220,14 @@ pub struct AppApiConfig {
 /// App-level static file config in app.toml.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct AppStaticFilesConfig {
+    /// Whether static file serving is active.
     #[serde(default)]
     pub enabled: bool,
+    /// Root directory for static assets.
     pub root: Option<String>,
+    /// Index file name (e.g. "index.html").
     pub index_file: Option<String>,
+    /// Enable SPA fallback routing.
     #[serde(default)]
     pub spa_fallback: bool,
 }

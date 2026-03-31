@@ -58,7 +58,10 @@ pub enum RateLimitResult {
     /// Request is allowed.
     Allowed,
     /// Request is rate limited. Contains Retry-After in seconds.
-    Limited { retry_after_secs: u64 },
+    Limited {
+        /// Seconds until the next request will be allowed.
+        retry_after_secs: u64,
+    },
 }
 
 /// Token bucket rate limiter.
@@ -168,6 +171,7 @@ pub struct PerViewRateLimiter {
 }
 
 impl PerViewRateLimiter {
+    /// Create a new per-view rate limiter wrapping a global limiter.
     pub fn new(global: Arc<RateLimiter>) -> Self {
         Self {
             global,
@@ -220,6 +224,8 @@ impl PerViewRateLimiter {
 /// Per spec §10.4.
 #[derive(Debug, Clone, Default)]
 pub struct ViewRateLimitConfig {
+    /// Optional per-view requests-per-minute override.
     pub rate_limit_per_minute: Option<u32>,
+    /// Optional per-view burst size override.
     pub rate_limit_burst_size: Option<u32>,
 }

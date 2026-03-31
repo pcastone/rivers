@@ -1,3 +1,6 @@
+#![warn(missing_docs)]
+//! Rivers daemon — HTTP server, routing, ProcessPool dispatch, engine loading.
+
 pub mod admin;
 pub mod admin_auth;
 pub mod admin_handlers;

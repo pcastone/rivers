@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! Kafka plugin driver — rskafka 0.6 (pure Rust).
 //!
 //! Consumer group coordination (offset tracking, partition assignment)
@@ -17,6 +18,7 @@ use rivers_driver_sdk::{
 
 // ── Driver ─────────────────────────────────────────────────────────
 
+/// Kafka driver factory — creates producers and consumers via rskafka.
 pub struct KafkaDriver;
 
 #[async_trait]
@@ -108,6 +110,7 @@ fn resolve_topic(config: &BrokerConsumerConfig, params: &ConnectionParams) -> St
 
 // ── Producer ───────────────────────────────────────────────────────
 
+/// Kafka producer — publishes records to a partition via rskafka.
 pub struct KafkaProducer {
     partition_client: Arc<rskafka::client::partition::PartitionClient>,
     topic: String,
@@ -153,6 +156,7 @@ impl BrokerProducer for KafkaProducer {
 
 // ── Consumer ───────────────────────────────────────────────────────
 
+/// Kafka consumer — fetches records from a partition with offset tracking.
 pub struct KafkaConsumer {
     partition_client: Arc<rskafka::client::partition::PartitionClient>,
     topic: String,

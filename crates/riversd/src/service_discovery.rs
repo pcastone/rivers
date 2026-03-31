@@ -14,13 +14,18 @@ pub struct ServiceRegistry {
 /// A discovered service endpoint.
 #[derive(Debug, Clone)]
 pub struct ServiceEndpoint {
+    /// Service name.
     pub name: String,
+    /// Endpoint URL.
     pub url: String,
+    /// Whether the service is healthy.
     pub healthy: bool,
+    /// Application identifier that provides this service.
     pub app_id: String,
 }
 
 impl ServiceRegistry {
+    /// Create an empty service registry.
     pub fn new() -> Self {
         Self {
             services: RwLock::new(HashMap::new()),

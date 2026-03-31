@@ -17,11 +17,17 @@ use std::path::PathBuf;
 /// Parsed CLI arguments.
 #[derive(Debug, Clone)]
 pub struct CliArgs {
+    /// Command to execute.
     pub command: CliCommand,
+    /// Optional path to the server config file.
     pub config_path: Option<PathBuf>,
+    /// Optional log level override.
     pub log_level: Option<String>,
+    /// Disable admin API authentication.
     pub no_admin_auth: bool,
+    /// Run in plain HTTP mode (debug only).
     pub no_ssl: bool,
+    /// Override bind port for `--no-ssl` mode.
     pub no_ssl_port: Option<u16>,
 }
 
@@ -164,15 +170,19 @@ pub fn help_text() -> String {
 /// CLI errors.
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
+    /// A required value was not supplied for a flag.
     #[error("missing value for {0}")]
     MissingValue(String),
 
+    /// An unrecognized flag was passed.
     #[error("unknown flag: {0}")]
     UnknownFlag(String),
 
+    /// An unrecognized subcommand was passed.
     #[error("unknown command: {0}")]
     UnknownCommand(String),
 
+    /// Invalid combination of flags or values.
     #[error("{0}")]
     InvalidUsage(String),
 }

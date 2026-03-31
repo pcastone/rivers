@@ -1,10 +1,19 @@
-//! Rivers Engine SDK — ABI contract for dynamic engine plugins.
+//! Rivers Engine SDK — C-ABI contract for dynamic engine plugins.
 //!
-//! Defines the C-ABI boundary between `riversd` and engine shared libraries
+//! Defines the binary boundary between `riversd` and engine shared libraries
 //! (V8, Wasmtime). Engines are loaded from `lib/` at startup via `libloading`.
 //!
 //! The ABI uses JSON serialization over raw byte buffers to avoid Rust ABI
-//! instability across compiler versions.
+//! instability across compiler versions. Each engine dylib exports five
+//! C symbols:
+//!
+//! - `_rivers_engine_abi_version` — returns [`ENGINE_ABI_VERSION`]
+//! - `_rivers_engine_init` — receives [`HostCallbacks`] and [`EngineConfig`]
+//! - `_rivers_engine_execute` — receives [`SerializedTaskContext`], returns [`SerializedTaskResult`]
+//! - `_rivers_engine_shutdown` — graceful teardown
+//! - `_rivers_engine_cancel` — cancel a running task by ID
+
+#![warn(missing_docs)]
 
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
@@ -75,19 +84,26 @@ pub struct SerializedEntrypoint {
 /// Serialized datasource config for ctx.datasource().build().
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerializedDatasource {
+    /// Driver name (e.g. `"postgres"`, `"redis"`).
     pub driver_name: String,
+    /// Hostname or IP address.
     pub host: String,
+    /// Port number.
     pub port: u16,
+    /// Database, bucket, or keyspace name.
     pub database: String,
+    /// Authentication username.
     pub username: String,
-    /// Options map (driver-specific config).
+    /// Driver-specific connection options.
     pub options: HashMap<String, String>,
 }
 
 /// Serialized library content (resolved at dispatch time).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerializedLib {
+    /// Library module name (used for `import` resolution).
     pub name: String,
+    /// Raw file contents (JavaScript, TypeScript, or WASM bytes).
     pub content: Vec<u8>,
 }
 
@@ -103,11 +119,17 @@ pub struct SerializedTaskResult {
 /// Engine configuration passed during initialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineConfig {
+    /// Number of worker threads (isolates or instances) to pre-allocate.
     pub workers: usize,
+    /// Maximum V8/WASM heap size per worker in megabytes.
     pub max_heap_mb: usize,
+    /// Task execution timeout in milliseconds.
     pub task_timeout_ms: u64,
+    /// Maximum pending tasks before backpressure rejects new work.
     pub max_queue_depth: usize,
+    /// V8 epoch interrupt interval in milliseconds (for preemption checks).
     pub epoch_interval_ms: u64,
+    /// Heap usage fraction (0.0–1.0) that triggers worker recycling.
     pub heap_recycle_threshold: f64,
 }
 

@@ -10,8 +10,20 @@ use super::registry::registry;
 /// Load result for a single engine.
 #[derive(Debug)]
 pub enum EngineLoadResult {
-    Success { name: String, path: String },
-    Failed { path: String, reason: String },
+    /// Engine loaded successfully.
+    Success {
+        /// Engine name (e.g. "v8", "wasm").
+        name: String,
+        /// Filesystem path to the shared library.
+        path: String,
+    },
+    /// Engine failed to load.
+    Failed {
+        /// Filesystem path to the shared library.
+        path: String,
+        /// Reason for the failure.
+        reason: String,
+    },
 }
 
 /// Scan a directory for engine shared libraries and load them.

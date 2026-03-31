@@ -2,6 +2,8 @@
 //!
 //! Commands: init, generate, list, info, delete, rotate
 
+#![warn(missing_docs)]
+
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};

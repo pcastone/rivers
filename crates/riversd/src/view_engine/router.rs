@@ -16,11 +16,15 @@ pub enum PathSegment {
 /// A registered view route for matching incoming requests.
 #[derive(Debug, Clone)]
 pub struct ViewRoute {
+    /// Unique view identifier (qualified with entry point for bundle routes).
     pub view_id: String,
+    /// HTTP method this route matches.
     pub method: String,
+    /// Original path pattern string (e.g. `/api/orders/{id}`).
     pub path_pattern: String,
     /// Path segments for matching. Each is either a literal or a parameter (starts with '{').
     pub segments: Vec<PathSegment>,
+    /// View configuration from the app manifest.
     pub config: ApiViewConfig,
     /// App entry point — used to namespace DataView lookups.
     pub app_entry_point: String,

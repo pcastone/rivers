@@ -16,21 +16,27 @@ use super::types::ResolverMapping;
 /// GraphQL errors.
 #[derive(Debug, thiserror::Error)]
 pub enum GraphqlError {
+    /// GraphQL is not enabled in config.
     #[error("GraphQL not enabled")]
     NotEnabled,
 
+    /// Query nesting exceeds the configured maximum depth.
     #[error("query too deep: depth {0} exceeds max {1}")]
     DepthExceeded(usize, usize),
 
+    /// Query complexity score exceeds the configured maximum.
     #[error("query too complex: complexity {0} exceeds max {1}")]
     ComplexityExceeded(usize, usize),
 
+    /// A resolver returned an error during execution.
     #[error("resolver error: {0}")]
     ResolverError(String),
 
+    /// Failed to build the dynamic GraphQL schema.
     #[error("schema build error: {0}")]
     SchemaError(String),
 
+    /// Feature not yet implemented.
     #[error("async-graphql integration not yet available")]
     NotImplemented,
 }

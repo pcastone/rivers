@@ -3,6 +3,8 @@
 //! Loaded by `riversd` at startup from `lib/librivers_wasm.dylib`.
 //! Implements the C-ABI contract defined in `rivers-engine-sdk`.
 
+#![warn(missing_docs)]
+
 use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;

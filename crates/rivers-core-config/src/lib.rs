@@ -6,10 +6,17 @@
 //! Used by CLI tools and storage backend crates that need these types
 //! without pulling in the full rivers-core dependency tree.
 
+#![warn(missing_docs)]
+
+/// Server configuration types mapped from `riversd.conf`.
 pub mod config;
+/// Top-level error type ([`RiversError`]).
 pub mod error;
+/// EventBus event types and log severity levels.
 pub mod event;
+/// LockBox configuration (no encryption dependencies).
 pub mod lockbox_config;
+/// Internal KV storage trait and in-memory backend.
 pub mod storage;
 
 pub use config::ServerConfig;

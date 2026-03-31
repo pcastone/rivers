@@ -100,8 +100,11 @@ fn default_heap_recycle_threshold() -> f64 {
 /// Fields mirror `BaseConfig` and `SecurityConfig` but are all optional.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct EnvironmentOverride {
+    /// Partial base config overrides.
     pub base: Option<BaseOverride>,
+    /// Partial security config overrides.
     pub security: Option<SecurityOverride>,
+    /// Partial storage engine config overrides.
     pub storage_engine: Option<StorageEngineOverride>,
 }
 
@@ -139,38 +142,56 @@ impl EnvironmentOverride {
 /// Partial `[base]` override for an environment.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct BaseOverride {
+    /// Override listen address.
     pub host: Option<String>,
+    /// Override listen port.
     pub port: Option<u16>,
+    /// Override worker thread count.
     pub workers: Option<u32>,
+    /// Override request timeout in seconds.
     pub request_timeout_seconds: Option<u64>,
+    /// Override log level.
     pub log_level: Option<LogLevel>,
+    /// Override backpressure settings.
     pub backpressure: Option<BackpressureOverride>,
 }
 
 /// Partial `[base.backpressure]` override.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct BackpressureOverride {
+    /// Override backpressure enabled state.
     pub enabled: Option<bool>,
+    /// Override queue depth.
     pub queue_depth: Option<usize>,
+    /// Override queue timeout in milliseconds.
     pub queue_timeout_ms: Option<u64>,
 }
 
 /// Partial `[security]` override.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct SecurityOverride {
+    /// Override CORS enabled state.
     pub cors_enabled: Option<bool>,
+    /// Override allowed CORS origins.
     pub cors_allowed_origins: Option<Vec<String>>,
+    /// Override rate limit per minute.
     pub rate_limit_per_minute: Option<u32>,
+    /// Override rate limit burst size.
     pub rate_limit_burst_size: Option<u32>,
 }
 
 /// Partial `[storage_engine]` override.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct StorageEngineOverride {
+    /// Override storage backend type.
     pub backend: Option<String>,
+    /// Override storage backend URL.
     pub url: Option<String>,
+    /// Override credentials source.
     pub credentials_source: Option<String>,
+    /// Override key prefix.
     pub key_prefix: Option<String>,
+    /// Override connection pool size.
     pub pool_size: Option<usize>,
 }
 
@@ -180,12 +201,15 @@ pub struct StorageEngineOverride {
 /// Per `rivers-logging-spec.md` S9.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct LoggingConfig {
+    /// Log severity filter (default: `Info`).
     #[serde(default)]
     pub level: LogLevel,
 
+    /// Output format: `"json"` or `"text"` (default: `"json"`).
     #[serde(default = "default_log_format")]
     pub format: String,
 
+    /// Optional path for a local log file (in addition to stdout).
     pub local_file_path: Option<String>,
 }
 
@@ -256,9 +280,11 @@ fn default_plugins_dir() -> String {
 /// this is the minimal enable/path config for ServerConfig.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct GraphqlServerConfig {
+    /// Enable the GraphQL endpoint (default: `false`).
     #[serde(default)]
     pub enabled: bool,
 
+    /// URL path for the GraphQL endpoint (default: `"/graphql"`).
     #[serde(default = "default_graphql_path")]
     pub path: String,
 
@@ -304,21 +330,27 @@ fn default_graphql_complexity() -> usize {
 /// `[static_files]` -- static file serving and SPA fallback.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct StaticFilesConfig {
+    /// Enable static file serving (default: `false`).
     #[serde(default)]
     pub enabled: bool,
 
+    /// Root directory for static files.
     #[serde(default)]
     pub root_path: Option<String>,
 
+    /// Default index file (default: `"index.html"`).
     #[serde(default = "default_index_file")]
     pub index_file: String,
 
+    /// Serve `index_file` for unmatched routes (SPA mode, default: `false`).
     #[serde(default)]
     pub spa_fallback: bool,
 
+    /// `Cache-Control: max-age` in seconds for static assets.
     #[serde(default)]
     pub max_age: Option<u64>,
 
+    /// URL path prefixes excluded from static file serving.
     #[serde(default)]
     pub exclude_paths: Vec<String>,
 }

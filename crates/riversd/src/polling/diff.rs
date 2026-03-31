@@ -21,6 +21,7 @@ pub enum DiffStrategy {
 }
 
 impl DiffStrategy {
+    /// Parse a diff strategy from an optional string, defaulting to Hash.
     pub fn from_str_opt(s: Option<&str>) -> Self {
         match s {
             Some(s) if s.eq_ignore_ascii_case("null") => DiffStrategy::Null,
@@ -37,11 +38,14 @@ impl DiffStrategy {
 /// Per spec: multiple clients with same parameters share one poll loop.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct PollLoopKey {
+    /// View identifier for this poll loop.
     pub view_id: String,
+    /// SHA-256 hash of the query parameters.
     pub param_hash: String,
 }
 
 impl PollLoopKey {
+    /// Create a new poll loop key from a view ID and query parameters.
     pub fn new(view_id: &str, params: &HashMap<String, String>) -> Self {
         let param_hash = compute_param_hash(params);
         Self {
@@ -50,6 +54,7 @@ impl PollLoopKey {
         }
     }
 
+    /// Storage key for the poll loop: `poll:{view}:{hash}`.
     pub fn storage_key(&self) -> String {
         format!("poll:{}:{}", self.view_id, self.param_hash)
     }

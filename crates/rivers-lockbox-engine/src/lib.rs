@@ -10,11 +10,19 @@
 //! CodeComponent isolates never receive raw credentials -- only opaque
 //! datasource tokens. Credentials stay host-side.
 
+#![warn(missing_docs)]
+
+/// Error types, keystore model, and entry definitions.
 pub mod types;
+/// Name validation and `lockbox://` URI parsing.
 pub mod validation;
+/// In-memory secret resolver (name/alias -> entry metadata).
 pub mod resolver;
+/// Age-based keystore encryption and decryption.
 pub mod crypto;
+/// Key source resolution (env var, file, or agent).
 pub mod key_source;
+/// Startup resolution sequence for `riversd`.
 pub mod startup;
 
 pub use types::*;

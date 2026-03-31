@@ -28,6 +28,7 @@ pub enum StreamingFormat {
 }
 
 impl StreamingFormat {
+    /// Return the HTTP content type for this streaming format.
     pub fn content_type(&self) -> &'static str {
         match self {
             StreamingFormat::Ndjson => "application/x-ndjson",
@@ -35,6 +36,7 @@ impl StreamingFormat {
         }
     }
 
+    /// Parse a streaming format from an optional string.
     pub fn from_str_opt(s: Option<&str>) -> Option<Self> {
         match s {
             Some(s) if s.eq_ignore_ascii_case("ndjson") => Some(StreamingFormat::Ndjson),
@@ -49,10 +51,12 @@ impl StreamingFormat {
 /// A single chunk in a streaming response.
 #[derive(Debug, Clone, Serialize)]
 pub struct StreamChunk {
+    /// The chunk payload as a JSON value.
     pub data: serde_json::Value,
 }
 
 impl StreamChunk {
+    /// Create a new stream chunk with the given data.
     pub fn new(data: serde_json::Value) -> Self {
         Self { data }
     }
@@ -95,6 +99,7 @@ pub fn poison_chunk_ndjson(error: &str) -> String {
     s
 }
 
+/// Build an SSE poison chunk for mid-stream errors (`event: error`).
 pub fn poison_chunk_sse(error: &str) -> String {
     format!("event: error\ndata: {}\n\n", serde_json::json!({"error": error}))
 }
@@ -119,7 +124,9 @@ pub fn check_stream_terminated(data: &serde_json::Value) -> bool {
 /// Streaming configuration for a REST view.
 #[derive(Debug, Clone)]
 pub struct StreamingConfig {
+    /// Wire format (NDJSON or SSE).
     pub format: StreamingFormat,
+    /// Maximum stream lifetime in milliseconds.
     pub stream_timeout_ms: u64,
 }
 
@@ -379,15 +386,19 @@ impl StreamToken {
 /// Streaming errors.
 #[derive(Debug, thiserror::Error)]
 pub enum StreamingError {
+    /// Stream exceeded its configured timeout.
     #[error("stream timeout after {0}ms")]
     Timeout(u64),
 
+    /// The client disconnected before the stream completed.
     #[error("client disconnected")]
     ClientDisconnected,
 
+    /// The generator handler returned an error.
     #[error("generator error: {0}")]
     GeneratorError(String),
 
+    /// No CodeComponent engine is available for handler execution.
     #[error("handler requires CodeComponent (not yet available)")]
     CodeComponentRequired,
 }

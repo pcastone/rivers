@@ -7,10 +7,15 @@ use axum::http::{HeaderValue, Method};
 /// CORS configuration for a view or global scope.
 #[derive(Debug, Clone)]
 pub struct CorsConfig {
+    /// Whether CORS handling is enabled.
     pub enabled: bool,
+    /// Allowed origin URLs (use `"*"` for wildcard).
     pub allowed_origins: Vec<String>,
+    /// Allowed HTTP methods.
     pub allowed_methods: Vec<String>,
+    /// Allowed request headers.
     pub allowed_headers: Vec<String>,
+    /// Whether to include credentials (cookies, auth headers).
     pub allow_credentials: bool,
 }
 
@@ -86,10 +91,15 @@ pub fn resolve_cors_headers(
 
 /// Resolved CORS headers to inject into a response.
 pub struct CorsHeaders {
+    /// Matched origin or `"*"`.
     pub allow_origin: String,
+    /// Comma-separated allowed methods.
     pub allow_methods: String,
+    /// Comma-separated allowed headers.
     pub allow_headers: String,
+    /// Whether credentials are allowed.
     pub allow_credentials: bool,
+    /// Whether this is an OPTIONS preflight response.
     pub is_preflight: bool,
 }
 

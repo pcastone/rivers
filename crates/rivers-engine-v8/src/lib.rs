@@ -9,6 +9,8 @@
 //! Host callbacks (ctx.dataview, ctx.store, etc.) are provided by riversd
 //! via the HostCallbacks function pointer table passed during init.
 
+#![warn(missing_docs)]
+
 mod task_context;
 mod v8_runtime;
 mod execution;
@@ -24,17 +26,20 @@ static HOST_CALLBACKS: std::sync::OnceLock<HostCallbacks> = std::sync::OnceLock:
 
 // ── C-ABI Exports ───────────────────────────────────────────────
 
+/// Return the engine ABI version for compatibility checks.
 #[no_mangle]
 pub extern "C" fn _rivers_engine_abi_version() -> u32 {
     ENGINE_ABI_VERSION
 }
 
+/// Initialize the V8 platform (idempotent). Returns 0 on success.
 #[no_mangle]
 pub extern "C" fn _rivers_engine_init() -> i32 {
     ensure_v8_initialized();
     0
 }
 
+/// Initialize V8 with host callback function pointers for dataview, store, and log.
 #[no_mangle]
 pub extern "C" fn _rivers_engine_init_with_callbacks(callbacks: *const HostCallbacks) -> i32 {
     if !callbacks.is_null() {
@@ -44,6 +49,7 @@ pub extern "C" fn _rivers_engine_init_with_callbacks(callbacks: *const HostCallb
     _rivers_engine_init()
 }
 
+/// Execute a JavaScript handler. Deserializes context, runs the script, writes result.
 #[no_mangle]
 pub extern "C" fn _rivers_engine_execute(
     ctx_ptr: *const u8,
@@ -76,6 +82,7 @@ pub extern "C" fn _rivers_engine_execute(
     }
 }
 
+/// Shut down the engine and clear the script cache.
 #[no_mangle]
 pub extern "C" fn _rivers_engine_shutdown() {
     if let Ok(mut cache) = SCRIPT_CACHE.lock() {
@@ -83,6 +90,7 @@ pub extern "C" fn _rivers_engine_shutdown() {
     }
 }
 
+/// Cancel a running task (stub — full watchdog integration is Phase 5).
 #[no_mangle]
 pub extern "C" fn _rivers_engine_cancel(_task_id: usize) -> i32 {
     // V8 termination requires an IsolateHandle — not possible from outside

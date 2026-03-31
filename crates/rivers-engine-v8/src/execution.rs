@@ -193,6 +193,16 @@ fn inject_ctx_object<'s>(
         }
     }
 
+    // ctx.ws (from args if present — WebSocket lifecycle hooks)
+    if let Some(ws) = ctx.args.get("ws") {
+        let ws_json = serde_json::to_string(ws).unwrap_or_default();
+        let ws_src = v8_str(scope, &ws_json);
+        if let Some(parsed) = v8::json::parse(scope, ws_src) {
+            let ws_key = v8_str(scope, "ws");
+            obj.set(scope, ws_key.into(), parsed);
+        }
+    }
+
     // ctx.store (in-memory get/set/del)
     inject_store_methods(scope, obj);
 

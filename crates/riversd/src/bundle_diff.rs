@@ -10,36 +10,49 @@ use rivers_runtime::LoadedBundle;
 /// Summary of differences between two bundle versions.
 #[derive(Debug)]
 pub struct BundleDiff {
+    /// DataView additions, removals, and changes.
     pub dataviews: SectionDiff,
+    /// View additions, removals, and changes.
     pub views: SectionDiff,
+    /// Datasource additions, removals, and changes.
     pub datasources: DatasourceDiff,
 }
 
 /// Added/removed/changed items in a section.
 #[derive(Debug, Default)]
 pub struct SectionDiff {
+    /// Items present in the new bundle but not the old.
     pub added: Vec<String>,
+    /// Items present in the old bundle but not the new.
     pub removed: Vec<String>,
+    /// Items present in both bundles but with different configuration.
     pub changed: Vec<String>,
 }
 
 /// Datasource-specific diff with restart detection.
 #[derive(Debug, Default)]
 pub struct DatasourceDiff {
+    /// Datasources added in the new bundle.
     pub added: Vec<String>,
+    /// Datasources removed from the old bundle.
     pub removed: Vec<String>,
+    /// Datasources with changed configuration.
     pub changed: Vec<DatasourceChange>,
 }
 
 /// A single datasource change with restart requirement.
 #[derive(Debug)]
 pub struct DatasourceChange {
+    /// Datasource name.
     pub name: String,
+    /// List of changed configuration fields.
     pub fields_changed: Vec<String>,
+    /// Whether the change requires a connection pool restart.
     pub requires_restart: bool,
 }
 
 impl BundleDiff {
+    /// Returns true if no changes were detected between the two bundles.
     pub fn is_empty(&self) -> bool {
         self.dataviews.added.is_empty()
             && self.dataviews.removed.is_empty()

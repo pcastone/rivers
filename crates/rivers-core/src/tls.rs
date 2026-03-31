@@ -133,13 +133,21 @@ pub fn generate_csr(x509: &TlsX509Config) -> Result<String, String> {
 
 /// Certificate info returned by `inspect_cert`.
 pub struct CertInfo {
+    /// Certificate subject distinguished name.
     pub subject: String,
+    /// Certificate issuer distinguished name.
     pub issuer: String,
+    /// Whether the certificate is self-signed (subject == issuer).
     pub is_self_signed: bool,
+    /// Subject Alternative Names (DNS names and IP addresses).
     pub sans: Vec<String>,
+    /// Validity start date (ISO 8601).
     pub not_before: String,
+    /// Validity end date (ISO 8601).
     pub not_after: String,
+    /// Human-readable expiry summary (e.g. "365 days left", "EXPIRED").
     pub expiry_summary: String,
+    /// SHA-256 fingerprint of the DER-encoded certificate.
     pub fingerprint: String,
 }
 

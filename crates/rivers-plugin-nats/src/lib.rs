@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! NATS plugin driver — async-nats 0.38 (pure Rust).
 
 use std::collections::HashMap;
@@ -14,6 +15,7 @@ use rivers_driver_sdk::{
 
 // ── Driver ─────────────────────────────────────────────────────────
 
+/// NATS driver factory — creates producers and consumers via core NATS pub/sub.
 pub struct NatsDriver;
 
 #[async_trait]
@@ -89,6 +91,7 @@ fn resolve_subject(config: &BrokerConsumerConfig, params: &ConnectionParams) -> 
 
 // ── Producer ───────────────────────────────────────────────────────
 
+/// NATS producer — publishes messages to subjects.
 pub struct NatsProducer {
     client: async_nats::Client,
 }
@@ -159,6 +162,7 @@ impl BrokerProducer for NatsProducer {
 
 // ── Consumer ───────────────────────────────────────────────────────
 
+/// NATS consumer — subscribes to a subject and receives messages.
 pub struct NatsConsumer {
     client: async_nats::Client,
     subscriber: async_nats::Subscriber,

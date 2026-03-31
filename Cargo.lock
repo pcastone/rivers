@@ -5195,11 +5195,13 @@ dependencies = [
 name = "riverpackage"
 version = "0.52.5"
 dependencies = [
+ "hex",
  "rivers-core-config",
  "rivers-driver-sdk",
  "rivers-runtime",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "toml 0.8.23",
 ]

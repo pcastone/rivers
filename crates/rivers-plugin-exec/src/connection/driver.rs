@@ -21,9 +21,13 @@ use super::exec_connection::ExecConnection;
 
 /// Per-command runtime state including integrity checker and semaphore.
 pub struct CommandRuntime {
+    /// Parsed command configuration.
     pub config: crate::config::CommandConfig,
+    /// Integrity checker for SHA-256 verification.
     pub integrity: CommandIntegrity,
+    /// Compiled input schema for validation (if declared).
     pub schema: Option<schema::CompiledSchema>,
+    /// Per-command concurrency semaphore (if limit set).
     pub semaphore: Option<Arc<Semaphore>>,
 }
 

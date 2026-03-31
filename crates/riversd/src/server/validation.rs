@@ -60,12 +60,15 @@ pub fn validate_server_tls(config: &ServerConfig, no_ssl: bool) -> Result<(), St
 /// Server startup/runtime errors.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
+    /// Configuration validation failure.
     #[error("config error: {0}")]
     Config(String),
 
+    /// Failed to bind to the configured address/port.
     #[error("bind error: {0}")]
     Bind(String),
 
+    /// Error while serving requests.
     #[error("serve error: {0}")]
     Serve(String),
 }

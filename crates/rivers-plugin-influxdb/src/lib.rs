@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! InfluxDB v2 plugin driver (DatabaseDriver).
 //!
 //! Implements `DatabaseDriver` using `reqwest` for direct HTTP API calls.
