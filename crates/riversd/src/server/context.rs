@@ -91,8 +91,11 @@ impl LogController {
 ///   - `AppContext.config`    → config, log_controller
 #[derive(Clone)]
 pub struct AppContext {
+    /// Server configuration.
     pub config: ServerConfig,
+    /// Graceful shutdown coordinator.
     pub shutdown: Arc<ShutdownCoordinator>,
+    /// Server uptime tracker.
     pub uptime: Arc<UptimeTracker>,
     /// ProcessPool for CodeComponent execution.
     pub pool: Arc<ProcessPoolManager>,
@@ -146,6 +149,7 @@ pub struct AppContext {
 }
 
 impl AppContext {
+    /// Create a new application context with default subsystem state.
     pub fn new(config: ServerConfig, shutdown: Arc<ShutdownCoordinator>) -> Self {
         let pool = Arc::new(ProcessPoolManager::from_config(
             &config.runtime.process_pools,

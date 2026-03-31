@@ -5,6 +5,8 @@
 //! It can be compiled statically into riversd or loaded at runtime from
 //! `lib/librivers_drivers_builtin.dylib`.
 
+#![warn(missing_docs)]
+
 mod eventbus;
 mod faker;
 #[cfg(unix)]

@@ -13,6 +13,7 @@ use super::single::RedisConnection;
 pub struct RedisDriver;
 
 impl RedisDriver {
+    /// Create a new Redis driver instance.
     pub fn new() -> Self {
         Self
     }

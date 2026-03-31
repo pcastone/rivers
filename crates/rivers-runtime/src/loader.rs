@@ -100,15 +100,20 @@ pub fn load_bundle(bundle_dir: &Path) -> Result<LoadedBundle, RiversError> {
 /// A fully loaded bundle — manifest plus all apps.
 #[derive(Debug)]
 pub struct LoadedBundle {
+    /// Bundle-level manifest metadata.
     pub manifest: BundleManifest,
+    /// All loaded apps within this bundle.
     pub apps: Vec<LoadedApp>,
 }
 
 /// A fully loaded app — manifest, resources, and config.
 #[derive(Debug)]
 pub struct LoadedApp {
+    /// App-level manifest (name, type, appId, entry point).
     pub manifest: AppManifest,
+    /// Declared datasources, keystores, and service dependencies.
     pub resources: ResourcesConfig,
+    /// App configuration (datasources, DataViews, views, static files).
     pub config: AppConfig,
     /// Path to the app directory on disk (for resolving schema file references).
     pub app_dir: std::path::PathBuf,

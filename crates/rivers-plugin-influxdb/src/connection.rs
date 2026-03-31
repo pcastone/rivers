@@ -9,6 +9,7 @@ use crate::protocol::{build_line_protocol, parse_csv_response, urlencoded};
 
 // ── Connection ─────────────────────────────────────────────────────────
 
+/// Active InfluxDB v2 connection for executing Flux queries and line protocol writes.
 pub struct InfluxConnection {
     pub(crate) client: Client,
     pub(crate) base_url: String,

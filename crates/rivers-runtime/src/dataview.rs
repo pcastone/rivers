@@ -12,11 +12,14 @@ use serde::Deserialize;
 /// with explicit `name` field (not named subtables).
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct DataViewParameterConfig {
+    /// Parameter name (used in query template substitution).
     pub name: String,
 
+    /// Type name: "string", "integer", "float", "boolean", "array". Default: "string".
     #[serde(rename = "type", default = "default_param_type")]
     pub param_type: String,
 
+    /// Whether the caller must supply this parameter. Default: false.
     #[serde(default)]
     pub required: bool,
 
@@ -34,8 +37,10 @@ fn default_param_type() -> String {
 /// Per spec: cache uses `ttl_seconds` (integer), not `ttl`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct DataViewCachingConfig {
+    /// Time-to-live in seconds. 0 disables caching.
     pub ttl_seconds: u64,
 
+    /// Whether L1 in-process cache is enabled. Default: true.
     #[serde(default = "default_true")]
     pub l1_enabled: bool,
 
@@ -47,9 +52,11 @@ pub struct DataViewCachingConfig {
     #[serde(default = "default_l1_max_entries")]
     pub l1_max_entries: usize,
 
+    /// Whether L2 StorageEngine-backed cache is enabled. Default: false.
     #[serde(default)]
     pub l2_enabled: bool,
 
+    /// Max serialized value size for L2 storage in bytes. Default: 128 KB.
     #[serde(default = "default_l2_max_bytes")]
     pub l2_max_value_bytes: usize,
 }
@@ -89,7 +96,9 @@ fn default_l2_max_bytes() -> usize {
 /// per-method field takes precedence.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct DataViewConfig {
+    /// DataView name (unique within the app).
     pub name: String,
+    /// Target datasource name.
     pub datasource: String,
 
     // ── Legacy / backward-compatible fields ──────────────────────────
@@ -108,43 +117,55 @@ pub struct DataViewConfig {
 
     // ── Per-method queries (tech path spec §5.1) ─────────────────────
 
+    /// GET query string (overrides legacy `query`).
     #[serde(default)]
     pub get_query: Option<String>,
 
+    /// POST query string.
     #[serde(default)]
     pub post_query: Option<String>,
 
+    /// PUT query string.
     #[serde(default)]
     pub put_query: Option<String>,
 
+    /// DELETE query string.
     #[serde(default)]
     pub delete_query: Option<String>,
 
     // ── Per-method schemas (tech path spec §7.2) ─────────────────────
 
+    /// GET return schema path (overrides legacy `return_schema`).
     #[serde(default)]
     pub get_schema: Option<String>,
 
+    /// POST return schema path.
     #[serde(default)]
     pub post_schema: Option<String>,
 
+    /// PUT return schema path.
     #[serde(default)]
     pub put_schema: Option<String>,
 
+    /// DELETE return schema path.
     #[serde(default)]
     pub delete_schema: Option<String>,
 
     // ── Per-method parameters (tech path spec §5.2) ──────────────────
 
+    /// GET-specific parameters (overrides legacy `parameters` if non-empty).
     #[serde(default)]
     pub get_parameters: Vec<DataViewParameterConfig>,
 
+    /// POST-specific parameters.
     #[serde(default)]
     pub post_parameters: Vec<DataViewParameterConfig>,
 
+    /// PUT-specific parameters.
     #[serde(default)]
     pub put_parameters: Vec<DataViewParameterConfig>,
 
+    /// DELETE-specific parameters.
     #[serde(default)]
     pub delete_parameters: Vec<DataViewParameterConfig>,
 
@@ -156,6 +177,7 @@ pub struct DataViewConfig {
 
     // ── Existing flags ───────────────────────────────────────────────
 
+    /// Per-view caching policy (L1/L2 tiered cache).
     #[serde(default)]
     pub caching: Option<DataViewCachingConfig>,
 

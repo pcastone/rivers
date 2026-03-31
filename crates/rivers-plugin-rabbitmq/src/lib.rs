@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! RabbitMQ plugin driver — lapin 2.x (pure Rust AMQP 0.9.1).
 
 use std::collections::HashMap;
@@ -22,6 +23,7 @@ use rivers_driver_sdk::{
 
 // ── Driver ─────────────────────────────────────────────────────────
 
+/// RabbitMQ driver factory — creates producers and consumers via AMQP 0.9.1.
 pub struct RabbitMqDriver;
 
 #[async_trait]
@@ -168,6 +170,7 @@ fn resolve_queue(config: &BrokerConsumerConfig, params: &ConnectionParams) -> St
 
 // ── Producer ───────────────────────────────────────────────────────
 
+/// RabbitMQ producer — publishes messages with publisher confirms.
 pub struct RabbitProducer {
     _conn: AmqpConnection,
     channel: Channel,
@@ -232,6 +235,7 @@ impl BrokerProducer for RabbitProducer {
 
 // ── Consumer ───────────────────────────────────────────────────────
 
+/// RabbitMQ consumer — receives messages with manual ack/nack.
 pub struct RabbitConsumer {
     _conn: AmqpConnection,
     channel: Channel,

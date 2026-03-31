@@ -31,12 +31,15 @@ pub struct GuardResult {
 /// Errors from guard handler execution.
 #[derive(Debug, thiserror::Error)]
 pub enum GuardError {
+    /// The guard handler returned an error.
     #[error("guard handler error: {0}")]
     HandlerError(String),
 
+    /// Failed to dispatch to the ProcessPool.
     #[error("guard dispatch error: {0}")]
     DispatchError(#[from] TaskError),
 
+    /// The guard handler returned an unparseable result.
     #[error("invalid guard result: {0}")]
     InvalidResult(String),
 }

@@ -37,8 +37,11 @@ impl rivers_runtime::rivers_core::eventbus::EventHandler for SseTriggerHandler {
 /// Summary of a hot reload rebuild.
 #[derive(Debug)]
 pub struct ReloadSummary {
+    /// Number of apps rebuilt.
     pub apps: usize,
+    /// Number of views rebuilt.
     pub views: usize,
+    /// Number of DataViews rebuilt.
     pub dataviews: usize,
 }
 

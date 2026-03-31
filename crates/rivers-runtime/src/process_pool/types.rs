@@ -26,7 +26,9 @@ pub struct HttpToken;
 /// Maps a datasource token name to the driver + connection params needed for execution.
 #[derive(Debug, Clone)]
 pub struct ResolvedDatasource {
+    /// Driver name (e.g. "postgres", "mysql", "faker").
     pub driver_name: String,
+    /// Connection parameters for the driver.
     pub params: crate::rivers_driver_sdk::ConnectionParams,
 }
 
@@ -48,6 +50,7 @@ pub struct Entrypoint {
 /// A library resolved and ready for injection into the isolate.
 #[derive(Debug, Clone)]
 pub struct ResolvedLib {
+    /// Library module name.
     pub name: String,
     /// Compiled JS source or WASM binary.
     pub content: Vec<u8>,
@@ -60,13 +63,21 @@ pub struct ResolvedLib {
 /// Per spec §4.1: built by the host, passed to the worker.
 /// Contains only opaque tokens — never raw connections or credentials.
 pub struct TaskContext {
+    /// Opaque datasource handles available to this task.
     pub datasources: HashMap<String, DatasourceToken>,
+    /// Opaque DataView handles available to this task.
     pub dataviews: HashMap<String, DataViewToken>,
+    /// Pre-resolved library modules to inject into the isolate.
     pub libs: Vec<ResolvedLib>,
+    /// Outbound HTTP capability token (None = no HTTP access).
     pub http: Option<HttpToken>,
+    /// Environment variables exposed to the handler.
     pub env: HashMap<String, String>,
+    /// Module and function to invoke.
     pub entrypoint: Entrypoint,
+    /// JSON arguments passed to the handler function.
     pub args: serde_json::Value,
+    /// Distributed trace ID for observability.
     pub trace_id: String,
     /// Application ID for this task's owning app.
     pub app_id: String,
@@ -133,24 +144,31 @@ pub struct TaskResult {
 /// Errors that can occur during task dispatch or execution.
 #[derive(Debug, thiserror::Error)]
 pub enum TaskError {
+    /// Pool task queue is full — backpressure signal.
     #[error("queue full: pool has reached max_queue_depth")]
     QueueFull,
 
+    /// Task exceeded its execution timeout.
     #[error("task timeout after {0}ms")]
     Timeout(u64),
 
+    /// Worker process crashed during execution.
     #[error("worker crashed: {0}")]
     WorkerCrash(String),
 
+    /// Handler function returned an error.
     #[error("handler error: {0}")]
     HandlerError(String),
 
+    /// Required capability (datasource, DataView, HTTP) not available.
     #[error("capability error: {0}")]
     Capability(String),
 
+    /// Requested engine (V8 or WASM) is not loaded.
     #[error("engine not available: {0}")]
     EngineUnavailable(String),
 
+    /// Unexpected internal error.
     #[error("internal error: {0}")]
     Internal(String),
 }

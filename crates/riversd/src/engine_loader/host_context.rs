@@ -54,7 +54,7 @@ pub fn set_host_keystore(keystore: Arc<rivers_keystore_engine::AppKeystore>) {
 // Do NOT replace with ErrorResponse — changing the shape would break dynamic
 // engine plugins that parse these responses.
 
-/// Build the HostCallbacks table with all callbacks wired.
+/// Build the `HostCallbacks` table with all callback functions wired.
 pub fn build_host_callbacks() -> HostCallbacks {
     HostCallbacks {
         dataview_execute: Some(host_callbacks::host_dataview_execute),

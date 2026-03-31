@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! riverpackage — Rivers bundle validator and packager.
 //!
 //! Commands: validate, preflight, pack

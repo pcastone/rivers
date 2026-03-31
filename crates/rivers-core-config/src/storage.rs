@@ -21,20 +21,31 @@ pub type Bytes = Vec<u8>;
 
 // ── Errors ──────────────────────────────────────────────────────────
 
+/// Errors returned by [`StorageEngine`] operations.
 #[derive(Error, Debug)]
 pub enum StorageError {
+    /// Requested key does not exist in the given namespace.
     #[error("not found: {namespace}/{key}")]
-    NotFound { namespace: String, key: String },
+    NotFound {
+        /// Storage namespace.
+        namespace: String,
+        /// Key within the namespace.
+        key: String,
+    },
 
+    /// Value could not be serialized or deserialized.
     #[error("serialization error: {0}")]
     Serialization(String),
 
+    /// Underlying backend returned an error.
     #[error("backend error: {0}")]
     Backend(String),
 
+    /// Storage capacity limit reached.
     #[error("capacity exceeded: {0}")]
     Capacity(String),
 
+    /// Backend is not reachable or not initialized.
     #[error("storage unavailable: {0}")]
     Unavailable(String),
 }
@@ -57,8 +68,10 @@ pub fn is_reserved_namespace(namespace: &str) -> bool {
 /// Plus maintenance: flush_expired removes stale entries.
 #[async_trait]
 pub trait StorageEngine: Send + Sync {
+    /// Retrieve a value by namespace and key. Returns `None` if missing or expired.
     async fn get(&self, namespace: &str, key: &str) -> Result<Option<Bytes>, StorageError>;
 
+    /// Store a value with an optional TTL in milliseconds.
     async fn set(
         &self,
         namespace: &str,
@@ -67,8 +80,10 @@ pub trait StorageEngine: Send + Sync {
         ttl_ms: Option<u64>,
     ) -> Result<(), StorageError>;
 
+    /// Delete a key from the given namespace.
     async fn delete(&self, namespace: &str, key: &str) -> Result<(), StorageError>;
 
+    /// List keys in a namespace, optionally filtered by a prefix.
     async fn list_keys(
         &self,
         namespace: &str,
@@ -108,6 +123,7 @@ pub struct InMemoryStorageEngine {
 }
 
 impl InMemoryStorageEngine {
+    /// Create a new empty in-memory storage backend.
     pub fn new() -> Self {
         Self {
             kv: Arc::new(Mutex::new(HashMap::new())),

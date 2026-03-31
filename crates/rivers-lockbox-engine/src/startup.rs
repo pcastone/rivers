@@ -74,7 +74,7 @@ pub fn resolve_all_references(
 ///
 /// Per spec S8.1 -- the 12-step startup sequence:
 /// 1. Collect lockbox:// URIs (done by caller, passed as `references`)
-/// 2. Check [lockbox] config present
+/// 2. Check `[lockbox]` config present
 /// 3. Check file permissions
 /// 4. Resolve key source
 /// 5. Decrypt keystore

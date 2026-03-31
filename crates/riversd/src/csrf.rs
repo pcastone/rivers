@@ -27,6 +27,7 @@ struct CsrfEntry {
 }
 
 impl CsrfManager {
+    /// Create a new CSRF manager backed by the given storage engine.
     pub fn new(storage: Arc<dyn StorageEngine>, config: CsrfConfig) -> Self {
         Self { storage, config }
     }
@@ -202,9 +203,11 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// CSRF errors.
 #[derive(Debug, thiserror::Error)]
 pub enum CsrfError {
+    /// StorageEngine read/write failure.
     #[error("storage error: {0}")]
     Storage(String),
 
+    /// Internal serialization or logic error.
     #[error("internal error: {0}")]
     Internal(String),
 }

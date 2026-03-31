@@ -10,18 +10,23 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 /// Admin authentication errors.
 #[derive(Debug, thiserror::Error)]
 pub enum AdminAuthError {
+    /// The provided public key is malformed or invalid.
     #[error("invalid public key: {0}")]
     InvalidPublicKey(String),
 
+    /// The provided signature is malformed.
     #[error("invalid signature: {0}")]
     InvalidSignature(String),
 
+    /// The signature did not match the expected payload.
     #[error("signature verification failed")]
     VerificationFailed,
 
+    /// The request timestamp is too old or too far in the future.
     #[error("timestamp expired: {0}")]
     TimestampExpired(String),
 
+    /// The timestamp string could not be parsed.
     #[error("invalid timestamp format: {0}")]
     InvalidTimestamp(String),
 }

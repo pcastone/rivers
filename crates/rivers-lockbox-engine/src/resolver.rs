@@ -19,7 +19,9 @@ use crate::validation::validate_entry_name;
 /// non-secret connection routing metadata -- safe to hold in memory.
 #[derive(Debug, Clone)]
 pub struct EntryMetadata {
+    /// Entry name (primary key in the keystore).
     pub name: String,
+    /// Value type hint for deserialization.
     pub entry_type: EntryType,
     /// Index into the keystore entries array (for disk-based value retrieval).
     pub entry_index: usize,
@@ -48,8 +50,11 @@ impl EntryMetadata {
 /// Values are decrypted per-access and should be zeroized after use.
 #[derive(Debug, Clone)]
 pub struct ResolvedEntry {
+    /// Entry name.
     pub name: String,
+    /// Decrypted secret value. Must be zeroized after use.
     pub value: String,
+    /// Value type hint.
     pub entry_type: EntryType,
 }
 

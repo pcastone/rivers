@@ -248,15 +248,19 @@ pub fn check_reload_scope(current: &ServerConfig, new: &ServerConfig) -> ReloadS
 /// Hot reload errors.
 #[derive(Debug, thiserror::Error)]
 pub enum HotReloadError {
+    /// Config file could not be parsed.
     #[error("config parse error: {0}")]
     ParseError(String),
 
+    /// Config validation rejected the new config.
     #[error("config validation failed: {0}")]
     ValidationFailed(String),
 
+    /// File watcher setup or runtime error.
     #[error("file watch error: {0}")]
     WatchError(String),
 
+    /// The config change requires a full server restart.
     #[error("requires restart: {0}")]
     RequiresRestart(String),
 }

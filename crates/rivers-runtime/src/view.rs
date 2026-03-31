@@ -68,7 +68,9 @@ pub struct ApiViewConfig {
 
     // ── Rate limiting (per-view override) ───────────────────────────
 
+    /// Per-view rate limit: max requests per minute.
     pub rate_limit_per_minute: Option<u32>,
+    /// Per-view rate limit: burst allowance above the sustained rate.
     pub rate_limit_burst_size: Option<u32>,
 
     // ── View-type-specific fields ───────────────────────────────────
@@ -99,6 +101,7 @@ pub struct ApiViewConfig {
 
     // ── Event handlers (pipeline stages) ────────────────────────────
 
+    /// Pipeline event handlers (pre_process, handlers, post_process, on_error).
     #[serde(default)]
     pub event_handlers: Option<ViewEventHandlers>,
 
@@ -142,14 +145,19 @@ fn default_token_body_key() -> String {
 pub enum HandlerConfig {
     /// Handler that dispatches to a named DataView.
     Dataview {
+        /// DataView name (must exist in the registry).
         dataview: String,
     },
 
     /// Handler that runs a WASM CodeComponent.
     Codecomponent {
+        /// Source language: "javascript", "typescript", "wasm".
         language: String,
+        /// Module file path relative to the app directory.
         module: String,
+        /// Function name to call within the module.
         entrypoint: String,
+        /// Datasource/DataView resource names the handler may access.
         #[serde(default)]
         resources: Vec<String>,
     },
@@ -166,9 +174,11 @@ pub enum HandlerConfig {
 /// Format: `{http_param} = "{dataview_param}"`.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct ParameterMappingConfig {
+    /// Query-string parameter mappings (`?page=1` -> DataView param).
     #[serde(default)]
     pub query: HashMap<String, String>,
 
+    /// URL path parameter mappings (`:id` -> DataView param).
     #[serde(default)]
     pub path: HashMap<String, String>,
 
@@ -183,6 +193,7 @@ pub struct ParameterMappingConfig {
 ///   pre_process → handlers → post_process + on_error
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct ViewEventHandlers {
+    /// Pre-processing stage — runs before the primary handler.
     #[serde(default)]
     pub pre_process: Vec<HandlerStageConfig>,
 
@@ -190,9 +201,11 @@ pub struct ViewEventHandlers {
     #[serde(default)]
     pub handlers: Vec<HandlerStageConfig>,
 
+    /// Post-processing stage — runs after successful handler execution.
     #[serde(default)]
     pub post_process: Vec<HandlerStageConfig>,
 
+    /// Error recovery stage — runs when any prior stage fails.
     #[serde(default)]
     pub on_error: Vec<HandlerStageConfig>,
 }
@@ -200,34 +213,46 @@ pub struct ViewEventHandlers {
 /// A single pipeline stage handler reference.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct HandlerStageConfig {
+    /// CodeComponent module path.
     pub module: String,
+    /// Function name within the module.
     pub entrypoint: String,
+    /// Optional key name for storing stage output in the pipeline context.
     pub key: Option<String>,
+    /// Failure action: "abort" (default), "continue", or "redirect".
     pub on_failure: Option<String>,
 }
 
 /// `[api.views.*.on_stream]` — WebSocket stream handler.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct OnStreamConfig {
+    /// CodeComponent module path.
     pub module: String,
+    /// Function name within the module.
     pub entrypoint: String,
-    /// "Stream" | "Normal" | "Auto"
+    /// Handler mode: "Stream", "Normal", or "Auto".
     pub handler_mode: Option<String>,
 }
 
 /// WebSocket lifecycle hooks per technology-path-spec §14.2.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct WebSocketHooks {
+    /// Called when a new WebSocket connection is established.
     pub on_connect: Option<HandlerStageConfig>,
+    /// Called for each incoming WebSocket message.
     pub on_message: Option<HandlerStageConfig>,
+    /// Called when a WebSocket connection closes.
     pub on_disconnect: Option<HandlerStageConfig>,
 }
 
 /// `[api.views.*.on_event]` — MessageConsumer event handler.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct OnEventConfig {
+    /// Topic or queue name to consume from.
     pub topic: String,
+    /// CodeComponent handler function name.
     pub handler: String,
+    /// Handler mode: "Stream", "Normal", or "Auto".
     pub handler_mode: Option<String>,
 }
 
@@ -262,13 +287,17 @@ fn default_diff_strategy() -> String {
 /// `on_change` handler — invoked when polled data changes.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct OnChangeConfig {
+    /// CodeComponent module path.
     pub module: String,
+    /// Function name within the module.
     pub entrypoint: String,
 }
 
 /// `change_detect` handler — custom diff logic via CodeComponent.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ChangeDetectConfig {
+    /// CodeComponent module path.
     pub module: String,
+    /// Function name within the module.
     pub entrypoint: String,
 }

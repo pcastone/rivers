@@ -17,10 +17,14 @@ use serde::Serialize;
 /// across all server-generated errors.
 #[derive(Debug, Clone, Serialize)]
 pub struct ErrorResponse {
+    /// HTTP status code.
     pub code: u16,
+    /// Human-readable error message.
     pub message: String,
+    /// Optional structured error details.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
+    /// Optional distributed trace ID.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
 }
@@ -124,17 +128,29 @@ pub fn map_error_code(category: ErrorCategory) -> u16 {
 /// Error categories for status code mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorCategory {
+    /// 400 Bad Request.
     BadRequest,
+    /// 401 Unauthorized.
     Unauthorized,
+    /// 403 Forbidden.
     Forbidden,
+    /// 404 Not Found.
     NotFound,
+    /// 405 Method Not Allowed.
     MethodNotAllowed,
+    /// 408 Request Timeout.
     Timeout,
+    /// 409 Conflict.
     Conflict,
+    /// 422 Unprocessable Entity.
     ValidationError,
+    /// 429 Too Many Requests.
     RateLimited,
+    /// 500 Internal Server Error.
     InternalError,
+    /// 503 Service Unavailable.
     ServiceUnavailable,
+    /// 504 Gateway Timeout.
     GatewayTimeout,
 }
 

@@ -104,6 +104,7 @@ pub struct TaskContextBuilder {
 }
 
 impl TaskContextBuilder {
+    /// Create a new builder with default values.
     pub fn new() -> Self {
         Self {
             datasources: HashMap::new(),
@@ -132,46 +133,55 @@ impl TaskContextBuilder {
         }
     }
 
+    /// Add a datasource token.
     pub fn datasource(mut self, name: String, token: DatasourceToken) -> Self {
         self.datasources.insert(name, token);
         self
     }
 
+    /// Add a DataView token.
     pub fn dataview(mut self, name: String, token: DataViewToken) -> Self {
         self.dataviews.insert(name, token);
         self
     }
 
+    /// Add a pre-resolved library module.
     pub fn lib(mut self, lib: ResolvedLib) -> Self {
         self.libs.push(lib);
         self
     }
 
+    /// Enable outbound HTTP capability.
     pub fn http(mut self, token: HttpToken) -> Self {
         self.http = Some(token);
         self
     }
 
+    /// Set the StorageEngine backend for `ctx.store`.
     pub fn storage(mut self, engine: Arc<dyn StorageEngine>) -> Self {
         self.storage = Some(engine);
         self
     }
 
+    /// Set the DriverFactory for `ctx.datasource().build()`.
     pub fn driver_factory(mut self, factory: Arc<DriverFactory>) -> Self {
         self.driver_factory = Some(factory);
         self
     }
 
+    /// Add a resolved datasource config for dynamic connection building.
     pub fn datasource_config(mut self, name: String, config: ResolvedDatasource) -> Self {
         self.datasource_configs.insert(name, config);
         self
     }
 
+    /// Set the DataViewExecutor for `ctx.dataview()` dynamic execution.
     pub fn dataview_executor(mut self, executor: Arc<DataViewExecutor>) -> Self {
         self.dataview_executor = Some(executor);
         self
     }
 
+    /// Set the LockBox resolver, keystore path, and identity for secret access.
     #[cfg(feature = "lockbox")]
     pub fn lockbox(
         mut self,
@@ -185,47 +195,56 @@ impl TaskContextBuilder {
         self
     }
 
+    /// Set the application keystore for encryption/decryption operations.
     #[cfg(feature = "keystore")]
     pub fn keystore(mut self, ks: Arc<rivers_keystore_engine::AppKeystore>) -> Self {
         self.keystore = Some(ks);
         self
     }
 
+    /// Add an environment variable.
     pub fn env_var(mut self, key: String, value: String) -> Self {
         self.env.insert(key, value);
         self
     }
 
+    /// Set the module and function to invoke.
     pub fn entrypoint(mut self, entrypoint: Entrypoint) -> Self {
         self.entrypoint = Some(entrypoint);
         self
     }
 
+    /// Set the JSON arguments for the handler function.
     pub fn args(mut self, args: serde_json::Value) -> Self {
         self.args = args;
         self
     }
 
+    /// Set the distributed trace ID.
     pub fn trace_id(mut self, trace_id: String) -> Self {
         self.trace_id = trace_id;
         self
     }
 
+    /// Set the application ID.
     pub fn app_id(mut self, id: String) -> Self {
         self.app_id = id;
         self
     }
 
+    /// Set the Rivers node ID.
     pub fn node_id(mut self, id: String) -> Self {
         self.node_id = id;
         self
     }
 
+    /// Set the runtime environment name (e.g. "dev", "staging", "prod").
     pub fn runtime_env(mut self, env: String) -> Self {
         self.runtime_env = env;
         self
     }
 
+    /// Build the `TaskContext`. Fails if entrypoint is not set.
     pub fn build(self) -> Result<TaskContext, TaskError> {
         let entrypoint = self
             .entrypoint

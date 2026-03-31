@@ -21,66 +21,106 @@ use crate::event::Event;
 /// Event type constants for all spec-defined events.
 /// Per `rivers-logging-spec.md` §4 event-to-level mapping.
 pub mod events {
-    // Request lifecycle
+    //! String constants for all spec-defined event types.
+
+    // ── Request lifecycle ───────────────────────────────────────
+    /// An HTTP request completed (success or error).
     pub const REQUEST_COMPLETED: &str = "RequestCompleted";
 
-    // DataView
+    // ── DataView ────────────────────────────────────────────────
+    /// A DataView query was executed.
     pub const DATAVIEW_EXECUTED: &str = "DataViewExecuted";
+    /// A cache entry was invalidated.
     pub const CACHE_INVALIDATION: &str = "CacheInvalidation";
 
-    // WebSocket
+    // ── WebSocket ───────────────────────────────────────────────
+    /// A WebSocket client connected.
     pub const WEBSOCKET_CONNECTED: &str = "WebSocketConnected";
+    /// A WebSocket client disconnected.
     pub const WEBSOCKET_DISCONNECTED: &str = "WebSocketDisconnected";
+    /// An inbound WebSocket message was received.
     pub const WEBSOCKET_MESSAGE_IN: &str = "WebSocketMessageIn";
+    /// An outbound WebSocket message was sent.
     pub const WEBSOCKET_MESSAGE_OUT: &str = "WebSocketMessageOut";
 
-    // SSE
+    // ── SSE ─────────────────────────────────────────────────────
+    /// An SSE stream was opened.
     pub const SSE_STREAM_OPENED: &str = "SseStreamOpened";
+    /// An SSE stream was closed.
     pub const SSE_STREAM_CLOSED: &str = "SseStreamClosed";
+    /// An SSE event was sent to a client.
     pub const SSE_EVENT_SENT: &str = "SseEventSent";
 
-    // Driver / Datasource
+    // ── Driver / Datasource ─────────────────────────────────────
+    /// A driver was registered in the DriverFactory.
     pub const DRIVER_REGISTERED: &str = "DriverRegistered";
+    /// A datasource connection was established.
     pub const DATASOURCE_CONNECTED: &str = "DatasourceConnected";
+    /// A datasource connection was lost.
     pub const DATASOURCE_DISCONNECTED: &str = "DatasourceDisconnected";
+    /// A datasource connection attempt failed.
     pub const DATASOURCE_CONNECTION_FAILED: &str = "DatasourceConnectionFailed";
+    /// A previously-disconnected datasource reconnected.
     pub const DATASOURCE_RECONNECTED: &str = "DatasourceReconnected";
+    /// A circuit breaker tripped open for a datasource.
     pub const DATASOURCE_CIRCUIT_OPENED: &str = "DatasourceCircuitOpened";
+    /// A circuit breaker closed (recovered) for a datasource.
     pub const DATASOURCE_CIRCUIT_CLOSED: &str = "DatasourceCircuitClosed";
+    /// A datasource health check failed.
     pub const DATASOURCE_HEALTH_CHECK_FAILED: &str = "DatasourceHealthCheckFailed";
+    /// All connections in a pool are in use.
     pub const CONNECTION_POOL_EXHAUSTED: &str = "ConnectionPoolExhausted";
 
-    // Broker
+    // ── Broker ──────────────────────────────────────────────────
+    /// A broker consumer started listening.
     pub const BROKER_CONSUMER_STARTED: &str = "BrokerConsumerStarted";
+    /// A broker consumer stopped.
     pub const BROKER_CONSUMER_STOPPED: &str = "BrokerConsumerStopped";
+    /// A message was received from a broker.
     pub const BROKER_MESSAGE_RECEIVED: &str = "BrokerMessageReceived";
+    /// A message was published to a broker.
     pub const BROKER_MESSAGE_PUBLISHED: &str = "BrokerMessagePublished";
+    /// A broker consumer encountered an error.
     pub const BROKER_CONSUMER_ERROR: &str = "BrokerConsumerError";
+    /// Consumer lag was detected on a broker topic.
     pub const CONSUMER_LAG_DETECTED: &str = "ConsumerLagDetected";
+    /// A Kafka partition rebalance occurred.
     pub const PARTITION_REBALANCED: &str = "PartitionRebalanced";
+    /// A message processing attempt failed.
     pub const MESSAGE_FAILED: &str = "MessageFailed";
 
-    // EventBus internal
+    // ── EventBus internal ───────────────────────────────────────
+    /// An event was published to a topic.
     pub const EVENTBUS_TOPIC_PUBLISHED: &str = "EventBusTopicPublished";
+    /// A handler subscribed to a topic.
     pub const EVENTBUS_TOPIC_SUBSCRIBED: &str = "EventBusTopicSubscribed";
+    /// A handler unsubscribed from a topic.
     pub const EVENTBUS_TOPIC_UNSUBSCRIBED: &str = "EventBusTopicUnsubscribed";
 
-    // Deployment / Config
+    // ── Deployment / Config ─────────────────────────────────────
+    /// A deployment status changed (deploying, deployed, failed).
     pub const DEPLOYMENT_STATUS_CHANGED: &str = "DeploymentStatusChanged";
+    /// A config file was modified on disk.
     pub const CONFIG_FILE_CHANGED: &str = "ConfigFileChanged";
 
-    // Cluster / Security
+    // ── Cluster / Security ──────────────────────────────────────
+    /// A cluster node's health status changed.
     pub const NODE_HEALTH_CHANGED: &str = "NodeHealthChanged";
 
-    // Plugin
+    // ── Plugin ──────────────────────────────────────────────────
+    /// A plugin failed to load.
     pub const PLUGIN_LOAD_FAILED: &str = "PluginLoadFailed";
 
-    // Polling
+    // ── Polling ─────────────────────────────────────────────────
+    /// A poll tick handler failed.
     pub const POLL_TICK_FAILED: &str = "PollTickFailed";
+    /// An onChange handler failed.
     pub const ON_CHANGE_FAILED: &str = "OnChangeFailed";
+    /// A poll change detection timed out.
     pub const POLL_CHANGE_DETECT_TIMEOUT: &str = "PollChangeDetectTimeout";
 
-    // Internal
+    // ── Internal ────────────────────────────────────────────────
+    /// An EventBus handler execution failed.
     pub const HANDLER_EXECUTION_FAILED: &str = "HandlerExecutionFailed";
 }
 
@@ -120,9 +160,13 @@ pub fn event_log_level(event_type: &str) -> LogLevel {
 /// Observe handlers are spawned fire-and-forget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HandlerPriority {
+    /// Awaited first — must complete before the request continues.
     Expect = 0,
+    /// Awaited second — normal blocking handlers.
     Handle = 1,
+    /// Awaited third — side-effect emission.
     Emit = 2,
+    /// Fire-and-forget — spawned as background tasks.
     Observe = 3,
 }
 
@@ -306,8 +350,11 @@ impl Default for EventBus {
 /// An error from an Expect, Handle, or Emit handler during publish.
 #[derive(Debug)]
 pub struct EventBusError {
+    /// Name of the handler that failed.
     pub handler_name: String,
+    /// Event type that triggered the failure.
     pub event_type: String,
+    /// Error message.
     pub error: String,
 }
 

@@ -25,25 +25,35 @@ pub struct ResolverMapping {
 /// A GraphQL type generated from a DataView return schema.
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphqlType {
+    /// GraphQL type name (PascalCase).
     pub name: String,
+    /// Fields belonging to this type.
     pub fields: Vec<GraphqlField>,
 }
 
 /// A field in a GraphQL type.
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphqlField {
+    /// Field name.
     pub name: String,
+    /// Field type.
     pub field_type: GraphqlFieldType,
+    /// Whether the field is nullable.
     pub nullable: bool,
 }
 
 /// GraphQL field type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum GraphqlFieldType {
+    /// UTF-8 string scalar.
     String,
+    /// 32-bit integer scalar.
     Int,
+    /// 64-bit floating-point scalar.
     Float,
+    /// Boolean scalar.
     Boolean,
+    /// Unique identifier scalar.
     ID,
     /// Reference to another GraphQL type.
     Object(std::string::String),

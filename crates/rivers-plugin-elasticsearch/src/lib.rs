@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! Elasticsearch plugin driver (DatabaseDriver).
 //!
 //! Implements `DatabaseDriver` using `reqwest` for direct REST API calls.
@@ -25,6 +26,7 @@ use rivers_driver_sdk::{
 
 // ── Driver ─────────────────────────────────────────────────────────────
 
+/// Elasticsearch driver factory — creates connections via REST API.
 pub struct ElasticsearchDriver;
 
 #[async_trait]
@@ -76,6 +78,7 @@ impl DatabaseDriver for ElasticsearchDriver {
 
 // ── Connection ─────────────────────────────────────────────────────────
 
+/// Active Elasticsearch connection for executing REST API operations.
 pub struct ElasticConnection {
     client: Client,
     base_url: String,

@@ -10,30 +10,50 @@ use rivers_driver_sdk::DriverError;
 /// Global ExecDriver datasource configuration (spec section 4.1).
 #[derive(Debug, Clone)]
 pub struct ExecConfig {
+    /// Unix username for privilege-dropped execution.
     pub run_as_user: String,
+    /// Working directory for spawned processes.
     pub working_directory: PathBuf,
+    /// Default timeout in milliseconds for command execution.
     pub default_timeout_ms: u64,
+    /// Maximum bytes to read from stdout before truncation.
     pub max_stdout_bytes: usize,
+    /// Global concurrency limit across all commands.
     pub max_concurrent: usize,
+    /// Default integrity check mode for all commands.
     pub integrity_check: IntegrityMode,
+    /// Named command configurations.
     pub commands: HashMap<String, CommandConfig>,
 }
 
 /// Per-command configuration (spec section 5).
 #[derive(Debug, Clone)]
 pub struct CommandConfig {
+    /// Absolute path to the executable.
     pub path: PathBuf,
+    /// Expected SHA-256 hash of the executable file.
     pub sha256: String,
+    /// How parameters are delivered to the command.
     pub input_mode: InputMode,
+    /// Template strings for argument interpolation (when `input_mode` is `Args` or `Both`).
     pub args_template: Option<Vec<String>>,
+    /// Key whose value is sent on stdin (when `input_mode` is `Both`).
     pub stdin_key: Option<String>,
+    /// Path to a JSON schema file for input validation.
     pub args_schema: Option<PathBuf>,
+    /// Per-command timeout override in milliseconds.
     pub timeout_ms: Option<u64>,
+    /// Per-command stdout byte limit override.
     pub max_stdout_bytes: Option<usize>,
+    /// Per-command concurrency limit override.
     pub max_concurrent: Option<usize>,
+    /// Per-command integrity check mode override.
     pub integrity_check: Option<IntegrityMode>,
+    /// Whether to clear the environment before spawning.
     pub env_clear: bool,
+    /// Environment variables to pass through when `env_clear` is true.
     pub env_allow: Vec<String>,
+    /// Environment variables to set explicitly.
     pub env_set: HashMap<String, String>,
 }
 

@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! LDAP plugin driver (DatabaseDriver).
 //!
 //! Implements `DatabaseDriver` using the `ldap3` async client.
@@ -23,6 +24,7 @@ use rivers_driver_sdk::{
 
 // -- Driver -----------------------------------------------------------------
 
+/// LDAP driver factory — creates connections via the `ldap3` async client.
 pub struct LdapDriver;
 
 #[async_trait]
@@ -77,6 +79,7 @@ impl DatabaseDriver for LdapDriver {
 
 // -- Connection -------------------------------------------------------------
 
+/// Active LDAP connection for search, add, modify, and delete operations.
 pub struct LdapConnection {
     ldap: Ldap,
 }

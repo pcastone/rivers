@@ -25,46 +25,97 @@ use crate::tiered_cache::{cache_key, DataViewCache};
 /// Errors from DataView operations.
 #[derive(Debug, thiserror::Error)]
 pub enum DataViewError {
+    /// Named DataView does not exist in the registry.
     #[error("dataview not found: '{name}'")]
-    NotFound { name: String },
+    NotFound {
+        /// DataView name that was looked up.
+        name: String,
+    },
 
+    /// A required parameter was not supplied.
     #[error("missing required parameter '{name}' for dataview '{dataview}'")]
-    MissingParameter { name: String, dataview: String },
+    MissingParameter {
+        /// Parameter name.
+        name: String,
+        /// DataView name.
+        dataview: String,
+    },
 
+    /// Supplied parameter value does not match the declared type.
     #[error("parameter type mismatch for '{name}': expected {expected}, got {actual}")]
     ParameterTypeMismatch {
+        /// Parameter name.
         name: String,
+        /// Expected type (e.g. "integer").
         expected: String,
+        /// Actual type of the supplied value.
         actual: String,
     },
 
+    /// Unknown parameter supplied when `strict_parameters` is enabled.
     #[error("unknown parameter '{name}' for dataview '{dataview}' (strict mode)")]
-    UnknownParameter { name: String, dataview: String },
+    UnknownParameter {
+        /// Parameter name.
+        name: String,
+        /// DataView name.
+        dataview: String,
+    },
 
+    /// Return-schema validation failed.
     #[error("schema validation failed: {reason}")]
-    Schema { reason: String },
+    Schema {
+        /// Human-readable validation failure.
+        reason: String,
+    },
 
+    /// Connection pool or datasource error.
     #[error("pool error: {0}")]
     Pool(String),
 
+    /// Driver-level execution error.
     #[error("driver error: {0}")]
     Driver(String),
 
+    /// Malformed request (empty name, zero timeout, etc.).
     #[error("invalid request: {reason}")]
-    InvalidRequest { reason: String },
+    InvalidRequest {
+        /// What was wrong with the request.
+        reason: String,
+    },
 
+    /// Schema attribute not supported by the target driver.
     #[error("unsupported schema attribute: {attribute} for driver {driver}")]
-    UnsupportedSchemaAttribute { attribute: String, driver: String },
+    UnsupportedSchemaAttribute {
+        /// Attribute name.
+        attribute: String,
+        /// Driver name.
+        driver: String,
+    },
 
+    /// Schema file does not exist at the configured path.
     #[error("schema file not found: {path}")]
-    SchemaFileNotFound { path: String },
+    SchemaFileNotFound {
+        /// Filesystem path.
+        path: String,
+    },
 
+    /// Schema file could not be parsed as JSON.
     #[error("schema file parse error: {path}: {reason}")]
-    SchemaFileParseError { path: String, reason: String },
+    SchemaFileParseError {
+        /// Filesystem path.
+        path: String,
+        /// Parse error details.
+        reason: String,
+    },
 
+    /// Unknown faker method referenced in schema.
     #[error("unknown faker method: {method}")]
-    UnknownFakerMethod { method: String },
+    UnknownFakerMethod {
+        /// Faker method string (e.g. "name.invalid").
+        method: String,
+    },
 
+    /// Cache read/write error.
     #[error("cache error: {0}")]
     Cache(String),
 }
@@ -76,11 +127,17 @@ pub enum DataViewError {
 /// Per spec §6.3.
 #[derive(Debug, Clone)]
 pub struct DataViewRequest {
+    /// DataView name (must match a registry entry).
     pub name: String,
+    /// HTTP method for per-method query/parameter resolution.
     pub method: String,
+    /// Resolved parameter values.
     pub parameters: HashMap<String, QueryValue>,
+    /// Optional per-request timeout override.
     pub timeout_ms: Option<u64>,
+    /// Distributed trace ID for observability.
     pub trace_id: String,
+    /// When true, skip cache lookup and force a fresh execution.
     pub cache_bypass: bool,
 }
 
@@ -89,9 +146,13 @@ pub struct DataViewRequest {
 /// Per spec §6.3. query_result is Arc-wrapped to avoid deep clones on cache hits.
 #[derive(Debug, Clone)]
 pub struct DataViewResponse {
+    /// Query result (Arc-wrapped to avoid deep clones on cache hits).
     pub query_result: Arc<QueryResult>,
+    /// Wall-clock execution time in milliseconds.
     pub execution_time_ms: u64,
+    /// Whether this result came from the cache.
     pub cache_hit: bool,
+    /// Distributed trace ID echoed from the request.
     pub trace_id: String,
 }
 
@@ -275,6 +336,10 @@ fn json_value_to_query_value(val: &serde_json::Value, param_type: &str) -> Optio
     }
 }
 
+/// Return the zero-value default for a parameter type.
+///
+/// Per spec §6.5: `""` for String, `0` for Integer, `0.0` for Float,
+/// `false` for Boolean, `[]` for Array.
 pub fn zero_value_for_type(param_type: &str) -> QueryValue {
     match param_type.to_lowercase().as_str() {
         "string" => QueryValue::String(String::new()),

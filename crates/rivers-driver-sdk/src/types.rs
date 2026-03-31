@@ -10,12 +10,19 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum QueryValue {
+    /// SQL NULL or absent value.
     Null,
+    /// Boolean true/false.
     Boolean(bool),
+    /// Signed 64-bit integer.
     Integer(i64),
+    /// 64-bit floating point number.
     Float(f64),
+    /// UTF-8 string value.
     String(String),
+    /// Ordered list of values.
     Array(Vec<QueryValue>),
+    /// Arbitrary structured JSON payload.
     Json(serde_json::Value),
 }
 
@@ -101,9 +108,13 @@ pub fn infer_operation(statement: &str) -> String {
 /// Canonical operation category for a query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationCategory {
+    /// SELECT, GET, FIND, SCAN, etc.
     Read,
+    /// INSERT, UPDATE, SET, XADD, PUBLISH, etc.
     Write,
+    /// DELETE, DEL, DROP, TRUNCATE, REMOVE, etc.
     Delete,
+    /// Unrecognized operation — passed through to the driver.
     Other,
 }
 
@@ -162,8 +173,11 @@ fn strip_sql_comments(input: &str) -> String {
 /// Drivers must never return rows as None — use empty vec.
 #[derive(Debug, Clone)]
 pub struct QueryResult {
+    /// Result rows — each row is a map of column name to value.
     pub rows: Vec<HashMap<String, QueryValue>>,
+    /// Number of rows affected by write operations, or `rows.len()` for reads.
     pub affected_rows: u64,
+    /// Auto-generated ID from an INSERT, if the driver provides one.
     pub last_insert_id: Option<String>,
 }
 

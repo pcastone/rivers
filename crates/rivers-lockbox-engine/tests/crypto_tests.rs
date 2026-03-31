@@ -4,6 +4,7 @@ use std::path::Path;
 
 use age::secrecy::ExposeSecret;
 use rivers_lockbox_engine::*;
+use zeroize::Zeroize;
 
 /// Helper: build a KeystoreEntry with sensible defaults.
 fn make_entry(name: &str, value: &str, entry_type: &str, aliases: &[&str]) -> KeystoreEntry {
@@ -198,6 +199,29 @@ fn fetch_secret_value_round_trip() {
     assert_eq!(resolved.name, "third");
     assert_eq!(resolved.value, "value-three");
     assert_eq!(resolved.entry_type, EntryType::Pem);
+}
+
+#[test]
+fn fetch_secret_value_zeroize_after_use() {
+    let (identity_str, recipient_str) = generate_keypair();
+
+    let keystore = Keystore {
+        version: 1,
+        entries: vec![make_entry("api-key", "super-secret", "string", &[])],
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zeroize.rkeystore");
+    encrypt_keystore(&path, &recipient_str, &keystore).unwrap();
+
+    let resolver = LockBoxResolver::from_entries(&keystore.entries).unwrap();
+    let meta = resolver.resolve("api-key").unwrap();
+    let mut resolved = fetch_secret_value(meta, &path, identity_str.trim()).unwrap();
+
+    assert_eq!(resolved.value, "super-secret");
+    resolved.value.zeroize();
+    assert_eq!(resolved.value, "");
+    assert_eq!(resolved.name, "api-key");
 }
 
 // ── Keystore TOML Serialization ──────────────────────────────────

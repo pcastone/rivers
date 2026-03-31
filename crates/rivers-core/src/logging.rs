@@ -22,9 +22,13 @@ use crate::eventbus::{event_log_level, EventBus, EventHandler, HandlerPriority};
 ///
 /// Runs at `Observe` tier — fire-and-forget, never blocks requests.
 pub struct LogHandler {
+    /// Output format (JSON or text).
     pub format: LogFormat,
+    /// Minimum severity — events below this level are discarded.
     pub min_level: LogLevel,
+    /// Application ID included in every log record.
     pub app_id: String,
+    /// Node ID included in every log record.
     pub node_id: String,
     /// Optional async-buffered file writer for local log persistence.
     file_writer: Option<std::sync::Mutex<std::io::BufWriter<std::fs::File>>>,
@@ -33,11 +37,14 @@ pub struct LogHandler {
 /// Log output format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
+    /// Structured JSON — one record per line.
     Json,
+    /// Human-readable single-line text.
     Text,
 }
 
 impl LogFormat {
+    /// Parse a format string (`"json"` or `"text"`). Defaults to JSON.
     pub fn parse(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "text" => LogFormat::Text,

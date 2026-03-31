@@ -13,20 +13,24 @@ pub struct KeystoreResolver {
 }
 
 impl KeystoreResolver {
+    /// Create an empty keystore resolver.
     pub fn new() -> Self {
         Self {
             keystores: HashMap::new(),
         }
     }
 
+    /// Insert an unlocked keystore under the given scoped name.
     pub fn insert(&mut self, scoped_name: String, ks: rivers_keystore_engine::AppKeystore) {
         self.keystores.insert(scoped_name, Arc::new(ks));
     }
 
+    /// Get a keystore by its scoped name.
     pub fn get(&self, scoped_name: &str) -> Option<&Arc<rivers_keystore_engine::AppKeystore>> {
         self.keystores.get(scoped_name)
     }
 
+    /// Returns true if no keystores are registered.
     pub fn is_empty(&self) -> bool {
         self.keystores.is_empty()
     }

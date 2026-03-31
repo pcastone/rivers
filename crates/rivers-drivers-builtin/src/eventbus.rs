@@ -30,6 +30,7 @@ pub type EventBusPublisher = Arc<dyn Fn(String, serde_json::Value) + Send + Sync
 pub struct EventBusDriver;
 
 impl EventBusDriver {
+    /// Create a new EventBus driver instance.
     pub fn new() -> Self {
         Self
     }

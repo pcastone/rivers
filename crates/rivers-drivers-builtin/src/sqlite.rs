@@ -27,7 +27,7 @@ const SQLITE_TYPES: &[&str] = &[
 
 /// SQLite database driver.
 ///
-/// Creates [`SqliteConnection`] instances backed by rusqlite. Each connection
+/// Creates `SqliteConnection` instances backed by rusqlite. Each connection
 /// opens its own database file (or `:memory:` instance) with WAL mode and a
 /// 5-second busy timeout.
 ///
@@ -35,6 +35,7 @@ const SQLITE_TYPES: &[&str] = &[
 pub struct SqliteDriver;
 
 impl SqliteDriver {
+    /// Create a new SQLite driver instance.
     pub fn new() -> Self {
         Self
     }

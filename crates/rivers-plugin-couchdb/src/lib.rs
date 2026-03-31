@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! CouchDB plugin driver (DatabaseDriver).
 //!
 //! Implements `DatabaseDriver` using `reqwest` HTTP client.
@@ -26,6 +27,7 @@ use rivers_driver_sdk::{
 
 // ── Driver ─────────────────────────────────────────────────────────────
 
+/// CouchDB driver factory — creates connections via HTTP REST API.
 pub struct CouchDBDriver;
 
 #[async_trait]
@@ -91,6 +93,7 @@ impl DatabaseDriver for CouchDBDriver {
 
 // ── Connection ─────────────────────────────────────────────────────────
 
+/// Active CouchDB connection for executing Mango queries and document operations.
 pub struct CouchDBConnection {
     client: Client,
     base_url: String,

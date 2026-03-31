@@ -20,16 +20,27 @@ use rivers_driver_sdk::types::QueryValue;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RiversType {
+    /// Universally unique identifier (8-4-4-4-12 hex).
     Uuid,
+    /// UTF-8 text.
     String,
+    /// Signed 64-bit integer.
     Integer,
+    /// 64-bit floating point.
     Float,
+    /// Boolean true/false.
     Boolean,
+    /// Email address (local@domain).
     Email,
+    /// Phone number (7+ digits).
     Phone,
+    /// ISO 8601 date-time string.
     Datetime,
+    /// ISO 8601 date (YYYY-MM-DD).
     Date,
+    /// HTTP/HTTPS URL.
     Url,
+    /// Arbitrary JSON value.
     Json,
 }
 
@@ -58,11 +69,14 @@ pub struct SchemaFile {
 /// Driver-specific attributes are stored in `attributes`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaField {
+    /// Field name (must match result row keys).
     pub name: String,
 
+    /// Rivers primitive type.
     #[serde(rename = "type")]
     pub field_type: RiversType,
 
+    /// Whether this field must be present in every result row.
     #[serde(default)]
     pub required: bool,
 
@@ -77,26 +91,50 @@ pub struct SchemaField {
 /// Errors from schema operations.
 #[derive(Debug, thiserror::Error)]
 pub enum SchemaError {
+    /// Schema file does not exist at the configured path.
     #[error("schema file not found: {path}")]
-    FileNotFound { path: String },
+    FileNotFound {
+        /// Filesystem path.
+        path: String,
+    },
 
+    /// Schema file could not be parsed as JSON.
     #[error("schema file parse error in '{path}': {reason}")]
-    ParseError { path: String, reason: String },
+    ParseError {
+        /// Filesystem path.
+        path: String,
+        /// Parse error details.
+        reason: String,
+    },
 
+    /// Schema attribute not supported by the target driver.
     #[error("schema attribute '{attribute}' is not supported by driver '{driver}'. Supported attributes: {supported:?}")]
     UnsupportedAttribute {
+        /// Attribute name (e.g. "faker").
         attribute: String,
+        /// Driver name (e.g. "postgresql").
         driver: String,
+        /// List of supported attributes for this driver.
         supported: Vec<String>,
     },
 
+    /// Faker method string not recognized.
     #[error("unknown faker method '{method}' on field '{field}'")]
-    UnknownFakerMethod { method: String, field: String },
+    UnknownFakerMethod {
+        /// Faker method string (e.g. "name.invalid").
+        method: String,
+        /// Field name in the schema.
+        field: String,
+    },
 
+    /// Result row value does not match the declared field type.
     #[error("type validation failed for field '{field}': expected {expected}, got {actual}")]
     TypeValidation {
+        /// Field path (e.g. `row[0].email`).
         field: String,
+        /// Expected type description.
         expected: String,
+        /// Actual value description.
         actual: String,
     },
 }

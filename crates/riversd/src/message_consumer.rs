@@ -25,6 +25,7 @@ use crate::process_pool::{
 /// Parsed MessageConsumer view configuration.
 #[derive(Debug, Clone)]
 pub struct MessageConsumerConfig {
+    /// View identifier.
     pub view_id: String,
     /// EventBus topic to subscribe to.
     pub topic: String,
@@ -346,15 +347,19 @@ impl EventHandler for MessageConsumerHandler {
 /// MessageConsumer errors.
 #[derive(Debug, thiserror::Error)]
 pub enum MessageConsumerError {
+    /// Direct HTTP access is not allowed for MessageConsumer views.
     #[error("direct HTTP access not allowed for MessageConsumer view '{0}'")]
     DirectHttpAccess(String),
 
+    /// Handler requires a CodeComponent that is not loaded.
     #[error("handler requires CodeComponent (not yet available)")]
     CodeComponentRequired,
 
+    /// The referenced EventBus topic does not exist.
     #[error("topic not found: {0}")]
     TopicNotFound(String),
 
+    /// The CodeComponent handler returned an error.
     #[error("handler error: {0}")]
     HandlerError(String),
 }

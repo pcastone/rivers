@@ -34,7 +34,12 @@ pub enum HttpDriverError {
 
     /// Response status code not in `success_status` list.
     #[error("unexpected HTTP status {status}: {body}")]
-    UnexpectedStatus { status: u16, body: String },
+    UnexpectedStatus {
+        /// The HTTP status code received.
+        status: u16,
+        /// Response body (truncated for error display).
+        body: String,
+    },
 
     /// Request timed out.
     #[error("HTTP request timed out after {0}ms")]
@@ -129,7 +134,7 @@ pub trait HttpStreamConnection: Send + Sync {
 /// Per spec §2.1.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpConnectionParams {
-    /// Base URL for the upstream (e.g. "https://api.openai.com").
+    /// Base URL for the upstream (e.g. `"https://api.openai.com"`).
     pub base_url: String,
     /// Protocol to use.
     pub protocol: HttpProtocol,
@@ -245,7 +250,7 @@ pub enum AuthState {
     Active {
         /// The header name (e.g. "Authorization", "X-Api-Key").
         header_name: String,
-        /// The header value (e.g. "Bearer <token>").
+        /// The header value (e.g. `"Bearer <token>"`).
         header_value: String,
     },
     /// Auth token has expired and needs refresh.
@@ -279,12 +284,18 @@ pub struct HttpRequest {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum HttpMethod {
+    /// HTTP GET (default).
     #[default]
     Get,
+    /// HTTP POST.
     Post,
+    /// HTTP PUT.
     Put,
+    /// HTTP PATCH.
     Patch,
+    /// HTTP DELETE.
     Delete,
+    /// HTTP HEAD.
     Head,
 }
 

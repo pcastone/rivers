@@ -10,8 +10,11 @@ use serde::{Deserialize, Serialize};
 /// Per spec §11.2: no `env`, no `node_id`, no runtime metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplicationContext {
+    /// Unique application identifier (UUID).
     pub app_id: String,
+    /// Human-readable application name.
     pub app_name: String,
+    /// App-level configuration key-value map from `[app.config]`.
     pub config: HashMap<String, serde_json::Value>,
 }
 
@@ -20,10 +23,15 @@ pub struct ApplicationContext {
 /// Per technology-path-spec §10.3.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorsPolicy {
+    /// Allowed origin URLs.
     pub origins: Vec<String>,
+    /// Allowed HTTP methods.
     pub methods: Vec<String>,
+    /// Allowed request headers.
     pub headers: Vec<String>,
+    /// Whether to include credentials (cookies, auth headers).
     pub credentials: bool,
+    /// Optional preflight cache duration in seconds.
     #[serde(default)]
     pub max_age: Option<u64>,
 }
@@ -39,9 +47,12 @@ pub type ShutdownFn = Box<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<
 /// Populated by the init handler, consumed by the runtime.
 #[derive(Debug)]
 pub struct AppInitResult {
+    /// CORS policy set by the init handler, if any.
     pub cors_policy: Option<CorsPolicy>,
-    pub health_check: Option<String>,  // Placeholder — real impl would use fn
-    pub shutdown_hooks: Vec<String>,    // Placeholder — real impl would use fn
+    /// Custom health-check response string (placeholder).
+    pub health_check: Option<String>,
+    /// Shutdown hook identifiers (placeholder).
+    pub shutdown_hooks: Vec<String>,
 }
 
 impl Default for AppInitResult {

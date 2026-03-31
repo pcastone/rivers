@@ -18,11 +18,17 @@ const SESSION_NAMESPACE: &str = "session";
 /// Per spec §4.1: session_id, subject, claims, created_at, expires_at, last_seen.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
+    /// Unique session identifier (e.g. `sess_<uuid>`).
     pub session_id: String,
+    /// Authenticated subject (username, user ID, etc.).
     pub subject: String,
+    /// Arbitrary claims associated with the session.
     pub claims: serde_json::Value,
+    /// When the session was created.
     pub created_at: DateTime<Utc>,
+    /// Absolute session expiry time.
     pub expires_at: DateTime<Utc>,
+    /// Last time the session was accessed (for idle timeout).
     pub last_seen: DateTime<Utc>,
 }
 
@@ -36,6 +42,7 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    /// Create a new session manager backed by the given storage engine.
     pub fn new(storage: Arc<dyn StorageEngine>, config: SessionConfig) -> Self {
         Self { storage, config }
     }
@@ -269,9 +276,11 @@ pub fn build_claims_header(session: &serde_json::Value) -> Option<String> {
 /// Session management errors.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
+    /// StorageEngine read/write failure.
     #[error("storage error: {0}")]
     Storage(String),
 
+    /// Internal serialization or logic error.
     #[error("internal error: {0}")]
     Internal(String),
 }

@@ -1,3 +1,12 @@
+[data.datasources.nats]
+name       = "nats"
+driver     = "nats"
+nopassword = true
+
+[data.datasources.nats.config]
+host = "192.168.2.229"
+port = 4222
+
 [data.dataviews.publish_event]
 name       = "publish_event"
 datasource = "nats"
@@ -9,13 +18,14 @@ type     = "string"
 required = true
 
 [api.views.events]
-path     = "events"
-method   = "POST"
-auth     = "none"
-dataview = "publish_event"
+path      = "events"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
 
 [api.views.events.handler]
-type = "dataview"
+type     = "dataview"
+dataview = "publish_event"
 
 [api.views.events.parameter_mapping.body]
 payload = "payload"

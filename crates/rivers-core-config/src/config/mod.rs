@@ -3,10 +3,15 @@
 //! Maps to `riversd.conf` — the top-level TOML config for a riversd instance.
 //! Per `rivers-httpd-spec.md` §19.
 
+/// Runtime, process pool, environment overrides, logging, engines, plugins, GraphQL, and static files.
 pub mod runtime;
+/// Security, CORS, rate limiting, CSRF, and session configuration.
 pub mod security;
+/// Root server config, base settings, backpressure, and HTTP/2.
 pub mod server;
+/// Storage engine and cache configuration.
 pub mod storage;
+/// TLS, admin API, cluster, and session store configuration.
 pub mod tls;
 
 pub use runtime::*;

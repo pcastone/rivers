@@ -24,18 +24,34 @@ use rivers_runtime::rivers_driver_sdk::traits::{Connection, ConnectionParams, Da
 /// Errors from the connection pool.
 #[derive(Debug, thiserror::Error)]
 pub enum PoolError {
+    /// The circuit breaker is open for the given datasource.
     #[error("circuit breaker is open for datasource '{datasource}'")]
-    CircuitOpen { datasource: String },
+    CircuitOpen {
+        /// Datasource that triggered the circuit open.
+        datasource: String,
+    },
 
+    /// Timed out waiting for an available connection.
     #[error("connection timeout after {timeout_ms}ms for datasource '{datasource}'")]
-    Timeout { datasource: String, timeout_ms: u64 },
+    Timeout {
+        /// Datasource the timeout occurred on.
+        datasource: String,
+        /// Elapsed timeout in milliseconds.
+        timeout_ms: u64,
+    },
 
+    /// Pool is draining and rejecting new checkouts.
     #[error("pool is draining, no new checkouts for datasource '{datasource}'")]
-    Draining { datasource: String },
+    Draining {
+        /// Datasource whose pool is draining.
+        datasource: String,
+    },
 
+    /// Error propagated from the underlying driver.
     #[error("driver error: {0}")]
     Driver(#[from] rivers_runtime::rivers_driver_sdk::error::DriverError),
 
+    /// Invalid pool configuration.
     #[error("pool configuration error: {0}")]
     Config(String),
 }
@@ -155,8 +171,11 @@ impl From<&rivers_runtime::datasource::CircuitBreakerConfig> for CircuitBreakerC
 /// Circuit breaker state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircuitState {
+    /// Circuit is healthy; all requests pass through.
     Closed,
+    /// Circuit has tripped; requests are rejected.
     Open,
+    /// Circuit is testing recovery with limited trial requests.
     HalfOpen,
 }
 
@@ -177,6 +196,7 @@ pub struct CircuitBreaker {
 }
 
 impl CircuitBreaker {
+    /// Create a new circuit breaker in the closed state.
     pub fn new(config: CircuitBreakerConfig) -> Self {
         Self {
             config,
@@ -297,13 +317,21 @@ impl CircuitBreaker {
 /// Per spec §5.4 — accessible via admin `/status` endpoint.
 #[derive(Debug, Clone)]
 pub struct PoolSnapshot {
+    /// Identifier of the datasource this snapshot belongs to.
     pub datasource_id: String,
+    /// Number of connections currently checked out.
     pub active_connections: usize,
+    /// Number of connections sitting idle in the pool.
     pub idle_connections: usize,
+    /// Sum of active and idle connections.
     pub total_connections: usize,
+    /// Cumulative number of successful checkouts.
     pub checkout_count: u64,
+    /// Average wait time per checkout in milliseconds.
     pub avg_wait_ms: u64,
+    /// Configured maximum pool size.
     pub max_size: usize,
+    /// Configured minimum idle connections.
     pub min_idle: usize,
 }
 

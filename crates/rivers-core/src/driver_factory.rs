@@ -167,11 +167,18 @@ impl DriverRegistrar for DriverFactory {
 pub enum PluginLoadResult {
     /// Plugin loaded and registered successfully.
     Success {
+        /// Filesystem path of the loaded shared library.
         path: String,
+        /// Driver names that were registered by this plugin.
         driver_names: Vec<String>,
     },
     /// Plugin failed to load.
-    Failed { path: String, reason: String },
+    Failed {
+        /// Filesystem path that was attempted.
+        path: String,
+        /// Human-readable failure reason.
+        reason: String,
+    },
 }
 
 /// Load plugins from a directory.

@@ -176,28 +176,43 @@ pub fn check_permission(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DeploymentState {
+    /// Deployment is queued and awaiting processing.
     Pending,
+    /// Resolving dependencies and configuration.
     Resolving,
+    /// Application is starting up.
     Starting,
+    /// Application is live and serving traffic.
     Running,
+    /// Deployment failed during a prior phase.
     Failed,
+    /// Application is shutting down.
     Stopping,
+    /// Application has been fully stopped.
     Stopped,
 }
 
 /// A deployment record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Deployment {
+    /// Unique deployment identifier (e.g. `deploy_<uuid>`).
     pub deploy_id: String,
+    /// Application identifier this deployment belongs to.
     pub app_id: String,
+    /// Name of the bundle being deployed.
     pub bundle_name: String,
+    /// Current state in the deployment lifecycle.
     pub state: DeploymentState,
+    /// RFC 3339 timestamp when the deployment was created.
     pub created_at: String,
+    /// RFC 3339 timestamp of the last state change.
     pub updated_at: String,
+    /// Error message if the deployment failed.
     pub error: Option<String>,
 }
 
 impl Deployment {
+    /// Create a new deployment in the `Pending` state.
     pub fn new(app_id: String, bundle_name: String) -> Self {
         let now = chrono::Utc::now().to_rfc3339();
         Self {
@@ -242,27 +257,50 @@ impl Deployment {
 /// Admin API errors.
 #[derive(Debug, thiserror::Error)]
 pub enum AdminError {
+    /// Timestamp header could not be parsed as an integer.
     #[error("invalid timestamp: {0}")]
     InvalidTimestamp(String),
 
+    /// Request timestamp falls outside the replay protection window.
     #[error("replay detected: drift {drift_secs}s exceeds window {max_secs}s")]
-    ReplayDetected { drift_secs: u64, max_secs: u64 },
+    ReplayDetected {
+        /// Observed clock drift in milliseconds.
+        drift_secs: u64,
+        /// Maximum allowed drift in milliseconds.
+        max_secs: u64,
+    },
 
+    /// Remote IP is not on the configured allowlist.
     #[error("IP not allowed: {0}")]
     IpNotAllowed(String),
 
+    /// No role binding exists for the given identity.
     #[error("identity not found: {0}")]
     IdentityNotFound(String),
 
+    /// Role referenced by an identity binding does not exist.
     #[error("role not found: {0}")]
     RoleNotFound(String),
 
+    /// Identity lacks the required permission.
     #[error("permission denied: {identity} lacks {required}")]
-    PermissionDenied { identity: String, required: String },
+    PermissionDenied {
+        /// The identity that was denied.
+        identity: String,
+        /// The permission that was required.
+        required: String,
+    },
 
+    /// Attempted an illegal deployment state transition.
     #[error("invalid state transition: {from} → {to}")]
-    InvalidTransition { from: String, to: String },
+    InvalidTransition {
+        /// The current state.
+        from: String,
+        /// The target state that was rejected.
+        to: String,
+    },
 
+    /// Ed25519 signature verification is not yet implemented.
     #[error("Ed25519 signature verification not yet available")]
     SignatureVerificationUnavailable,
 }

@@ -83,24 +83,40 @@ pub struct OutboundMessage {
 /// Per spec §3.2. Variant is determined by the driver.
 #[derive(Debug, Clone)]
 pub enum BrokerMetadata {
+    /// Kafka-specific metadata.
     Kafka {
+        /// Partition the message was consumed from.
         partition: i32,
+        /// Offset within the partition.
         offset: i64,
+        /// Consumer group ID.
         consumer_group: String,
     },
+    /// RabbitMQ-specific metadata.
     Rabbit {
+        /// AMQP delivery tag for ack/nack.
         delivery_tag: u64,
+        /// Exchange the message was published to.
         exchange: String,
+        /// Routing key used for delivery.
         routing_key: String,
     },
+    /// NATS JetStream-specific metadata.
     Nats {
+        /// Stream sequence number.
         sequence: u64,
+        /// JetStream stream name.
         stream: String,
+        /// Consumer name.
         consumer: String,
     },
+    /// Redis Streams-specific metadata.
     Redis {
+        /// Stream entry ID (e.g. `"1234567890-0"`).
         stream_id: String,
+        /// Consumer group name.
         group: String,
+        /// Consumer name within the group.
         consumer: String,
     },
 }
@@ -113,11 +129,17 @@ pub enum BrokerMetadata {
 /// Consumer group ID is derived: `{group_prefix}.{app_id}.{datasource_id}.{component}`.
 #[derive(Debug, Clone)]
 pub struct BrokerConsumerConfig {
+    /// Prefix for the derived consumer group ID.
     pub group_prefix: String,
+    /// Application identifier (used in group ID derivation).
     pub app_id: String,
+    /// Datasource identifier (used in group ID derivation).
     pub datasource_id: String,
+    /// Node identifier for this Rivers instance.
     pub node_id: String,
+    /// Delay in milliseconds before reconnecting after a disconnect.
     pub reconnect_ms: u64,
+    /// Topics/queues/subjects to subscribe to.
     pub subscriptions: Vec<BrokerSubscription>,
 }
 
@@ -137,6 +159,7 @@ pub struct BrokerSubscription {
 /// Per spec §3.8.
 #[derive(Debug, Clone)]
 pub struct FailurePolicy {
+    /// How to dispose of the failed message.
     pub mode: FailureMode,
     /// Dead-letter or redirect target name.
     pub destination: Option<String>,

@@ -18,6 +18,7 @@ pub struct ShutdownCoordinator {
 }
 
 impl ShutdownCoordinator {
+    /// Create a new shutdown coordinator in non-draining state.
     pub fn new() -> Self {
         Self {
             draining: AtomicBool::new(false),

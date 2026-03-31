@@ -178,6 +178,45 @@ fn startup_resolve_file_not_found() {
 
 #[cfg(unix)]
 #[test]
+fn startup_resolve_insecure_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let keystore_path = dir.path().join("insecure.rkeystore");
+    std::fs::write(&keystore_path, "not-used").unwrap();
+    std::fs::set_permissions(&keystore_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let config = LockBoxConfig {
+        path: Some(keystore_path.to_str().unwrap().to_string()),
+        key_source: "env".to_string(),
+        key_env_var: "TEST_LOCKBOX_KEY_INSECURE_PERMS".to_string(),
+        ..Default::default()
+    };
+
+    let result = startup_resolve(&config, &[]);
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        LockBoxError::InsecureFilePermissions { mode, .. } => {
+            assert_eq!(mode, 0o644);
+        }
+        other => panic!("expected InsecureFilePermissions, got: {:?}", other),
+    }
+}
+
+#[test]
+fn error_config_missing() {
+    let config = LockBoxConfig::default();
+
+    let result = startup_resolve(&config, &[]);
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        LockBoxError::ConfigMissing => {}
+        other => panic!("expected ConfigMissing, got: {:?}", other),
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn startup_resolve_wrong_key() {
     let (_, recipient_str) = generate_keypair();
     let (wrong_identity_str, _) = generate_keypair();

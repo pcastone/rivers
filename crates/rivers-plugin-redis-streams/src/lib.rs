@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! Redis Streams plugin driver (MessageBrokerDriver).
 //!
 //! Implements `MessageBrokerDriver` using Redis Streams commands:
@@ -51,6 +52,7 @@ impl RedisConn {
 
 // ── Driver ─────────────────────────────────────────────────────────────
 
+/// Redis Streams driver factory — creates producers and consumers via XADD/XREADGROUP.
 pub struct RedisStreamsDriver;
 
 #[async_trait]
@@ -307,6 +309,7 @@ fn redis_value_to_string(v: &RedisValue) -> Option<String> {
 
 // ── Producer ───────────────────────────────────────────────────────────
 
+/// Redis Streams producer — publishes messages via XADD.
 pub struct RedisStreamProducer {
     conn: RedisConn,
 }
@@ -348,6 +351,7 @@ impl BrokerProducer for RedisStreamProducer {
 
 // ── Consumer ───────────────────────────────────────────────────────────
 
+/// Redis Streams consumer — reads messages via XREADGROUP with consumer groups.
 pub struct RedisStreamConsumer {
     conn: RedisConn,
     stream: String,

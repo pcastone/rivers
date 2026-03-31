@@ -6,6 +6,8 @@
 //! SHA-256 integrity check, semaphore acquisition, process spawn (privilege-dropped,
 //! env-controlled), bounded I/O with timeout, JSON result parsing.
 
+#![warn(missing_docs)]
+
 pub mod config;
 pub mod connection;
 pub mod executor;

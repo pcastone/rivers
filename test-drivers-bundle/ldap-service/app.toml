@@ -1,3 +1,12 @@
+[data.datasources.ldap]
+name       = "ldap"
+driver     = "ldap"
+nopassword = true
+
+[data.datasources.ldap.config]
+host = "192.168.2.227"
+port = 389
+
 [data.dataviews.search_users]
 name       = "search_users"
 datasource = "ldap"
@@ -34,22 +43,24 @@ type     = "string"
 required = true
 
 [api.views.users]
-path     = "users"
-method   = "GET"
-auth     = "none"
-dataview = "search_users"
+path      = "users"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
 
 [api.views.users.handler]
-type = "dataview"
+type     = "dataview"
+dataview = "search_users"
 
 [api.views.create_user]
-path     = "users"
-method   = "POST"
-auth     = "none"
-dataview = "add_user"
+path      = "users"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
 
 [api.views.create_user.handler]
-type = "dataview"
+type     = "dataview"
+dataview = "add_user"
 
 [api.views.create_user.parameter_mapping.body]
 dn = "dn"
@@ -57,13 +68,14 @@ cn = "cn"
 sn = "sn"
 
 [api.views.remove_user]
-path     = "users/{dn}"
-method   = "DELETE"
-auth     = "none"
-dataview = "delete_user"
+path      = "users/{dn}"
+method    = "DELETE"
+view_type = "Rest"
+auth      = "none"
 
 [api.views.remove_user.handler]
-type = "dataview"
+type     = "dataview"
+dataview = "delete_user"
 
 [api.views.remove_user.parameter_mapping.path]
 dn = "dn"

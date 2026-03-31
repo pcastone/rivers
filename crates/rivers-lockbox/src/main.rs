@@ -2,6 +2,8 @@
 //!
 //! Commands: init, add, list, show, alias, rotate, remove, rekey, validate
 
+#![warn(missing_docs)]
+
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};

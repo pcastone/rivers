@@ -11,15 +11,22 @@ use serde::{Deserialize, Serialize};
 /// Per spec §4.3, technology-path-spec §E1.6.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParsedRequest {
+    /// HTTP method (GET, POST, etc.).
     pub method: String,
+    /// Request path.
     pub path: String,
+    /// Parsed query string parameters.
     pub query_params: HashMap<String, String>,
+    /// HTTP headers.
     pub headers: HashMap<String, String>,
+    /// Deserialized request body.
     pub body: serde_json::Value,
+    /// Extracted path parameters (e.g. `{id}` segments).
     pub path_params: HashMap<String, String>,
 }
 
 impl ParsedRequest {
+    /// Create a new parsed request with the given method and path.
     pub fn new(method: &str, path: &str) -> Self {
         Self {
             method: method.to_string(),
@@ -39,6 +46,7 @@ impl ParsedRequest {
 /// Per technology-path-spec §2.4.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoreHandle {
+    /// Application identifier used as the store namespace.
     pub app_id: String,
 }
 
@@ -47,6 +55,7 @@ impl StoreHandle {
     const RESERVED_PREFIXES: &'static [&'static str] =
         &["session:", "csrf:", "cache:", "raft:", "rivers:"];
 
+    /// Create a store handle for the given application.
     pub fn new(app_id: String) -> Self {
         Self { app_id }
     }
@@ -65,8 +74,11 @@ impl StoreHandle {
 /// pre-fetched data map, mutable response payload, and store handle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ViewContext {
+    /// The parsed incoming HTTP request.
     pub request: ParsedRequest,
+    /// Distributed trace identifier.
     pub trace_id: String,
+    /// Session data, if authenticated.
     pub session: Option<serde_json::Value>,
     /// Application ID.
     pub app_id: String,
@@ -83,6 +95,7 @@ pub struct ViewContext {
 }
 
 impl ViewContext {
+    /// Create a new view context for the given request and app identity.
     pub fn new(
         request: ParsedRequest,
         trace_id: String,
@@ -110,8 +123,11 @@ impl ViewContext {
 /// Result of executing a view handler pipeline.
 #[derive(Debug, Serialize)]
 pub struct ViewResult {
+    /// HTTP status code.
     pub status: u16,
+    /// Response headers.
     pub headers: HashMap<String, String>,
+    /// Response body.
     pub body: serde_json::Value,
 }
 
@@ -130,21 +146,27 @@ impl Default for ViewResult {
 /// View execution errors.
 #[derive(Debug, thiserror::Error)]
 pub enum ViewError {
+    /// Resource not found.
     #[error("not found: {0}")]
     NotFound(String),
 
+    /// HTTP method not allowed for this route.
     #[error("method not allowed: {0}")]
     MethodNotAllowed(String),
 
+    /// Error raised by the view handler.
     #[error("handler error: {0}")]
     Handler(String),
 
+    /// Error in the middleware pipeline.
     #[error("pipeline error: {0}")]
     Pipeline(String),
 
+    /// Request validation failure.
     #[error("validation error: {0}")]
     Validation(String),
 
+    /// Internal server error.
     #[error("internal error: {0}")]
     Internal(String),
 }

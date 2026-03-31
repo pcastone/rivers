@@ -12,8 +12,11 @@ use crate::http_driver::{CircuitBreakerConfig, HttpDriverError};
 /// Circuit breaker states per the standard Closed -> Open -> Half-Open -> Closed model.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CircuitState {
+    /// Current flows freely through the channel — all requests pass downstream.
     Closed,
+    /// Overflow has broken the banks; no requests cross until the waters recede.
     Open { opened_at: Instant },
+    /// Waters tested with careful probes before the full current is restored.
     HalfOpen { successes: u32 },
 }
 

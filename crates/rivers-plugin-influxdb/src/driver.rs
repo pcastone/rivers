@@ -12,6 +12,7 @@ use crate::connection::InfluxConnection;
 
 // ── Driver ─────────────────────────────────────────────────────────────
 
+/// InfluxDB v2 driver factory — creates connections via HTTP API.
 pub struct InfluxDriver;
 
 #[async_trait]

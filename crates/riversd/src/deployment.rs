@@ -21,11 +21,14 @@ use crate::process_pool::{Entrypoint, ProcessPoolManager, TaskContextBuilder};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppType {
+    /// A backend service app (starts first).
     AppService,
+    /// A frontend/main app (starts after services).
     AppMain,
 }
 
 impl AppType {
+    /// Parse an app type from a kebab-case string, returning `None` if unrecognized.
     pub fn from_str_opt(s: &str) -> Option<Self> {
         match s {
             "app-service" => Some(AppType::AppService),
@@ -40,10 +43,15 @@ impl AppType {
 /// Parsed app manifest (per-app `manifest.toml`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppManifest {
+    /// Unique application identifier (UUID).
     pub app_id: String,
+    /// Application type as a string (e.g. "app-service", "app-main").
     pub app_type: String,
+    /// Human-readable application name.
     pub name: String,
+    /// TCP port the app listens on.
     pub port: u16,
+    /// Names of other apps this app depends on.
     #[serde(default)]
     pub dependencies: Vec<String>,
 }
@@ -53,8 +61,11 @@ pub struct AppManifest {
 /// Parsed bundle manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BundleManifest {
+    /// Bundle name.
     pub name: String,
+    /// Semantic version string.
     pub version: String,
+    /// List of app directory names in the bundle.
     pub apps: Vec<String>,
 }
 
@@ -63,17 +74,24 @@ pub struct BundleManifest {
 /// A resolved resource reference.
 #[derive(Debug, Clone, Serialize)]
 pub struct ResolvedResource {
+    /// Resource name (datasource, service, or alias).
     pub name: String,
+    /// Category of the resource.
     pub resource_type: ResourceType,
+    /// Whether the resource was successfully resolved.
     pub resolved: bool,
+    /// Error message if resolution failed.
     pub error: Option<String>,
 }
 
 /// Types of resources that need resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum ResourceType {
+    /// A database or storage datasource.
     Datasource,
+    /// An inter-app or external service.
     Service,
+    /// A LockBox secret alias.
     LockboxAlias,
 }
 
@@ -144,9 +162,13 @@ pub fn all_resources_resolved(resources: &[ResolvedResource]) -> bool {
 /// An app in the startup sequence.
 #[derive(Debug, Clone)]
 pub struct StartupEntry {
+    /// Application name.
     pub app_name: String,
+    /// Application type (service or main).
     pub app_type: AppType,
+    /// Port the app listens on.
     pub port: u16,
+    /// Names of apps this app depends on.
     pub dependencies: Vec<String>,
 }
 
@@ -206,14 +228,20 @@ pub fn compute_startup_order(apps: &[StartupEntry]) -> Vec<Vec<String>> {
 /// Preflight validation result.
 #[derive(Debug, Clone, Serialize)]
 pub struct PreflightResult {
+    /// Whether all preflight checks passed.
     pub passed: bool,
+    /// Individual check results.
     pub checks: Vec<PreflightCheck>,
 }
 
+/// A single preflight check result.
 #[derive(Debug, Clone, Serialize)]
 pub struct PreflightCheck {
+    /// Check identifier.
     pub name: String,
+    /// Whether this check passed.
     pub passed: bool,
+    /// Descriptive message (typically set on failure).
     pub message: Option<String>,
 }
 
@@ -268,6 +296,7 @@ pub struct DeploymentManager {
 }
 
 impl DeploymentManager {
+    /// Create an empty deployment manager.
     pub fn new() -> Self {
         Self {
             deployments: tokio::sync::RwLock::new(HashMap::new()),
@@ -383,13 +412,18 @@ pub enum RedeployPhase {
 /// A redeployment operation tracking old → new transition.
 #[derive(Debug, Clone, Serialize)]
 pub struct RedeploymentState {
+    /// Deploy ID of the existing (old) deployment.
     pub old_deploy_id: String,
+    /// Deploy ID of the incoming (new) deployment.
     pub new_deploy_id: String,
+    /// Current phase of the redeployment.
     pub phase: RedeployPhase,
+    /// RFC 3339 timestamp when the redeployment started.
     pub started_at: String,
 }
 
 impl RedeploymentState {
+    /// Create a new redeployment in the `Starting` phase.
     pub fn new(old_deploy_id: String, new_deploy_id: String) -> Self {
         Self {
             old_deploy_id,
@@ -437,6 +471,7 @@ pub struct AuthScopeCarryOver {
 }
 
 impl AuthScopeCarryOver {
+    /// Build a carry-over scope valid for `drain_timeout_secs` from now.
     pub fn new(app_id: String, old_keys: Vec<String>, drain_timeout_secs: u64) -> Self {
         let valid_until = (chrono::Utc::now()
             + chrono::Duration::try_seconds(drain_timeout_secs as i64)
@@ -521,18 +556,23 @@ pub async fn execute_init_handler(
 /// Deployment errors.
 #[derive(Debug, thiserror::Error)]
 pub enum DeploymentError {
+    /// Deployment ID not found.
     #[error("deployment not found: {0}")]
     NotFound(String),
 
+    /// Invalid state transition attempted.
     #[error("invalid transition: {0}")]
     InvalidTransition(String),
 
+    /// Resource resolution failed for one or more resources.
     #[error("resource resolution failed: {0}")]
     ResolutionFailed(String),
 
+    /// Health check did not pass within the allowed retries.
     #[error("health check failed: {0}")]
     HealthCheckFailed(String),
 
+    /// Preflight validation failed.
     #[error("preflight failed: {0}")]
     PreflightFailed(String),
 }
