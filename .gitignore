@@ -41,9 +41,11 @@ logs/*.log
 # Git worktrees
 .worktrees/
 
-# Claude Code
+# Claude Code / AI agent configs
 .claude/
 CLAUDE.md
+AGENTS.md
+rivers-skill.md
 
 # Archives
 *.zip
@@ -65,6 +67,26 @@ todo/
 
 # ATT docs (local)
 docs/att/
+
+# AI reflection artifacts
+docs/dreams/
+
+# Internal planning / completed feature requests
+docs/deviation.md
+docs/rivers-remediation-plan.md
+docs/rivers-feature-request-app-keystore*.md
+docs/rivers-exec-driver-spec.md
+crates/rivers-dependency-report.md
+
+# SPA build artifacts
+address-book-bundle/address-book-main/libraries/spa/bundle.js
+address-book-bundle/address-book-main/libraries/spa/bundle.css
+address-book-bundle/address-book-main/libraries/package-lock.json
+
+# Runtime directories
+logs/
+config/
+src/
 
 # Test keystores and fixtures
 test/
