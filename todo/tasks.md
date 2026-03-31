@@ -1,30 +1,23 @@
-# Tasks — Cleanup & Commit
+# Tasks — cargo-deploy
 
-> **Branch:** `largefiles`
-
----
-
-## Validated: Rust Documentation Epic
-
-All 27 sprints verified complete (2026-03-30):
-- 23 lib crates + 4 binary crates all have `#![warn(missing_docs)]`
-- All 27 crates have crate-level `//!` documentation
-- Spot-checked sprints 3, 4, 7, 11, 23, 25, 26, 27 — docs present and correct
-- Epic tracker (`todo/epic-rust-docs.md`) checkboxes need updating but work is done
+> **Branch:** `deployment`
+> **Goal:** Create `cargo deploy <path>` subcommand that builds and deploys Rivers to a target directory.
 
 ---
 
-## Completed: Example & Tutorial Validation
+## T1: Create cargo-deploy crate
 
-- [x] **T5.1** All example bundles pass `riversctl validate` — 7 bundles, 18 apps, all pass
-  - Fixed: kafka-service (dataview placement, missing view_type), rabbitmq-service, nats-service, ldap-service (same pattern), chat-app (missing handler section)
-- [x] **T5.2** All JS handler examples have correct ctx/Rivers API usage
-  - Fixed: V8 engine now injects `ctx.ws` from args (matching `ctx.request` pattern) so chat.js WebSocket hooks work correctly
-  - Verified: todos.js, metrics.js, chat.js all use correct API surface
-- [x] **T5.3** N/A — no tutorial documents exist; example configs validated in T5.1
+- [x] **T1.1** Add `crates/cargo-deploy/Cargo.toml` to workspace
+- [x] **T1.2** Create `crates/cargo-deploy/src/main.rs` — arg parsing, usage/help
 
----
+## T2: Dynamic deploy (default)
 
-## Pending: Commit & Branch Cleanup
+- [x] **T2.1–T2.7** Build binaries (no-default-features), engines, plugins; copy to bin/, lib/, plugins/; generate TLS cert; write VERSION
 
-- [ ] **T6.1** Stage and commit all changes on `largefiles` branch
+## T3: Static deploy (--static flag)
+
+- [x] **T3.1–T3.5** Build with default features (all static); copy binaries to bin/; generate TLS cert; write VERSION
+
+## T4: Commit & PR
+
+- [ ] **T4.1** Commit and open PR to main

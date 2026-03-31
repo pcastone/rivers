@@ -1,0 +1,15 @@
+[package]
+name = "cargo-deploy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Deploy Rivers runtime to a target directory"
+
+[[bin]]
+name = "cargo-deploy"
+path = "src/main.rs"
+
+[dependencies]
+rivers-core-config = { path = "../rivers-core-config" }
+rivers-core = { path = "../rivers-core" }
+serde_json.workspace = true
