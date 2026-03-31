@@ -48,16 +48,23 @@ CLAUDE.md
 # Archives
 *.zip
 
-# Release binaries (built artifacts, not source)
-release/*/bin/
-release/*/lib/
-release/*/plugins/
-release/dynamic/
 
 # Scratch / temp work
 scratch/
 data/
 sec/
+
+# Superpowers generated plans/specs
+docs/superpowers/
+
+# Local release builds
+release/
+
+# Task tracking (local workflow)
+todo/
+
+# ATT docs (local)
+docs/att/
 
 # Test keystores and fixtures
 test/
