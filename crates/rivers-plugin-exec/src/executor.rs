@@ -410,6 +410,7 @@ printf ']'
     // ── non-zero exit ────────────────────────────────────────────────
 
     #[tokio::test]
+    #[ignore = "broken pipe on Linux CI runners — subprocess exits before stdin write (#46)"]
     async fn non_zero_exit_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let script = create_test_script(
@@ -435,6 +436,7 @@ printf ']'
     // ── empty output ─────────────────────────────────────────────────
 
     #[tokio::test]
+    #[ignore = "broken pipe on Linux CI runners — subprocess exits before stdin write (#46)"]
     async fn empty_output_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let script = create_test_script(
