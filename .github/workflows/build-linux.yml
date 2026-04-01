@@ -11,7 +11,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
-  RUSTC_WRAPPER: "sccache"
 
 jobs:
   build-x86_64:
@@ -23,10 +22,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup sccache
+        id: sccache
         uses: mozilla-actions/sccache-action@v0.0.6
+        continue-on-error: true
 
       - name: Build
         run: cargo build --profile ci -p riversd -p riversctl -p rivers-lockbox -p riverpackage
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
 
       - name: Run tests
         run: cargo test --workspace --lib
@@ -47,9 +50,13 @@ jobs:
             | tar xzf - -C "$HOME/.cargo/bin"
 
       - name: Setup sccache
+        id: sccache-arm
         uses: mozilla-actions/sccache-action@v0.0.6
+        continue-on-error: true
 
       - name: Build (cross-compile)
         run: |
           cross build --profile ci --target aarch64-unknown-linux-gnu \
             -p riversd -p riversctl -p rivers-lockbox -p riverpackage
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-arm.outcome == 'success' && 'sccache' || '' }}

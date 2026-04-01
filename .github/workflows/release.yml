@@ -11,7 +11,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
-  RUSTC_WRAPPER: "sccache"
 
 jobs:
   # ── Build matrix ──────────────────────────────────────────────────
@@ -44,7 +43,9 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Setup sccache
+        id: sccache
         uses: mozilla-actions/sccache-action@v0.0.6
+        continue-on-error: true
 
       - name: Install cross
         if: matrix.cross
@@ -58,6 +59,7 @@ jobs:
         env:
           BUILD_TARGET: ${{ matrix.target }}
           USE_CROSS: ${{ matrix.cross }}
+          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
         run: |
           if [ "$USE_CROSS" = "true" ]; then
             cross build --release --target "$BUILD_TARGET" \
@@ -119,9 +121,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Setup sccache
+        id: sccache-dyn
         uses: mozilla-actions/sccache-action@v0.0.6
+        continue-on-error: true
       - name: Build dynamic libraries
         shell: bash
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-dyn.outcome == 'success' && 'sccache' || '' }}
         run: |
           sed -i 's/crate-type = \["rlib"\]/crate-type = ["dylib"]/' crates/rivers-runtime/Cargo.toml
           export CARGO_PROFILE_RELEASE_LTO=off
