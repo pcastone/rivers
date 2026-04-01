@@ -1,3 +1,6 @@
+[target.x86_64-unknown-linux-gnu]
+image = "rivers-cross-x86_64:latest"
+
 [target.aarch64-unknown-linux-gnu]
 pre-build = [
     "dpkg --add-architecture arm64",

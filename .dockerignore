@@ -1,0 +1,14 @@
+target/
+!target/x86_64-unknown-linux-gnu/ci/riversd
+!target/x86_64-unknown-linux-gnu/ci/riversctl
+.git
+.claude
+.worktrees
+node_modules
+release
+todo
+scratch
+data
+sec
+test
+*.log
