@@ -46,17 +46,13 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.6
         continue-on-error: true
 
-      - name: Check sccache health
-        id: sccache
+      - name: Disable sccache if unhealthy
         shell: bash
         run: |
-          if sccache --show-stats >/dev/null 2>&1; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::sccache unavailable, building without cache"
+          if ! sccache --show-stats >/dev/null 2>&1; then
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "::warning::sccache cache backend unavailable — building without cache"
           fi
-        continue-on-error: true
 
       - name: Install cross
         if: matrix.cross
@@ -70,7 +66,6 @@ jobs:
         env:
           BUILD_TARGET: ${{ matrix.target }}
           USE_CROSS: ${{ matrix.cross }}
-          RUSTC_WRAPPER: ${{ steps.sccache.outputs.available == 'true' && 'sccache' || '' }}
         run: |
           if [ "$USE_CROSS" = "true" ]; then
             cross build --release --target "$BUILD_TARGET" \
@@ -134,20 +129,14 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.6
         continue-on-error: true
-      - name: Check sccache health
-        id: sccache-dyn
+      - name: Disable sccache if unhealthy
         run: |
-          if sccache --show-stats >/dev/null 2>&1; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::sccache unavailable, building without cache"
+          if ! sccache --show-stats >/dev/null 2>&1; then
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "::warning::sccache cache backend unavailable — building without cache"
           fi
-        continue-on-error: true
       - name: Build dynamic libraries
         shell: bash
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache-dyn.outputs.available == 'true' && 'sccache' || '' }}
         run: |
           sed -i 's/crate-type = \["rlib"\]/crate-type = ["dylib"]/' crates/rivers-runtime/Cargo.toml
           export CARGO_PROFILE_RELEASE_LTO=off
