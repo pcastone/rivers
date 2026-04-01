@@ -25,23 +25,15 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.6
         continue-on-error: true
 
-      - name: Check sccache health
-        id: sccache
+      - name: Disable sccache if unhealthy
         run: |
-          if sccache --show-stats >/dev/null 2>&1; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::sccache unavailable, building without cache"
+          if ! sccache --show-stats >/dev/null 2>&1; then
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "::warning::sccache cache backend unavailable — building without cache"
           fi
-        continue-on-error: true
 
       - name: Build
         run: cargo build --profile ci -p riversd -p riversctl -p rivers-lockbox -p riverpackage
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache.outputs.available == 'true' && 'sccache' || '' }}
 
       - name: Run tests
         run: cargo test --workspace --lib
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache.outputs.available == 'true' && 'sccache' || '' }}
