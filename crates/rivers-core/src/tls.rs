@@ -245,8 +245,9 @@ pub fn validate_cert_key_pair(cert_path: &str, key_path: &str) -> Result<(), Str
     let key_bytes = std::fs::read(key_path)
         .map_err(|e| format!("cannot read key {key_path}: {e}"))?;
 
-    let mut cert_reader = std::io::BufReader::new(cert_bytes.as_slice());
-    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_reader)
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_bytes)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("failed to parse cert PEM: {e}"))?;
 
@@ -254,10 +255,8 @@ pub fn validate_cert_key_pair(cert_path: &str, key_path: &str) -> Result<(), Str
         return Err(format!("no certificates found in {cert_path}"));
     }
 
-    let mut key_reader = std::io::BufReader::new(key_bytes.as_slice());
-    let key = rustls_pemfile::private_key(&mut key_reader)
-        .map_err(|e| format!("failed to parse key PEM: {e}"))?
-        .ok_or_else(|| format!("no private key found in {key_path}"))?;
+    let key = PrivateKeyDer::from_pem_slice(&key_bytes)
+        .map_err(|e| format!("failed to parse key PEM from {key_path}: {e}"))?;
 
     // Use rustls to verify the pair matches
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();

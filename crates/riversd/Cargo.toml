@@ -40,11 +40,9 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 toml = { workspace = true }
 ipnet = { workspace = true }
-notify = { workspace = true }
 rcgen = { workspace = true }
 time = { workspace = true }
-rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
+rustls = { workspace = true, features = ["std"] }
 tokio-rustls = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }

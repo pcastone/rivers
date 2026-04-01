@@ -12,7 +12,7 @@ default = ["drivers", "storage-backends", "lockbox", "tls"]
 drivers = ["rivers-drivers-builtin"]
 storage-backends = ["rivers-storage-backends"]
 lockbox = ["rivers-lockbox-engine"]
-tls = ["rcgen", "sha2", "time", "rustls-pemfile", "rustls", "x509-parser"]
+tls = ["rcgen", "sha2", "time", "rustls", "x509-parser"]
 
 [dependencies]
 serde = { workspace = true }
@@ -32,8 +32,7 @@ schemars = { workspace = true }
 rcgen = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 time = { workspace = true, optional = true }
-rustls-pemfile = { workspace = true, optional = true }
-rustls = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true, features = ["std"] }
 x509-parser = { workspace = true, optional = true }
 rivers-core-config = { path = "../rivers-core-config" }
 rivers-driver-sdk = { path = "../rivers-driver-sdk" }
