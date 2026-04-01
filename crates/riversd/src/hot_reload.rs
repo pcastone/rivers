@@ -4,12 +4,13 @@
 //!
 //! Config file watcher that swaps view routes, DataViews, and security config
 //! without server restart. In-flight requests use their Arc<ServerConfig> snapshot.
+//!
+//! Uses mtime polling instead of OS-level file watchers (no `notify` dependency).
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::SystemTime;
 
-use notify::{Event, EventKind, RecommendedWatcher, Watcher};
 use tokio::sync::{watch, RwLock};
 
 use rivers_runtime::rivers_core::ServerConfig;
@@ -93,24 +94,24 @@ impl HotReloadState {
     }
 }
 
-// ── File Watcher ────────────────────────────────────────────────
+// ── File Watcher (polling) ─────────────────────────────────────
 
-/// Watches a config file for changes and triggers hot reload.
+/// Poll interval for checking config file changes.
+const POLL_INTERVAL_SECS: u64 = 2;
+
+/// Watches a config file for changes via mtime polling and triggers hot reload.
 ///
 /// Per spec §16: file watcher with debounce. On change, reads the config,
 /// validates scope, and swaps if safe.
 pub struct FileWatcher {
-    /// Held to keep the watcher alive; dropped when FileWatcher is dropped.
-    _watcher: RecommendedWatcher,
+    /// Cancel signal — dropped when FileWatcher is dropped, stopping the poll task.
+    _cancel: tokio::sync::oneshot::Sender<()>,
 }
-
-/// Debounce interval — ignore modify events within 500ms of each other.
-const DEBOUNCE_MS: u128 = 500;
 
 impl FileWatcher {
     /// Start watching `config_path` for modifications.
     ///
-    /// On each debounced modify event:
+    /// Polls file mtime every 2 seconds. On change:
     /// 1. Read and parse the config file.
     /// 2. Check reload scope against the current config.
     /// 3. If safe, swap the config in `reload_state`.
@@ -119,60 +120,39 @@ impl FileWatcher {
         config_path: PathBuf,
         reload_state: Arc<HotReloadState>,
     ) -> Result<Self, HotReloadError> {
-        let last_event = Arc::new(std::sync::Mutex::new(Instant::now().checked_sub(std::time::Duration::from_secs(1)).unwrap_or_else(Instant::now)));
-        let last_event_clone = last_event.clone();
-        let config_path_clone = config_path.clone();
-        let reload_state_clone = reload_state.clone();
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
 
-        // Create a tokio runtime handle so we can spawn async work from the sync callback.
-        let rt_handle = tokio::runtime::Handle::current();
+        let initial_mtime = file_mtime(&config_path).unwrap_or(SystemTime::UNIX_EPOCH);
 
-        let mut watcher = notify::recommended_watcher(
-            move |res: Result<Event, notify::Error>| {
-                let event = match res {
-                    Ok(e) => e,
-                    Err(e) => {
-                        tracing::error!(error = %e, "file watcher error");
+        let watch_path = config_path.clone();
+        tokio::spawn(async move {
+            let mut last_mtime = initial_mtime;
+            let interval = tokio::time::Duration::from_secs(POLL_INTERVAL_SECS);
+
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {}
+                    _ = &mut cancel_rx => {
+                        tracing::debug!("file watcher stopped");
                         return;
                     }
+                }
+
+                let mtime = match file_mtime(&watch_path) {
+                    Some(t) => t,
+                    None => continue,
                 };
 
-                // React to modify, create, and remove events.
-                // Create covers atomic rename-in-place; remove+create covers
-                // editors that delete-then-write. On macOS FSEvents, most changes
-                // appear as Modify(Any).
-                match event.kind {
-                    EventKind::Modify(_) | EventKind::Create(_) => {}
-                    _ => return,
+                if mtime > last_mtime {
+                    last_mtime = mtime;
+                    Self::handle_change(watch_path.clone(), reload_state.clone()).await;
                 }
+            }
+        });
 
-                // Debounce: skip if within 500ms of last processed event
-                {
-                    let mut last = last_event_clone.lock().unwrap();
-                    let now = Instant::now();
-                    if now.duration_since(*last).as_millis() < DEBOUNCE_MS {
-                        return;
-                    }
-                    *last = now;
-                }
+        tracing::info!(path = %config_path.display(), poll_secs = POLL_INTERVAL_SECS, "file watcher started (polling)");
 
-                let path = config_path_clone.clone();
-                let state = reload_state_clone.clone();
-
-                rt_handle.spawn(async move {
-                    Self::handle_change(path, state).await;
-                });
-            },
-        )
-        .map_err(|e| HotReloadError::WatchError(e.to_string()))?;
-
-        watcher
-            .watch(&config_path, notify::RecursiveMode::NonRecursive)
-            .map_err(|e| HotReloadError::WatchError(e.to_string()))?;
-
-        tracing::info!(path = %config_path.display(), "file watcher started");
-
-        Ok(Self { _watcher: watcher })
+        Ok(Self { _cancel: cancel_tx })
     }
 
     /// Handle a config file change event.
@@ -208,6 +188,11 @@ impl FileWatcher {
             }
         }
     }
+}
+
+/// Get file modification time, or None if the file doesn't exist.
+fn file_mtime(path: &std::path::Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
 }
 
 // ── Reload Validation ───────────────────────────────────────────
