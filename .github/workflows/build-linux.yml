@@ -3,11 +3,15 @@ name: Build Linux
 on:
   push:
     branches: [main]
+    paths: ['crates/**', 'Cargo.*', '.github/workflows/build-linux.yml']
   pull_request:
     branches: [main]
+    paths: ['crates/**', 'Cargo.*', '.github/workflows/build-linux.yml']
 
 env:
   CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
 
 jobs:
   build-x86_64:
@@ -18,18 +22,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: linux-x86_64-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: linux-x86_64-cargo-
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
 
       - name: Build
-        run: cargo build --release -p riversd -p riversctl -p rivers-lockbox -p riverpackage
+        run: cargo build --profile ci -p riversd -p riversctl -p rivers-lockbox -p riverpackage
 
       - name: Run tests
         run: cargo test --workspace --lib
@@ -49,17 +46,10 @@ jobs:
           curl -sSfL https://github.com/cross-rs/cross/releases/latest/download/cross-x86_64-unknown-linux-gnu.tar.gz \
             | tar xzf - -C "$HOME/.cargo/bin"
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: linux-aarch64-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: linux-aarch64-cargo-
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
 
       - name: Build (cross-compile)
         run: |
-          cross build --release --target aarch64-unknown-linux-gnu \
+          cross build --profile ci --target aarch64-unknown-linux-gnu \
             -p riversd -p riversctl -p rivers-lockbox -p riverpackage
