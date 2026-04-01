@@ -1145,6 +1145,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo-deploy"
+version = "0.52.5"
+dependencies = [
+ "rivers-core",
+ "rivers-core-config",
+ "serde_json",
+]
+
+[[package]]
 name = "cbc"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

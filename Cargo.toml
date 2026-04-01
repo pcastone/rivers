@@ -28,6 +28,7 @@ members = [
     "crates/rivers-keystore",
     "crates/riversctl",
     "crates/riverpackage",
+    "crates/cargo-deploy",
 ]
 
 [workspace.package]

@@ -41,23 +41,52 @@ logs/*.log
 # Git worktrees
 .worktrees/
 
-# Claude Code
+# Claude Code / AI agent configs
 .claude/
 CLAUDE.md
+AGENTS.md
+rivers-skill.md
 
 # Archives
 *.zip
 
-# Release binaries (built artifacts, not source)
-release/*/bin/
-release/*/lib/
-release/*/plugins/
-release/dynamic/
 
 # Scratch / temp work
 scratch/
 data/
 sec/
+
+# Superpowers generated plans/specs
+docs/superpowers/
+
+# Local release builds
+release/
+
+# Task tracking (local workflow)
+todo/
+
+# ATT docs (local)
+docs/att/
+
+# AI reflection artifacts
+docs/dreams/
+
+# Internal planning / completed feature requests
+docs/deviation.md
+docs/rivers-remediation-plan.md
+docs/rivers-feature-request-app-keystore*.md
+docs/rivers-exec-driver-spec.md
+crates/rivers-dependency-report.md
+
+# SPA build artifacts
+address-book-bundle/address-book-main/libraries/spa/bundle.js
+address-book-bundle/address-book-main/libraries/spa/bundle.css
+address-book-bundle/address-book-main/libraries/package-lock.json
+
+# Runtime directories
+logs/
+config/
+src/
 
 # Test keystores and fixtures
 test/
