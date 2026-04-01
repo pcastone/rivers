@@ -102,3 +102,10 @@ jsonschema = "0.28"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# Fast CI builds — skip LTO, parallel codegen
+[profile.ci]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = "symbols"
