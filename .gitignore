@@ -86,7 +86,7 @@ address-book-bundle/address-book-main/libraries/package-lock.json
 # Runtime directories
 logs/
 config/
-src/
+/src/
 
 # Test keystores and fixtures
 test/
