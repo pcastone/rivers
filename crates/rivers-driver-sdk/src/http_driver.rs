@@ -167,9 +167,10 @@ pub enum HttpProtocol {
 }
 
 /// TLS configuration for HTTP connections.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TlsConfig {
-    /// Whether to verify the upstream's TLS certificate.
+    /// Whether to verify the upstream's TLS certificate (default: true).
+    #[serde(default = "default_tls_verify")]
     pub verify: bool,
     /// Optional CA certificate path for custom CAs.
     pub ca_cert: Option<String>,
@@ -177,6 +178,21 @@ pub struct TlsConfig {
     pub client_cert: Option<String>,
     /// Optional client key path for mTLS.
     pub client_key: Option<String>,
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        Self {
+            verify: true,
+            ca_cert: None,
+            client_cert: None,
+            client_key: None,
+        }
+    }
+}
+
+fn default_tls_verify() -> bool {
+    true
 }
 
 // ── Auth ────────────────────────────────────────────────────────────

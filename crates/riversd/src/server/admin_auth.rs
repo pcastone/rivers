@@ -135,19 +135,19 @@ pub(super) async fn admin_auth_middleware(
 
 /// Map an admin API path to the required `AdminPermission`.
 ///
-/// Returns `None` for unknown paths (middleware will allow through).
+/// Unknown paths default to `Admin` (deny by default — highest privilege required).
 fn path_to_admin_permission(path: &str) -> Option<crate::admin::AdminPermission> {
     use crate::admin::AdminPermission;
-    match path {
-        "/admin/status" | "/admin/drivers" | "/admin/datasources" => Some(AdminPermission::StatusRead),
-        "/admin/deploy" | "/admin/deploy/test" => Some(AdminPermission::DeployWrite),
-        "/admin/deploy/approve" | "/admin/deploy/reject" => Some(AdminPermission::DeployApprove),
-        "/admin/deploy/promote" => Some(AdminPermission::DeployPromote),
-        "/admin/deployments" => Some(AdminPermission::DeployRead),
-        p if p.starts_with("/admin/log") => Some(AdminPermission::Admin),
-        "/admin/shutdown" => Some(AdminPermission::Admin),
-        _ => None,
-    }
+    Some(match path {
+        "/admin/status" | "/admin/drivers" | "/admin/datasources" => AdminPermission::StatusRead,
+        "/admin/deploy" | "/admin/deploy/test" => AdminPermission::DeployWrite,
+        "/admin/deploy/approve" | "/admin/deploy/reject" => AdminPermission::DeployApprove,
+        "/admin/deploy/promote" => AdminPermission::DeployPromote,
+        "/admin/deployments" => AdminPermission::DeployRead,
+        p if p.starts_with("/admin/log") => AdminPermission::Admin,
+        "/admin/shutdown" => AdminPermission::Admin,
+        _ => AdminPermission::Admin, // deny by default
+    })
 }
 
 /// Fallback for when `admin_auth_config` is not initialized (e.g. tests).
