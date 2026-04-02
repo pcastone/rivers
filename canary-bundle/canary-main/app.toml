@@ -1,1 +1,187 @@
-# Placeholder — to be populated in later phases
+# ---------------------------------------------
+# PROXY Profile -- HTTP proxy datasources + SPA dashboard
+# ---------------------------------------------
+
+# -- HTTP Datasources (resolve via service registry) --
+
+[data.datasources.guard-api]
+name       = "guard-api"
+driver     = "http"
+service    = "guard"
+nopassword = true
+
+[data.datasources.guard-api.config]
+timeout_ms     = 5000
+retry_attempts = 1
+
+[data.datasources.sql-api]
+name       = "sql-api"
+driver     = "http"
+service    = "sql"
+nopassword = true
+
+[data.datasources.sql-api.config]
+timeout_ms     = 5000
+retry_attempts = 1
+
+[data.datasources.nosql-api]
+name       = "nosql-api"
+driver     = "http"
+service    = "nosql"
+nopassword = true
+
+[data.datasources.nosql-api.config]
+timeout_ms     = 5000
+retry_attempts = 1
+
+[data.datasources.handlers-api]
+name       = "handlers-api"
+driver     = "http"
+service    = "handlers"
+nopassword = true
+
+[data.datasources.handlers-api.config]
+timeout_ms     = 5000
+retry_attempts = 1
+
+[data.datasources.streams-api]
+name       = "streams-api"
+driver     = "http"
+service    = "streams"
+nopassword = true
+
+[data.datasources.streams-api.config]
+timeout_ms     = 5000
+retry_attempts = 1
+
+# ---------------------------------------------
+# DataViews -- HTTP proxy ping for each service
+# ---------------------------------------------
+
+[data.dataviews.proxy_guard_ping]
+name       = "proxy_guard_ping"
+datasource = "guard-api"
+query      = "/canary/auth/login"
+method     = "GET"
+
+[data.dataviews.proxy_sql_ping]
+name       = "proxy_sql_ping"
+datasource = "sql-api"
+query      = "/canary/sql/sqlite/param-order"
+method     = "GET"
+
+[data.dataviews.proxy_nosql_ping]
+name       = "proxy_nosql_ping"
+datasource = "nosql-api"
+query      = "/canary/nosql/redis/ping"
+method     = "GET"
+
+[data.dataviews.proxy_handlers_ping]
+name       = "proxy_handlers_ping"
+datasource = "handlers-api"
+query      = "/canary/rt/ctx/request"
+method     = "GET"
+
+[data.dataviews.proxy_streams_ping]
+name       = "proxy_streams_ping"
+datasource = "streams-api"
+query      = "/canary/stream/poll/data"
+method     = "GET"
+
+# ---------------------------------------------
+# Views -- proxy test endpoints
+# ---------------------------------------------
+
+# -- Health check: verify proxy round-trip --
+
+[api.views.proxy_health]
+path      = "canary/proxy/health"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.proxy_health.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/proxy-tests.ts"
+entrypoint = "proxyHealth"
+
+# -- Guard proxy forward --
+
+[api.views.proxy_guard]
+path      = "canary/proxy/guard"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.proxy_guard.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/proxy-tests.ts"
+entrypoint = "proxyGuard"
+
+# -- SQL proxy forward --
+
+[api.views.proxy_sql]
+path      = "canary/proxy/sql"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.proxy_sql.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/proxy-tests.ts"
+entrypoint = "proxySql"
+
+# -- NoSQL proxy forward --
+
+[api.views.proxy_nosql]
+path      = "canary/proxy/nosql"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.proxy_nosql.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/proxy-tests.ts"
+entrypoint = "proxyNosql"
+
+# -- Handlers proxy forward --
+
+[api.views.proxy_handlers]
+path      = "canary/proxy/handlers"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.proxy_handlers.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/proxy-tests.ts"
+entrypoint = "proxyHandlers"
+
+# -- Response envelope verification --
+
+[api.views.proxy_envelope]
+path      = "canary/proxy/envelope"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.proxy_envelope.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/proxy-tests.ts"
+entrypoint = "proxyResponseEnvelope"
+
+# ---------------------------------------------
+# SPA Config
+# ---------------------------------------------
+
+[static_files]
+enabled      = true
+root         = "libraries/spa"
+index_file   = "index.html"
+spa_fallback = true
