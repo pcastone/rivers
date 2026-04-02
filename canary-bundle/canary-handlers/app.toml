@@ -2,12 +2,12 @@
 # RUNTIME Profile — Datasources
 # ─────────────────────────────────────────────
 
-[data.datasources.faker]
-name       = "faker"
+[data.datasources.canary-faker]
+name       = "canary-faker"
 driver     = "faker"
 nopassword = true
 
-[data.datasources.faker.config]
+[data.datasources.canary-faker.config]
 locale                = "en_US"
 seed                  = 42
 max_records_per_query = 100
@@ -18,7 +18,7 @@ max_records_per_query = 100
 
 [data.dataviews.list_records]
 name          = "list_records"
-datasource    = "faker"
+datasource    = "canary-faker"
 query         = "schemas/faker-record.schema.json"
 return_schema = "schemas/faker-record.schema.json"
 
@@ -33,42 +33,42 @@ default  = 10
 # ─────────────────────────────────────────────
 
 [api.views.ctx_request]
-path      = "canary/rt/ctx/request"
+path      = "/canary/rt/ctx/request"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.ctx_request.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/ctx-surface.ts"
 entrypoint = "ctxRequest"
 
 # ─────────────────────────
 
 [api.views.ctx_resdata]
-path      = "canary/rt/ctx/resdata"
+path      = "/canary/rt/ctx/resdata"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.ctx_resdata.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/ctx-surface.ts"
 entrypoint = "ctxResdata"
 
 # ─────────────────────────
 
 [api.views.ctx_data]
-path      = "canary/rt/ctx/data"
+path      = "/canary/rt/ctx/data"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.ctx_data.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/ctx-surface.ts"
 entrypoint = "ctxData"
 dataviews  = ["list_records"]
@@ -76,70 +76,70 @@ dataviews  = ["list_records"]
 # ─────────────────────────
 
 [api.views.ctx_dataview]
-path      = "canary/rt/ctx/dataview"
+path      = "/canary/rt/ctx/dataview"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.ctx_dataview.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/ctx-surface.ts"
 entrypoint = "ctxDataview"
 
 # ─────────────────────────
 
 [api.views.ctx_store]
-path      = "canary/rt/ctx/store"
+path      = "/canary/rt/ctx/store"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.ctx_store.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/ctx-surface.ts"
 entrypoint = "ctxStore"
 
 # ─────────────────────────
 
 [api.views.ctx_trace_id]
-path      = "canary/rt/ctx/trace-id"
+path      = "/canary/rt/ctx/trace-id"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.ctx_trace_id.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/ctx-surface.ts"
 entrypoint = "ctxTraceId"
 
 # ─────────────────────────
 
 [api.views.ctx_app_id]
-path      = "canary/rt/ctx/app-id"
+path      = "/canary/rt/ctx/app-id"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.ctx_app_id.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/ctx-surface.ts"
 entrypoint = "ctxAppId"
 
 # ─────────────────────────
 
 [api.views.ctx_env]
-path      = "canary/rt/ctx/env"
+path      = "/canary/rt/ctx/env"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.ctx_env.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/ctx-surface.ts"
 entrypoint = "ctxEnv"
 
@@ -148,56 +148,56 @@ entrypoint = "ctxEnv"
 # ─────────────────────────────────────────────
 
 [api.views.crypto_randomhex]
-path      = "canary/rt/crypto/randomhex"
+path      = "/canary/rt/crypto/randomhex"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.crypto_randomhex.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/rivers-api.ts"
 entrypoint = "cryptoRandomHex"
 
 # ─────────────────────────
 
 [api.views.crypto_hashpassword]
-path      = "canary/rt/crypto/hashpassword"
+path      = "/canary/rt/crypto/hashpassword"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.crypto_hashpassword.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/rivers-api.ts"
 entrypoint = "cryptoHashPassword"
 
 # ─────────────────────────
 
 [api.views.crypto_timingsafe]
-path      = "canary/rt/crypto/timingsafe"
+path      = "/canary/rt/crypto/timingsafe"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.crypto_timingsafe.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/rivers-api.ts"
 entrypoint = "cryptoTimingSafe"
 
 # ─────────────────────────
 
 [api.views.log_info]
-path      = "canary/rt/log/info"
+path      = "/canary/rt/log/info"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.log_info.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/rivers-api.ts"
 entrypoint = "logInfo"
 
@@ -206,28 +206,28 @@ entrypoint = "logInfo"
 # ─────────────────────────────────────────────
 
 [api.views.store_crud]
-path      = "canary/rt/store/crud"
+path      = "/canary/rt/store/crud"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.store_crud.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/storage-tests.ts"
 entrypoint = "storeCrud"
 
 # ─────────────────────────
 
 [api.views.store_reserved]
-path      = "canary/rt/store/reserved"
+path      = "/canary/rt/store/reserved"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.store_reserved.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/storage-tests.ts"
 entrypoint = "storeReservedPrefix"
 
@@ -236,41 +236,41 @@ entrypoint = "storeReservedPrefix"
 # ─────────────────────────────────────────────
 
 [api.views.v8_timeout]
-path      = "canary/rt/v8/timeout"
+path      = "/canary/rt/v8/timeout"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.v8_timeout.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/v8-security.ts"
 entrypoint = "v8Timeout"
 
 # ─────────────────────────
 
 [api.views.v8_codegen]
-path      = "canary/rt/v8/codegen"
+path      = "/canary/rt/v8/codegen"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.v8_codegen.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/v8-security.ts"
 entrypoint = "v8CodeGenBlocked"
 
 # ─────────────────────────
 
 [api.views.error_sanitized]
-path      = "canary/rt/error/sanitized"
+path      = "/canary/rt/error/sanitized"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.error_sanitized.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/v8-security.ts"
 entrypoint = "errorSanitized"

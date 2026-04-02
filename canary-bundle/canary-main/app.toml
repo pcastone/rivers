@@ -95,84 +95,84 @@ method     = "GET"
 # -- Health check: verify proxy round-trip --
 
 [api.views.proxy_health]
-path      = "canary/proxy/health"
+path      = "/canary/proxy/health"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.proxy_health.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/proxy-tests.ts"
 entrypoint = "proxyHealth"
 
 # -- Guard proxy forward --
 
 [api.views.proxy_guard]
-path      = "canary/proxy/guard"
+path      = "/canary/proxy/guard"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.proxy_guard.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/proxy-tests.ts"
 entrypoint = "proxyGuard"
 
 # -- SQL proxy forward --
 
 [api.views.proxy_sql]
-path      = "canary/proxy/sql"
+path      = "/canary/proxy/sql"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.proxy_sql.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/proxy-tests.ts"
 entrypoint = "proxySql"
 
 # -- NoSQL proxy forward --
 
 [api.views.proxy_nosql]
-path      = "canary/proxy/nosql"
+path      = "/canary/proxy/nosql"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.proxy_nosql.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/proxy-tests.ts"
 entrypoint = "proxyNosql"
 
 # -- Handlers proxy forward --
 
 [api.views.proxy_handlers]
-path      = "canary/proxy/handlers"
+path      = "/canary/proxy/handlers"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.proxy_handlers.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/proxy-tests.ts"
 entrypoint = "proxyHandlers"
 
 # -- Response envelope verification --
 
 [api.views.proxy_envelope]
-path      = "canary/proxy/envelope"
+path      = "/canary/proxy/envelope"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.proxy_envelope.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/proxy-tests.ts"
 entrypoint = "proxyResponseEnvelope"
 
