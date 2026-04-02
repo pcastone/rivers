@@ -196,6 +196,14 @@ pub struct DataViewConfig {
     /// When true, reject unknown parameters instead of ignoring them.
     #[serde(default)]
     pub strict_parameters: bool,
+
+    /// Maximum rows returned from a query. 0 = no limit. Default: 1000.
+    #[serde(default = "default_max_rows")]
+    pub max_rows: usize,
+}
+
+fn default_max_rows() -> usize {
+    1000
 }
 
 impl DataViewConfig {

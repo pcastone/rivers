@@ -183,9 +183,12 @@ pub fn is_csrf_exempt(method: &str, auth_mode: Option<&str>, has_bearer: bool) -
     false
 }
 
-/// Generate a cryptographically random CSRF token.
+/// Generate a cryptographically random CSRF token (256 bits of entropy).
 fn generate_csrf_token() -> String {
-    uuid::Uuid::new_v4().as_simple().to_string()
+    use rand::RngCore;
+    let mut buf = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut buf);
+    hex::encode(buf)
 }
 
 /// Constant-time comparison to prevent timing attacks.

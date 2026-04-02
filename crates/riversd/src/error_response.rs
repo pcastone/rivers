@@ -209,16 +209,40 @@ pub fn service_unavailable(message: impl Into<String>) -> ErrorResponse {
 // ── Runtime Error Mapping ───────────────────────────────────────
 
 /// Map a view error to an error response, optionally including trace_id.
+///
+/// Internal/handler/pipeline errors are sanitized — the full error is logged
+/// server-side but only a generic message is returned to the client.
+/// In debug builds, the full error is included for development convenience.
 pub fn map_view_error(err: &crate::view_engine::ViewError, trace_id: Option<&str>) -> ErrorResponse {
     let mut resp = match err {
         crate::view_engine::ViewError::NotFound(msg) => not_found(msg.clone()),
         crate::view_engine::ViewError::MethodNotAllowed(msg) => method_not_allowed(msg.clone()),
-        crate::view_engine::ViewError::Handler(msg) => internal_error(msg.clone()),
-        crate::view_engine::ViewError::Pipeline(msg) => internal_error(msg.clone()),
-        crate::view_engine::ViewError::Validation(msg) => {
-            validation_error(msg.clone())
+        crate::view_engine::ViewError::Validation(msg) => validation_error(msg.clone()),
+        // Sanitize internal errors — don't leak driver/infra details to clients
+        crate::view_engine::ViewError::Handler(msg) => {
+            tracing::error!(error = %msg, "handler error");
+            if cfg!(debug_assertions) {
+                internal_error(msg.clone())
+            } else {
+                internal_error("internal server error")
+            }
         }
-        crate::view_engine::ViewError::Internal(msg) => internal_error(msg.clone()),
+        crate::view_engine::ViewError::Pipeline(msg) => {
+            tracing::error!(error = %msg, "pipeline error");
+            if cfg!(debug_assertions) {
+                internal_error(msg.clone())
+            } else {
+                internal_error("internal server error")
+            }
+        }
+        crate::view_engine::ViewError::Internal(msg) => {
+            tracing::error!(error = %msg, "internal error");
+            if cfg!(debug_assertions) {
+                internal_error(msg.clone())
+            } else {
+                internal_error("internal server error")
+            }
+        }
     };
     if let Some(id) = trace_id {
         resp = resp.with_trace_id(id.to_string());

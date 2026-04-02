@@ -250,9 +250,12 @@ fn parse_cookie_value(cookies: &str, name: &str) -> Option<String> {
     None
 }
 
-/// Generate a cryptographically random session ID.
+/// Generate a cryptographically random session ID (256 bits of entropy).
 fn generate_session_id() -> String {
-    format!("sess_{}", uuid::Uuid::new_v4().as_simple())
+    use rand::RngCore;
+    let mut buf = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut buf);
+    format!("sess_{}", hex::encode(buf))
 }
 
 // ── Cross-App Session Propagation (§7.5) ────────────────────────
