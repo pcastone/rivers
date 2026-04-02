@@ -58,6 +58,9 @@ impl DatabaseDriver for CassandraDriver {
 
     fn supports_transactions(&self) -> bool { false }
     fn supports_prepared_statements(&self) -> bool { true }
+    fn param_style(&self) -> rivers_driver_sdk::ParamStyle {
+        rivers_driver_sdk::ParamStyle::ColonNamed
+    }
 }
 
 // ── Connection ─────────────────────────────────────────────────────────

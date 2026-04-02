@@ -86,6 +86,10 @@ impl DatabaseDriver for SqliteDriver {
     fn supports_transactions(&self) -> bool {
         true
     }
+
+    fn param_style(&self) -> rivers_driver_sdk::ParamStyle {
+        rivers_driver_sdk::ParamStyle::DollarNamed
+    }
 }
 
 /// A live SQLite connection wrapping `rusqlite::Connection` behind `Arc<Mutex>`.
@@ -190,7 +194,7 @@ fn bind_params(parameters: &HashMap<String, QueryValue>) -> Vec<(String, Box<dyn
             let name = if key.starts_with(':') || key.starts_with('@') || key.starts_with('$') {
                 key.clone()
             } else {
-                format!(":{}", key)
+                format!("${}", key)
             };
             let boxed: Box<dyn rusqlite::types::ToSql> = match val {
                 QueryValue::Null => Box::new(rusqlite::types::Null),

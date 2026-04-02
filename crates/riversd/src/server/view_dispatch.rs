@@ -169,7 +169,7 @@ async fn view_dispatch_handler(
     let mut view_ctx = view_engine::ViewContext::new(
         parsed,
         trace_id.clone(),
-        String::new(), // app_id — populated after bundle deployment
+        app_entry_point.clone(), // app_id from matched route
         String::new(), // node_id
         "dev".to_string(),
     );

@@ -67,6 +67,10 @@ impl DatabaseDriver for PostgresDriver {
     fn supports_prepared_statements(&self) -> bool {
         true
     }
+
+    fn param_style(&self) -> rivers_driver_sdk::ParamStyle {
+        rivers_driver_sdk::ParamStyle::DollarPositional
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -323,8 +327,9 @@ impl Connection for PostgresConnection {
 
 /// Build a positional parameter list from named parameters.
 ///
-/// Parameters are sorted by name alphabetically so the caller can use
-/// `$1`, `$2`, ... in the statement in a predictable order.
+/// Keys are sorted alphabetically. The DataView engine uses zero-padded
+/// numeric keys ("001", "002") for positional styles, so alphabetical
+/// sort preserves the correct positional binding order.
 fn build_params(parameters: &HashMap<String, QueryValue>) -> Vec<Box<dyn ToSql + Sync + Send>> {
     let mut keys: Vec<&String> = parameters.keys().collect();
     keys.sort();

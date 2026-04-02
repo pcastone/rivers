@@ -66,6 +66,10 @@ impl DatabaseDriver for MysqlDriver {
     fn supports_transactions(&self) -> bool {
         true
     }
+
+    fn param_style(&self) -> rivers_driver_sdk::ParamStyle {
+        rivers_driver_sdk::ParamStyle::QuestionPositional
+    }
 }
 
 // ---------------------------------------------------------------------------
