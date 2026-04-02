@@ -56,6 +56,13 @@ pub struct SecurityConfig {
     /// CSRF protection configuration.
     #[serde(default)]
     pub csrf: CsrfConfig,
+
+    /// DDL whitelist — authorizes specific database+app pairs for DDL execution
+    /// during application init handlers only.
+    ///
+    /// Format: `"database_name@app_uuid"`. Default: empty (no DDL permitted).
+    #[serde(default)]
+    pub ddl_whitelist: Vec<String>,
 }
 
 impl Default for SecurityConfig {
@@ -73,8 +80,39 @@ impl Default for SecurityConfig {
             admin_ip_allowlist: Vec::new(),
             session: SessionConfig::default(),
             csrf: CsrfConfig::default(),
+            ddl_whitelist: Vec::new(),
         }
     }
+}
+
+/// Check if a database+appId pair is in the DDL whitelist.
+///
+/// Format: `"database@appId"`. Both must match exactly.
+pub fn is_ddl_permitted(database: &str, app_id: &str, whitelist: &[String]) -> bool {
+    let key = format!("{database}@{app_id}");
+    whitelist.iter().any(|entry| entry == &key)
+}
+
+/// Validate DDL whitelist entries at startup.
+///
+/// Returns warnings for invalid entries (does not fail startup).
+pub fn validate_ddl_whitelist(whitelist: &[String]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for entry in whitelist {
+        let parts: Vec<&str> = entry.splitn(2, '@').collect();
+        if parts.len() != 2 {
+            warnings.push(format!("ddl_whitelist: invalid format '{}' — expected 'database@appId'", entry));
+            continue;
+        }
+        let (database, app_id) = (parts[0], parts[1]);
+        if database.is_empty() {
+            warnings.push(format!("ddl_whitelist: empty database name in '{}'", entry));
+        }
+        if uuid::Uuid::parse_str(app_id).is_err() {
+            warnings.push(format!("ddl_whitelist: invalid UUID '{}' in '{}'", app_id, entry));
+        }
+    }
+    warnings
 }
 
 // ── [security.csrf] ─────────────────────────────────────────────────

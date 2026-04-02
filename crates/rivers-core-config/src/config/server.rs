@@ -131,6 +131,11 @@ pub struct BaseConfig {
     /// TLS configuration (enables HTTPS when present).
     #[serde(default)]
     pub tls: Option<TlsConfig>,
+
+    /// Maximum time (seconds) an application init handler may run before timeout.
+    /// Default: 60.
+    #[serde(default = "default_init_timeout")]
+    pub init_timeout_s: u64,
 }
 
 impl Default for BaseConfig {
@@ -147,8 +152,13 @@ impl Default for BaseConfig {
             cluster: ClusterConfig::default(),
             logging: LoggingConfig::default(),
             tls: None,
+            init_timeout_s: default_init_timeout(),
         }
     }
+}
+
+fn default_init_timeout() -> u64 {
+    60
 }
 
 fn default_host() -> String {
