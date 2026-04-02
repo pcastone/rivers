@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "description": "Elasticsearch canary test document",
+  "fields": [
+    { "name": "title",   "type": "string",   "required": true  },
+    { "name": "content", "type": "string",   "required": true  },
+    { "name": "tags",    "type": "string",   "required": false }
+  ]
+}

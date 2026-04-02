@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "description": "CouchDB canary test document",
+  "fields": [
+    { "name": "_id",    "type": "string",  "required": false },
+    { "name": "name",   "type": "string",  "required": true  },
+    { "name": "value",  "type": "integer", "required": true  }
+  ]
+}
