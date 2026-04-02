@@ -514,16 +514,11 @@ async fn dispatch_init_handler(
         .as_deref()
         .unwrap_or(&app.manifest.app_name);
 
-    let module_path = app.app_dir
-        .join("libraries")
-        .join(&init_config.module);
-
-    if !module_path.exists() {
-        return Err(format!(
-            "init handler module not found: {}",
-            module_path.display()
-        ));
-    }
+    // Validate module path containment — prevent path traversal
+    let module_path = rivers_runtime::bundle::validate_module_path(
+        &app.app_dir,
+        &init_config.module,
+    ).map_err(|e| format!("init handler: {e}"))?;
 
     let entrypoint = Entrypoint {
         module: module_path.to_string_lossy().to_string(),

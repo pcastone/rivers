@@ -107,6 +107,38 @@ fn default_index() -> String {
     "index.html".to_string()
 }
 
+// ── Path Containment ──────────────────────────────────────────────
+
+/// Validate that a module path stays within the app's libraries directory.
+///
+/// Canonicalizes the path and checks it starts with `app_dir/libraries/`.
+/// Prevents path traversal attacks via `../../` in module paths from TOML config.
+///
+/// Returns `Ok(canonical_path)` if contained, `Err(reason)` if it escapes.
+pub fn validate_module_path(
+    app_dir: &std::path::Path,
+    module: &str,
+) -> Result<std::path::PathBuf, String> {
+    let libraries_dir = app_dir.join("libraries");
+    let full_path = libraries_dir.join(module);
+
+    // Canonicalize resolves symlinks and ../ components
+    let canonical = full_path.canonicalize().map_err(|e| {
+        format!("module path '{}' cannot be resolved: {e}", full_path.display())
+    })?;
+
+    let canonical_libraries = libraries_dir.canonicalize().unwrap_or(libraries_dir);
+
+    if !canonical.starts_with(&canonical_libraries) {
+        return Err(format!(
+            "module path '{}' escapes app libraries directory",
+            module
+        ));
+    }
+
+    Ok(canonical)
+}
+
 // ── Resources config ────────────────────────────────────────────────
 
 /// `resources.toml` — declares datasources and service dependencies.
