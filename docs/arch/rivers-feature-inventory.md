@@ -283,8 +283,8 @@ Extracted from all specification documents. Top-level features with granular sub
 - CouchDB (HTTP-based)
 - LDAP (ldap3)
 
-### 6.5 Stub Drivers (NotImplemented)
-- Neo4j, Solr, Hadoop/HDFS, ZooKeeper, ActiveMQ, PingIdentity
+### 6.5 Planned Drivers
+- Neo4j (Bolt protocol via `neo4rs` — planned for v0.53)
 
 ### 6.6 Five-Op Driver Contract
 - Standard operations: `query`, `execute`, `ping`, `begin`, `stream`
