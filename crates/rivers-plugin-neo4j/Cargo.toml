@@ -1,0 +1,22 @@
+[package]
+name = "rivers-plugin-neo4j"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Neo4j graph database plugin driver for Rivers"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+plugin-exports = []
+
+[dependencies]
+rivers-driver-sdk = { path = "../rivers-driver-sdk" }
+neo4rs = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
