@@ -544,10 +544,10 @@ async fn dispatch_init_handler(
 
     let task_ctx = builder.build().map_err(|e| format!("failed to build init task context: {e}"))?;
 
-    let _ = timeout_s; // TODO: enforce timeout via tokio::time::timeout
-
-    pool.dispatch("default", task_ctx)
-        .await
-        .map(|_| ())
-        .map_err(|e| format!("init handler execution failed: {e}"))
+    let timeout = std::time::Duration::from_secs(timeout_s);
+    match tokio::time::timeout(timeout, pool.dispatch("default", task_ctx)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(format!("init handler execution failed: {e}")),
+        Err(_) => Err(format!("init handler timed out after {}s", timeout_s)),
+    }
 }

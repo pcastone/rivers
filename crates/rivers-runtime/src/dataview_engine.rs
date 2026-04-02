@@ -606,10 +606,22 @@ impl DataViewExecutor {
         match self.factory.connect(driver_name, ds_params).await {
             Ok(mut conn) => {
                 // 6. Execute query via database connection
-                let query_result = conn
+                let mut query_result = conn
                     .execute(&query)
                     .await
                     .map_err(|e| DataViewError::Driver(e.to_string()))?;
+
+                // 6a. Enforce max_rows limit
+                if config.max_rows > 0 && query_result.rows.len() > config.max_rows {
+                    tracing::warn!(
+                        dataview = %name,
+                        returned = query_result.rows.len(),
+                        max_rows = config.max_rows,
+                        "result truncated to max_rows"
+                    );
+                    query_result.rows.truncate(config.max_rows);
+                    query_result.affected_rows = config.max_rows as u64;
+                }
 
                 // 6b. Validate result against schema if configured
                 if config.validate_result {
