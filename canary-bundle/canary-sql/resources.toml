@@ -1,0 +1,17 @@
+[[datasources]]
+name       = "pg"
+driver     = "postgresql"
+lockbox    = "canary-pg"
+required   = true
+
+[[datasources]]
+name       = "mysql"
+driver     = "mysql"
+lockbox    = "canary-mysql"
+required   = true
+
+[[datasources]]
+name       = "sqlite"
+driver     = "sqlite"
+nopassword = true
+required   = true

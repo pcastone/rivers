@@ -1,0 +1,7 @@
+appName       = "canary-handlers"
+description   = "Canary Fleet — RUNTIME profile: ctx.* surface, Rivers.* globals, V8 security"
+version       = "1.0.0"
+type          = "app-service"
+appId         = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee03"
+entryPoint    = "http://0.0.0.0:9103"
+source        = "https://github.com/pcastone/rivers/canary-fleet"

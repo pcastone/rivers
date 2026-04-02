@@ -1,0 +1,45 @@
+bundle_path = "canary-bundle/"
+
+[base]
+host = "0.0.0.0"
+port = 8080
+request_timeout_seconds = 30
+init_timeout_s = 60
+
+[base.logging]
+level  = "info"
+format = "json"
+
+[security]
+cors_enabled         = true
+cors_allowed_origins = ["http://localhost:8080"]
+rate_limit_per_minute = 1000
+rate_limit_burst_size = 500
+
+# Session config for canary-guard
+[security.session]
+enabled    = true
+ttl_s      = 300
+idle_timeout_s = 120
+
+[security.session.cookie]
+name      = "canary_session"
+http_only = true
+secure    = false
+same_site = "Lax"
+
+# CSRF enabled
+[security.csrf]
+enabled = true
+
+# DDL whitelist — canary-sql can create test tables
+ddl_whitelist = [
+    "rivers@aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee01",
+]
+
+[storage_engine]
+backend = "redis"
+url     = "redis://:rivers_test@192.168.2.206:6379"
+
+[graphql]
+enabled = false

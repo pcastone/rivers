@@ -1,0 +1,7 @@
+appName       = "canary-streams"
+description   = "Canary Fleet — STREAM profile: WebSocket, SSE, Streaming REST, Kafka, Polling"
+version       = "1.0.0"
+type          = "app-service"
+appId         = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee04"
+entryPoint    = "http://0.0.0.0:9104"
+source        = "https://github.com/pcastone/rivers/canary-fleet"

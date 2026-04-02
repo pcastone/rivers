@@ -1,0 +1,7 @@
+appName       = "canary-nosql"
+description   = "Canary Fleet — NOSQL profile: MongoDB, Elasticsearch, CouchDB, Cassandra, LDAP, Redis"
+version       = "1.0.0"
+type          = "app-service"
+appId         = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee02"
+entryPoint    = "http://0.0.0.0:9102"
+source        = "https://github.com/pcastone/rivers/canary-fleet"

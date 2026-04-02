@@ -1,0 +1,5 @@
+[[datasources]]
+name       = "faker"
+driver     = "faker"
+nopassword = true
+required   = true

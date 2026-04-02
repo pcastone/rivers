@@ -1,0 +1,7 @@
+appName       = "canary-main"
+description   = "Canary Fleet — PROXY profile: cross-app proxy + SPA dashboard"
+version       = "1.0.0"
+type          = "app-main"
+appId         = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee05"
+entryPoint    = "http://0.0.0.0:8080"
+source        = "https://github.com/pcastone/rivers/canary-fleet"

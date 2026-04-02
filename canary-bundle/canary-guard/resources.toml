@@ -1,0 +1,1 @@
+# No external datasources — guard uses framework-provided session storage
