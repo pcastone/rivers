@@ -169,12 +169,11 @@ impl CouchDBConnection {
         // Parse selector from statement (JSON string) or build from parameters
         let selector: serde_json::Value = if !query.statement.is_empty() {
             let mut sel_str = query.statement.clone();
-            // Substitute $1, $2 etc. with parameter values
-            let mut keys: Vec<&String> = query.parameters.keys().collect();
-            keys.sort();
-            for (i, key) in keys.iter().enumerate() {
-                let placeholder = format!("${}", i + 1);
-                if let Some(val) = query.parameters.get(*key) {
+            // Substitute $name with parameter values (statement already has $1,$2
+            // from DataView engine translation, or bare $name for direct calls)
+            for (key, val) in &query.parameters {
+                let placeholder_named = format!("${key}");
+                if sel_str.contains(&placeholder_named) {
                     let replacement = match val {
                         QueryValue::String(s) => s.clone(),
                         QueryValue::Integer(n) => n.to_string(),
@@ -182,7 +181,7 @@ impl CouchDBConnection {
                         QueryValue::Boolean(b) => b.to_string(),
                         other => serde_json::to_string(other).unwrap_or_default(),
                     };
-                    sel_str = sel_str.replace(&placeholder, &replacement);
+                    sel_str = sel_str.replace(&placeholder_named, &replacement);
                 }
             }
             let mut parsed: serde_json::Value = serde_json::from_str(&sel_str)
