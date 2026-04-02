@@ -302,16 +302,29 @@ fn dataview_callback(
 ) {
     let name = args.get(0).to_rust_string_lossy(scope);
 
-    // Check ctx.data first (pre-fetched)
-    let this = args.this();
-    let data_key = v8_str(scope, "data");
-    if let Some(data_obj) = this.get(scope, data_key.into()) {
-        if data_obj.is_object() {
-            let dv_key = v8_str(scope, &name);
-            if let Some(val) = data_obj.to_object(scope).unwrap().get(scope, dv_key.into()) {
-                if !val.is_undefined() {
-                    rv.set(val);
-                    return;
+    // Extract parameters from second argument (if provided)
+    let params = {
+        let arg1 = args.get(1);
+        if arg1.is_object() && !arg1.is_null_or_undefined() {
+            v8_to_json_value(scope, arg1)
+        } else {
+            serde_json::Value::Null
+        }
+    };
+
+    // Check ctx.data first (pre-fetched), but only when no params passed
+    // (pre-fetched results are static; dynamic params require re-execution)
+    if params.is_null() {
+        let this = args.this();
+        let data_key = v8_str(scope, "data");
+        if let Some(data_obj) = this.get(scope, data_key.into()) {
+            if data_obj.is_object() {
+                let dv_key = v8_str(scope, &name);
+                if let Some(val) = data_obj.to_object(scope).unwrap().get(scope, dv_key.into()) {
+                    if !val.is_undefined() {
+                        rv.set(val);
+                        return;
+                    }
                 }
             }
         }
@@ -320,7 +333,11 @@ fn dataview_callback(
     // Try host callback for dynamic execution
     if let Some(callbacks) = HOST_CALLBACKS.get() {
         if let Some(dv_fn) = callbacks.dataview_execute {
-            let input = serde_json::json!({"name": name}).to_string();
+            let input = if params.is_null() {
+                serde_json::json!({"name": name}).to_string()
+            } else {
+                serde_json::json!({"name": name, "params": params}).to_string()
+            };
             let mut out_ptr: *mut u8 = std::ptr::null_mut();
             let mut out_len: usize = 0;
             let result = dv_fn(

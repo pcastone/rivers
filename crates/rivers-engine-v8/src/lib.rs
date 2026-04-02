@@ -209,6 +209,42 @@ mod tests {
     }
 
     #[test]
+    fn execute_dataview_returns_prefetched() {
+        let mut ctx = make_ctx(
+            "function handler(ctx) { return { result: ctx.dataview('users') }; }",
+            "handler",
+        );
+        // Pre-fetch data keyed by DataView name
+        ctx.prefetched_data.insert(
+            "users".to_string(),
+            serde_json::json!([{"id": 1, "name": "alice"}]),
+        );
+        let result = execute_js(ctx).unwrap();
+        assert_eq!(result.value["result"][0]["name"], "alice");
+    }
+
+    #[test]
+    fn execute_dataview_with_params_skips_prefetch() {
+        let mut ctx = make_ctx(
+            r#"function handler(ctx) {
+                var prefetched = ctx.dataview('users');
+                var dynamic = ctx.dataview('users', { id: 42 });
+                return { prefetched_found: prefetched !== null, dynamic_is_null: dynamic === null };
+            }"#,
+            "handler",
+        );
+        ctx.prefetched_data.insert(
+            "users".to_string(),
+            serde_json::json!([{"id": 1}]),
+        );
+        let result = execute_js(ctx).unwrap();
+        // Prefetched should return data (no params = use cache)
+        assert_eq!(result.value["prefetched_found"], true);
+        // Dynamic with params should return null (no host callback in unit tests)
+        assert_eq!(result.value["dynamic_is_null"], true);
+    }
+
+    #[test]
     fn c_abi_execute_round_trip() {
         let ctx = make_ctx("function handler(ctx) { return { v8: true }; }", "handler");
         let ctx_json = serde_json::to_vec(&ctx).unwrap();
