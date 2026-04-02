@@ -16,8 +16,16 @@ use crate::HOST_CALLBACKS;
 
 // ── Core Execution ──────────────────────────────────────────────
 
+/// Default handler execution timeout in milliseconds.
+const DEFAULT_TIMEOUT_MS: u64 = 5000;
+
 pub(crate) fn execute_js(ctx: SerializedTaskContext) -> Result<rivers_engine_sdk::SerializedTaskResult, String> {
     let start = Instant::now();
+
+    // Resolve timeout from args or use default
+    let timeout_ms = ctx.args.get("_timeout_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_TIMEOUT_MS);
 
     // Set up thread-locals
     setup_task_locals(&ctx);
@@ -44,6 +52,13 @@ pub(crate) fn execute_js(ctx: SerializedTaskContext) -> Result<rivers_engine_sdk
 
     // Acquire isolate
     let mut isolate = acquire_isolate(DEFAULT_HEAP_LIMIT);
+
+    // Start watchdog thread — terminates execution after timeout
+    let isolate_handle = isolate.thread_safe_handle();
+    let watchdog = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(timeout_ms));
+        isolate_handle.terminate_execution();
+    });
 
     let result = {
         let handle_scope = &mut v8::HandleScope::new(&mut isolate);
@@ -91,9 +106,17 @@ pub(crate) fn execute_js(ctx: SerializedTaskContext) -> Result<rivers_engine_sdk
 
         let result = func.call(tc, recv, &[ctx_arg]);
 
+        // Cancel watchdog if execution completed before timeout
+        drop(watchdog);
+
         if tc.has_caught() {
             let exception = tc.exception().unwrap();
             let msg = exception.to_rust_string_lossy(tc);
+            // Check if this was a timeout termination
+            if start.elapsed().as_millis() as u64 >= timeout_ms {
+                clear_task_locals();
+                return Err(format!("handler execution timed out after {}ms", timeout_ms));
+            }
             clear_task_locals();
             return Err(msg);
         }
@@ -534,7 +557,16 @@ fn crypto_timing_safe_equal_callback(
 ) {
     let a = args.get(0).to_rust_string_lossy(scope);
     let b = args.get(1).to_rust_string_lossy(scope);
-    let equal = a.len() == b.len() && a.as_bytes().iter().zip(b.as_bytes()).all(|(x, y)| x == y);
+    // Constant-time comparison — XOR accumulation, no short-circuit
+    let equal = if a.len() != b.len() {
+        false
+    } else {
+        let mut diff = 0u8;
+        for (x, y) in a.as_bytes().iter().zip(b.as_bytes()) {
+            diff |= x ^ y;
+        }
+        diff == 0
+    };
     rv.set(v8::Boolean::new(scope, equal).into());
 }
 
