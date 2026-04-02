@@ -1,0 +1,8 @@
+{
+  "type": "object",
+  "description": "Canary guard identity for session testing",
+  "fields": [
+    { "name": "username", "type": "string", "required": true },
+    { "name": "role",     "type": "string", "required": true }
+  ]
+}
