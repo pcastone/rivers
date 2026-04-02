@@ -78,7 +78,7 @@ async fn postgres_create_insert_select_roundtrip() {
         "CREATE TABLE {table_name} (id SERIAL PRIMARY KEY, name TEXT NOT NULL, age INT)"
     );
     let create_query = Query::with_operation("create", "", &create_sql);
-    tokio::time::timeout(TIMEOUT, conn.execute(&create_query))
+    tokio::time::timeout(TIMEOUT, conn.ddl_execute(&create_query))
         .await
         .expect("timed out")
         .expect("CREATE TABLE failed");
@@ -117,7 +117,7 @@ async fn postgres_create_insert_select_roundtrip() {
     // DROP TABLE (cleanup)
     let drop_sql = format!("DROP TABLE {table_name}");
     let drop_query = Query::with_operation("drop", "", &drop_sql);
-    tokio::time::timeout(TIMEOUT, conn.execute(&drop_query))
+    tokio::time::timeout(TIMEOUT, conn.ddl_execute(&drop_query))
         .await
         .expect("timed out")
         .expect("DROP TABLE failed");

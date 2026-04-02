@@ -12,6 +12,9 @@ use zeroize::Zeroize;
 use rivers_runtime::rivers_core::ServerConfig;
 use rivers_runtime::DataViewExecutor;
 
+use rivers_runtime::bundle::InitHandlerConfig;
+
+use crate::process_pool::ProcessPoolManager;
 use crate::server::{AppContext, ServerError, register_all_drivers};
 use crate::view_engine;
 use super::reload::build_cache_policy_from_bundle;
@@ -316,8 +319,63 @@ pub async fn load_and_wire_bundle(
     let ds_params = Arc::new(ds_params);
     let mut executor = DataViewExecutor::new(registry, factory.clone(), ds_params.clone(), cache);
     executor.set_event_bus(ctx.event_bus.clone());
-    *ctx.dataview_executor.write().await = Some(Arc::new(executor));
+    let executor = Arc::new(executor);
+    *ctx.dataview_executor.write().await = Some(executor.clone());
     ctx.driver_factory = Some(factory.clone());
+
+    // ── Phase 1.5: Run application init handlers (DDL security spec) ──
+    for app in &bundle.apps {
+        if let Some(ref init_config) = app.manifest.init {
+            let app_id = &app.manifest.app_id;
+            let app_name = &app.manifest.app_name;
+
+            tracing::info!(
+                app_id = %app_id,
+                app_name = %app_name,
+                module = %init_config.module,
+                entrypoint = %init_config.entrypoint,
+                "init handler started"
+            );
+
+            let start = std::time::Instant::now();
+
+            // Dispatch init handler via ProcessPool
+            let init_result = dispatch_init_handler(
+                &ctx.pool,
+                app,
+                init_config,
+                &executor,
+                &config.security.ddl_whitelist,
+                config.base.init_timeout_s,
+            ).await;
+
+            let duration_ms = start.elapsed().as_millis() as u64;
+
+            match init_result {
+                Ok(()) => {
+                    tracing::info!(
+                        app_id = %app_id,
+                        app_name = %app_name,
+                        duration_ms = duration_ms,
+                        "init handler completed"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        app_id = %app_id,
+                        app_name = %app_name,
+                        error = %e,
+                        duration_ms = duration_ms,
+                        "init handler failed — app entering FAILED state"
+                    );
+                    return Err(ServerError::Config(format!(
+                        "init handler failed for app '{}': {}",
+                        app_name, e
+                    )));
+                }
+            }
+        }
+    }
 
     // Build namespaced router: /<prefix>/<bundle>/<app>/<view>
     let router = view_engine::ViewRouter::from_bundle(
@@ -433,4 +491,63 @@ pub async fn load_and_wire_bundle(
     crate::task_enrichment::sync_from_app_context(ctx);
 
     Ok(())
+}
+
+/// Dispatch an application init handler via the ProcessPool.
+///
+/// The init handler runs in ApplicationInit context with access to
+/// `ctx.ddl()`, `ctx.admin()`, and `ctx.query()`. DDL operations
+/// are gated by the whitelist (Gate 3).
+async fn dispatch_init_handler(
+    pool: &ProcessPoolManager,
+    app: &rivers_runtime::LoadedApp,
+    init_config: &InitHandlerConfig,
+    _executor: &Arc<DataViewExecutor>,
+    _ddl_whitelist: &[String],
+    timeout_s: u64,
+) -> Result<(), String> {
+    use crate::process_pool::Entrypoint;
+
+    let entry_point = app
+        .manifest
+        .entry_point
+        .as_deref()
+        .unwrap_or(&app.manifest.app_name);
+
+    let module_path = app.app_dir
+        .join("libraries")
+        .join(&init_config.module);
+
+    if !module_path.exists() {
+        return Err(format!(
+            "init handler module not found: {}",
+            module_path.display()
+        ));
+    }
+
+    let entrypoint = Entrypoint {
+        module: module_path.to_string_lossy().to_string(),
+        function: init_config.entrypoint.clone(),
+        language: "javascript".to_string(),
+    };
+
+    let args = serde_json::json!({
+        "context": "ApplicationInit",
+        "app_id": app.manifest.app_id,
+        "app_name": app.manifest.app_name,
+    });
+
+    let builder = rivers_runtime::process_pool::TaskContextBuilder::new()
+        .entrypoint(entrypoint)
+        .args(args)
+        .trace_id(format!("init-{}", entry_point));
+
+    let task_ctx = builder.build().map_err(|e| format!("failed to build init task context: {e}"))?;
+
+    let _ = timeout_s; // TODO: enforce timeout via tokio::time::timeout
+
+    pool.dispatch("default", task_ctx)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("init handler execution failed: {e}"))
 }

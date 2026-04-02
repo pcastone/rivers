@@ -158,6 +158,11 @@ pub struct PostgresConnection {
 #[async_trait]
 impl Connection for PostgresConnection {
     async fn execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
+        // Gate 1: DDL guard
+        if let Some(reason) = rivers_driver_sdk::check_admin_guard(query, self.admin_operations()) {
+            return Err(DriverError::Forbidden(format!("{reason} — use application init handler")));
+        }
+
         match query.operation.as_str() {
             // -----------------------------------------------------------------
             // Read operations — return rows
@@ -287,6 +292,24 @@ impl Connection for PostgresConnection {
             .await
             .map_err(|e| DriverError::Connection(format!("postgres ping: {e}")))?;
         Ok(())
+    }
+
+    async fn ddl_execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
+        let params = build_params(&query.parameters);
+        let param_refs: Vec<&(dyn ToSql + Sync)> =
+            params.iter().map(|p| &**p as &(dyn ToSql + Sync)).collect();
+
+        let affected = self
+            .client
+            .execute(&query.statement as &str, &param_refs)
+            .await
+            .map_err(|e| DriverError::Query(format!("postgres ddl: {e}")))?;
+
+        Ok(QueryResult {
+            rows: Vec::new(),
+            affected_rows: affected,
+            last_insert_id: None,
+        })
     }
 
     fn driver_name(&self) -> &str {

@@ -62,7 +62,7 @@ async fn sqlite_create_insert_select_roundtrip() {
         "",
         "CREATE TABLE contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, age INTEGER)",
     );
-    tokio::time::timeout(TIMEOUT, conn.execute(&create_query))
+    tokio::time::timeout(TIMEOUT, conn.ddl_execute(&create_query))
         .await
         .expect("timed out")
         .expect("CREATE TABLE failed");
@@ -147,7 +147,7 @@ async fn sqlite_named_parameter_binding() {
         "",
         "CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT, price REAL, active INTEGER)",
     );
-    tokio::time::timeout(TIMEOUT, conn.execute(&create_query))
+    tokio::time::timeout(TIMEOUT, conn.ddl_execute(&create_query))
         .await
         .expect("timed out")
         .expect("CREATE TABLE failed");

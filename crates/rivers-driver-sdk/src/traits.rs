@@ -447,13 +447,47 @@ pub trait Driver: Send + Sync {
 
 /// A pool-owned connection to a datasource.
 ///
-/// The `execute` method handles all operations — reads, writes, DDL.
-/// The driver dispatches to the correct native call based on `query.operation`.
+/// The `execute` method handles DML operations (SELECT, INSERT, UPDATE, DELETE).
+/// It MUST reject DDL statements and admin operations with [`DriverError::Forbidden`].
+///
+/// The `ddl_execute` method handles DDL and admin operations. It is only callable
+/// from the ApplicationInit execution context. The caller (DataViewEngine) enforces
+/// whitelist checks before calling this method.
+///
 /// Connections are owned by the pool; when done, the pool reclaims them.
 #[async_trait]
 pub trait Connection: Send + Sync {
-    /// Execute a query (read, write, DDL — all go through here).
+    /// Execute a DML query (SELECT, INSERT, UPDATE, DELETE, or equivalent).
+    ///
+    /// MUST reject DDL statements (SQL) and admin operations (non-SQL)
+    /// with [`DriverError::Forbidden`]. Use [`check_admin_guard`](crate::check_admin_guard)
+    /// for a combined check.
     async fn execute(&mut self, query: &Query) -> Result<QueryResult, DriverError>;
+
+    /// Execute a DDL statement or admin operation.
+    ///
+    /// Only callable from ApplicationInit context. The caller (DataViewEngine)
+    /// is responsible for whitelist enforcement (Gate 3).
+    ///
+    /// Default implementation returns [`DriverError::Unsupported`] — drivers that
+    /// support DDL/admin operations (postgres, mysql, sqlite, redis, etc.) override.
+    async fn ddl_execute(&mut self, _query: &Query) -> Result<QueryResult, DriverError> {
+        Err(DriverError::Unsupported(format!(
+            "{} does not support DDL/admin operations",
+            self.driver_name()
+        )))
+    }
+
+    /// Returns operation tokens this driver considers admin/DDL-like.
+    ///
+    /// `execute()` MUST reject queries whose operation matches this list.
+    /// `ddl_execute()` accepts these operations.
+    ///
+    /// SQL drivers return an empty slice (they use [`is_ddl_statement`](crate::is_ddl_statement)
+    /// on the statement text instead). Non-SQL drivers return their admin operation tokens.
+    fn admin_operations(&self) -> &[&str] {
+        &[]
+    }
 
     /// Health check — returns Ok(()) or connection-level error.
     async fn ping(&mut self) -> Result<(), DriverError>;

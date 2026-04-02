@@ -20,6 +20,19 @@ use rivers_driver_sdk::ConnectionParams;
 use crate::dataview::DataViewConfig;
 use crate::tiered_cache::{cache_key, DataViewCache};
 
+// ── Execution Context ─────────────────────────────────────────────
+
+/// Execution context for datasource operations.
+///
+/// Determines whether DDL/admin operations are permitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionContext {
+    /// Normal request dispatch — DDL/admin ops blocked by Gate 1.
+    ViewRequest,
+    /// Application init handler — DDL/admin ops permitted if whitelisted.
+    ApplicationInit,
+}
+
 // ── DataView Errors ───────────────────────────────────────────────
 
 /// Errors from DataView operations.
@@ -627,6 +640,62 @@ impl DataViewExecutor {
             }
             Err(e) => Err(DataViewError::Pool(format!("connection failed: {e}"))),
         }
+    }
+
+    /// Execute a DDL statement or admin operation (ApplicationInit context only).
+    ///
+    /// Checks the DDL whitelist (Gate 3) before calling `Connection::ddl_execute()`.
+    /// Only used by application init handlers.
+    pub async fn execute_ddl(
+        &self,
+        datasource_name: &str,
+        query: &Query,
+        app_id: &str,
+        ddl_whitelist: &[String],
+        _trace_id: &str,
+    ) -> Result<QueryResult, DataViewError> {
+        // Resolve datasource → connection params
+        let ds_params = self
+            .datasource_params
+            .get(datasource_name)
+            .ok_or_else(|| DataViewError::Pool(format!(
+                "datasource '{}' not configured",
+                datasource_name
+            )))?;
+
+        // Gate 3: whitelist check
+        let database = if ds_params.database.is_empty() { datasource_name } else { &ds_params.database };
+        if !rivers_core_config::config::security::is_ddl_permitted(database, app_id, ddl_whitelist) {
+            return Err(DataViewError::Driver(format!(
+                "DDL operation not permitted: '{}' not in ddl_whitelist for app {}",
+                database, app_id
+            )));
+        }
+
+        // Connect and execute DDL
+        let driver_name = ds_params
+            .options
+            .get("driver")
+            .map(|s| s.as_str())
+            .unwrap_or(datasource_name);
+
+        let mut conn = self.factory.connect(driver_name, ds_params).await
+            .map_err(|e| DataViewError::Pool(format!("connection failed: {e}")))?;
+
+        let result = conn
+            .ddl_execute(query)
+            .await
+            .map_err(|e| DataViewError::Driver(e.to_string()))?;
+
+        tracing::info!(
+            datasource = %datasource_name,
+            database = %database,
+            app_id = %app_id,
+            statement_prefix = %query.statement.chars().take(40).collect::<String>(),
+            "DDL executed"
+        );
+
+        Ok(result)
     }
 
     /// Invalidate cache entries for listed DataViews and emit EventBus event.

@@ -92,7 +92,16 @@ pub struct MongoConnection {
 
 #[async_trait]
 impl Connection for MongoConnection {
+    fn admin_operations(&self) -> &[&str] {
+        &["create_collection", "drop_collection", "drop_database", "create_index", "drop_index", "rename_collection"]
+    }
+
     async fn execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
+        // Gate 1: DDL/admin operation guard
+        if let Some(reason) = rivers_driver_sdk::check_admin_guard(query, self.admin_operations()) {
+            return Err(DriverError::Forbidden(format!("{reason} — use application init handler")));
+        }
+
         match query.operation.as_str() {
             "find" | "select" | "query" => self.exec_find(query).await,
             "insert" | "create" => self.exec_insert(query).await,

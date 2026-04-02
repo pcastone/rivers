@@ -17,7 +17,16 @@ pub struct RedisConnection {
 
 #[async_trait]
 impl Connection for RedisConnection {
+    fn admin_operations(&self) -> &[&str] {
+        &["flushdb", "flushall", "config_set", "config_rewrite"]
+    }
+
     async fn execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
+        // Gate 1: admin operation guard
+        if let Some(reason) = rivers_driver_sdk::check_admin_guard(query, self.admin_operations()) {
+            return Err(DriverError::Forbidden(format!("{reason} — use application init handler")));
+        }
+
         // Pre-process: if params are missing expected keys, parse them from statement.
         // e.g. "SMEMBERS categories" -> params["key"] = "categories"
         let query = &inject_params_from_statement(query);

@@ -87,6 +87,11 @@ pub struct LdapConnection {
 #[async_trait]
 impl Connection for LdapConnection {
     async fn execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
+        // Gate 1: DDL/admin operation guard
+        if let Some(reason) = rivers_driver_sdk::check_admin_guard(query, self.admin_operations()) {
+            return Err(DriverError::Forbidden(format!("{reason} — use application init handler")));
+        }
+
         match query.operation.as_str() {
             "search" | "find" | "select" => self.exec_search(query).await,
             "add" | "insert" => self.exec_add(query).await,

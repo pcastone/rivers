@@ -29,6 +29,11 @@ pub struct ExecConnection {
 #[async_trait]
 impl Connection for ExecConnection {
     async fn execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
+        // Gate 1: DDL/admin operation guard
+        if let Some(reason) = rivers_driver_sdk::check_admin_guard(query, self.admin_operations()) {
+            return Err(DriverError::Forbidden(format!("{reason} — use application init handler")));
+        }
+
         // Only "query" operation supported
         match query.operation.as_str() {
             "query" => self.execute_command(query).await,

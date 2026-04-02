@@ -71,6 +71,21 @@ pub struct AppManifest {
 
     /// SPA configuration (app-main only).
     pub spa: Option<SpaConfig>,
+
+    /// Application init handler — runs once at startup before the app enters RUNNING.
+    /// Used for DDL operations (schema migrations) with whitelisted datasources.
+    pub init: Option<InitHandlerConfig>,
+}
+
+/// Application init handler configuration.
+///
+/// Declared in the app manifest. Runs once during startup in ApplicationInit context.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct InitHandlerConfig {
+    /// Path to CodeComponent module relative to `libraries/`.
+    pub module: String,
+    /// Exported function name.
+    pub entrypoint: String,
 }
 
 /// SPA serving config in the app manifest.
