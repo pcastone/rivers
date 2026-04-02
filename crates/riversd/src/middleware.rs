@@ -145,6 +145,10 @@ pub async fn security_headers_middleware(request: Request<Body>, next: Next) -> 
         "referrer-policy",
         HeaderValue::from_static("strict-origin-when-cross-origin"),
     );
+    headers.insert(
+        "strict-transport-security",
+        HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+    );
     // CSP is the operator's responsibility — not injected by default.
 
     response

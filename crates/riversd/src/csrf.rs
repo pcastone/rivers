@@ -144,7 +144,7 @@ impl CsrfManager {
 /// Per spec §9.1: NOT HttpOnly (readable by JavaScript), SameSite=Lax, Path=/.
 pub fn build_csrf_cookie(token: &str, config: &CsrfConfig) -> String {
     format!(
-        "{}={}; SameSite=Lax; Path=/",
+        "{}={}; SameSite=Lax; Path=/; Secure",
         config.cookie_name, token
     )
 }

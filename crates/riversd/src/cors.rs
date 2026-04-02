@@ -124,6 +124,10 @@ impl CorsHeaders {
         if self.is_preflight {
             headers.insert("access-control-max-age", HeaderValue::from_static("86400"));
         }
+        // Vary: Origin required when origin is dynamically reflected (not *)
+        if self.allow_origin != "*" {
+            headers.insert("vary", HeaderValue::from_static("Origin"));
+        }
     }
 }
 
