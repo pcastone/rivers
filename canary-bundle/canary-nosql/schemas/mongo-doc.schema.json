@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "description": "MongoDB canary test document — simple name/value pair for CRUD roundtrip",
+  "fields": [
+    { "name": "_id",   "type": "string",  "required": false },
+    { "name": "name",  "type": "string",  "required": true  },
+    { "name": "value", "type": "string",  "required": true  }
+  ]
+}
