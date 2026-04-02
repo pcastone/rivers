@@ -1,1 +1,132 @@
-# Placeholder — to be populated in later phases
+# ─────────────────────────────────────────────
+# STREAM Profile — Datasources
+# ─────────────────────────────────────────────
+
+[data.datasources.kafka]
+name       = "kafka"
+driver     = "kafka"
+nopassword = true
+
+[data.datasources.redis]
+name       = "redis"
+driver     = "redis"
+nopassword = true
+
+[data.datasources.faker]
+name       = "faker"
+driver     = "faker"
+nopassword = true
+
+[data.datasources.faker.config]
+locale                = "en_US"
+seed                  = 0
+max_records_per_query = 50
+
+# ─────────────────────────────────────────────
+# DataViews — faker data for streaming and polling
+# ─────────────────────────────────────────────
+
+[data.dataviews.stream_faker]
+name          = "stream_faker"
+datasource    = "faker"
+query         = "schemas/stream-payload.schema.json"
+return_schema = "schemas/stream-payload.schema.json"
+
+[[data.dataviews.stream_faker.parameters]]
+name     = "limit"
+type     = "integer"
+required = false
+default  = 5
+
+[data.dataviews.poll_faker]
+name          = "poll_faker"
+datasource    = "faker"
+query         = "schemas/stream-payload.schema.json"
+return_schema = "schemas/stream-payload.schema.json"
+
+[[data.dataviews.poll_faker.parameters]]
+name     = "limit"
+type     = "integer"
+required = false
+default  = 3
+
+# ─────────────────────────────────────────────
+# Views — WebSocket
+# ─────────────────────────────────────────────
+
+[api.views.ws_chat]
+path           = "canary/stream/ws/chat"
+method         = "GET"
+view_type      = "Websocket"
+auth           = "none"
+websocket_mode = "Broadcast"
+
+[api.views.ws_chat.handler]
+type = "none"
+
+[api.views.ws_chat.ws_hooks]
+on_connect.module        = "libraries/handlers/ws-handler.ts"
+on_connect.entrypoint    = "onConnect"
+on_message.module        = "libraries/handlers/ws-handler.ts"
+on_message.entrypoint    = "onMessage"
+on_disconnect.module     = "libraries/handlers/ws-handler.ts"
+on_disconnect.entrypoint = "onDisconnect"
+
+# ─────────────────────────────────────────────
+# Views — SSE with polling config
+# ─────────────────────────────────────────────
+
+[api.views.sse_events]
+path                  = "canary/stream/sse/events"
+method                = "GET"
+view_type             = "ServerSentEvents"
+auth                  = "none"
+sse_event_buffer_size = 50
+
+[api.views.sse_events.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/sse-handler.ts"
+entrypoint = "sseDataview"
+dataviews  = ["stream_faker"]
+
+[api.views.sse_events.polling]
+tick_interval_ms = 3000
+diff_strategy    = "hash"
+poll_state_ttl_s = 300
+
+# ─────────────────────────────────────────────
+# Views — Streaming REST (NDJSON)
+# ─────────────────────────────────────────────
+
+[api.views.stream_chunks]
+path              = "canary/stream/rest/chunks"
+method            = "GET"
+view_type         = "Rest"
+auth              = "none"
+streaming         = true
+streaming_format  = "ndjson"
+stream_timeout_ms = 30000
+
+[api.views.stream_chunks.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/streaming-rest.ts"
+entrypoint = "streamChunks"
+
+# ─────────────────────────────────────────────
+# Views — Polling data endpoint
+# ─────────────────────────────────────────────
+
+[api.views.poll_data]
+path      = "canary/stream/poll/data"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.poll_data.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/poll-handler.ts"
+entrypoint = "pollData"
+dataviews  = ["poll_faker"]
