@@ -221,34 +221,40 @@ pub async fn session_middleware(
 /// Per spec §10.1, §10.5.
 /// Supports IP (default) and custom header strategies.
 pub async fn rate_limit_middleware(
-    State((limiter, strategy)): State<(Arc<RateLimiter>, crate::rate_limit::RateLimitStrategy)>,
+    State((limiter, strategy, trusted_proxies)): State<(Arc<RateLimiter>, crate::rate_limit::RateLimitStrategy, Vec<String>)>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
+    // Extract direct connection IP
+    let direct_ip = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Resolve real client IP (respects trusted proxies + X-Forwarded-For)
+    let xff = request.headers().get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok());
+    let client_ip = crate::rate_limit::resolve_client_ip(&direct_ip, xff, &trusted_proxies);
+
     // Extract key based on strategy
     let key = match &strategy {
         crate::rate_limit::RateLimitStrategy::CustomHeader(header_name) => {
-            request
-                .headers()
-                .get(header_name.as_str())
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    // Fall back to IP if custom header is absent
-                    request
-                        .extensions()
-                        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                        .map(|ci| ci.0.ip().to_string())
-                        .unwrap_or_else(|| "unknown".to_string())
-                })
+            // Only trust custom header if request comes from a trusted proxy
+            if trusted_proxies.is_empty() || !crate::rate_limit::resolve_client_ip(&direct_ip, None, &trusted_proxies).eq(&direct_ip) {
+                // Direct connection is from a trusted proxy — trust the header
+                request
+                    .headers()
+                    .get(header_name.as_str())
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string())
+                    .unwrap_or(client_ip.clone())
+            } else {
+                // Direct connection is NOT from a trusted proxy — ignore custom header
+                client_ip.clone()
+            }
         }
-        crate::rate_limit::RateLimitStrategy::Ip => {
-            request
-                .extensions()
-                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                .map(|ci| ci.0.ip().to_string())
-                .unwrap_or_else(|| "unknown".to_string())
-        }
+        crate::rate_limit::RateLimitStrategy::Ip => client_ip,
     };
 
     match limiter.check(&key).await {
