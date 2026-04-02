@@ -161,6 +161,15 @@ pub async fn serve_static_file(
         None => return crate::error_response::not_found("not found").into_axum_response(),
     };
 
+    // Check file size before reading into memory (default: 50 MiB)
+    const MAX_STATIC_FILE_SIZE: u64 = 50 * 1024 * 1024;
+    if let Ok(meta) = tokio::fs::metadata(&file_path).await {
+        if meta.len() > MAX_STATIC_FILE_SIZE {
+            return crate::error_response::ErrorResponse::new(413, "file too large")
+                .into_axum_response();
+        }
+    }
+
     // Read file
     let content = match tokio::fs::read(&file_path).await {
         Ok(bytes) => bytes,

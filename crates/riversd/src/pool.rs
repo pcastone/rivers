@@ -56,6 +56,53 @@ pub enum PoolError {
     Config(String),
 }
 
+// ── PoolGuard (RAII connection release) ────────────────────────────
+
+/// RAII guard for pool connections.
+///
+/// Automatically decrements `active_count` when dropped, preventing
+/// connection leaks on panics or early returns. The connection is
+/// dropped (not returned to idle) — callers who want to reuse should
+/// call `pool.release()` explicitly and `std::mem::forget` the guard.
+pub struct PoolGuard {
+    active_count: Arc<AtomicU64>,
+    /// Held connection — dropped when guard is dropped.
+    _conn: Option<Box<dyn Connection>>,
+}
+
+impl PoolGuard {
+    /// Create a guard for a checked-out connection.
+    pub fn new(conn: Box<dyn Connection>, active_count: Arc<AtomicU64>) -> Self {
+        Self {
+            active_count,
+            _conn: Some(conn),
+        }
+    }
+
+    /// Get a mutable reference to the underlying connection.
+    pub fn conn_mut(&mut self) -> &mut Box<dyn Connection> {
+        self._conn.as_mut().expect("connection already taken")
+    }
+
+    /// Take the connection out of the guard (for explicit release to pool).
+    /// Caller is responsible for calling pool.release() and active_count management.
+    pub fn take(mut self) -> Box<dyn Connection> {
+        // Prevent Drop from decrementing active_count
+        let conn = self._conn.take().expect("connection already taken");
+        std::mem::forget(self);
+        conn
+    }
+}
+
+impl Drop for PoolGuard {
+    fn drop(&mut self) {
+        if self._conn.is_some() {
+            // Connection dropped without explicit release — decrement active count
+            self.active_count.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
 // ── PoolConfig ─────────────────────────────────────────────────────
 
 /// Per-datasource pool configuration.
