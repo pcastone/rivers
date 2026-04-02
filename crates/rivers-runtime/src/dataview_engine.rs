@@ -616,9 +616,11 @@ impl DataViewExecutor {
                 if style == rivers_driver_sdk::ParamStyle::DollarPositional
                     || style == rivers_driver_sdk::ParamStyle::QuestionPositional
                 {
+                    // Use zero-padded numeric keys so alphabetical sort in
+                    // build_params preserves positional order: "001", "002", ...
                     query.parameters.clear();
-                    for (k, v) in ordered {
-                        query.parameters.insert(k, v);
+                    for (i, (_k, v)) in ordered.into_iter().enumerate() {
+                        query.parameters.insert(format!("{:03}", i + 1), v);
                     }
                 }
             }
