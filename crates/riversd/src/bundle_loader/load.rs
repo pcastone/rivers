@@ -542,6 +542,9 @@ async fn dispatch_init_handler(
         .args(args)
         .trace_id(format!("init-{}", entry_point));
 
+    // Wire shared capabilities (storage, driver_factory, dataview_executor, lockbox, keystore)
+    let builder = crate::task_enrichment::enrich(builder, entry_point);
+
     let task_ctx = builder.build().map_err(|e| format!("failed to build init task context: {e}"))?;
 
     let timeout = std::time::Duration::from_secs(timeout_s);
