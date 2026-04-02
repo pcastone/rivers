@@ -45,7 +45,7 @@ const PLUGIN_LIB_NAMES: &[&str] = &[
 ];
 
 /// Binary names to deploy.
-const BINARIES: &[&str] = &["riversd", "riversctl", "rivers-lockbox", "riverpackage"];
+const BINARIES: &[&str] = &["riversd", "riversctl", "rivers-lockbox", "rivers-keystore", "riverpackage"];
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -147,6 +147,7 @@ fn deploy_dynamic(workspace_root: &Path, target_dir: &Path, deploy_path: &Path, 
         "-p", "riversd",
         "-p", "riversctl",
         "-p", "rivers-lockbox",
+        "-p", "rivers-keystore",
         "-p", "riverpackage",
     ]);
 
@@ -222,6 +223,7 @@ fn deploy_static(_workspace_root: &Path, target_dir: &Path, deploy_path: &Path, 
         "-p", "riversd",
         "-p", "riversctl",
         "-p", "rivers-lockbox",
+        "-p", "rivers-keystore",
         "-p", "riverpackage",
     ]);
 
