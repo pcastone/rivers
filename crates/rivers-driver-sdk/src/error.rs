@@ -35,4 +35,10 @@ pub enum DriverError {
     /// Driver-internal error, unexpected state.
     #[error("internal driver error: {0}")]
     Internal(String),
+
+    /// Operation rejected by security policy.
+    /// Semantically distinct from `Unsupported` — the operation is implemented
+    /// but blocked (e.g., DDL via execute(), admin op without whitelist).
+    #[error("forbidden: {0}")]
+    Forbidden(String),
 }

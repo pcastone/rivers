@@ -100,7 +100,16 @@ impl ElasticConnection {
 
 #[async_trait]
 impl Connection for ElasticConnection {
+    fn admin_operations(&self) -> &[&str] {
+        &["create_index", "delete_index", "put_mapping", "update_settings"]
+    }
+
     async fn execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
+        // Gate 1: DDL/admin operation guard
+        if let Some(reason) = rivers_driver_sdk::check_admin_guard(query, self.admin_operations()) {
+            return Err(DriverError::Forbidden(format!("{reason} — use application init handler")));
+        }
+
         match query.operation.as_str() {
             "search" | "find" | "query" | "select" => self.exec_search(query).await,
             "insert" | "index" | "create" => self.exec_index(query).await,

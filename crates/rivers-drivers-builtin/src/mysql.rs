@@ -161,6 +161,11 @@ pub struct MysqlConnection {
 #[async_trait]
 impl Connection for MysqlConnection {
     async fn execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
+        // Gate 1: DDL guard
+        if let Some(reason) = rivers_driver_sdk::check_admin_guard(query, self.admin_operations()) {
+            return Err(DriverError::Forbidden(format!("{reason} — use application init handler")));
+        }
+
         let params = build_mysql_params(&query.parameters);
 
         match query.operation.as_str() {
@@ -324,6 +329,14 @@ impl Connection for MysqlConnection {
             .await
             .map_err(|e| DriverError::Connection(format!("mysql ping: {e}")))?;
         Ok(())
+    }
+
+    async fn ddl_execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
+        self.conn
+            .query_drop(&query.statement)
+            .await
+            .map_err(|e| DriverError::Query(format!("mysql ddl: {e}")))?;
+        Ok(QueryResult::empty())
     }
 
     fn driver_name(&self) -> &str {

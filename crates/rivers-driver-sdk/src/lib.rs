@@ -46,6 +46,40 @@ pub use traits::{
 };
 pub use types::{classify_operation, infer_operation, OperationCategory, Query, QueryResult, QueryValue};
 
+// ── DDL / Admin Operation Guards ────────────────────────────────
+
+/// Returns true if the SQL statement is a DDL operation.
+///
+/// Checks the actual statement text, not the inferred operation token.
+/// Handles leading whitespace and is case-insensitive.
+pub fn is_ddl_statement(statement: &str) -> bool {
+    let upper = statement.trim_start().to_uppercase();
+    upper.starts_with("CREATE ")
+        || upper.starts_with("ALTER ")
+        || upper.starts_with("DROP ")
+        || upper.starts_with("TRUNCATE ")
+}
+
+/// Check if a query is an admin operation (SQL DDL or driver-declared admin op).
+///
+/// Returns `Some(reason)` if blocked, `None` if allowed.
+/// Use in `Connection::execute()` to reject admin operations.
+pub fn check_admin_guard(query: &Query, admin_ops: &[&str]) -> Option<String> {
+    if is_ddl_statement(&query.statement) {
+        return Some(format!(
+            "DDL statement rejected — statement prefix: '{}'",
+            query.statement.chars().take(40).collect::<String>()
+        ));
+    }
+    if admin_ops.contains(&query.operation.as_str()) {
+        return Some(format!(
+            "admin operation '{}' rejected",
+            query.operation
+        ));
+    }
+    None
+}
+
 /// ABI version for plugin compatibility checks.
 ///
 /// Per spec §7.2 — plugins must export `_rivers_abi_version()` returning this value.

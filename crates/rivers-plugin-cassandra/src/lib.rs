@@ -70,6 +70,11 @@ pub struct CassandraConnection {
 #[async_trait]
 impl Connection for CassandraConnection {
     async fn execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
+        // Gate 1: DDL/admin operation guard
+        if let Some(reason) = rivers_driver_sdk::check_admin_guard(query, self.admin_operations()) {
+            return Err(DriverError::Forbidden(format!("{reason} — use application init handler")));
+        }
+
         match query.operation.as_str() {
             "select" | "query" | "get" | "find" => self.exec_query(query).await,
             "insert" | "create" | "update" | "delete" | "remove" | "del" => {

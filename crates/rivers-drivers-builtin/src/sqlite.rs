@@ -99,6 +99,11 @@ pub struct SqliteConnection {
 #[async_trait]
 impl Connection for SqliteConnection {
     async fn execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
+        // Gate 1: DDL guard
+        if let Some(reason) = rivers_driver_sdk::check_admin_guard(query, self.admin_operations()) {
+            return Err(DriverError::Forbidden(format!("{reason} — use application init handler")));
+        }
+
         let conn = Arc::clone(&self.conn);
         let statement = query.statement.clone();
         let operation = query.operation.clone();
@@ -149,6 +154,22 @@ impl Connection for SqliteConnection {
         })
         .await
         .map_err(|e| DriverError::Internal(format!("spawn_blocking join: {}", e)))?
+    }
+
+    async fn ddl_execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
+        let conn = Arc::clone(&self.conn);
+        let statement = query.statement.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = conn
+                .lock()
+                .map_err(|e| DriverError::Internal(format!("sqlite lock: {e}")))?;
+            conn.execute_batch(&statement)
+                .map_err(|e| DriverError::Query(format!("sqlite ddl: {e}")))?;
+            Ok(QueryResult::empty())
+        })
+        .await
+        .map_err(|e| DriverError::Internal(format!("sqlite spawn: {e}")))?
     }
 
     fn driver_name(&self) -> &str {
