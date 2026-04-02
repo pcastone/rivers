@@ -219,6 +219,63 @@ impl PerViewRateLimiter {
     }
 }
 
+/// Extract the real client IP, respecting trusted proxies.
+///
+/// If the direct connection IP is in the trusted_proxies list and
+/// `X-Forwarded-For` is present, returns the rightmost non-proxy IP.
+/// Otherwise returns the direct connection IP.
+pub fn resolve_client_ip(
+    direct_ip: &str,
+    forwarded_for: Option<&str>,
+    trusted_proxies: &[String],
+) -> String {
+    if trusted_proxies.is_empty() {
+        return direct_ip.to_string();
+    }
+
+    // Only trust X-Forwarded-For if the direct connection is from a trusted proxy
+    if !is_trusted(direct_ip, trusted_proxies) {
+        return direct_ip.to_string();
+    }
+
+    // Parse X-Forwarded-For: client, proxy1, proxy2
+    // Walk from right to left, skip trusted proxies, return first untrusted IP
+    if let Some(xff) = forwarded_for {
+        let ips: Vec<&str> = xff.split(',').map(|s| s.trim()).collect();
+        for ip in ips.iter().rev() {
+            if !is_trusted(ip, trusted_proxies) {
+                return ip.to_string();
+            }
+        }
+    }
+
+    direct_ip.to_string()
+}
+
+/// Check if an IP is in the trusted proxies list.
+fn is_trusted(ip: &str, trusted_proxies: &[String]) -> bool {
+    let addr: std::net::IpAddr = match ip.parse() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+
+    for proxy in trusted_proxies {
+        // Try CIDR match first
+        if let Ok(network) = proxy.parse::<ipnet::IpNet>() {
+            if network.contains(&addr) {
+                return true;
+            }
+        }
+        // Try exact IP match
+        if let Ok(proxy_addr) = proxy.parse::<std::net::IpAddr>() {
+            if proxy_addr == addr {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Per-view rate limit override config.
 ///
 /// Per spec §10.4.

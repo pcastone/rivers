@@ -45,6 +45,14 @@ pub struct SecurityConfig {
     /// Custom header name for rate limit keying (when strategy = `"header"`).
     pub rate_limit_custom_header: Option<String>,
 
+    /// Trusted proxy IP addresses or CIDR ranges.
+    ///
+    /// When set, `X-Forwarded-For` is parsed for rate limiting and client IP
+    /// resolution, but only when the direct connection comes from a trusted proxy.
+    /// Empty = trust no proxies (use direct connection IP only).
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
+
     /// IP addresses allowed to access the admin API.
     #[serde(default)]
     pub admin_ip_allowlist: Vec<String>,
@@ -77,6 +85,7 @@ impl Default for SecurityConfig {
             rate_limit_burst_size: default_burst_size(),
             rate_limit_strategy: default_rate_strategy(),
             rate_limit_custom_header: None,
+            trusted_proxies: Vec::new(),
             admin_ip_allowlist: Vec::new(),
             session: SessionConfig::default(),
             csrf: CsrfConfig::default(),
