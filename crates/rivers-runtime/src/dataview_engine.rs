@@ -583,7 +583,7 @@ impl DataViewExecutor {
         }
 
         // 4. Build query from config + validated params
-        let query = build_query(config, &request.parameters, &request.method);
+        let mut query = build_query(config, &request.parameters, &request.method);
 
         // 5. Resolve datasource → connection params
         let ds_params = self
@@ -602,10 +602,32 @@ impl DataViewExecutor {
             .map(|s| s.as_str())
             .unwrap_or(&config.datasource);
 
+        // 6a. Translate $name parameters to driver's native format
+        if let Some(driver) = self.factory.get_driver(driver_name) {
+            let style = driver.param_style();
+            if style != rivers_driver_sdk::ParamStyle::None {
+                let (rewritten, ordered) = rivers_driver_sdk::translate_params(
+                    &query.statement,
+                    &query.parameters,
+                    style,
+                );
+                query.statement = rewritten;
+                // For positional styles, rebuild params in order
+                if style == rivers_driver_sdk::ParamStyle::DollarPositional
+                    || style == rivers_driver_sdk::ParamStyle::QuestionPositional
+                {
+                    query.parameters.clear();
+                    for (k, v) in ordered {
+                        query.parameters.insert(k, v);
+                    }
+                }
+            }
+        }
+
         // Try database driver first; if unknown, fall back to broker driver
         match self.factory.connect(driver_name, ds_params).await {
             Ok(mut conn) => {
-                // 6. Execute query via database connection
+                // 7. Execute query via database connection
                 let mut query_result = conn
                     .execute(&query)
                     .await

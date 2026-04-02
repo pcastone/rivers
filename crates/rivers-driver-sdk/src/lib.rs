@@ -41,7 +41,7 @@ pub use broker::{
 };
 pub use error::DriverError;
 pub use traits::{
-    Connection, ConnectionParams, DatabaseDriver, Driver, DriverType, HttpMethod,
+    Connection, ConnectionParams, DatabaseDriver, Driver, DriverType, HttpMethod, ParamStyle,
     SchemaDefinition, SchemaFieldDef, SchemaSyntaxError, ValidationDirection, ValidationError,
 };
 pub use types::{classify_operation, infer_operation, OperationCategory, Query, QueryResult, QueryValue};
@@ -78,6 +78,99 @@ pub fn check_admin_guard(query: &Query, admin_ops: &[&str]) -> Option<String> {
         ));
     }
     None
+}
+
+// ── Parameter Translation ──────────────────────────────────────
+
+/// Rewrite `$name` placeholders in a query statement to the driver's native format.
+///
+/// Scans the statement for `$name` tokens (bare identifiers after `$`),
+/// extracts them in order of appearance, and rewrites based on `ParamStyle`.
+/// Returns the rewritten statement and parameters ordered for positional styles.
+///
+/// For `ParamStyle::None`, returns the statement unchanged.
+pub fn translate_params(
+    statement: &str,
+    params: &std::collections::HashMap<String, QueryValue>,
+    style: ParamStyle,
+) -> (String, Vec<(String, QueryValue)>) {
+    if style == ParamStyle::None || style == ParamStyle::DollarNamed {
+        // No rewriting needed — $name is already correct or not used
+        let ordered: Vec<(String, QueryValue)> = params
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        return (statement.to_string(), ordered);
+    }
+
+    // Extract $name placeholders in order of appearance
+    let mut placeholders: Vec<String> = Vec::new();
+    let mut chars = statement.chars().peekable();
+    let mut i = 0;
+    let bytes = statement.as_bytes();
+
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() && (bytes[i + 1].is_ascii_alphabetic() || bytes[i + 1] == b'_') {
+            // Found $name — extract the identifier
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+                end += 1;
+            }
+            let name = String::from_utf8_lossy(&bytes[start..end]).to_string();
+            if !placeholders.contains(&name) {
+                placeholders.push(name);
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    let _ = chars; // consumed above via bytes
+
+    // Build ordered params matching placeholder order
+    let ordered: Vec<(String, QueryValue)> = placeholders
+        .iter()
+        .filter_map(|name| params.get(name).map(|v| (name.clone(), v.clone())))
+        .collect();
+
+    // Rewrite statement
+    let mut result = statement.to_string();
+    match style {
+        ParamStyle::DollarPositional => {
+            // Replace each $name with $1, $2, $3... in order of first appearance
+            for (idx, name) in placeholders.iter().enumerate() {
+                let from = format!("${name}");
+                let to = format!("${}", idx + 1);
+                result = result.replace(&from, &to);
+            }
+        }
+        ParamStyle::QuestionPositional => {
+            // Replace each $name with ? in order of first appearance
+            for name in &placeholders {
+                let from = format!("${name}");
+                result = result.replacen(&from, "?", 1);
+            }
+            // Handle duplicates — remaining occurrences of same $name also become ?
+            for name in &placeholders {
+                let from = format!("${name}");
+                while result.contains(&from) {
+                    result = result.replacen(&from, "?", 1);
+                }
+            }
+        }
+        ParamStyle::ColonNamed => {
+            // Replace $name with :name
+            for name in &placeholders {
+                let from = format!("${name}");
+                let to = format!(":{name}");
+                result = result.replace(&from, &to);
+            }
+        }
+        _ => {}
+    }
+
+    (result, ordered)
 }
 
 /// ABI version for plugin compatibility checks.

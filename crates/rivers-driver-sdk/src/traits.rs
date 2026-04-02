@@ -9,6 +9,24 @@ use crate::types::{Query, QueryResult};
 // DriverType enum (technology-path-spec §8)
 // ---------------------------------------------------------------------------
 
+/// How a driver binds parameters in query text.
+///
+/// The DataView engine rewrites `$name` placeholders from TOML config
+/// into the driver's native format before dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamStyle {
+    /// No placeholders in query text (Redis, MongoDB, Faker, etc.).
+    None,
+    /// Positional `$1`, `$2`, `$3` — parameters ordered by appearance in query (PostgreSQL).
+    DollarPositional,
+    /// Positional `?`, `?`, `?` — parameters ordered by appearance in query (MySQL).
+    QuestionPositional,
+    /// Named `$name` — pass-through, already matches spec convention (SQLite default).
+    DollarNamed,
+    /// Named `:name` — dollar prefix rewritten to colon (Cassandra CQL).
+    ColonNamed,
+}
+
 /// Driver category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriverType {
@@ -521,5 +539,13 @@ pub trait DatabaseDriver: Send + Sync {
     /// Whether this driver supports prepared statements.
     fn supports_prepared_statements(&self) -> bool {
         false
+    }
+
+    /// How this driver binds parameters in query text.
+    ///
+    /// The DataView engine uses this to rewrite `$name` placeholders
+    /// from TOML config into the driver's native format before dispatch.
+    fn param_style(&self) -> ParamStyle {
+        ParamStyle::None
     }
 }

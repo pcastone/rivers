@@ -89,6 +89,10 @@ impl DatabaseDriver for CouchDBDriver {
             password,
         }))
     }
+
+    fn param_style(&self) -> rivers_driver_sdk::ParamStyle {
+        rivers_driver_sdk::ParamStyle::DollarPositional
+    }
 }
 
 // ── Connection ─────────────────────────────────────────────────────────

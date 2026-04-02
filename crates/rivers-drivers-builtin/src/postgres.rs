@@ -67,6 +67,10 @@ impl DatabaseDriver for PostgresDriver {
     fn supports_prepared_statements(&self) -> bool {
         true
     }
+
+    fn param_style(&self) -> rivers_driver_sdk::ParamStyle {
+        rivers_driver_sdk::ParamStyle::DollarPositional
+    }
 }
 
 // ---------------------------------------------------------------------------
