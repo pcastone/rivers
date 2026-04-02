@@ -245,6 +245,21 @@ mod tests {
     }
 
     #[test]
+    fn execute_timeout_kills_infinite_loop() {
+        let mut ctx = make_ctx(
+            "function handler(ctx) { while(true) {} }",
+            "handler",
+        );
+        // Set a short timeout (100ms)
+        ctx.args = serde_json::json!({"_source": ctx.inline_source, "_timeout_ms": 100});
+        let start = std::time::Instant::now();
+        let result = execute_js(ctx);
+        let elapsed = start.elapsed().as_millis();
+        assert!(result.is_err(), "infinite loop should be terminated");
+        assert!(elapsed < 2000, "should terminate within 2s, took {}ms", elapsed);
+    }
+
+    #[test]
     fn c_abi_execute_round_trip() {
         let ctx = make_ctx("function handler(ctx) { return { v8: true }; }", "handler");
         let ctx_json = serde_json::to_vec(&ctx).unwrap();

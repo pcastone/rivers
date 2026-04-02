@@ -13,6 +13,10 @@ static V8_INIT: std::sync::Once = std::sync::Once::new();
 
 pub(crate) fn ensure_v8_initialized() {
     V8_INIT.call_once(|| {
+        // Block dynamic code generation from strings in the sandbox.
+        // Prevents code injection via built-in constructors.
+        v8::V8::set_flags_from_string("--disallow-code-generation-from-strings");
+
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();
@@ -28,8 +32,27 @@ pub(crate) static SCRIPT_CACHE: std::sync::LazyLock<StdMutex<HashMap<String, Str
 
 pub(crate) const DEFAULT_HEAP_LIMIT: usize = 128 * 1024 * 1024;
 
+/// Maximum heap usage (as fraction of limit) before an isolate is discarded
+/// instead of returned to the pool.
+const HEAP_RECYCLE_THRESHOLD: f64 = 0.5;
+
 thread_local! {
     static ISOLATE_POOL: RefCell<Vec<v8::OwnedIsolate>> = RefCell::new(Vec::new());
+}
+
+/// Callback invoked when V8 isolate approaches heap limit.
+///
+/// Terminates execution gracefully instead of crashing the process.
+/// The TryCatch scope in execute_js will catch the termination.
+extern "C" fn near_heap_limit_callback(
+    data: *mut std::ffi::c_void,
+    current_heap_limit: usize,
+    _initial_heap_limit: usize,
+) -> usize {
+    let isolate = unsafe { &mut *(data as *mut v8::Isolate) };
+    isolate.terminate_execution();
+    // Return same limit — don't grow the heap
+    current_heap_limit
 }
 
 pub(crate) fn acquire_isolate(heap_limit: usize) -> v8::OwnedIsolate {
@@ -37,12 +60,27 @@ pub(crate) fn acquire_isolate(heap_limit: usize) -> v8::OwnedIsolate {
     ISOLATE_POOL.with(|pool| {
         pool.borrow_mut().pop().unwrap_or_else(|| {
             let params = v8::CreateParams::default().heap_limits(0, heap_limit);
-            v8::Isolate::new(params)
+            let mut isolate = v8::Isolate::new(params);
+
+            // Register heap limit callback — terminates execution on OOM
+            let isolate_ptr = &mut *isolate as *mut v8::Isolate as *mut std::ffi::c_void;
+            isolate.add_near_heap_limit_callback(near_heap_limit_callback, isolate_ptr);
+
+            isolate
         })
     })
 }
 
-pub(crate) fn release_isolate(isolate: v8::OwnedIsolate) {
+pub(crate) fn release_isolate(mut isolate: v8::OwnedIsolate) {
+    // Check heap usage — discard if above threshold to prevent memory buildup
+    let mut stats = v8::HeapStatistics::default();
+    isolate.get_heap_statistics(&mut stats);
+    let usage = stats.used_heap_size() as f64 / stats.heap_size_limit() as f64;
+    if usage > HEAP_RECYCLE_THRESHOLD {
+        drop(isolate);
+        return;
+    }
+
     ISOLATE_POOL.with(|pool| pool.borrow_mut().push(isolate));
 }
 
