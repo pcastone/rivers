@@ -183,11 +183,24 @@ mod tests {
     }
 
     fn make_valid_config() -> ExecConfig {
+        // Use cross-platform paths for test fixtures
+        let test_dir = std::env::temp_dir();
+        let test_script = test_dir.join("rivers-test-echo");
+        // Create a dummy script file so path validation passes
+        if !test_script.exists() {
+            std::fs::write(&test_script, "#!/bin/sh\necho ok").ok();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&test_script, std::fs::Permissions::from_mode(0o755)).ok();
+            }
+        }
+
         let mut commands = HashMap::new();
         commands.insert(
             "echo".to_string(),
             CommandConfig {
-                path: PathBuf::from("/bin/echo"),
+                path: test_script,
                 sha256: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
                     .to_string(),
                 input_mode: InputMode::Stdin,
@@ -205,7 +218,7 @@ mod tests {
         );
         ExecConfig {
             run_as_user: non_root_user(),
-            working_directory: PathBuf::from("/tmp"),
+            working_directory: test_dir,
             default_timeout_ms: 30000,
             max_stdout_bytes: 5_242_880,
             max_concurrent: 10,
@@ -350,8 +363,12 @@ mod tests {
     #[test]
     fn validate_working_directory_not_a_dir() {
         let mut config = make_valid_config();
-        // /bin/echo exists but is a file, not a directory
-        config.working_directory = PathBuf::from("/bin/echo");
+        // Use a file that exists on all platforms — the test script we created
+        let file_path = std::env::temp_dir().join("rivers-test-echo");
+        if !file_path.exists() {
+            std::fs::write(&file_path, "test").ok();
+        }
+        config.working_directory = file_path;
         let err = config.validate().unwrap_err();
         assert!(
             err.to_string().contains("is not a directory"),
