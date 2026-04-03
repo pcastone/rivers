@@ -71,7 +71,7 @@ function storeCrud(ctx) {
 // ── RT-STORE-RESERVED — writing to reserved prefix (session:, csrf:) throws error ──
 
 function storeReservedPrefix(ctx) {
-    var t = new TestResult("RT-STORE-RESERVED", "RUNTIME", "storage-engine section 11.3");
+    var t = new TestResult("RT-CTX-STORE-NAMESPACE", "RUNTIME", "storage-engine section 11.3");
     try {
         // Attempt to write to "session:" prefix — must be rejected
         var sessionThrew = false;

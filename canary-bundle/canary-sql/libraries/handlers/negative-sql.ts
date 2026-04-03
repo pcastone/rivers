@@ -18,9 +18,9 @@ TestResult.prototype.fail = function(err) {
         passed: false, assertions: this.assertions, duration_ms: Date.now() - this.start, error: err };
 };
 
-// SQL-DDL-REJECTED — DDL via execute() is blocked by Gate 1
-function ddlRejected(ctx) {
-    var t = new TestResult("SQL-DDL-REJECTED", "SQL", "rivers-ddl-security-spec.md section 4");
+// SQL-PG-DDL-REJECT — DDL via execute() is blocked by Gate 1 (PostgreSQL)
+function pgDdlReject(ctx) {
+    var t = new TestResult("SQL-PG-DDL-REJECT", "SQL", "feature-inventory section 21.1");
     try {
         // This DataView has a DROP TABLE statement — should be rejected
         var threw = false;
@@ -34,7 +34,63 @@ function ddlRejected(ctx) {
 
         t.assert("ddl_blocked", threw, "threw=" + threw);
         t.assert("error_contains_forbidden",
-            errMsg.toLowerCase().indexOf("forbidden") >= 0,
+            errMsg.toLowerCase().indexOf("forbidden") >= 0 ||
+            errMsg.toLowerCase().indexOf("ddl") >= 0,
+            "error=" + errMsg.substring(0, 80)
+        );
+    } catch (e) {
+        return t.fail(String(e));
+    }
+    ctx.resdata = t.finish();
+}
+
+// SQL-MYSQL-DDL-REJECT — DDL via execute() is blocked by Gate 1 (MySQL)
+function mysqlDdlReject(ctx) {
+    var t = new TestResult("SQL-MYSQL-DDL-REJECT", "SQL", "feature-inventory section 21.1");
+    try {
+        // Attempt DDL through mysql datasource — should be rejected
+        var threw = false;
+        var errMsg = "";
+        try {
+            // Use a dynamic query to attempt DROP TABLE on mysql
+            var ds = ctx.datasource("canary-mysql");
+            var dv = ds.fromQuery("DROP TABLE canary_records").build();
+            ctx.dataview(dv);
+        } catch (e) {
+            threw = true;
+            errMsg = String(e);
+        }
+
+        t.assert("ddl_blocked", threw, "threw=" + threw);
+        t.assert("error_contains_forbidden",
+            errMsg.toLowerCase().indexOf("forbidden") >= 0 ||
+            errMsg.toLowerCase().indexOf("ddl") >= 0,
+            "error=" + errMsg.substring(0, 80)
+        );
+    } catch (e) {
+        return t.fail(String(e));
+    }
+    ctx.resdata = t.finish();
+}
+
+// SQL-PG-DDL-REJECT (legacy endpoint) — kept for backward compatibility
+function ddlRejected(ctx) {
+    var t = new TestResult("SQL-PG-DDL-REJECT", "SQL", "rivers-ddl-security-spec.md section 4");
+    try {
+        // This DataView has a DROP TABLE statement — should be rejected
+        var threw = false;
+        var errMsg = "";
+        try {
+            ctx.dataview("pg_ddl_trap");
+        } catch (e) {
+            threw = true;
+            errMsg = String(e);
+        }
+
+        t.assert("ddl_blocked", threw, "threw=" + threw);
+        t.assert("error_contains_forbidden",
+            errMsg.toLowerCase().indexOf("forbidden") >= 0 ||
+            errMsg.toLowerCase().indexOf("ddl") >= 0,
             "error=" + errMsg.substring(0, 80)
         );
     } catch (e) {

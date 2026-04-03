@@ -7,11 +7,6 @@ name       = "canary-kafka"
 driver     = "kafka"
 nopassword = true
 
-[data.datasources.canary-redis]
-name       = "canary-redis"
-driver     = "redis"
-nopassword = true
-
 [data.datasources.canary-faker]
 name       = "canary-faker"
 driver     = "faker"
@@ -38,13 +33,13 @@ type     = "integer"
 required = false
 default  = 5
 
-[data.dataviews.poll_faker]
-name          = "poll_faker"
+[data.dataviews.poll_data]
+name          = "poll_data"
 datasource    = "canary-faker"
 query         = "schemas/stream-payload.schema.json"
 return_schema = "schemas/stream-payload.schema.json"
 
-[[data.dataviews.poll_faker.parameters]]
+[[data.dataviews.poll_data.parameters]]
 name     = "limit"
 type     = "integer"
 required = false
@@ -54,68 +49,153 @@ default  = 3
 # Views — WebSocket
 # ─────────────────────────────────────────────
 
-[api.views.ws_chat]
-path           = "/canary/stream/ws/chat"
-method         = "GET"
-view_type      = "Websocket"
-auth           = "none"
-websocket_mode = "Broadcast"
+[api.views.ws_echo]
+path      = "/canary/stream/ws/echo"
+method    = "GET"
+view_type = "Websocket"
+auth      = "session"
 
-[api.views.ws_chat.handler]
-type = "none"
-
-[api.views.ws_chat.ws_hooks]
-on_connect.module        = "libraries/handlers/ws-handler.ts"
-on_connect.entrypoint    = "onConnect"
-on_message.module        = "libraries/handlers/ws-handler.ts"
-on_message.entrypoint    = "onMessage"
-on_disconnect.module     = "libraries/handlers/ws-handler.ts"
-on_disconnect.entrypoint = "onDisconnect"
-
-# ─────────────────────────────────────────────
-# Views — SSE with polling config
-# ─────────────────────────────────────────────
-
-[api.views.sse_events]
-path                  = "/canary/stream/sse/events"
-method                = "GET"
-view_type             = "ServerSentEvents"
-auth                  = "none"
-sse_event_buffer_size = 50
-
-[api.views.sse_events.handler]
+[api.views.ws_echo.handler]
 type       = "codecomponent"
 language   = "typescript"
-module     = "libraries/handlers/sse-handler.ts"
-entrypoint = "sseDataview"
-dataviews  = ["stream_faker"]
+module     = "handlers/ws-handler.ts"
+entrypoint = "onConnection"
 
-[api.views.sse_events.polling]
-tick_interval_ms = 3000
-diff_strategy    = "hash"
-poll_state_ttl_s = 300
+[api.views.ws_echo.on_stream]
+module     = "handlers/ws-handler.ts"
+entrypoint = "onMessage"
+
+[api.views.ws_broadcast]
+path      = "/canary/stream/ws/broadcast"
+method    = "GET"
+view_type = "Websocket"
+auth      = "session"
+
+[api.views.ws_broadcast.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "handlers/ws-handler.ts"
+entrypoint = "onBroadcastConnection"
+
+[api.views.ws_broadcast.on_stream]
+module     = "handlers/ws-handler.ts"
+entrypoint = "onBroadcastMessage"
+
+# ─────────────────────────────────────────────
+# Views — SSE
+# ─────────────────────────────────────────────
+
+[api.views.sse_tick]
+path                 = "/canary/stream/sse/tick"
+method               = "GET"
+view_type            = "ServerSentEvents"
+sse_tick_interval_ms = 1000
+auth                 = "session"
+
+[api.views.sse_tick.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "handlers/sse-handler.ts"
+entrypoint = "onTick"
+
+[api.views.sse_event]
+path                 = "/canary/stream/sse/event"
+method               = "GET"
+view_type            = "ServerSentEvents"
+sse_tick_interval_ms = 0
+sse_trigger_events   = ["canary.ping"]
+auth                 = "optional"
+
+[api.views.sse_event.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "handlers/sse-handler.ts"
+entrypoint = "onEventTriggered"
 
 # ─────────────────────────────────────────────
 # Views — Streaming REST (NDJSON)
 # ─────────────────────────────────────────────
 
-[api.views.stream_chunks]
-path              = "/canary/stream/rest/chunks"
-method            = "GET"
+[api.views.stream_ndjson]
+path              = "/canary/stream/rest/ndjson"
+method            = "POST"
 view_type         = "Rest"
-auth              = "none"
-streaming         = true
-streaming_format  = "ndjson"
-stream_timeout_ms = 30000
+stream_format     = "ndjson"
+stream_timeout_ms = 10000
+auth              = "session"
 
-[api.views.stream_chunks.handler]
+[api.views.stream_ndjson.handler]
 type       = "codecomponent"
 language   = "typescript"
-module     = "libraries/handlers/streaming-rest.ts"
-entrypoint = "streamChunks"
+module     = "handlers/streaming-rest.ts"
+entrypoint = "streamNdjson"
+
+[api.views.stream_poison]
+path              = "/canary/stream/rest/poison"
+method            = "POST"
+view_type         = "Rest"
+stream_format     = "ndjson"
+stream_timeout_ms = 10000
+auth              = "session"
+
+[api.views.stream_poison.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "handlers/streaming-rest.ts"
+entrypoint = "streamPoison"
 
 # ─────────────────────────────────────────────
-# Views — Polling data endpoint
+# Views — Kafka MessageConsumer
+# ─────────────────────────────────────────────
+
+[api.views.kafka_consume]
+view_type = "MessageConsumer"
+auth      = "none"
+
+[api.views.kafka_consume.handler]
+type = "none"
+
+# ─────────────────────────────────────────────
+# Views — Kafka verify (REST endpoint to check last consume verdict)
+# ─────────────────────────────────────────────
+
+[api.views.kafka_verify]
+path      = "/canary/stream/kafka/verify"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.kafka_verify.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "handlers/kafka-consumer.ts"
+entrypoint = "kafkaVerify"
+
+# ─────────────────────────────────────────────
+# Views — Polling with hash diff
+# ─────────────────────────────────────────────
+
+[api.views.poll_hash]
+path      = "/canary/stream/poll/hash"
+method    = "GET"
+view_type = "ServerSentEvents"
+auth      = "optional"
+
+[api.views.poll_hash.handler]
+type     = "dataview"
+dataview = "poll_data"
+
+[api.views.poll_hash.polling]
+tick_interval_ms = 2000
+diff_strategy    = "hash"
+poll_state_ttl_s = 60
+
+[api.views.poll_hash.polling.on_change]
+module     = "handlers/poll-handler.ts"
+entrypoint = "onPollChange"
+
+# ─────────────────────────────────────────────
+# Views — Polling data endpoint (REST)
 # ─────────────────────────────────────────────
 
 [api.views.poll_data]
@@ -127,6 +207,6 @@ auth      = "none"
 [api.views.poll_data.handler]
 type       = "codecomponent"
 language   = "typescript"
-module     = "libraries/handlers/poll-handler.ts"
+module     = "handlers/poll-handler.ts"
 entrypoint = "pollData"
-dataviews  = ["poll_faker"]
+dataviews  = ["poll_data"]

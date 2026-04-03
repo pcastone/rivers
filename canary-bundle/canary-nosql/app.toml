@@ -76,6 +76,12 @@ name     = "_filter"
 type     = "string"
 required = true
 
+# Negative test trap — admin command that should be rejected by Gate 1
+[data.dataviews.mongo_drop_trap]
+name       = "mongo_drop_trap"
+datasource = "canary-mongo"
+query      = '{"collection":"canary","operation":"drop_collection"}'
+
 # ─────────────────────────────────────────────
 # DataViews — Elasticsearch
 # ─────────────────────────────────────────────
@@ -84,6 +90,36 @@ required = true
 name       = "es_ping"
 datasource = "canary-es"
 query      = '{"index":"canary","body":{"query":{"match_all":{}}}}'
+
+[data.dataviews.es_index_doc]
+name       = "es_index_doc"
+datasource = "canary-es"
+query      = '{"index":"canary","operation":"index","id":"$1"}'
+
+[[data.dataviews.es_index_doc.parameters]]
+name     = "doc_id"
+type     = "string"
+required = true
+
+[[data.dataviews.es_index_doc.parameters]]
+name     = "title"
+type     = "string"
+required = true
+
+[[data.dataviews.es_index_doc.parameters]]
+name     = "body"
+type     = "string"
+required = true
+
+[data.dataviews.es_search]
+name       = "es_search"
+datasource = "canary-es"
+query      = '{"index":"canary","body":{"query":{"match":{"title":"$1"}}}}'
+
+[[data.dataviews.es_search.parameters]]
+name     = "query_text"
+type     = "string"
+required = true
 
 # ─────────────────────────────────────────────
 # DataViews — CouchDB
@@ -94,6 +130,31 @@ name       = "couch_ping"
 datasource = "canary-couch"
 query      = '{"operation":"find","selector":{}}'
 
+[data.dataviews.couch_put_doc]
+name       = "couch_put_doc"
+datasource = "canary-couch"
+query      = '{"operation":"put","id":"$1"}'
+
+[[data.dataviews.couch_put_doc.parameters]]
+name     = "doc_id"
+type     = "string"
+required = true
+
+[[data.dataviews.couch_put_doc.parameters]]
+name     = "title"
+type     = "string"
+required = true
+
+[data.dataviews.couch_get_doc]
+name       = "couch_get_doc"
+datasource = "canary-couch"
+query      = '{"operation":"get","id":"$1"}'
+
+[[data.dataviews.couch_get_doc.parameters]]
+name     = "doc_id"
+type     = "string"
+required = true
+
 # ─────────────────────────────────────────────
 # DataViews — Cassandra
 # ─────────────────────────────────────────────
@@ -103,6 +164,36 @@ name       = "cassandra_ping"
 datasource = "canary-cassandra"
 query      = "SELECT key FROM system.local"
 
+[data.dataviews.cassandra_insert]
+name       = "cassandra_insert"
+datasource = "canary-cassandra"
+query      = "INSERT INTO canary.records (id, name, value) VALUES ($1, $2, $3)"
+
+[[data.dataviews.cassandra_insert.parameters]]
+name     = "id"
+type     = "string"
+required = true
+
+[[data.dataviews.cassandra_insert.parameters]]
+name     = "name"
+type     = "string"
+required = true
+
+[[data.dataviews.cassandra_insert.parameters]]
+name     = "value"
+type     = "string"
+required = true
+
+[data.dataviews.cassandra_select_by_id]
+name       = "cassandra_select_by_id"
+datasource = "canary-cassandra"
+query      = "SELECT id, name, value FROM canary.records WHERE id = $1"
+
+[[data.dataviews.cassandra_select_by_id.parameters]]
+name     = "id"
+type     = "string"
+required = true
+
 # ─────────────────────────────────────────────
 # DataViews — LDAP
 # ─────────────────────────────────────────────
@@ -111,6 +202,16 @@ query      = "SELECT key FROM system.local"
 name       = "ldap_ping"
 datasource = "canary-ldap"
 query      = "dc=canary,dc=test sub (objectClass=*)"
+
+[data.dataviews.ldap_search]
+name       = "ldap_search"
+datasource = "canary-ldap"
+query      = "dc=canary,dc=test sub ($1)"
+
+[[data.dataviews.ldap_search.parameters]]
+name     = "filter"
+type     = "string"
+required = true
 
 # ─────────────────────────────────────────────
 # DataViews — Redis
@@ -178,17 +279,41 @@ language   = "typescript"
 module     = "libraries/handlers/nosql-tests.ts"
 entrypoint = "mongoConnect"
 
-[api.views.mongo_crud]
-path      = "/canary/nosql/mongo/crud"
+[api.views.mongo_insert]
+path      = "/canary/nosql/mongo/insert"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.mongo_insert.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/nosql-tests.ts"
+entrypoint = "mongoInsert"
+
+[api.views.mongo_find]
+path      = "/canary/nosql/mongo/find"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
-[api.views.mongo_crud.handler]
+[api.views.mongo_find.handler]
 type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/nosql-tests.ts"
-entrypoint = "mongoCrud"
+entrypoint = "mongoFind"
+
+[api.views.mongo_admin_reject]
+path      = "/canary/nosql/mongo/admin-reject"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.mongo_admin_reject.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/negative-nosql.ts"
+entrypoint = "mongoAdminReject"
 
 # ─────────────────────────────────────────────
 # Views — Elasticsearch
@@ -206,6 +331,30 @@ language   = "typescript"
 module     = "libraries/handlers/nosql-tests.ts"
 entrypoint = "esConnect"
 
+[api.views.es_index]
+path      = "/canary/nosql/es/index"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.es_index.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/nosql-tests.ts"
+entrypoint = "esIndex"
+
+[api.views.es_search]
+path      = "/canary/nosql/es/search"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.es_search.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/nosql-tests.ts"
+entrypoint = "esSearch"
+
 # ─────────────────────────────────────────────
 # Views — CouchDB
 # ─────────────────────────────────────────────
@@ -221,6 +370,30 @@ type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/nosql-tests.ts"
 entrypoint = "couchConnect"
+
+[api.views.couch_put]
+path      = "/canary/nosql/couch/put"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.couch_put.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/nosql-tests.ts"
+entrypoint = "couchPut"
+
+[api.views.couch_get]
+path      = "/canary/nosql/couch/get"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.couch_get.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/nosql-tests.ts"
+entrypoint = "couchGet"
 
 # ─────────────────────────────────────────────
 # Views — Cassandra
@@ -238,6 +411,30 @@ language   = "typescript"
 module     = "libraries/handlers/nosql-tests.ts"
 entrypoint = "cassandraConnect"
 
+[api.views.cassandra_insert]
+path      = "/canary/nosql/cassandra/insert"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.cassandra_insert.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/nosql-tests.ts"
+entrypoint = "cassandraInsert"
+
+[api.views.cassandra_select]
+path      = "/canary/nosql/cassandra/select"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.cassandra_select.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/nosql-tests.ts"
+entrypoint = "cassandraSelect"
+
 # ─────────────────────────────────────────────
 # Views — LDAP
 # ─────────────────────────────────────────────
@@ -253,6 +450,18 @@ type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/nosql-tests.ts"
 entrypoint = "ldapConnect"
+
+[api.views.ldap_search]
+path      = "/canary/nosql/ldap/search"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ldap_search.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/nosql-tests.ts"
+entrypoint = "ldapSearch"
 
 # ─────────────────────────────────────────────
 # Views — Redis
@@ -270,29 +479,41 @@ language   = "typescript"
 module     = "libraries/handlers/nosql-tests.ts"
 entrypoint = "redisConnect"
 
-[api.views.redis_crud]
-path      = "/canary/nosql/redis/crud"
+[api.views.redis_set]
+path      = "/canary/nosql/redis/set"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.redis_set.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/nosql-tests.ts"
+entrypoint = "redisSet"
+
+[api.views.redis_get]
+path      = "/canary/nosql/redis/get"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
-[api.views.redis_crud.handler]
+[api.views.redis_get.handler]
 type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/nosql-tests.ts"
-entrypoint = "redisCrud"
+entrypoint = "redisGet"
 
 # ─────────────────────────────────────────────
 # Views — Negative Tests
 # ─────────────────────────────────────────────
 
-[api.views.admin_rejected]
-path      = "/canary/nosql/negative/admin-rejected"
-method    = "GET"
+[api.views.redis_admin_reject]
+path      = "/canary/nosql/redis/admin-reject"
+method    = "POST"
 view_type = "Rest"
 auth      = "none"
 
-[api.views.admin_rejected.handler]
+[api.views.redis_admin_reject.handler]
 type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/negative-nosql.ts"

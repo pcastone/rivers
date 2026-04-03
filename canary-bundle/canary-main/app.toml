@@ -4,177 +4,113 @@
 
 # -- HTTP Datasources (resolve via service registry) --
 
-[data.datasources.guard-api]
-name       = "guard-api"
+[data.datasources.canary-sql-api]
+name       = "canary-sql-api"
 driver     = "http"
-service    = "guard"
+service    = "canary-sql"
 nopassword = true
 
-[data.datasources.guard-api.config]
+[data.datasources.canary-sql-api.config]
 timeout_ms     = 5000
 retry_attempts = 1
 
-[data.datasources.sql-api]
-name       = "sql-api"
+[data.datasources.canary-handlers-api]
+name       = "canary-handlers-api"
 driver     = "http"
-service    = "sql"
+service    = "canary-handlers"
 nopassword = true
 
-[data.datasources.sql-api.config]
-timeout_ms     = 5000
-retry_attempts = 1
-
-[data.datasources.nosql-api]
-name       = "nosql-api"
-driver     = "http"
-service    = "nosql"
-nopassword = true
-
-[data.datasources.nosql-api.config]
-timeout_ms     = 5000
-retry_attempts = 1
-
-[data.datasources.handlers-api]
-name       = "handlers-api"
-driver     = "http"
-service    = "handlers"
-nopassword = true
-
-[data.datasources.handlers-api.config]
-timeout_ms     = 5000
-retry_attempts = 1
-
-[data.datasources.streams-api]
-name       = "streams-api"
-driver     = "http"
-service    = "streams"
-nopassword = true
-
-[data.datasources.streams-api.config]
+[data.datasources.canary-handlers-api.config]
 timeout_ms     = 5000
 retry_attempts = 1
 
 # ---------------------------------------------
-# DataViews -- HTTP proxy ping for each service
+# DataViews -- HTTP proxy targets
 # ---------------------------------------------
 
-[data.dataviews.proxy_guard_ping]
-name       = "proxy_guard_ping"
-datasource = "guard-api"
-query      = "/canary/auth/login"
+# Proxy to canary-sql pg select endpoint
+[data.dataviews.proxy_sql_pg_select]
+name       = "proxy_sql_pg_select"
+datasource = "canary-sql-api"
+query      = "/canary/sql/pg/select"
 method     = "GET"
 
-[data.dataviews.proxy_sql_ping]
-name       = "proxy_sql_ping"
-datasource = "sql-api"
-query      = "/canary/sql/sqlite/param-order"
+# Proxy to canary-handlers trace-id endpoint
+[data.dataviews.proxy_handlers_trace_id]
+name       = "proxy_handlers_trace_id"
+datasource = "canary-handlers-api"
+query      = "/canary/rt/ctx/trace-id"
 method     = "GET"
 
-[data.dataviews.proxy_nosql_ping]
-name       = "proxy_nosql_ping"
-datasource = "nosql-api"
-query      = "/canary/nosql/redis/ping"
-method     = "GET"
-
-[data.dataviews.proxy_handlers_ping]
-name       = "proxy_handlers_ping"
-datasource = "handlers-api"
-query      = "/canary/rt/ctx/request"
-method     = "GET"
-
-[data.dataviews.proxy_streams_ping]
-name       = "proxy_streams_ping"
-datasource = "streams-api"
-query      = "/canary/stream/poll/data"
+# Proxy to a non-existent endpoint to test error propagation
+[data.dataviews.proxy_error_target]
+name       = "proxy_error_target"
+datasource = "canary-handlers-api"
+query      = "/canary/rt/does-not-exist"
 method     = "GET"
 
 # ---------------------------------------------
 # Views -- proxy test endpoints
 # ---------------------------------------------
 
-# -- Health check: verify proxy round-trip --
+# -- PROXY-SESSION-PROPAGATION: verify session headers survive HTTP proxy --
 
-[api.views.proxy_health]
-path      = "/canary/proxy/health"
+[api.views.proxy_session_check]
+path      = "/canary/proxy/session-check"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.proxy_session_check.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/proxy-tests.ts"
+entrypoint = "proxySessionPropagation"
+
+# -- PROXY-SQL-PASSTHROUGH: proxy to canary-sql pg select --
+
+[api.views.proxy_sql_select]
+path      = "/canary/proxy/sql/pg/select"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
-[api.views.proxy_health.handler]
+[api.views.proxy_sql_select.handler]
 type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/proxy-tests.ts"
-entrypoint = "proxyHealth"
+entrypoint = "proxySqlPassthrough"
+dataviews  = ["proxy_sql_pg_select"]
 
-# -- Guard proxy forward --
+# -- PROXY-HANDLER-PASSTHROUGH: proxy to canary-handlers trace-id --
 
-[api.views.proxy_guard]
-path      = "/canary/proxy/guard"
+[api.views.proxy_handler_trace]
+path      = "/canary/proxy/rt/ctx/trace-id"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
-[api.views.proxy_guard.handler]
+[api.views.proxy_handler_trace.handler]
 type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/proxy-tests.ts"
-entrypoint = "proxyGuard"
+entrypoint = "proxyHandlerPassthrough"
+dataviews  = ["proxy_handlers_trace_id"]
 
-# -- SQL proxy forward --
+# -- PROXY-ERROR-PROPAGATION: proxy to failing endpoint --
 
-[api.views.proxy_sql]
-path      = "/canary/proxy/sql"
+[api.views.proxy_error]
+path      = "/canary/proxy/error"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
-[api.views.proxy_sql.handler]
+[api.views.proxy_error.handler]
 type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/proxy-tests.ts"
-entrypoint = "proxySql"
-
-# -- NoSQL proxy forward --
-
-[api.views.proxy_nosql]
-path      = "/canary/proxy/nosql"
-method    = "GET"
-view_type = "Rest"
-auth      = "none"
-
-[api.views.proxy_nosql.handler]
-type       = "codecomponent"
-language   = "typescript"
-module     = "libraries/handlers/proxy-tests.ts"
-entrypoint = "proxyNosql"
-
-# -- Handlers proxy forward --
-
-[api.views.proxy_handlers]
-path      = "/canary/proxy/handlers"
-method    = "GET"
-view_type = "Rest"
-auth      = "none"
-
-[api.views.proxy_handlers.handler]
-type       = "codecomponent"
-language   = "typescript"
-module     = "libraries/handlers/proxy-tests.ts"
-entrypoint = "proxyHandlers"
-
-# -- Response envelope verification --
-
-[api.views.proxy_envelope]
-path      = "/canary/proxy/envelope"
-method    = "GET"
-view_type = "Rest"
-auth      = "none"
-
-[api.views.proxy_envelope.handler]
-type       = "codecomponent"
-language   = "typescript"
-module     = "libraries/handlers/proxy-tests.ts"
-entrypoint = "proxyResponseEnvelope"
+entrypoint = "proxyErrorPropagation"
+dataviews  = ["proxy_error_target"]
 
 # ---------------------------------------------
 # SPA Config

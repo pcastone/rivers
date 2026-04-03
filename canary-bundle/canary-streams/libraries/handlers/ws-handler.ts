@@ -1,5 +1,5 @@
 // WebSocket lifecycle hooks — canary-streams STREAM profile.
-// Tests WebSocket connect, message echo, and disconnect lifecycle.
+// Tests WebSocket connect, message echo, broadcast, and disconnect lifecycle.
 
 // ── Inline TestResult (cross-app imports forbidden) ──
 
@@ -37,11 +37,10 @@ TestResult.prototype.fail = function(err) {
     };
 };
 
-// ── onConnect — called when a client completes the WebSocket upgrade ──
-// Return non-null to send welcome message to client.
+// ── ws_echo view: onConnection — called on WebSocket upgrade for echo mode ──
 
-function onConnect(ctx) {
-    var t = new TestResult("STREAM-WS-CONNECT", "STREAM", "view-layer section 2.4");
+function onConnection(ctx) {
+    var t = new TestResult("STREAM-WS-ECHO", "STREAM", "view-layer §2.4");
     try {
         var connId = ctx.ws.connection_id;
 
@@ -53,9 +52,8 @@ function onConnect(ctx) {
             typeof connId === "string" && connId.length > 0,
             "length=" + (connId ? connId.length : 0));
 
-        Rivers.log.info("ws connected", { connection_id: connId });
+        Rivers.log.info("ws echo connected", { connection_id: connId });
 
-        // Return welcome message — sent to the connecting client
         return {
             type: "welcome",
             connection_id: connId,
@@ -67,11 +65,10 @@ function onConnect(ctx) {
     }
 }
 
-// ── onMessage — called for each inbound WebSocket frame ──
-// Echo the message back with metadata.
+// ── ws_echo view: onMessage — called for each inbound frame, echoes back ──
 
 function onMessage(ctx) {
-    var t = new TestResult("STREAM-WS-ECHO", "STREAM", "view-layer section 2.4");
+    var t = new TestResult("STREAM-WS-ECHO", "STREAM", "view-layer §2.4");
     try {
         var connId = ctx.ws.connection_id;
         var msg = ctx.ws.message;
@@ -82,12 +79,11 @@ function onMessage(ctx) {
             typeof connId === "string" && connId.length > 0,
             "connection_id=" + connId);
 
-        Rivers.log.info("ws message received", {
+        Rivers.log.info("ws echo message received", {
             connection_id: connId,
             message_type: typeof msg
         });
 
-        // Echo with metadata
         return {
             type: "echo",
             connection_id: connId,
@@ -100,15 +96,72 @@ function onMessage(ctx) {
     }
 }
 
-// ── onDisconnect — called when the client or server closes the connection ──
-// Return value is ignored — cleanup only.
+// ── ws_broadcast view: onBroadcastConnection — called on WebSocket upgrade for broadcast mode ──
+
+function onBroadcastConnection(ctx) {
+    var t = new TestResult("STREAM-WS-BROADCAST", "STREAM", "view-layer §2.4");
+    try {
+        var connId = ctx.ws.connection_id;
+
+        t.assert("ws_exists", ctx.ws !== null && ctx.ws !== undefined,
+            "type=" + typeof ctx.ws);
+        t.assert("connection_id_exists", connId !== null && connId !== undefined,
+            "connection_id=" + connId);
+        t.assert("broadcast_mode", true, "view configured as broadcast");
+
+        Rivers.log.info("ws broadcast connected", { connection_id: connId });
+
+        return {
+            type: "welcome",
+            mode: "broadcast",
+            connection_id: connId,
+            server_time: new Date().toISOString(),
+            verdict: t.finish()
+        };
+    } catch (e) {
+        return { type: "error", verdict: t.fail(String(e)) };
+    }
+}
+
+// ── ws_broadcast view: onBroadcastMessage — called for each inbound frame, fans out to all clients ──
+
+function onBroadcastMessage(ctx) {
+    var t = new TestResult("STREAM-WS-BROADCAST", "STREAM", "view-layer §2.4");
+    try {
+        var connId = ctx.ws.connection_id;
+        var msg = ctx.ws.message;
+
+        t.assert("message_received", msg !== null && msg !== undefined,
+            "type=" + typeof msg);
+        t.assert("connection_id_on_broadcast",
+            typeof connId === "string" && connId.length > 0,
+            "connection_id=" + connId);
+
+        Rivers.log.info("ws broadcast message", {
+            connection_id: connId,
+            message_type: typeof msg
+        });
+
+        // Return value is broadcast to all connected clients
+        return {
+            type: "broadcast",
+            from: connId,
+            original: msg,
+            broadcast_at: new Date().toISOString(),
+            verdict: t.finish()
+        };
+    } catch (e) {
+        return { type: "error", verdict: t.fail(String(e)) };
+    }
+}
+
+// ── onDisconnect — cleanup on connection close ──
 
 function onDisconnect(ctx) {
     var connId = ctx.ws.connection_id;
 
     Rivers.log.info("ws disconnected", { connection_id: connId });
 
-    // Cleanup any stored connection state
     if (ctx.store && typeof ctx.store.del === "function") {
         ctx.store.del("ws:canary:" + connId);
     }

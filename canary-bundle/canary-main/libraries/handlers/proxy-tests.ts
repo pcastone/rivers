@@ -1,7 +1,7 @@
-// Proxy tests — verify canary-main can reach each service through HTTP proxy DataViews.
-// Each function is a standalone test endpoint for the canary fleet.
+// Proxy tests — canary-main PROXY profile.
+// Tests HTTP driver as cross-app proxy, session propagation, and error handling.
 
-// -- Inline TestResult (cross-app imports forbidden) --
+// ── Inline TestResult (cross-app imports forbidden) ──
 
 function TestResult(test_id, profile, spec_ref) {
     this.test_id = test_id;
@@ -37,150 +37,144 @@ TestResult.prototype.fail = function(err) {
     };
 };
 
-// -- PROXY-HEALTH -- verify canary-main can reach its own health endpoint via self-check
+// ── PROXY-SESSION-PROPAGATION ──
+// Verify that session headers (X-Rivers-Claims) survive the HTTP driver proxy.
 
-function proxyHealth(ctx) {
-    var t = new TestResult("PROXY-HEALTH", "PROXY", "http-driver-spec section 6");
+function proxySessionPropagation(ctx) {
+    var t = new TestResult("PROXY-SESSION-PROPAGATION", "PROXY", "auth-session §7.5");
     try {
-        // Verify ctx.dataview is callable
+        // If we reached this handler, the session was valid (auth = "session").
+        t.assert("session_exists", ctx.session !== null && ctx.session !== undefined,
+            "type=" + typeof ctx.session);
+
+        // Check that the session claims are present
+        if (ctx.session) {
+            t.assert("has_sub", ctx.session.sub !== null && ctx.session.sub !== undefined,
+                "sub=" + ctx.session.sub);
+            t.assert("has_role", ctx.session.role !== null && ctx.session.role !== undefined,
+                "role=" + ctx.session.role);
+        }
+
+        // Check the X-Rivers-Claims header is present in the request
+        var claimsHeader = ctx.request.headers["x-rivers-claims"];
+        t.assert("claims_header_present",
+            claimsHeader !== null && claimsHeader !== undefined,
+            "x-rivers-claims=" + (claimsHeader || "missing"));
+
+        if (claimsHeader) {
+            // The claims header should be a JSON-encoded string or base64
+            t.assert("claims_header_not_empty",
+                typeof claimsHeader === "string" && claimsHeader.length > 0,
+                "length=" + claimsHeader.length);
+        }
+    } catch (e) {
+        ctx.resdata = t.fail(String(e));
+        return;
+    }
+    ctx.resdata = t.finish();
+}
+
+// ── PROXY-SQL-PASSTHROUGH ──
+// Proxy to canary-sql pg select endpoint, verify the result comes back correctly.
+
+function proxySqlPassthrough(ctx) {
+    var t = new TestResult("PROXY-SQL-PASSTHROUGH", "PROXY", "http-driver §6.2");
+    try {
         t.assert("dataview_is_function", typeof ctx.dataview === "function",
             "type=" + typeof ctx.dataview);
 
-        // Call proxy_guard_ping as a basic health reachability check
-        var result = ctx.dataview("proxy_guard_ping", {});
-        t.assert("proxy_returned", result !== null && result !== undefined,
-            "type=" + typeof result);
-
-        // If we got here without throwing, the HTTP proxy round-trip works
-        t.assert("proxy_reachable", true, "HTTP proxy round-trip succeeded");
-    } catch (e) {
-        return t.fail(String(e));
-    }
-    ctx.resdata = t.finish();
-}
-
-// -- PROXY-GUARD-FORWARD -- verify cross-app proxy to canary-guard works
-
-function proxyGuard(ctx) {
-    var t = new TestResult("PROXY-GUARD-FORWARD", "PROXY", "http-driver-spec section 6");
-    try {
-        var result = ctx.dataview("proxy_guard_ping", {});
-        t.assert("guard_responded", result !== null && result !== undefined,
-            "type=" + typeof result);
-
-        // The upstream response should be a valid object or array
-        if (result && result.rows) {
-            t.assert("guard_has_rows", Array.isArray(result.rows), "type=" + typeof result.rows);
-        } else if (typeof result === "object") {
-            t.assert("guard_is_object", true, "keys=" + Object.keys(result).join(","));
-        }
-
-        t.assert("guard_proxy_ok", true, "canary-guard reachable via HTTP proxy");
-    } catch (e) {
-        return t.fail(String(e));
-    }
-    ctx.resdata = t.finish();
-}
-
-// -- PROXY-SQL-FORWARD -- verify proxy to canary-sql works
-
-function proxySql(ctx) {
-    var t = new TestResult("PROXY-SQL-FORWARD", "PROXY", "http-driver-spec section 6");
-    try {
-        var result = ctx.dataview("proxy_sql_ping", {});
+        var result = ctx.dataview("proxy_sql_pg_select", {});
         t.assert("sql_responded", result !== null && result !== undefined,
             "type=" + typeof result);
 
+        // The upstream response should contain rows from canary-sql
         if (result && result.rows) {
-            t.assert("sql_has_rows", Array.isArray(result.rows), "type=" + typeof result.rows);
-        } else if (typeof result === "object") {
-            t.assert("sql_is_object", true, "keys=" + Object.keys(result).join(","));
+            t.assert("has_rows", Array.isArray(result.rows),
+                "rows type=" + typeof result.rows);
+        } else if (typeof result === "object" && result !== null) {
+            t.assert("is_object", true, "keys=" + Object.keys(result).join(","));
         }
 
-        t.assert("sql_proxy_ok", true, "canary-sql reachable via HTTP proxy");
+        t.assert("sql_passthrough_ok", true, "canary-sql pg/select reachable via proxy");
     } catch (e) {
-        return t.fail(String(e));
+        ctx.resdata = t.fail(String(e));
+        return;
     }
     ctx.resdata = t.finish();
 }
 
-// -- PROXY-NOSQL-FORWARD -- verify proxy to canary-nosql works
+// ── PROXY-HANDLER-PASSTHROUGH ──
+// Proxy to canary-handlers trace-id endpoint, verify the verdict comes back.
 
-function proxyNosql(ctx) {
-    var t = new TestResult("PROXY-NOSQL-FORWARD", "PROXY", "http-driver-spec section 6");
+function proxyHandlerPassthrough(ctx) {
+    var t = new TestResult("PROXY-HANDLER-PASSTHROUGH", "PROXY", "http-driver §6.2");
     try {
-        var result = ctx.dataview("proxy_nosql_ping", {});
-        t.assert("nosql_responded", result !== null && result !== undefined,
-            "type=" + typeof result);
+        t.assert("dataview_is_function", typeof ctx.dataview === "function",
+            "type=" + typeof ctx.dataview);
 
-        if (result && result.rows) {
-            t.assert("nosql_has_rows", Array.isArray(result.rows), "type=" + typeof result.rows);
-        } else if (typeof result === "object") {
-            t.assert("nosql_is_object", true, "keys=" + Object.keys(result).join(","));
-        }
-
-        t.assert("nosql_proxy_ok", true, "canary-nosql reachable via HTTP proxy");
-    } catch (e) {
-        return t.fail(String(e));
-    }
-    ctx.resdata = t.finish();
-}
-
-// -- PROXY-RT-FORWARD -- verify proxy to canary-handlers works
-
-function proxyHandlers(ctx) {
-    var t = new TestResult("PROXY-RT-FORWARD", "PROXY", "http-driver-spec section 6");
-    try {
-        var result = ctx.dataview("proxy_handlers_ping", {});
+        var result = ctx.dataview("proxy_handlers_trace_id", {});
         t.assert("handlers_responded", result !== null && result !== undefined,
             "type=" + typeof result);
 
-        if (result && result.rows) {
-            t.assert("handlers_has_rows", Array.isArray(result.rows), "type=" + typeof result.rows);
-        } else if (typeof result === "object") {
-            t.assert("handlers_is_object", true, "keys=" + Object.keys(result).join(","));
+        // The upstream handler returns a test verdict — verify it has test_id
+        if (result && result.test_id) {
+            t.assert("upstream_has_test_id", true,
+                "upstream test_id=" + result.test_id);
+        } else if (typeof result === "object" && result !== null) {
+            t.assert("is_object", true, "keys=" + Object.keys(result).join(","));
         }
 
-        t.assert("handlers_proxy_ok", true, "canary-handlers reachable via HTTP proxy");
+        t.assert("handler_passthrough_ok", true,
+            "canary-handlers rt/ctx/trace-id reachable via proxy");
     } catch (e) {
-        return t.fail(String(e));
+        ctx.resdata = t.fail(String(e));
+        return;
     }
     ctx.resdata = t.finish();
 }
 
-// -- PROXY-RESPONSE-ENVELOPE -- verify response envelope format (data + meta)
+// ── PROXY-ERROR-PROPAGATION ──
+// Proxy to a failing endpoint and verify the error is propagated correctly.
 
-function proxyResponseEnvelope(ctx) {
-    var t = new TestResult("PROXY-RESPONSE-ENVELOPE", "PROXY", "http-driver-spec section 10");
+function proxyErrorPropagation(ctx) {
+    var t = new TestResult("PROXY-ERROR-PROPAGATION", "PROXY", "SHAPE-2");
     try {
-        // Call any proxy DataView and inspect the response structure
-        var result = ctx.dataview("proxy_guard_ping", {});
-        t.assert("response_not_null", result !== null && result !== undefined,
-            "type=" + typeof result);
+        t.assert("dataview_is_function", typeof ctx.dataview === "function",
+            "type=" + typeof ctx.dataview);
 
-        // The DataView engine wraps HTTP responses in QueryResult format.
-        // Verify the response is structured data (object or has rows).
-        var isStructured = false;
-        if (result && result.rows) {
-            isStructured = true;
-            t.assert("has_rows_array", Array.isArray(result.rows),
-                "rows type=" + typeof result.rows);
-        } else if (typeof result === "object" && result !== null) {
-            isStructured = true;
-            t.assert("is_object", true, "keys=" + Object.keys(result).join(","));
-        } else if (Array.isArray(result)) {
-            isStructured = true;
-            t.assert("is_array", true, "length=" + result.length);
+        // Call a non-existent endpoint — should get an error
+        var result = null;
+        var errorCaught = false;
+        try {
+            result = ctx.dataview("proxy_error_target", {});
+        } catch (proxyErr) {
+            errorCaught = true;
+            t.assert("error_thrown", true, "proxy error: " + String(proxyErr));
+
+            // Verify the error is not a raw stack trace (SHAPE-2 sanitization)
+            var errStr = String(proxyErr);
+            var hasStackTrace = errStr.indexOf("at ") >= 0 && errStr.indexOf(".rs:") >= 0;
+            t.assert("error_sanitized", !hasStackTrace,
+                "error should not contain raw Rust stack trace");
         }
 
-        t.assert("response_is_structured", isStructured,
-            "result type=" + typeof result);
-
-        // Verify the response is not an error string
-        t.assert("not_error_string", typeof result !== "string",
-            "should be object, not raw string");
+        if (!errorCaught) {
+            // If no error was thrown, the proxy returned something — check for error status
+            if (result && result.error) {
+                t.assert("error_in_result", true, "error=" + JSON.stringify(result.error));
+            } else if (result && result.status && result.status >= 400) {
+                t.assert("error_status_propagated", true, "status=" + result.status);
+            } else {
+                // If no error at all, the endpoint might exist — still test the structure
+                t.assert("response_received", result !== null && result !== undefined,
+                    "result type=" + typeof result);
+                t.assert("error_expected", false,
+                    "expected error from non-existent endpoint, got success");
+            }
+        }
     } catch (e) {
-        return t.fail(String(e));
+        ctx.resdata = t.fail(String(e));
+        return;
     }
     ctx.resdata = t.finish();
 }

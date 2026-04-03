@@ -37,29 +37,25 @@ TestResult.prototype.fail = function(err) {
     };
 };
 
-// ── RT-V8-TIMEOUT — verify the timeout mechanism exists ──
-// NOTE: We do NOT actually run an infinite loop (that would hang the test).
-// Instead we verify the V8 isolate has timeout enforcement configured
-// by checking that the handler environment has the expected properties.
+// ── RT-V8-TIMEOUT — verify the V8 watchdog terminates infinite loops ──
+// This handler deliberately runs while(true){} to test the watchdog.
+// The V8 watchdog thread must terminate it within task_timeout_ms.
+// If the watchdog fires, the Rust side catches the timeout and returns an error.
+// The handler catches the error and reports it as a pass.
 
 function v8Timeout(ctx) {
     var t = new TestResult("RT-V8-TIMEOUT", "RUNTIME", "feature-inventory section 21.2");
     try {
-        // Verify the handler executes within a bounded context.
-        // If we reach this point, the V8 isolate is running with a watchdog.
-        // The actual infinite-loop test is done at the integration level
-        // (Rust side terminates the isolate and returns a timeout error).
-        t.assert("handler_executes", true, "handler reached execution");
-        t.assert("ctx_available", ctx !== null && ctx !== undefined,
-            "ctx is available — isolate is live");
-
-        // Verify we have a finite execution window by checking
-        // that Date.now() returns reasonable values (not frozen)
-        var t1 = Date.now();
-        var t2 = Date.now();
-        t.assert("time_progresses", t2 >= t1, "t1=" + t1 + ", t2=" + t2);
+        // Run an infinite loop — the V8 watchdog should terminate this.
+        // If we somehow exit the loop, the timeout did NOT fire.
+        while (true) {}
+        // If we reach here, the watchdog failed
+        t.assert("timeout_enforced", false,
+            "infinite loop completed — V8 timeout not enforced");
     } catch (e) {
-        return t.fail(String(e));
+        // The watchdog terminated the loop and threw an error — this is the pass case
+        t.assert("timeout_enforced", true,
+            "watchdog terminated infinite loop: " + String(e));
     }
     ctx.resdata = t.finish();
 }
@@ -106,10 +102,46 @@ function v8CodeGenBlocked(ctx) {
     ctx.resdata = t.finish();
 }
 
-// ── RT-ERROR-SANITIZED — trigger an error, verify response doesn't contain infra details ──
+// ── RT-V8-HEAP — allocate large array, expect graceful error ──
+
+function v8Heap(ctx) {
+    var t = new TestResult("RT-V8-HEAP", "RUNTIME", "feature-inventory section 21.2");
+    try {
+        // Allocate massive arrays to trigger NearHeapLimitCallback.
+        // Must NOT crash the process — must terminate the handler gracefully.
+        var arrays = [];
+        for (var i = 0; i < 1000000; i++) {
+            arrays.push(new Array(100000));
+        }
+        t.assert("heap_limit_enforced", false,
+            "massive allocation succeeded — heap limit not enforced");
+    } catch (e) {
+        t.assert("heap_limit_enforced", true,
+            "threw: " + String(e));
+    }
+    ctx.resdata = t.finish();
+}
+
+// ── RT-V8-CONSOLE — verify console.log is not available ──
+
+function v8Console(ctx) {
+    var t = new TestResult("RT-V8-CONSOLE", "RUNTIME", "processpool section 9.1");
+    try {
+        t.assert("console_not_available",
+            typeof console === "undefined" || typeof console.log !== "function",
+            "typeof console=" + typeof console);
+    } catch (e) {
+        // If accessing console throws, that also means it's not available — pass
+        t.assert("console_not_available", true,
+            "accessing console threw: " + String(e));
+    }
+    ctx.resdata = t.finish();
+}
+
+// ── RT-ERROR-SANITIZE — trigger an error, verify response doesn't contain infra details ──
 
 function errorSanitized(ctx) {
-    var t = new TestResult("RT-ERROR-SANITIZED", "RUNTIME", "feature-inventory section 21.5");
+    var t = new TestResult("RT-ERROR-SANITIZE", "RUNTIME", "feature-inventory section 21.5");
     try {
         // Deliberately trigger an error by calling a nonexistent DataView
         var threw = false;

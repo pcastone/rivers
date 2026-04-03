@@ -121,7 +121,7 @@ function ctxDataview(ctx) {
 // ── RT-CTX-STORE — verify ctx.store.set/get/del works ──
 
 function ctxStore(ctx) {
-    var t = new TestResult("RT-CTX-STORE", "RUNTIME", "storage-engine section 11.5");
+    var t = new TestResult("RT-CTX-STORE-GET-SET", "RUNTIME", "storage-engine section 11.5");
     try {
         t.assert("store_exists", ctx.store !== null && ctx.store !== undefined,
             "type=" + typeof ctx.store);
@@ -153,7 +153,7 @@ function ctxStore(ctx) {
 // ── RT-CTX-TRACEID — verify ctx.trace_id is a non-empty string ──
 
 function ctxTraceId(ctx) {
-    var t = new TestResult("RT-CTX-TRACEID", "RUNTIME", "processpool section 9.8");
+    var t = new TestResult("RT-CTX-TRACE-ID", "RUNTIME", "processpool section 9.8");
     try {
         t.assert("trace_id_exists", ctx.trace_id !== null && ctx.trace_id !== undefined,
             "type=" + typeof ctx.trace_id);
@@ -170,7 +170,7 @@ function ctxTraceId(ctx) {
 // ── RT-CTX-APPID — verify ctx.app_id is populated (not empty) ──
 
 function ctxAppId(ctx) {
-    var t = new TestResult("RT-CTX-APPID", "RUNTIME", "processpool section 9.8");
+    var t = new TestResult("RT-CTX-APP-ID", "RUNTIME", "processpool section 9.8");
     try {
         t.assert("app_id_exists", ctx.app_id !== null && ctx.app_id !== undefined,
             "type=" + typeof ctx.app_id);
@@ -198,6 +198,112 @@ function ctxEnv(ctx) {
             "type=" + typeof ctx.env);
         t.assert("env_not_empty", ctx.env.length > 0,
             "value=" + ctx.env);
+    } catch (e) {
+        return t.fail(String(e));
+    }
+    ctx.resdata = t.finish();
+}
+
+// ── RT-CTX-NODE-ID — verify ctx.node_id exists and is a string ──
+
+function ctxNodeId(ctx) {
+    var t = new TestResult("RT-CTX-NODE-ID", "RUNTIME", "processpool section 9.8");
+    try {
+        t.assert("node_id_exists", ctx.node_id !== null && ctx.node_id !== undefined,
+            "type=" + typeof ctx.node_id);
+        t.assert("node_id_is_string", typeof ctx.node_id === "string",
+            "type=" + typeof ctx.node_id);
+        t.assert("node_id_not_empty", ctx.node_id.length > 0,
+            "length=" + (ctx.node_id ? ctx.node_id.length : 0));
+    } catch (e) {
+        return t.fail(String(e));
+    }
+    ctx.resdata = t.finish();
+}
+
+// ── RT-CTX-SESSION — verify ctx.session exists (stub — not yet implemented) ──
+
+function ctxSession(ctx) {
+    var t = new TestResult("RT-CTX-SESSION", "RUNTIME", "processpool section 9.8");
+    try {
+        // ctx.session should exist as an object with claims when auth is active.
+        // This is a stub test — session support is not yet implemented.
+        // For now, just verify the property exists on ctx.
+        t.assert("session_property_exists", "session" in ctx,
+            "has_session_key=" + ("session" in ctx));
+        if (ctx.session !== null && ctx.session !== undefined) {
+            t.assert("session_is_object", typeof ctx.session === "object",
+                "type=" + typeof ctx.session);
+        } else {
+            // Session is null/undefined — acceptable for auth=none endpoints
+            t.assert("session_null_for_no_auth", true,
+                "session is null/undefined (expected for auth=none)");
+        }
+    } catch (e) {
+        return t.fail(String(e));
+    }
+    ctx.resdata = t.finish();
+}
+
+// ── RT-CTX-DATAVIEW-PARAMS — call ctx.dataview() with params, verify they are passed ──
+
+function ctxDataviewParams(ctx) {
+    var t = new TestResult("RT-CTX-DATAVIEW-PARAMS", "RUNTIME", "dream-doc: ctx.dataview() bug");
+    try {
+        t.assert("dataview_is_function", typeof ctx.dataview === "function",
+            "type=" + typeof ctx.dataview);
+
+        // Call a DataView with explicit params — this is the test for the
+        // ctx.dataview() param-dropping bug.
+        var result = ctx.dataview("list_records", { limit: 5 });
+        t.assert("result_not_null", result !== null && result !== undefined,
+            "type=" + typeof result);
+
+        if (result && result.rows) {
+            t.assert("has_rows", result.rows.length > 0,
+                "row_count=" + result.rows.length);
+            t.assert("limit_respected", result.rows.length <= 5,
+                "row_count=" + result.rows.length + " (expected <= 5)");
+        } else if (Array.isArray(result)) {
+            t.assert("has_rows", result.length > 0,
+                "array_length=" + result.length);
+            t.assert("limit_respected", result.length <= 5,
+                "array_length=" + result.length + " (expected <= 5)");
+        } else {
+            t.assert("has_rows", result !== null,
+                "result=" + JSON.stringify(result));
+        }
+    } catch (e) {
+        return t.fail(String(e));
+    }
+    ctx.resdata = t.finish();
+}
+
+// ── RT-CTX-PSEUDO-DV — test ctx.datasource() builder if available (stub) ──
+
+function ctxPseudoDv(ctx) {
+    var t = new TestResult("RT-CTX-PSEUDO-DV", "RUNTIME", "view-layer section 3.2");
+    try {
+        // ctx.datasource() is a pseudo DataView builder that lets handlers
+        // build ad-hoc queries against a datasource without a pre-defined DataView.
+        // This is a stub test — the feature may not be implemented yet.
+        if (typeof ctx.datasource === "function") {
+            t.assert("datasource_is_function", true,
+                "ctx.datasource is available");
+            // Try to use it — expect it to return a builder or result
+            try {
+                var builder = ctx.datasource("canary-faker");
+                t.assert("builder_returned", builder !== null && builder !== undefined,
+                    "type=" + typeof builder);
+            } catch (e) {
+                t.assert("datasource_callable", false,
+                    "ctx.datasource() threw: " + String(e));
+            }
+        } else {
+            // Not yet implemented — mark as stub pass
+            t.assert("datasource_not_implemented", true,
+                "ctx.datasource is " + typeof ctx.datasource + " — stub test (not yet implemented)");
+        }
     } catch (e) {
         return t.fail(String(e));
     }

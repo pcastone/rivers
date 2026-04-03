@@ -1,5 +1,5 @@
 // SSE handler — canary-streams STREAM profile.
-// Tests SSE view with polling config, returns faker-generated data for SSE polling.
+// Tests SSE tick-based push and EventBus-triggered push.
 
 // ── Inline TestResult (cross-app imports forbidden) ──
 
@@ -37,13 +37,87 @@ TestResult.prototype.fail = function(err) {
     };
 };
 
-// ── STREAM-SSE-POLL — handler for SSE view with polling config ──
-// Called by the SSE polling loop. Returns faker-sourced data as an SSE event payload.
+// ── STREAM-SSE-TICK — tick-based SSE push handler ──
+// Called at sse_tick_interval_ms (1000ms). Each invocation pushes an SSE event to the client.
+
+function onTick(ctx) {
+    var t = new TestResult("STREAM-SSE-TICK", "STREAM", "view-layer §2.5");
+    try {
+        t.assert("ctx_exists", ctx !== null && ctx !== undefined,
+            "ctx_keys=" + Object.keys(ctx).join(","));
+
+        // Fetch data from the faker dataview if available
+        var data = null;
+        if (ctx.data && ctx.data.stream_faker) {
+            data = ctx.data.stream_faker;
+        } else if (typeof ctx.dataview === "function") {
+            data = ctx.dataview("stream_faker", { limit: 3 });
+        }
+
+        t.assert("tick_fired", true, "tick handler invoked");
+
+        if (data !== null && data !== undefined) {
+            t.assert("data_fetched", true, "type=" + typeof data);
+        }
+
+        ctx.resdata = {
+            event: "tick",
+            data: data,
+            timestamp: new Date().toISOString(),
+            verdict: t.finish()
+        };
+    } catch (e) {
+        ctx.resdata = {
+            event: "tick-error",
+            verdict: t.fail(String(e))
+        };
+    }
+}
+
+// ── STREAM-SSE-EVENT — EventBus-triggered SSE push handler ──
+// Called when a "canary.ping" event fires on the EventBus. Pushes the event payload to the client.
+
+function onEventTriggered(ctx) {
+    var t = new TestResult("STREAM-SSE-EVENT", "STREAM", "view-layer §2.5");
+    try {
+        t.assert("ctx_exists", ctx !== null && ctx !== undefined,
+            "ctx_keys=" + Object.keys(ctx).join(","));
+
+        // The event payload arrives in ctx.event or ctx.request.body
+        var eventPayload = null;
+        if (ctx.event) {
+            eventPayload = ctx.event;
+        } else if (ctx.request && ctx.request.body) {
+            eventPayload = ctx.request.body;
+        }
+
+        t.assert("event_received", eventPayload !== null && eventPayload !== undefined,
+            "payload_type=" + typeof eventPayload);
+
+        if (eventPayload && eventPayload.event_name) {
+            t.assertEquals("event_name", "canary.ping", eventPayload.event_name);
+        }
+
+        ctx.resdata = {
+            event: "bus-event",
+            payload: eventPayload,
+            timestamp: new Date().toISOString(),
+            verdict: t.finish()
+        };
+    } catch (e) {
+        ctx.resdata = {
+            event: "bus-error",
+            verdict: t.fail(String(e))
+        };
+    }
+}
+
+// ── sseDataview — legacy SSE polling handler (kept for backward compat) ──
+// Used by the SSE polling view with hash diff detection.
 
 function sseDataview(ctx) {
-    var t = new TestResult("STREAM-SSE-POLL", "STREAM", "view-layer section 2.5");
+    var t = new TestResult("STREAM-SSE-POLL", "STREAM", "view-layer §2.5");
     try {
-        // Fetch data from the faker dataview
         var data = null;
         if (ctx.data && ctx.data.stream_faker) {
             data = ctx.data.stream_faker;

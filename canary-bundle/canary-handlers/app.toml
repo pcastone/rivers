@@ -34,7 +34,7 @@ default  = 10
 
 [api.views.ctx_request]
 path      = "/canary/rt/ctx/request"
-method    = "GET"
+method    = "POST"
 view_type = "Rest"
 auth      = "none"
 
@@ -89,9 +89,37 @@ entrypoint = "ctxDataview"
 
 # ─────────────────────────
 
+[api.views.ctx_dataview_params]
+path      = "/canary/rt/ctx/dataview-params"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ctx_dataview_params.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ctx-surface.ts"
+entrypoint = "ctxDataviewParams"
+
+# ─────────────────────────
+
+[api.views.ctx_pseudo_dv]
+path      = "/canary/rt/ctx/pseudo-dv"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ctx_pseudo_dv.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ctx-surface.ts"
+entrypoint = "ctxPseudoDv"
+
+# ─────────────────────────
+
 [api.views.ctx_store]
 path      = "/canary/rt/ctx/store"
-method    = "GET"
+method    = "POST"
 view_type = "Rest"
 auth      = "none"
 
@@ -114,6 +142,20 @@ type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/ctx-surface.ts"
 entrypoint = "ctxTraceId"
+
+# ─────────────────────────
+
+[api.views.ctx_node_id]
+path      = "/canary/rt/ctx/node-id"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ctx_node_id.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ctx-surface.ts"
+entrypoint = "ctxNodeId"
 
 # ─────────────────────────
 
@@ -143,17 +185,31 @@ language   = "typescript"
 module     = "libraries/handlers/ctx-surface.ts"
 entrypoint = "ctxEnv"
 
-# ─────────────────────────────────────────────
-# Views — Rivers.* global API tests
-# ─────────────────────────────────────────────
+# ─────────────────────────
 
-[api.views.crypto_randomhex]
-path      = "/canary/rt/crypto/randomhex"
+[api.views.ctx_session]
+path      = "/canary/rt/ctx/session"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
-[api.views.crypto_randomhex.handler]
+[api.views.ctx_session.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ctx-surface.ts"
+entrypoint = "ctxSession"
+
+# ─────────────────────────────────────────────
+# Views — Rivers.* global API tests
+# ─────────────────────────────────────────────
+
+[api.views.crypto_random]
+path      = "/canary/rt/rivers/crypto-random"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.crypto_random.handler]
 type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/rivers-api.ts"
@@ -161,13 +217,13 @@ entrypoint = "cryptoRandomHex"
 
 # ─────────────────────────
 
-[api.views.crypto_hashpassword]
-path      = "/canary/rt/crypto/hashpassword"
+[api.views.crypto_hash]
+path      = "/canary/rt/rivers/crypto-hash"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
-[api.views.crypto_hashpassword.handler]
+[api.views.crypto_hash.handler]
 type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/rivers-api.ts"
@@ -175,13 +231,13 @@ entrypoint = "cryptoHashPassword"
 
 # ─────────────────────────
 
-[api.views.crypto_timingsafe]
-path      = "/canary/rt/crypto/timingsafe"
+[api.views.crypto_timing]
+path      = "/canary/rt/rivers/crypto-timing"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
-[api.views.crypto_timingsafe.handler]
+[api.views.crypto_timing.handler]
 type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/rivers-api.ts"
@@ -189,8 +245,22 @@ entrypoint = "cryptoTimingSafe"
 
 # ─────────────────────────
 
+[api.views.crypto_hmac]
+path      = "/canary/rt/rivers/crypto-hmac"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.crypto_hmac.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/rivers-api.ts"
+entrypoint = "cryptoHmac"
+
+# ─────────────────────────
+
 [api.views.log_info]
-path      = "/canary/rt/log/info"
+path      = "/canary/rt/rivers/log"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
@@ -206,7 +276,7 @@ entrypoint = "logInfo"
 # ─────────────────────────────────────────────
 
 [api.views.store_crud]
-path      = "/canary/rt/store/crud"
+path      = "/canary/rt/ctx/store"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
@@ -220,7 +290,7 @@ entrypoint = "storeCrud"
 # ─────────────────────────
 
 [api.views.store_reserved]
-path      = "/canary/rt/store/reserved"
+path      = "/canary/rt/ctx/store-ns"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
@@ -249,6 +319,20 @@ entrypoint = "v8Timeout"
 
 # ─────────────────────────
 
+[api.views.v8_heap]
+path      = "/canary/rt/v8/heap"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.v8_heap.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/v8-security.ts"
+entrypoint = "v8Heap"
+
+# ─────────────────────────
+
 [api.views.v8_codegen]
 path      = "/canary/rt/v8/codegen"
 method    = "GET"
@@ -263,14 +347,74 @@ entrypoint = "v8CodeGenBlocked"
 
 # ─────────────────────────
 
-[api.views.error_sanitized]
-path      = "/canary/rt/error/sanitized"
+[api.views.v8_console]
+path      = "/canary/rt/v8/console"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
-[api.views.error_sanitized.handler]
+[api.views.v8_console.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/v8-security.ts"
+entrypoint = "v8Console"
+
+# ─────────────────────────
+
+[api.views.error_sanitize]
+path      = "/canary/rt/error/sanitize"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.error_sanitize.handler]
 type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/v8-security.ts"
 entrypoint = "errorSanitized"
+
+# ─────────────────────────────────────────────
+# Views — EventBus tests
+# ─────────────────────────────────────────────
+
+[api.views.eventbus_publish]
+path      = "/canary/rt/eventbus/publish"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.eventbus_publish.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/eventbus-tests.ts"
+entrypoint = "eventbusPublish"
+
+# ─────────────────────────────────────────────
+# Views — Misc tests
+# ─────────────────────────────────────────────
+
+[api.views.header_blocklist]
+path      = "/canary/rt/header/blocklist"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.header_blocklist.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/misc-tests.ts"
+entrypoint = "headerBlocklist"
+
+# ─────────────────────────
+
+[api.views.faker_determinism]
+path      = "/canary/rt/faker/determinism"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.faker_determinism.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/misc-tests.ts"
+entrypoint = "fakerDeterminism"

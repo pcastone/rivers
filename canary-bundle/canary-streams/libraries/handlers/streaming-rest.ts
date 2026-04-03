@@ -1,5 +1,5 @@
 // Streaming REST handler — canary-streams STREAM profile.
-// Tests the {chunk, done} streaming protocol with NDJSON wire format.
+// Tests NDJSON streaming and poison chunk guard (SHAPE-15).
 
 // ── Inline TestResult (cross-app imports forbidden) ──
 
@@ -37,37 +37,28 @@ TestResult.prototype.fail = function(err) {
     };
 };
 
-// ── STREAM-REST-CHUNKS — streaming handler using {chunk, done} protocol ──
-// Returns 5 chunks then done:true. Uses __args.iteration to track position.
-// Rivers calls this function repeatedly — iteration increments each call.
+// ── STREAM-REST-NDJSON — generator that yields 5 NDJSON chunks then closes ──
 
-function streamChunks(ctx) {
-    var iteration = __args.iteration || 0;
-    var totalChunks = 5;
-
-    // After all chunks are sent, signal completion
-    if (iteration >= totalChunks) {
-        var t = new TestResult("STREAM-REST-CHUNKS", "STREAM", "streaming-rest section 2.7");
-        t.assert("all_chunks_sent", true, "total=" + totalChunks);
-        t.assertEquals("final_iteration", totalChunks, iteration);
-
-        return {
-            chunk: { type: "complete", verdict: t.finish() },
-            done: true
+function* streamNdjson(ctx) {
+    for (var i = 0; i < 5; i++) {
+        yield {
+            chunk_index: i,
+            test_id: "STREAM-REST-NDJSON",
+            profile: "STREAM",
+            data: "chunk-" + i
         };
     }
+}
 
-    // Build chunk payload with test evidence
-    var chunkData = {
-        chunk_index: iteration,
-        test_id: "STREAM-REST-CHUNKS",
-        profile: "STREAM",
-        message: "chunk-" + iteration + "-of-" + totalChunks,
-        timestamp: new Date().toISOString()
-    };
+// ── STREAM-REST-POISON — mid-stream error handler ──
+// Yields a normal chunk first, then a chunk with stream_terminated.
+// SHAPE-15 guard must block the poison chunk and terminate the stream.
 
-    return {
-        chunk: chunkData,
-        done: false
-    };
+function* streamPoison(ctx) {
+    // Yield a normal chunk first
+    yield { chunk_index: 0, data: "normal" };
+    // Then yield a chunk with stream_terminated — SHAPE-15 guard must block this
+    yield { stream_terminated: true, data: "this should be blocked" };
+    // If guard works, this is unreachable (generator terminated by runtime)
+    yield { chunk_index: 2, data: "should not arrive" };
 }

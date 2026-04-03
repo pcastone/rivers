@@ -1,49 +1,33 @@
+[[datasources]]
+name       = "canary-sql-api"
+driver     = "http"
+x-type     = "http"
+nopassword = true
+required   = true
+
+[[datasources]]
+name       = "canary-handlers-api"
+driver     = "http"
+x-type     = "http"
+nopassword = true
+required   = true
+
 [[services]]
-name     = "guard"
+name     = "canary-guard"
 appId    = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee00"
 required = true
 
 [[services]]
-name     = "sql"
+name     = "canary-sql"
 appId    = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee01"
 required = true
 
 [[services]]
-name     = "nosql"
-appId    = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee02"
-required = true
-
-[[services]]
-name     = "handlers"
+name     = "canary-handlers"
 appId    = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee03"
 required = true
 
 [[services]]
-name     = "streams"
+name     = "canary-streams"
 appId    = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee04"
 required = true
-
-[[datasources]]
-name    = "guard-api"
-driver  = "http"
-service = "guard"
-
-[[datasources]]
-name    = "sql-api"
-driver  = "http"
-service = "sql"
-
-[[datasources]]
-name    = "nosql-api"
-driver  = "http"
-service = "nosql"
-
-[[datasources]]
-name    = "handlers-api"
-driver  = "http"
-service = "handlers"
-
-[[datasources]]
-name    = "streams-api"
-driver  = "http"
-service = "streams"
