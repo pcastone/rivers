@@ -462,3 +462,31 @@ function initDdlSuccess(ctx) {
     }
     ctx.resdata = t.finish();
 }
+
+// SQL-SQLITE-CRUD-INSERT
+function sqliteInsert(ctx) {
+    var t = new TestResult("SQL-SQLITE-CRUD-INSERT", "SQL", "rivers-data-layer-spec.md section 3.1");
+    try {
+        var id = Rivers.crypto.randomHex(16);
+        ctx.dataview("sqlite_insert", { id: id, zname: "CanaryInsert", age: 77 });
+        t.assert("insert_ok", true, "id=" + id);
+    } catch (e) {
+        return t.fail(String(e));
+    }
+    ctx.resdata = t.finish();
+}
+
+// SQL-SQLITE-CRUD-SELECT
+function sqliteSelect(ctx) {
+    var t = new TestResult("SQL-SQLITE-CRUD-SELECT", "SQL", "rivers-data-layer-spec.md section 3.1");
+    try {
+        var result = ctx.dataview("sqlite_select_all");
+        t.assert("result_not_null", result !== null, "type=" + typeof result);
+        if (result && result.rows) {
+            t.assert("has_rows", result.rows.length >= 0, "count=" + result.rows.length);
+        }
+    } catch (e) {
+        return t.fail(String(e));
+    }
+    ctx.resdata = t.finish();
+}

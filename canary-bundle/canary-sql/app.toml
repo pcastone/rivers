@@ -248,6 +248,11 @@ name = "id"
 type = "string"
 required = true
 
+[data.dataviews.sqlite_select_all]
+name       = "sqlite_select_all"
+datasource = "canary-sqlite"
+query      = "SELECT id, zname, age FROM canary_records"
+
 [data.dataviews.sqlite_delete]
 name       = "sqlite_delete"
 datasource = "canary-sqlite"
@@ -268,7 +273,7 @@ required = true
 path      = "/canary/sql/pg/param-order"
 method    = "POST"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.pg_param_order.handler]
 type       = "codecomponent"
@@ -280,7 +285,7 @@ entrypoint = "pgParamOrder"
 path      = "/canary/sql/pg/insert"
 method    = "POST"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.pg_insert.handler]
 type       = "codecomponent"
@@ -292,7 +297,7 @@ entrypoint = "pgInsert"
 path      = "/canary/sql/pg/select"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.pg_select.handler]
 type       = "codecomponent"
@@ -304,7 +309,7 @@ entrypoint = "pgSelect"
 path      = "/canary/sql/pg/update"
 method    = "PUT"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.pg_update.handler]
 type       = "codecomponent"
@@ -316,7 +321,7 @@ entrypoint = "pgUpdate"
 path      = "/canary/sql/pg/delete"
 method    = "DELETE"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.pg_delete.handler]
 type       = "codecomponent"
@@ -328,7 +333,7 @@ entrypoint = "pgDelete"
 path      = "/canary/sql/pg/ddl-reject"
 method    = "POST"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.pg_ddl_reject.handler]
 type       = "codecomponent"
@@ -340,7 +345,7 @@ entrypoint = "pgDdlReject"
 path      = "/canary/sql/pg/max-rows"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.pg_max_rows.handler]
 type       = "codecomponent"
@@ -354,7 +359,7 @@ entrypoint = "pgMaxRows"
 path      = "/canary/sql/mysql/param-order"
 method    = "POST"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.mysql_param_order.handler]
 type       = "codecomponent"
@@ -366,7 +371,7 @@ entrypoint = "mysqlParamOrder"
 path      = "/canary/sql/mysql/insert"
 method    = "POST"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.mysql_insert.handler]
 type       = "codecomponent"
@@ -378,7 +383,7 @@ entrypoint = "mysqlInsert"
 path      = "/canary/sql/mysql/select"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.mysql_select.handler]
 type       = "codecomponent"
@@ -390,7 +395,7 @@ entrypoint = "mysqlSelect"
 path      = "/canary/sql/mysql/update"
 method    = "PUT"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.mysql_update.handler]
 type       = "codecomponent"
@@ -402,7 +407,7 @@ entrypoint = "mysqlUpdate"
 path      = "/canary/sql/mysql/delete"
 method    = "DELETE"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.mysql_delete.handler]
 type       = "codecomponent"
@@ -414,7 +419,7 @@ entrypoint = "mysqlDelete"
 path      = "/canary/sql/mysql/ddl-reject"
 method    = "POST"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.mysql_ddl_reject.handler]
 type       = "codecomponent"
@@ -428,7 +433,7 @@ entrypoint = "mysqlDdlReject"
 path      = "/canary/sql/sqlite/param-order"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.sqlite_param_order.handler]
 type       = "codecomponent"
@@ -436,23 +441,35 @@ language   = "typescript"
 module     = "libraries/handlers/sql-tests.ts"
 entrypoint = "sqliteParamOrder"
 
-[api.views.sqlite_crud]
-path      = "/canary/sql/sqlite/crud"
-method    = "GET"
+[api.views.sqlite_insert]
+path      = "/canary/sql/sqlite/insert"
+method    = "POST"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
-[api.views.sqlite_crud.handler]
+[api.views.sqlite_insert.handler]
 type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/sql-tests.ts"
-entrypoint = "sqliteCrud"
+entrypoint = "sqliteInsert"
+
+[api.views.sqlite_select]
+path      = "/canary/sql/sqlite/select"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.sqlite_select.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "sqliteSelect"
 
 [api.views.sqlite_prefix]
 path      = "/canary/sql/sqlite/prefix"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.sqlite_prefix.handler]
 type       = "codecomponent"
@@ -466,7 +483,7 @@ entrypoint = "sqlitePrefix"
 path      = "/canary/sql/cache/l1-hit"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.cache_l1_hit.handler]
 type       = "codecomponent"
@@ -478,7 +495,7 @@ entrypoint = "cacheL1Hit"
 path      = "/canary/sql/cache/invalidate"
 method    = "POST"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.cache_invalidate.handler]
 type       = "codecomponent"
@@ -492,7 +509,7 @@ entrypoint = "cacheInvalidate"
 path      = "/canary/sql/init/ddl-success"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.init_ddl_success.handler]
 type       = "codecomponent"
@@ -506,7 +523,7 @@ entrypoint = "initDdlSuccess"
 path      = "/canary/sql/negative/ddl-rejected"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.ddl_rejected.handler]
 type       = "codecomponent"
@@ -518,7 +535,7 @@ entrypoint = "ddlRejected"
 path      = "/canary/sql/negative/error-sanitized"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.error_sanitized.handler]
 type       = "codecomponent"

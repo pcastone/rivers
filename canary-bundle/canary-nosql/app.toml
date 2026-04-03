@@ -271,7 +271,7 @@ query      = "FLUSHDB"
 path      = "/canary/nosql/mongo/ping"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.mongo_ping.handler]
 type       = "codecomponent"
@@ -283,7 +283,7 @@ entrypoint = "mongoConnect"
 path      = "/canary/nosql/mongo/insert"
 method    = "POST"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.mongo_insert.handler]
 type       = "codecomponent"
@@ -295,7 +295,7 @@ entrypoint = "mongoInsert"
 path      = "/canary/nosql/mongo/find"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.mongo_find.handler]
 type       = "codecomponent"
@@ -307,7 +307,7 @@ entrypoint = "mongoFind"
 path      = "/canary/nosql/mongo/admin-reject"
 method    = "POST"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.mongo_admin_reject.handler]
 type       = "codecomponent"
@@ -323,7 +323,7 @@ entrypoint = "mongoAdminReject"
 path      = "/canary/nosql/es/ping"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.es_ping.handler]
 type       = "codecomponent"
@@ -335,7 +335,7 @@ entrypoint = "esConnect"
 path      = "/canary/nosql/es/index"
 method    = "POST"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.es_index.handler]
 type       = "codecomponent"
@@ -347,7 +347,7 @@ entrypoint = "esIndex"
 path      = "/canary/nosql/es/search"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.es_search.handler]
 type       = "codecomponent"
@@ -363,7 +363,7 @@ entrypoint = "esSearch"
 path      = "/canary/nosql/couch/ping"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.couch_ping.handler]
 type       = "codecomponent"
@@ -375,7 +375,7 @@ entrypoint = "couchConnect"
 path      = "/canary/nosql/couch/put"
 method    = "POST"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.couch_put.handler]
 type       = "codecomponent"
@@ -387,7 +387,7 @@ entrypoint = "couchPut"
 path      = "/canary/nosql/couch/get"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.couch_get.handler]
 type       = "codecomponent"
@@ -403,7 +403,7 @@ entrypoint = "couchGet"
 path      = "/canary/nosql/cassandra/ping"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.cassandra_ping.handler]
 type       = "codecomponent"
@@ -415,7 +415,7 @@ entrypoint = "cassandraConnect"
 path      = "/canary/nosql/cassandra/insert"
 method    = "POST"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.cassandra_insert.handler]
 type       = "codecomponent"
@@ -427,7 +427,7 @@ entrypoint = "cassandraInsert"
 path      = "/canary/nosql/cassandra/select"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.cassandra_select.handler]
 type       = "codecomponent"
@@ -443,7 +443,7 @@ entrypoint = "cassandraSelect"
 path      = "/canary/nosql/ldap/ping"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.ldap_ping.handler]
 type       = "codecomponent"
@@ -455,7 +455,7 @@ entrypoint = "ldapConnect"
 path      = "/canary/nosql/ldap/search"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.ldap_search.handler]
 type       = "codecomponent"
@@ -471,7 +471,7 @@ entrypoint = "ldapSearch"
 path      = "/canary/nosql/redis/ping"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.redis_ping.handler]
 type       = "codecomponent"
@@ -483,7 +483,7 @@ entrypoint = "redisConnect"
 path      = "/canary/nosql/redis/set"
 method    = "POST"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.redis_set.handler]
 type       = "codecomponent"
@@ -495,7 +495,7 @@ entrypoint = "redisSet"
 path      = "/canary/nosql/redis/get"
 method    = "GET"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.redis_get.handler]
 type       = "codecomponent"
@@ -511,7 +511,7 @@ entrypoint = "redisGet"
 path      = "/canary/nosql/redis/admin-reject"
 method    = "POST"
 view_type = "Rest"
-auth      = "none"
+auth      = "session"
 
 [api.views.redis_admin_reject.handler]
 type       = "codecomponent"

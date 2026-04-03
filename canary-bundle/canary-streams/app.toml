@@ -58,11 +58,11 @@ auth      = "session"
 [api.views.ws_echo.handler]
 type       = "codecomponent"
 language   = "typescript"
-module     = "handlers/ws-handler.ts"
+module     = "libraries/handlers/ws-handler.ts"
 entrypoint = "onConnection"
 
 [api.views.ws_echo.on_stream]
-module     = "handlers/ws-handler.ts"
+module     = "libraries/handlers/ws-handler.ts"
 entrypoint = "onMessage"
 
 [api.views.ws_broadcast]
@@ -74,11 +74,11 @@ auth      = "session"
 [api.views.ws_broadcast.handler]
 type       = "codecomponent"
 language   = "typescript"
-module     = "handlers/ws-handler.ts"
+module     = "libraries/handlers/ws-handler.ts"
 entrypoint = "onBroadcastConnection"
 
 [api.views.ws_broadcast.on_stream]
-module     = "handlers/ws-handler.ts"
+module     = "libraries/handlers/ws-handler.ts"
 entrypoint = "onBroadcastMessage"
 
 # ─────────────────────────────────────────────
@@ -95,7 +95,7 @@ auth                 = "session"
 [api.views.sse_tick.handler]
 type       = "codecomponent"
 language   = "typescript"
-module     = "handlers/sse-handler.ts"
+module     = "libraries/handlers/sse-handler.ts"
 entrypoint = "onTick"
 
 [api.views.sse_event]
@@ -109,7 +109,7 @@ auth                 = "optional"
 [api.views.sse_event.handler]
 type       = "codecomponent"
 language   = "typescript"
-module     = "handlers/sse-handler.ts"
+module     = "libraries/handlers/sse-handler.ts"
 entrypoint = "onEventTriggered"
 
 # ─────────────────────────────────────────────
@@ -127,7 +127,7 @@ auth              = "session"
 [api.views.stream_ndjson.handler]
 type       = "codecomponent"
 language   = "typescript"
-module     = "handlers/streaming-rest.ts"
+module     = "libraries/handlers/streaming-rest.ts"
 entrypoint = "streamNdjson"
 
 [api.views.stream_poison]
@@ -141,7 +141,7 @@ auth              = "session"
 [api.views.stream_poison.handler]
 type       = "codecomponent"
 language   = "typescript"
-module     = "handlers/streaming-rest.ts"
+module     = "libraries/handlers/streaming-rest.ts"
 entrypoint = "streamPoison"
 
 # ─────────────────────────────────────────────
@@ -153,7 +153,11 @@ view_type = "MessageConsumer"
 auth      = "none"
 
 [api.views.kafka_consume.handler]
-type = "none"
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/kafka-consumer.ts"
+entrypoint = "onMessage"
+resources  = ["canary-kafka"]
 
 # ─────────────────────────────────────────────
 # Views — Kafka verify (REST endpoint to check last consume verdict)
@@ -168,7 +172,7 @@ auth      = "none"
 [api.views.kafka_verify.handler]
 type       = "codecomponent"
 language   = "typescript"
-module     = "handlers/kafka-consumer.ts"
+module     = "libraries/handlers/kafka-consumer.ts"
 entrypoint = "kafkaVerify"
 
 # ─────────────────────────────────────────────
@@ -191,7 +195,7 @@ diff_strategy    = "hash"
 poll_state_ttl_s = 60
 
 [api.views.poll_hash.polling.on_change]
-module     = "handlers/poll-handler.ts"
+module     = "libraries/handlers/poll-handler.ts"
 entrypoint = "onPollChange"
 
 # ─────────────────────────────────────────────
@@ -207,6 +211,6 @@ auth      = "none"
 [api.views.poll_data.handler]
 type       = "codecomponent"
 language   = "typescript"
-module     = "handlers/poll-handler.ts"
+module     = "libraries/handlers/poll-handler.ts"
 entrypoint = "pollData"
 dataviews  = ["poll_data"]

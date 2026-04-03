@@ -13,9 +13,9 @@ function login(ctx) {
     if (body.username === "canary" && body.password === "canary-test") {
         // Return IdentityClaims — framework creates session from these
         return {
-            subject: "canary-user-001",
-            username: body.username,
+            sub: "canary-user-001",
             role: "tester",
+            email: "canary@test.local",
             groups: ["canary-fleet"]
         };
     }
