@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "description": "Stream canary test payload — simple message envelope for WebSocket, SSE, and streaming REST tests",
+  "fields": [
+    { "name": "id",        "type": "uuid",      "faker": "datatype.uuid",          "required": true  },
+    { "name": "message",   "type": "string",     "faker": "lorem.sentence",         "required": true  },
+    { "name": "timestamp", "type": "datetime",   "faker": "date.recent",            "required": true  }
+  ]
+}

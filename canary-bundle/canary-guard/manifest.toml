@@ -1,0 +1,7 @@
+appName       = "canary-guard"
+description   = "Canary Fleet — AUTH profile: guard view and session lifecycle"
+version       = "1.0.0"
+type          = "app-service"
+appId         = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee00"
+entryPoint    = "http://0.0.0.0:9100"
+source        = "https://github.com/pcastone/rivers/canary-fleet"

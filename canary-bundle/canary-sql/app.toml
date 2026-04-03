@@ -1,0 +1,544 @@
+# ─────────────────────────────────────────────
+# SQL Profile — Datasources
+# ─────────────────────────────────────────────
+
+[data.datasources.canary-pg]
+name       = "canary-pg"
+driver     = "postgres"
+nopassword = true
+
+[data.datasources.canary-mysql]
+name       = "canary-mysql"
+driver     = "mysql"
+nopassword = true
+
+[data.datasources.canary-sqlite]
+name       = "canary-sqlite"
+driver     = "sqlite"
+database   = ":memory:"
+nopassword = true
+
+# ─────────────────────────────────────────────
+# DataViews — parameter names deliberately non-alphabetical
+# $zname appears before $age in queries to trap Issue #54
+# ─────────────────────────────────────────────
+
+# ── PostgreSQL DataViews ──
+
+[data.dataviews.pg_param_test]
+name       = "pg_param_test"
+datasource = "canary-pg"
+query      = "SELECT zname, age FROM canary_records WHERE zname = $zname AND age = $age"
+
+[[data.dataviews.pg_param_test.parameters]]
+name     = "zname"
+type     = "string"
+required = true
+
+[[data.dataviews.pg_param_test.parameters]]
+name     = "age"
+type     = "integer"
+required = true
+
+[data.dataviews.pg_insert]
+name       = "pg_insert"
+datasource = "canary-pg"
+query      = "INSERT INTO canary_records (id, zname, age, email) VALUES ($id, $zname, $age, $email)"
+
+[[data.dataviews.pg_insert.parameters]]
+name = "id"
+type = "string"
+required = true
+
+[[data.dataviews.pg_insert.parameters]]
+name = "zname"
+type = "string"
+required = true
+
+[[data.dataviews.pg_insert.parameters]]
+name = "age"
+type = "integer"
+required = true
+
+[[data.dataviews.pg_insert.parameters]]
+name = "email"
+type = "string"
+required = false
+
+[data.dataviews.pg_select_all]
+name       = "pg_select_all"
+datasource = "canary-pg"
+query      = "SELECT id, zname, age, email FROM canary_records ORDER BY created_at DESC"
+
+[data.dataviews.pg_update]
+name       = "pg_update"
+datasource = "canary-pg"
+query      = "UPDATE canary_records SET zname = $zname, age = $age WHERE id = $id"
+
+[[data.dataviews.pg_update.parameters]]
+name     = "id"
+type     = "string"
+required = true
+
+[[data.dataviews.pg_update.parameters]]
+name     = "zname"
+type     = "string"
+required = true
+
+[[data.dataviews.pg_update.parameters]]
+name     = "age"
+type     = "integer"
+required = true
+
+[data.dataviews.pg_delete]
+name       = "pg_delete"
+datasource = "canary-pg"
+query      = "DELETE FROM canary_records WHERE id = $id"
+
+[[data.dataviews.pg_delete.parameters]]
+name     = "id"
+type     = "string"
+required = true
+
+[data.dataviews.pg_select_by_id]
+name       = "pg_select_by_id"
+datasource = "canary-pg"
+query      = "SELECT * FROM canary_records WHERE id = $id"
+
+[[data.dataviews.pg_select_by_id.parameters]]
+name     = "id"
+type     = "string"
+required = true
+
+[data.dataviews.pg_cached]
+name       = "pg_cached"
+datasource = "canary-pg"
+query      = "SELECT id, zname, age, email FROM canary_records ORDER BY created_at DESC"
+
+[data.dataviews.pg_cached.caching]
+ttl_seconds = 60
+max_rows    = 10
+
+[data.dataviews.pg_ddl_trap]
+name       = "pg_ddl_trap"
+datasource = "canary-pg"
+query      = "DROP TABLE canary_records"
+
+[data.dataviews.pg_bad_query]
+name       = "pg_bad_query"
+datasource = "canary-pg"
+query      = "SELECT * FROM nonexistent_table_xyz"
+
+# ── MySQL DataViews ──
+
+[data.dataviews.mysql_param_test]
+name       = "mysql_param_test"
+datasource = "canary-mysql"
+query      = "SELECT zname, age FROM canary_records WHERE zname = $zname AND age = $age"
+
+[[data.dataviews.mysql_param_test.parameters]]
+name     = "zname"
+type     = "string"
+required = true
+
+[[data.dataviews.mysql_param_test.parameters]]
+name     = "age"
+type     = "integer"
+required = true
+
+[data.dataviews.mysql_insert]
+name       = "mysql_insert"
+datasource = "canary-mysql"
+query      = "INSERT INTO canary_records (id, zname, age) VALUES ($id, $zname, $age)"
+
+[[data.dataviews.mysql_insert.parameters]]
+name     = "id"
+type     = "string"
+required = true
+
+[[data.dataviews.mysql_insert.parameters]]
+name     = "zname"
+type     = "string"
+required = true
+
+[[data.dataviews.mysql_insert.parameters]]
+name     = "age"
+type     = "integer"
+required = true
+
+[data.dataviews.mysql_select_all]
+name       = "mysql_select_all"
+datasource = "canary-mysql"
+query      = "SELECT * FROM canary_records"
+
+[data.dataviews.mysql_update]
+name       = "mysql_update"
+datasource = "canary-mysql"
+query      = "UPDATE canary_records SET zname = $zname, age = $age WHERE id = $id"
+
+[[data.dataviews.mysql_update.parameters]]
+name     = "id"
+type     = "string"
+required = true
+
+[[data.dataviews.mysql_update.parameters]]
+name     = "zname"
+type     = "string"
+required = true
+
+[[data.dataviews.mysql_update.parameters]]
+name     = "age"
+type     = "integer"
+required = true
+
+[data.dataviews.mysql_delete]
+name       = "mysql_delete"
+datasource = "canary-mysql"
+query      = "DELETE FROM canary_records WHERE id = $id"
+
+[[data.dataviews.mysql_delete.parameters]]
+name     = "id"
+type     = "string"
+required = true
+
+# ── SQLite DataViews ──
+
+[data.dataviews.sqlite_param_test]
+name       = "sqlite_param_test"
+datasource = "canary-sqlite"
+query      = "SELECT zname, age FROM canary_records WHERE zname = $zname AND age = $age"
+
+[[data.dataviews.sqlite_param_test.parameters]]
+name     = "zname"
+type     = "string"
+required = true
+
+[[data.dataviews.sqlite_param_test.parameters]]
+name     = "age"
+type     = "integer"
+required = true
+
+[data.dataviews.sqlite_insert]
+name       = "sqlite_insert"
+datasource = "canary-sqlite"
+query      = "INSERT INTO canary_records (id, zname, age) VALUES ($id, $zname, $age)"
+
+[[data.dataviews.sqlite_insert.parameters]]
+name = "id"
+type = "string"
+required = true
+
+[[data.dataviews.sqlite_insert.parameters]]
+name = "zname"
+type = "string"
+required = true
+
+[[data.dataviews.sqlite_insert.parameters]]
+name = "age"
+type = "integer"
+required = true
+
+[data.dataviews.sqlite_select_by_id]
+name       = "sqlite_select_by_id"
+datasource = "canary-sqlite"
+query      = "SELECT id, zname, age FROM canary_records WHERE id = $id"
+
+[[data.dataviews.sqlite_select_by_id.parameters]]
+name = "id"
+type = "string"
+required = true
+
+[data.dataviews.sqlite_select_all]
+name       = "sqlite_select_all"
+datasource = "canary-sqlite"
+query      = "SELECT id, zname, age FROM canary_records"
+
+[data.dataviews.sqlite_delete]
+name       = "sqlite_delete"
+datasource = "canary-sqlite"
+query      = "DELETE FROM canary_records WHERE id = $id"
+
+[[data.dataviews.sqlite_delete.parameters]]
+name = "id"
+type = "string"
+required = true
+
+# ─────────────────────────────────────────────
+# Views
+# ─────────────────────────────────────────────
+
+# ── PostgreSQL Views ──
+
+[api.views.pg_param_order]
+path      = "/canary/sql/pg/param-order"
+method    = "POST"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.pg_param_order.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "pgParamOrder"
+
+[api.views.pg_insert]
+path      = "/canary/sql/pg/insert"
+method    = "POST"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.pg_insert.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "pgInsert"
+
+[api.views.pg_select]
+path      = "/canary/sql/pg/select"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.pg_select.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "pgSelect"
+
+[api.views.pg_update]
+path      = "/canary/sql/pg/update"
+method    = "PUT"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.pg_update.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "pgUpdate"
+
+[api.views.pg_delete]
+path      = "/canary/sql/pg/delete"
+method    = "DELETE"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.pg_delete.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "pgDelete"
+
+[api.views.pg_ddl_reject]
+path      = "/canary/sql/pg/ddl-reject"
+method    = "POST"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.pg_ddl_reject.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/negative-sql.ts"
+entrypoint = "pgDdlReject"
+
+[api.views.pg_max_rows]
+path      = "/canary/sql/pg/max-rows"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.pg_max_rows.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "pgMaxRows"
+
+# ── MySQL Views ──
+
+[api.views.mysql_param_order]
+path      = "/canary/sql/mysql/param-order"
+method    = "POST"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.mysql_param_order.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "mysqlParamOrder"
+
+[api.views.mysql_insert]
+path      = "/canary/sql/mysql/insert"
+method    = "POST"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.mysql_insert.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "mysqlInsert"
+
+[api.views.mysql_select]
+path      = "/canary/sql/mysql/select"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.mysql_select.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "mysqlSelect"
+
+[api.views.mysql_update]
+path      = "/canary/sql/mysql/update"
+method    = "PUT"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.mysql_update.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "mysqlUpdate"
+
+[api.views.mysql_delete]
+path      = "/canary/sql/mysql/delete"
+method    = "DELETE"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.mysql_delete.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "mysqlDelete"
+
+[api.views.mysql_ddl_reject]
+path      = "/canary/sql/mysql/ddl-reject"
+method    = "POST"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.mysql_ddl_reject.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/negative-sql.ts"
+entrypoint = "mysqlDdlReject"
+
+# ── SQLite Views ──
+
+[api.views.sqlite_param_order]
+path      = "/canary/sql/sqlite/param-order"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.sqlite_param_order.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "sqliteParamOrder"
+
+[api.views.sqlite_insert]
+path      = "/canary/sql/sqlite/insert"
+method    = "POST"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.sqlite_insert.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "sqliteInsert"
+
+[api.views.sqlite_select]
+path      = "/canary/sql/sqlite/select"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.sqlite_select.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "sqliteSelect"
+
+[api.views.sqlite_prefix]
+path      = "/canary/sql/sqlite/prefix"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.sqlite_prefix.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "sqlitePrefix"
+
+# ── Cache Views ──
+
+[api.views.cache_l1_hit]
+path      = "/canary/sql/cache/l1-hit"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.cache_l1_hit.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "cacheL1Hit"
+
+[api.views.cache_invalidate]
+path      = "/canary/sql/cache/invalidate"
+method    = "POST"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.cache_invalidate.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "cacheInvalidate"
+
+# ── Init DDL Verification ──
+
+[api.views.init_ddl_success]
+path      = "/canary/sql/init/ddl-success"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.init_ddl_success.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "initDdlSuccess"
+
+# ── Negative Tests ──
+
+[api.views.ddl_rejected]
+path      = "/canary/sql/negative/ddl-rejected"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.ddl_rejected.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/negative-sql.ts"
+entrypoint = "ddlRejected"
+
+[api.views.error_sanitized]
+path      = "/canary/sql/negative/error-sanitized"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.error_sanitized.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/negative-sql.ts"
+entrypoint = "errorSanitized"

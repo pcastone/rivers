@@ -1,0 +1,11 @@
+appName       = "canary-sql"
+description   = "Canary Fleet — SQL profile: PostgreSQL, MySQL, SQLite CRUD + param binding"
+version       = "1.0.0"
+type          = "app-service"
+appId         = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee01"
+entryPoint    = "http://0.0.0.0:9101"
+source        = "https://github.com/pcastone/rivers/canary-fleet"
+
+[init]
+module     = "handlers/init.ts"
+entrypoint = "initialize"

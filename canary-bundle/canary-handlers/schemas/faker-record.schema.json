@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "description": "Faker canary test record — synthetic contact data for runtime tests",
+  "fields": [
+    { "name": "id",    "type": "uuid",   "faker": "datatype.uuid",    "required": true  },
+    { "name": "name",  "type": "string", "faker": "person.fullName",  "required": true  },
+    { "name": "email", "type": "email",  "faker": "internet.email",   "required": true  },
+    { "name": "phone", "type": "phone",  "faker": "phone.number",     "required": false }
+  ]
+}

@@ -1,0 +1,17 @@
+[[datasources]]
+name       = "canary-kafka"
+driver     = "kafka"
+lockbox    = "canary-kafka"
+required   = true
+
+[[datasources]]
+name       = "canary-redis"
+driver     = "redis"
+lockbox    = "canary-redis"
+required   = true
+
+[[datasources]]
+name       = "canary-faker"
+driver     = "faker"
+nopassword = true
+required   = true

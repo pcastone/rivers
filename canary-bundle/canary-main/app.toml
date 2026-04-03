@@ -1,0 +1,123 @@
+# ---------------------------------------------
+# PROXY Profile -- HTTP proxy datasources + SPA dashboard
+# ---------------------------------------------
+
+# -- HTTP Datasources (resolve via service registry) --
+
+[data.datasources.canary-sql-api]
+name       = "canary-sql-api"
+driver     = "http"
+service    = "canary-sql"
+nopassword = true
+
+[data.datasources.canary-sql-api.config]
+timeout_ms     = 5000
+retry_attempts = 1
+
+[data.datasources.canary-handlers-api]
+name       = "canary-handlers-api"
+driver     = "http"
+service    = "canary-handlers"
+nopassword = true
+
+[data.datasources.canary-handlers-api.config]
+timeout_ms     = 5000
+retry_attempts = 1
+
+# ---------------------------------------------
+# DataViews -- HTTP proxy targets
+# ---------------------------------------------
+
+# Proxy to canary-sql pg select endpoint
+[data.dataviews.proxy_sql_pg_select]
+name       = "proxy_sql_pg_select"
+datasource = "canary-sql-api"
+query      = "/canary/sql/pg/select"
+method     = "GET"
+
+# Proxy to canary-handlers trace-id endpoint
+[data.dataviews.proxy_handlers_trace_id]
+name       = "proxy_handlers_trace_id"
+datasource = "canary-handlers-api"
+query      = "/canary/rt/ctx/trace-id"
+method     = "GET"
+
+# Proxy to a non-existent endpoint to test error propagation
+[data.dataviews.proxy_error_target]
+name       = "proxy_error_target"
+datasource = "canary-handlers-api"
+query      = "/canary/rt/does-not-exist"
+method     = "GET"
+
+# ---------------------------------------------
+# Views -- proxy test endpoints
+# ---------------------------------------------
+
+# -- PROXY-SESSION-PROPAGATION: verify session headers survive HTTP proxy --
+
+[api.views.proxy_session_check]
+path      = "/canary/proxy/session-check"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.proxy_session_check.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/proxy-tests.ts"
+entrypoint = "proxySessionPropagation"
+
+# -- PROXY-SQL-PASSTHROUGH: proxy to canary-sql pg select --
+
+[api.views.proxy_sql_select]
+path      = "/canary/proxy/sql/pg/select"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.proxy_sql_select.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/proxy-tests.ts"
+entrypoint = "proxySqlPassthrough"
+dataviews  = ["proxy_sql_pg_select"]
+
+# -- PROXY-HANDLER-PASSTHROUGH: proxy to canary-handlers trace-id --
+
+[api.views.proxy_handler_trace]
+path      = "/canary/proxy/rt/ctx/trace-id"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.proxy_handler_trace.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/proxy-tests.ts"
+entrypoint = "proxyHandlerPassthrough"
+dataviews  = ["proxy_handlers_trace_id"]
+
+# -- PROXY-ERROR-PROPAGATION: proxy to failing endpoint --
+
+[api.views.proxy_error]
+path      = "/canary/proxy/error"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.proxy_error.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/proxy-tests.ts"
+entrypoint = "proxyErrorPropagation"
+dataviews  = ["proxy_error_target"]
+
+# ---------------------------------------------
+# SPA Config
+# ---------------------------------------------
+
+[static_files]
+enabled      = true
+root         = "libraries/spa"
+index_file   = "index.html"
+spa_fallback = true

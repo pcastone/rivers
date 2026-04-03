@@ -1,0 +1,11 @@
+bundleName    = "canary-fleet"
+bundleVersion = "1.0.0"
+source        = "https://github.com/pcastone/rivers"
+apps          = [
+  "canary-guard",
+  "canary-sql",
+  "canary-nosql",
+  "canary-handlers",
+  "canary-streams",
+  "canary-main"
+]

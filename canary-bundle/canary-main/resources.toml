@@ -1,0 +1,33 @@
+[[datasources]]
+name       = "canary-sql-api"
+driver     = "http"
+x-type     = "http"
+nopassword = true
+required   = true
+
+[[datasources]]
+name       = "canary-handlers-api"
+driver     = "http"
+x-type     = "http"
+nopassword = true
+required   = true
+
+[[services]]
+name     = "canary-guard"
+appId    = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee00"
+required = true
+
+[[services]]
+name     = "canary-sql"
+appId    = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee01"
+required = true
+
+[[services]]
+name     = "canary-handlers"
+appId    = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee03"
+required = true
+
+[[services]]
+name     = "canary-streams"
+appId    = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee04"
+required = true

@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "description": "PostgreSQL canary test record — zname column traps alphabetical param binding",
+  "fields": [
+    { "name": "id",         "type": "uuid",     "required": true  },
+    { "name": "zname",      "type": "string",   "required": true  },
+    { "name": "age",        "type": "integer",  "required": true  },
+    { "name": "email",      "type": "email",    "required": false },
+    { "name": "created_at", "type": "datetime", "required": false }
+  ]
+}

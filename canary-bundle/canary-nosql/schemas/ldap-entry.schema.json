@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "description": "LDAP canary test entry",
+  "fields": [
+    { "name": "dn",         "type": "string", "required": true  },
+    { "name": "cn",         "type": "string", "required": true  },
+    { "name": "objectClass", "type": "string", "required": true }
+  ]
+}

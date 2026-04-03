@@ -1,0 +1,106 @@
+# ─────────────────────────────────────────────
+# AUTH Profile — Guard View + Session Lifecycle
+# ─────────────────────────────────────────────
+
+# ── Guard View (login) ──
+
+[api.views.login]
+path      = "/canary/auth/login"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+guard     = true
+
+[api.views.login.session]
+ttl_s          = 3600
+idle_timeout_s = 600
+
+[api.views.login.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/guard.ts"
+entrypoint = "login"
+
+# ── Session Token Check ──
+
+[api.views.token_check]
+path      = "/canary/auth/token-check"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.token_check.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/session-test.ts"
+entrypoint = "tokenCheck"
+
+# ── Cookie Check ──
+
+[api.views.cookie_check]
+path      = "/canary/auth/cookie-check"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.cookie_check.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/session-test.ts"
+entrypoint = "cookieCheck"
+
+# ── Session Read ──
+
+[api.views.session_read]
+path      = "/canary/auth/session-read"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.session_read.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/session-test.ts"
+entrypoint = "sessionRead"
+
+# ── Session Expired (expects 401 when session invalid) ──
+
+[api.views.session_expired]
+path      = "/canary/auth/session-expired"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.session_expired.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/session-test.ts"
+entrypoint = "sessionExpired"
+
+# ── CSRF Test ──
+
+[api.views.csrf_test]
+path      = "/canary/auth/csrf-test"
+method    = "POST"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.csrf_test.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/session-test.ts"
+entrypoint = "csrfTest"
+
+# ── Logout ──
+
+[api.views.logout]
+path      = "/canary/auth/logout"
+method    = "POST"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.logout.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/session-test.ts"
+entrypoint = "logout"
