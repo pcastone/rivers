@@ -824,6 +824,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backon"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffb0e931875b666fc4fcb20fee52e9bbd1ef836fd9e9e04ec21555f9f85f7ef"
+dependencies = [
+ "fastrand 2.3.0",
+ "tokio",
+]
+
+[[package]]
 name = "base64"
 version = "0.21.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1146,7 +1156,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-deploy"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "rivers-core",
  "rivers-core-config",
@@ -1231,6 +1241,16 @@ dependencies = [
  "serde",
  "wasm-bindgen",
  "windows-link",
+]
+
+[[package]]
+name = "chrono-tz"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6139a8597ed92cf816dfb33f5dd6cf0bb93a6adc938f11039f371bc5bcd26c3"
+dependencies = [
+ "chrono",
+ "phf 0.12.1",
 ]
 
 [[package]]
@@ -1840,12 +1860,41 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
+name = "deadpool"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0be2b1d1d6ec8d846f05e137292d0b89133caf95ef33695424c09568bdd39b1b"
+dependencies = [
+ "deadpool-runtime",
+ "lazy_static",
+ "num_cpus",
+ "tokio",
+]
+
+[[package]]
+name = "deadpool-runtime"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
+
+[[package]]
 name = "debugid"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bef552e6f588e446098f6ba40d89ac146c8c7b64aade83c051ee00bb5d2bc18d"
 dependencies = [
  "uuid",
+]
+
+[[package]]
+name = "delegate"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "780eb241654bf097afb00fc5f054a09b687dad862e485fdcf8399bb056565370"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2265,17 +2314,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
-name = "filetime"
-version = "0.2.27"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f98844151eee8917efc50bd9e8318cb963ae8b297431495d3f758616ea5c57db"
-dependencies = [
- "cfg-if",
- "libc",
- "libredox",
-]
-
-[[package]]
 name = "find-crate"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2470,15 +2508,6 @@ name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
-
-[[package]]
-name = "fsevent-sys"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76ee7a02da4d231650c7cea31349b889be2f45ddb3ef3032d2ec8185f6313fd2"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "fslock"
@@ -3236,26 +3265,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inotify"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdd168d97690d0b8c412d6b6c10360277f4d7ee495c5d0d5d5fe0854923255cc"
-dependencies = [
- "bitflags 1.3.2",
- "inotify-sys",
- "libc",
-]
-
-[[package]]
-name = "inotify-sys"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e05c02b5e89bff3b946cedeca278abc628fe811e604f027c45a8aa3cf793d0eb"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "inout"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3452,26 +3461,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kqueue"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eac30106d7dce88daf4a3fcb4879ea939476d5074a9b7ddd0fb97fa4bed5596a"
-dependencies = [
- "kqueue-sys",
- "libc",
-]
-
-[[package]]
-name = "kqueue-sys"
-version = "1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed9625ffda8729b85e45cf04090035ac368927b8cebc34898e7c120f52e4838b"
-dependencies = [
- "bitflags 1.3.2",
- "libc",
-]
-
-[[package]]
 name = "lapin"
 version = "2.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3570,10 +3559,7 @@ version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ddbf48fd451246b1f8c2610bd3b4ac0cc6e149d89832867093ab69a17194f08"
 dependencies = [
- "bitflags 2.11.0",
  "libc",
- "plain",
- "redox_syscall 0.7.3",
 ]
 
 [[package]]
@@ -3804,7 +3790,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1"
 dependencies = [
  "libc",
- "log",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
 ]
@@ -4011,6 +3996,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "neo4rs"
+version = "0.9.0-rc.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7fcca27768ef44617115648b7a9797d9e11fa76feee3900895d0eade165d2bc1"
+dependencies = [
+ "backon",
+ "bytes",
+ "chrono",
+ "chrono-tz",
+ "deadpool",
+ "delegate",
+ "futures",
+ "log",
+ "neo4rs-macros",
+ "pastey",
+ "pin-project-lite",
+ "rustls 0.23.37",
+ "rustls-native-certs 0.8.3",
+ "rustls-pemfile 2.2.0",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "url",
+]
+
+[[package]]
+name = "neo4rs-macros"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53a0d57c55d2d1dc62a2b1d16a0a1079eb78d67c36bdf468d582ab4482ec7002"
+dependencies = [
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "nkeys"
 version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4033,34 +4055,6 @@ checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
 dependencies = [
  "memchr",
  "minimal-lexical",
-]
-
-[[package]]
-name = "notify"
-version = "7.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c533b4c39709f9ba5005d8002048266593c1cfaf3c5f0739d5b8ab0c6c504009"
-dependencies = [
- "bitflags 2.11.0",
- "filetime",
- "fsevent-sys",
- "inotify",
- "kqueue",
- "libc",
- "log",
- "mio",
- "notify-types",
- "walkdir",
- "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "notify-types"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "585d3cb5e12e01aed9e8a1f70d5c6b5e86fe2a6e48fc8cd0b3e0b8df6f6eb174"
-dependencies = [
- "instant",
 ]
 
 [[package]]
@@ -4179,6 +4173,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "num_cpus"
+version = "1.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
+dependencies = [
+ "hermit-abi 0.5.2",
+ "libc",
 ]
 
 [[package]]
@@ -4324,7 +4328,7 @@ checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
 dependencies = [
  "cfg-if",
  "libc",
- "redox_syscall 0.5.18",
+ "redox_syscall",
  "smallvec",
  "windows-link",
 ]
@@ -4334,6 +4338,12 @@ name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
+name = "pastey"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 
 [[package]]
 name = "pbkdf2"
@@ -4425,12 +4435,30 @@ dependencies = [
 
 [[package]]
 name = "phf"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "913273894cec178f401a31ec4b656318d95473527be05c0752cc41cdc32be8b7"
+dependencies = [
+ "phf_shared 0.12.1",
+]
+
+[[package]]
+name = "phf"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf"
 dependencies = [
- "phf_shared",
+ "phf_shared 0.13.1",
  "serde",
+]
+
+[[package]]
+name = "phf_shared"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06005508882fb681fd97892ecff4b7fd0fee13ef1aa569f8695dae7ab9099981"
+dependencies = [
+ "siphasher",
 ]
 
 [[package]]
@@ -4542,12 +4570,6 @@ name = "pkg-config"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
-
-[[package]]
-name = "plain"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "polling"
@@ -5020,15 +5042,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "redox_syscall"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ce70a74e890531977d37e532c34d45e9055d2409ed08ddba14529471ed0be16"
-dependencies = [
- "bitflags 2.11.0",
-]
-
-[[package]]
 name = "redox_users"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5202,7 +5215,7 @@ dependencies = [
 
 [[package]]
 name = "riverpackage"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "hex",
  "rivers-core-config",
@@ -5217,7 +5230,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-core"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "age",
  "async-trait",
@@ -5232,7 +5245,6 @@ dependencies = [
  "rivers-storage-backends",
  "rusqlite",
  "rustls 0.23.37",
- "rustls-pemfile 2.2.0",
  "schemars",
  "serde",
  "serde_json",
@@ -5250,7 +5262,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-core-config"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5260,11 +5272,12 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml 0.8.23",
+ "uuid",
 ]
 
 [[package]]
 name = "rivers-driver-sdk"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5279,7 +5292,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-drivers-builtin"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "async-memcached",
  "async-trait",
@@ -5296,7 +5309,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-engine-sdk"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -5304,7 +5317,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-engine-v8"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "base64 0.22.1",
  "bcrypt",
@@ -5323,7 +5336,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-engine-wasm"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "rivers-engine-sdk",
  "serde_json",
@@ -5333,7 +5346,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-keystore"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "age",
  "clap",
@@ -5342,7 +5355,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-keystore-engine"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "aes-gcm",
  "age",
@@ -5358,7 +5371,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-lockbox"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "age",
  "rivers-lockbox-engine",
@@ -5371,7 +5384,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-lockbox-engine"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "age",
  "chrono",
@@ -5385,7 +5398,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-cassandra"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "age",
  "async-trait",
@@ -5401,7 +5414,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-couchdb"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "age",
  "async-trait",
@@ -5418,7 +5431,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-elasticsearch"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "age",
  "async-trait",
@@ -5432,7 +5445,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-exec"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "async-trait",
  "hex",
@@ -5449,7 +5462,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-influxdb"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "age",
  "async-trait",
@@ -5466,7 +5479,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-kafka"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "age",
  "async-trait",
@@ -5479,7 +5492,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-ldap"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "age",
  "async-trait",
@@ -5492,7 +5505,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-mongodb"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "age",
  "async-trait",
@@ -5506,7 +5519,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-nats"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "age",
  "async-nats",
@@ -5520,8 +5533,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rivers-plugin-neo4j"
+version = "0.52.8"
+dependencies = [
+ "async-trait",
+ "neo4rs",
+ "rivers-driver-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rivers-plugin-rabbitmq"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "age",
  "async-trait",
@@ -5535,7 +5561,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-redis-streams"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "age",
  "async-trait",
@@ -5552,7 +5578,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-runtime"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "async-trait",
  "hex",
@@ -5574,7 +5600,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-storage-backends"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "async-trait",
  "redis",
@@ -5586,7 +5612,7 @@ dependencies = [
 
 [[package]]
 name = "riversctl"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -5602,7 +5628,7 @@ dependencies = [
 
 [[package]]
 name = "riversd"
-version = "0.52.5"
+version = "0.52.8"
 dependencies = [
  "async-graphql",
  "async-graphql-axum",
@@ -5619,7 +5645,6 @@ dependencies = [
  "hyper-util",
  "ipnet",
  "libloading",
- "notify",
  "percent-encoding",
  "rand 0.8.5",
  "rcgen",
@@ -5635,11 +5660,11 @@ dependencies = [
  "rivers-plugin-ldap",
  "rivers-plugin-mongodb",
  "rivers-plugin-nats",
+ "rivers-plugin-neo4j",
  "rivers-plugin-rabbitmq",
  "rivers-plugin-redis-streams",
  "rivers-runtime",
  "rustls 0.23.37",
- "rustls-pemfile 2.2.0",
  "serde",
  "serde_json",
  "sha2",
@@ -6936,7 +6961,7 @@ dependencies = [
  "log",
  "parking_lot",
  "percent-encoding",
- "phf",
+ "phf 0.13.1",
  "pin-project-lite",
  "postgres-protocol",
  "postgres-types",
