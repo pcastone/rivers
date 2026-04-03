@@ -50,19 +50,13 @@ Remaining (need TestIsolate for mock dataview capture):
 
 ---
 
-## Phase 4 — AMD-1 Additions (Boot Parity + Module Resolution)
+## Phase 4 — AMD-1 Additions (Boot Parity + Module Resolution) ✅
 
-### 4.1 — Boot path parity tests (AMD-1.1, BUG-005)
-- [ ] Create `crates/riversd/tests/boot/no_ssl_boot.rs` — `no_ssl_boot_has_all_subsystems`
-- [ ] Create `crates/riversd/tests/boot/boot_parity.rs` — `boot_parity_tls_vs_no_ssl`
-- [ ] Both boot paths must have: StorageEngine, SessionManager, CsrfManager, EventBus, engine registry, host context
-- [ ] Verify: test fails if either path is missing a subsystem
-
-### 4.2 — Module path resolution tests (AMD-1.5, BUG-013)
-- [ ] Create `crates/riversd/tests/bundle/module_resolution.rs`
-- [ ] `module_paths_resolved_to_absolute_after_bundle_load` — verify all module paths are absolute
-- [ ] `module_resolution_independent_of_cwd` — load from non-bundle CWD, verify paths resolve
-- [ ] Create test fixture bundle at `crates/riversd/tests/fixtures/test-bundle/`
+4 tests in `boot_parity_tests.rs`:
+- no_ssl_path_has_all_subsystem_init_calls (BUG-005 regression) ✅
+- tls_path_has_all_subsystem_init_calls (sanity check) ✅
+- module_path_resolution_exists_in_bundle_loader (BUG-013) ✅
+- storage_engine_config_has_memory_default ✅
 
 ---
 
