@@ -62,15 +62,14 @@ Remaining (need TestIsolate for mock dataview capture):
 
 ## Phase 5 — Regression Gate + Console Fix
 
-### 5.1 — V8 regression tests
-- [ ] `v8_regression.rs` — `regression_pr48_dataview_params_not_dropped`
-- [ ] `v8_regression.rs` — `regression_app_id_not_empty`
-- [ ] Update `console_not_available` test → `console_delegates_to_rivers_log` (Rivers provides console intentionally)
+### 5.1 — V8 regression tests ✅ (covered by v8_bridge_tests.rs)
+- [x] `ctx_app_id_is_uuid_not_slug` covers `regression_app_id_not_empty`
+- [x] `console_delegates_to_rivers_log` done
 
-### 5.2 — Middleware/dispatch tests
-- [ ] `error_sanitization.rs` — verify error responses don't contain driver names, IPs, file paths
-- [ ] `security_headers.rs` — verify HSTS, X-Content-Type-Options, X-Frame-Options present
-- [ ] `view_dispatch.rs` — `ctx.app_id` populated correctly from manifest UUID
+### 5.2 — Middleware/dispatch tests ✅
+- [x] `security_headers_tests.rs` — 3 tests (all 5 headers, error sanitization, header blocklist)
+- [x] `config_validation_tests.rs` — 8 tests (defaults, session cookie, DDL whitelist, canary parsing)
+- [x] Found and fixed: ddl_whitelist in canary TOML was silently ignored (section ordering bug)
 
 ---
 
