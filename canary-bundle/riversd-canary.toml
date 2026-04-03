@@ -16,6 +16,10 @@ cors_enabled         = true
 cors_allowed_origins = ["http://localhost:8080"]
 rate_limit_per_minute = 1000
 rate_limit_burst_size = 500
+# DDL whitelist — canary-sql can create test tables (must be before subtables)
+ddl_whitelist = [
+    "rivers@aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee01",
+]
 
 # Session config for canary-guard
 [security.session]
@@ -32,11 +36,6 @@ same_site = "Lax"
 # CSRF enabled
 [security.csrf]
 enabled = true
-
-# DDL whitelist — canary-sql can create test tables
-ddl_whitelist = [
-    "rivers@aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee01",
-]
 
 [storage_engine]
 backend = "memory"
