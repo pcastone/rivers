@@ -3,5 +3,5 @@ description   = "Canary Fleet — RUNTIME profile: ctx.* surface, Rivers.* globa
 version       = "1.0.0"
 type          = "app-service"
 appId         = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee03"
-entryPoint    = "http://0.0.0.0:9103"
+entryPoint    = "handlers"
 source        = "https://github.com/pcastone/rivers/canary-fleet"

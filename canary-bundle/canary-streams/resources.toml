@@ -1,14 +1,16 @@
-[[datasources]]
-name       = "canary-kafka"
-driver     = "kafka"
-lockbox    = "canary-kafka"
-required   = true
+# Kafka disabled for local testing (no broker available)
+# [[datasources]]
+# name       = "canary-kafka"
+# driver     = "kafka"
+# lockbox    = "canary-kafka"
+# required   = true
 
-[[datasources]]
-name       = "canary-redis"
-driver     = "redis"
-lockbox    = "canary-redis"
-required   = true
+# Redis disabled for local testing (no server available)
+# [[datasources]]
+# name       = "canary-redis"
+# driver     = "redis"
+# lockbox    = "canary-redis"
+# required   = true
 
 [[datasources]]
 name       = "canary-faker"

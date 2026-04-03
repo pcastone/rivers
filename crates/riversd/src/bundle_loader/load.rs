@@ -60,6 +60,36 @@ pub async fn load_and_wire_bundle(
         return Err(ServerError::Config(format!("bundle validation failed: {}", msg)));
     }
 
+    // ── Resolve module paths to absolute ──
+    // CodeComponent handler modules are relative to their app directory.
+    // Resolve them now so the V8/WASM engines can read them from any CWD.
+    let mut bundle = bundle;
+    for app in &mut bundle.apps {
+        let app_dir = app.app_dir.clone();
+        for view_cfg in app.config.api.views.values_mut() {
+            resolve_handler_module(&app_dir, &mut view_cfg.handler);
+            if let Some(ref mut os) = view_cfg.on_stream {
+                let resolved = app_dir.join(&os.module);
+                os.module = resolved.to_string_lossy().to_string();
+            }
+            if let Some(ref mut eh) = view_cfg.event_handlers {
+                for h in eh.pre_process.iter_mut()
+                    .chain(eh.handlers.iter_mut())
+                    .chain(eh.post_process.iter_mut())
+                {
+                    let resolved = app_dir.join(&h.module);
+                    h.module = resolved.to_string_lossy().to_string();
+                }
+            }
+            if let Some(ref mut polling) = view_cfg.polling {
+                if let Some(ref mut oc) = polling.on_change {
+                    let resolved = app_dir.join(&oc.module);
+                    oc.module = resolved.to_string_lossy().to_string();
+                }
+            }
+        }
+    }
+
     let mut registry = rivers_runtime::DataViewRegistry::new();
     let mut ds_params: HashMap<String, rivers_runtime::rivers_driver_sdk::ConnectionParams> = HashMap::new();
     let mut view_count = 0usize;
@@ -547,5 +577,16 @@ async fn dispatch_init_handler(
         Ok(Ok(_)) => Ok(()),
         Ok(Err(e)) => Err(format!("init handler execution failed: {e}")),
         Err(_) => Err(format!("init handler timed out after {}s", timeout_s)),
+    }
+}
+
+/// Resolve a `HandlerConfig::Codecomponent` module path to absolute.
+fn resolve_handler_module(
+    app_dir: &std::path::Path,
+    handler: &mut rivers_runtime::view::HandlerConfig,
+) {
+    if let rivers_runtime::view::HandlerConfig::Codecomponent { module, .. } = handler {
+        let resolved = app_dir.join(&*module);
+        *module = resolved.to_string_lossy().to_string();
     }
 }

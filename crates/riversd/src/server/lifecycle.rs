@@ -154,9 +154,78 @@ pub async fn run_server_no_ssl(
         ctx.admin_auth_config = Some(build_admin_auth_config_for_rbac(&config));
     }
 
+    // Initialize runtime wiring (DataView engine, StorageEngine, gossip)
+    crate::runtime::initialize_runtime(&ctx.pool, &ctx.config).await;
+
+    // Initialize StorageEngine if configured (prerequisite for sessions, cache, polling)
+    if config.storage_engine.backend != "none" {
+        match rivers_runtime::rivers_core::storage::create_storage_engine(&config.storage_engine) {
+            Ok(engine) => {
+                let engine: Arc<dyn rivers_runtime::rivers_core::storage::StorageEngine> = Arc::from(engine);
+                if config.storage_engine.backend == "redis" {
+                    let node_id = config.app_id.as_deref().unwrap_or("node-0");
+                    if let Err(e) = rivers_runtime::rivers_core::storage::claim_sentinel(&*engine, node_id).await {
+                        return Err(ServerError::Config(format!(
+                            "sentinel claim failed (another node active?): {e}"
+                        )));
+                    }
+                    tracing::info!(node_id, "sentinel claimed");
+                }
+                let sweep_interval = config.storage_engine.sweep_interval_s;
+                if sweep_interval > 0 {
+                    rivers_runtime::rivers_core::storage::spawn_sweep_task(engine.clone(), sweep_interval);
+                }
+                ctx.storage_engine = Some(engine);
+                tracing::info!(backend = %config.storage_engine.backend, "storage engine initialized");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "storage engine initialization failed — running without persistence");
+            }
+        }
+    }
+
+    // Initialize SessionManager and CsrfManager if StorageEngine is available
+    if let Some(ref engine) = ctx.storage_engine {
+        ctx.session_manager = Some(Arc::new(crate::session::SessionManager::new(
+            engine.clone(),
+            config.security.session.clone(),
+        )));
+        ctx.csrf_manager = Some(Arc::new(crate::csrf::CsrfManager::new(
+            engine.clone(),
+            config.security.csrf.clone(),
+        )));
+        tracing::info!("session manager and CSRF manager initialized");
+    }
+
+    // Validate session cookie http_only=true enforcement
+    config.security.session.cookie.validate()
+        .map_err(|e| ServerError::Config(e))?;
+
+    // Register LogHandler on EventBus
+    {
+        let log_handler = Arc::new(rivers_runtime::rivers_core::logging::LogHandler::from_config(
+            &config.base.logging,
+            config.app_id.clone().unwrap_or_default(),
+            "node-0".to_string(),
+        ));
+        log_handler.register(&ctx.event_bus).await;
+    }
+
     // Auto-load bundle from config if bundle_path is set
     crate::bundle_loader::load_and_wire_bundle(&mut ctx, &config, shutdown_rx.clone()).await?;
     crate::task_enrichment::sync_from_app_context(&ctx);
+
+    // Wire host callbacks for cdylib engines
+    crate::engine_loader::set_host_context(
+        ctx.dataview_executor.clone(),
+        ctx.storage_engine.clone(),
+        ctx.driver_factory.clone(),
+    );
+
+    // Wire shared keystore resolver for static engines
+    if let Some(ref resolver) = ctx.keystore_resolver {
+        crate::process_pool::set_keystore_resolver(resolver.clone());
+    }
 
     let router = build_main_router(ctx);
 

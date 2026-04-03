@@ -1,6 +1,6 @@
 [[datasources]]
 name       = "pg"
-driver     = "postgresql"
+driver     = "postgres"
 lockbox    = "canary-pg"
 required   = true
 

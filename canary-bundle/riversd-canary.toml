@@ -2,7 +2,7 @@ bundle_path = "canary-bundle/"
 
 [base]
 host = "0.0.0.0"
-port = 8080
+port = 8090
 request_timeout_seconds = 30
 init_timeout_s = 60
 
@@ -38,8 +38,7 @@ ddl_whitelist = [
 ]
 
 [storage_engine]
-backend = "redis"
-url     = "redis://:rivers_test@192.168.2.206:6379"
+backend = "memory"
 
 [graphql]
 enabled = false

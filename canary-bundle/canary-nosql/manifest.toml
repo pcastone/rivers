@@ -3,5 +3,5 @@ description   = "Canary Fleet — NOSQL profile: MongoDB, Elasticsearch, CouchDB
 version       = "1.0.0"
 type          = "app-service"
 appId         = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee02"
-entryPoint    = "http://0.0.0.0:9102"
+entryPoint    = "nosql"
 source        = "https://github.com/pcastone/rivers/canary-fleet"

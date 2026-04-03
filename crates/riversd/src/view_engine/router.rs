@@ -123,6 +123,13 @@ impl ViewRouter {
                     );
                 }
 
+                tracing::debug!(
+                    method = %method,
+                    path = %full_path,
+                    view_id = %qualified_id,
+                    "route registered"
+                );
+
                 routes.push(ViewRoute {
                     view_id: qualified_id,
                     method,

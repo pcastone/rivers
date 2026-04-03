@@ -2,10 +2,11 @@
 # STREAM Profile — Datasources
 # ─────────────────────────────────────────────
 
-[data.datasources.canary-kafka]
-name       = "canary-kafka"
-driver     = "kafka"
-nopassword = true
+# Kafka disabled for local testing
+# [data.datasources.canary-kafka]
+# name       = "canary-kafka"
+# driver     = "kafka"
+# nopassword = true
 
 [data.datasources.canary-faker]
 name       = "canary-faker"
@@ -145,35 +146,35 @@ module     = "libraries/handlers/streaming-rest.ts"
 entrypoint = "streamPoison"
 
 # ─────────────────────────────────────────────
-# Views — Kafka MessageConsumer
+# Views — Kafka MessageConsumer (disabled — no broker)
 # ─────────────────────────────────────────────
 
-[api.views.kafka_consume]
-view_type = "MessageConsumer"
-auth      = "none"
-
-[api.views.kafka_consume.handler]
-type       = "codecomponent"
-language   = "typescript"
-module     = "libraries/handlers/kafka-consumer.ts"
-entrypoint = "onMessage"
-resources  = ["canary-kafka"]
+# [api.views.kafka_consume]
+# view_type = "MessageConsumer"
+# auth      = "none"
+#
+# [api.views.kafka_consume.handler]
+# type       = "codecomponent"
+# language   = "typescript"
+# module     = "libraries/handlers/kafka-consumer.ts"
+# entrypoint = "onMessage"
+# resources  = ["canary-kafka"]
 
 # ─────────────────────────────────────────────
-# Views — Kafka verify (REST endpoint to check last consume verdict)
+# Views — Kafka verify (disabled — no broker)
 # ─────────────────────────────────────────────
 
-[api.views.kafka_verify]
-path      = "/canary/stream/kafka/verify"
-method    = "GET"
-view_type = "Rest"
-auth      = "none"
-
-[api.views.kafka_verify.handler]
-type       = "codecomponent"
-language   = "typescript"
-module     = "libraries/handlers/kafka-consumer.ts"
-entrypoint = "kafkaVerify"
+# [api.views.kafka_verify]
+# path      = "/canary/stream/kafka/verify"
+# method    = "GET"
+# view_type = "Rest"
+# auth      = "none"
+#
+# [api.views.kafka_verify.handler]
+# type       = "codecomponent"
+# language   = "typescript"
+# module     = "libraries/handlers/kafka-consumer.ts"
+# entrypoint = "kafkaVerify"
 
 # ─────────────────────────────────────────────
 # Views — Polling with hash diff

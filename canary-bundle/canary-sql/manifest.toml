@@ -3,7 +3,7 @@ description   = "Canary Fleet — SQL profile: PostgreSQL, MySQL, SQLite CRUD + 
 version       = "1.0.0"
 type          = "app-service"
 appId         = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee01"
-entryPoint    = "http://0.0.0.0:9101"
+entryPoint    = "sql"
 source        = "https://github.com/pcastone/rivers/canary-fleet"
 
 [init]
