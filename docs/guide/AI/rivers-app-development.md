@@ -66,7 +66,7 @@ description   = "{description}"
 version       = "1.0.0"
 type          = "app-service"
 appId         = "{uuid}"
-entryPoint    = "http://0.0.0.0:{port}"
+entryPoint    = "{slug}"
 appEntryPoint = "https://{internal-hostname}"
 source        = "{repo-url}"
 ```
@@ -79,7 +79,7 @@ description   = "{description}"
 version       = "1.0.0"
 type          = "app-main"
 appId         = "{uuid}"
-entryPoint    = "http://0.0.0.0:{port}"
+entryPoint    = "{slug}"
 appEntryPoint = "https://{external-hostname}"
 source        = "{repo-url}"
 ```
@@ -92,7 +92,7 @@ source        = "{repo-url}"
 | `version` | yes | Developer | Semantic version |
 | `type` | yes | Developer | `app-service` or `app-main` |
 | `appId` | yes | Build tool | Stable UUID. NEVER regenerate. |
-| `entryPoint` | yes | Developer | Where Rivers binds this app |
+| `entryPoint` | yes | Developer | URL path slug — used as route namespace (e.g. `"service"`, `"main"`) |
 | `appEntryPoint` | no | Developer | Public URL (informational) |
 | `source` | yes | Build tool | Stamped at package time |
 
@@ -126,7 +126,7 @@ required   = true
 | Field | Required | Notes |
 |-------|----------|-------|
 | `name` | yes | Logical name — used in app.toml |
-| `driver` | yes | Driver type (postgresql, redis, faker, http, etc.) |
+| `driver` | yes | Driver type (postgres, redis, faker, http, etc.) |
 | `x-type` | yes | Build-time contract — same as driver for built-ins |
 | `lockbox` | conditional | Lockbox alias — required unless `nopassword = true` |
 | `nopassword` | no | Set `true` for credential-free drivers (faker, sqlite) |
@@ -175,7 +175,7 @@ MUST: `appId` matches the app-service's `manifest.toml` appId exactly.
 | Driver | x-type | Credentials | Use Case |
 |--------|--------|-------------|----------|
 | `faker` | `faker` | `nopassword = true` | Mock data, dev/demo |
-| `postgresql` | `postgresql` | lockbox | Relational data |
+| `postgres` | `postgres` | lockbox | Relational data |
 | `mysql` | `mysql` | lockbox | Relational data |
 | `sqlite` | `sqlite` | `nopassword = true` | Embedded relational |
 | `redis` | `redis` | lockbox | Cache, sessions, KV, streams |
@@ -232,9 +232,9 @@ Location: `{app}/schemas/{name}.schema.json`
 | Attribute | Supported Drivers | Description |
 |-----------|-------------------|-------------|
 | `faker` | `faker` only | Faker.js dot-notation: `"name.firstName"` |
-| `min` | `postgresql`, `mysql` | Minimum numeric value |
-| `max` | `postgresql`, `mysql` | Maximum numeric value |
-| `pattern` | `postgresql`, `mysql`, `ldap` | Regex pattern |
+| `min` | `postgres`, `mysql` | Minimum numeric value |
+| `max` | `postgres`, `mysql` | Maximum numeric value |
+| `pattern` | `postgres`, `mysql`, `ldap` | Regex pattern |
 
 MUST NOT: Use `faker` attribute with non-faker drivers — validation error.
 
@@ -278,7 +278,7 @@ max_records_per_query = 500
 
 ```toml
 [data.datasources.orders_db]
-driver             = "postgresql"
+driver             = "postgres"
 host               = "${DB_HOST}"
 port               = 5432
 database           = "orders"

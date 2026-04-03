@@ -1,17 +1,20 @@
 [[datasources]]
 name       = "pg"
 driver     = "postgres"
+x-type     = "postgres"
 lockbox    = "canary-pg"
 required   = true
 
 [[datasources]]
 name       = "mysql"
 driver     = "mysql"
+x-type     = "mysql"
 lockbox    = "canary-mysql"
 required   = true
 
 [[datasources]]
 name       = "sqlite"
 driver     = "sqlite"
+x-type     = "sqlite"
 nopassword = true
 required   = true
