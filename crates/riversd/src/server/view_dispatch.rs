@@ -26,6 +26,8 @@ use super::streaming::{
 pub(super) struct MatchedRoute {
     pub config: rivers_runtime::view::ApiViewConfig,
     pub app_entry_point: String,
+    /// Stable appId UUID from the app manifest.
+    pub app_id: String,
     pub path_params: HashMap<String, String>,
     pub guard_view_path: Option<String>,
     /// View ID from the router — needed by SSE/WS/Polling to look up per-route managers.
@@ -58,7 +60,8 @@ pub(super) async fn combined_fallback_handler(
                         .map(|r| r.path_pattern.clone())
                 });
                 let view_id = route.view_id.clone();
-                Some(MatchedRoute { config, app_entry_point, path_params, guard_view_path, view_id })
+                let app_id = route.app_id.clone();
+                Some(MatchedRoute { config, app_entry_point, app_id, path_params, guard_view_path, view_id })
             } else {
                 None
             }
@@ -166,11 +169,16 @@ async fn view_dispatch_handler(
     }
 
     // ── Standard REST dispatch ──
+    let manifest_app_id = matched.app_id;
+    let dv_namespace = app_entry_point.clone();
+    let node_id = ctx.config.app_id.clone().unwrap_or_else(|| "node-0".to_string());
+
     let mut view_ctx = view_engine::ViewContext::new(
         parsed,
         trace_id.clone(),
-        app_entry_point.clone(), // app_id from matched route
-        String::new(), // node_id
+        manifest_app_id.clone(), // stable appId UUID from manifest
+        dv_namespace,            // entry point slug for DataView namespacing
+        node_id,
         "dev".to_string(),
     );
 

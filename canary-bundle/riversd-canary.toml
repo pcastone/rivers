@@ -1,4 +1,5 @@
 bundle_path = "canary-bundle/"
+app_id      = "canary-node-0"
 
 [base]
 host = "0.0.0.0"

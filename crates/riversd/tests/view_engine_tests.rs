@@ -101,6 +101,7 @@ fn view_context_new_defaults() {
         req,
         "trace-123".to_string(),
         "app-1".to_string(),
+        String::new(),
         "node-1".to_string(),
         "dev".to_string(),
     );
@@ -331,6 +332,7 @@ async fn execute_rest_view_dataview_handler() {
         String::new(),
         String::new(),
         String::new(),
+        String::new(),
     );
     let config = rest_view("GET", "/api/contacts", "list_contacts");
 
@@ -349,6 +351,7 @@ async fn execute_rest_view_codecomponent_handler() {
         String::new(),
         String::new(),
         String::new(),
+        String::new(),
     );
     let config = codecomponent_view("POST", "/api/login");
 
@@ -364,6 +367,7 @@ async fn execute_rest_view_populates_resdata() {
     let mut ctx = ViewContext::new(
         req,
         "trace-3".to_string(),
+        String::new(),
         String::new(),
         String::new(),
         String::new(),

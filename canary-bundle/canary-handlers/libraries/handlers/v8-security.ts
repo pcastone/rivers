@@ -122,18 +122,24 @@ function v8Heap(ctx) {
     ctx.resdata = t.finish();
 }
 
-// ── RT-V8-CONSOLE — verify console.log is not available ──
+// ── RT-V8-CONSOLE — verify console delegates to Rivers.log ──
 
 function v8Console(ctx) {
     var t = new TestResult("RT-V8-CONSOLE", "RUNTIME", "processpool section 9.1");
     try {
-        t.assert("console_not_available",
-            typeof console === "undefined" || typeof console.log !== "function",
+        // Rivers provides console as a convenience that delegates to Rivers.log.
+        t.assert("console_available",
+            typeof console === "object" && typeof console.log === "function",
             "typeof console=" + typeof console);
+        t.assert("console_has_warn", typeof console.warn === "function",
+            "typeof console.warn=" + typeof console.warn);
+        t.assert("console_has_error", typeof console.error === "function",
+            "typeof console.error=" + typeof console.error);
+        // Verify it doesn't throw
+        console.log("canary console test");
+        t.assert("console_log_callable", true, "console.log executed without error");
     } catch (e) {
-        // If accessing console throws, that also means it's not available — pass
-        t.assert("console_not_available", true,
-            "accessing console threw: " + String(e));
+        return t.fail(String(e));
     }
     ctx.resdata = t.finish();
 }

@@ -162,6 +162,7 @@ pub async fn execute_rest_view(
                         "request": ctx.request,
                         "session": ctx.session,
                         "data": ctx.data,
+                        "_dv_namespace": ctx.dv_namespace,
                         "_source": null,
                     });
                     let mut builder = TaskContextBuilder::new()
