@@ -700,11 +700,13 @@ Loaded from the plugin directory via `libloading`. All implement `DatabaseDriver
 | InfluxDB | `rivers-plugin-influxdb` | `reqwest` 0.12 | Real |
 
 <!-- SHAPE-6 amendment: honest stubs return NotImplemented, not Unsupported -->
-### 9.2 Honest stubs (return DriverError::NotImplemented)
+### 9.2 Driver status
 
-Neo4j, Cassandra, Solr, Hadoop/HDFS, ZooKeeper, LDAP, ActiveMQ, PingIdentity.
+**Promoted to real implementations:** Neo4j (v0.52.7), Cassandra, LDAP — all fully implemented as plugin drivers.
 
-These register successfully, appear in `/admin/drivers`, but return `NotImplemented` on any operation. This is intentional — they signal "driver slot exists, implementation pending" rather than silently failing. `Unsupported` is reserved for drivers that exist but where a specific operation is not applicable.
+**Removed from roadmap:** Solr, Hadoop/HDFS, ZooKeeper, ActiveMQ, PingIdentity — no demand, removed.
+
+`DriverError::NotImplemented` is reserved for drivers that register but have pending operations. `Unsupported` is for operations not applicable to a driver type.
 
 ### 9.3 Kafka specifics
 
