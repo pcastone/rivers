@@ -1,6 +1,6 @@
 {
   "type": "object",
-  "description": "PostgreSQL canary test record — zname column traps alphabetical param binding",
+  "description": "MySQL canary test record — zname column traps alphabetical param binding",
   "fields": [
     { "name": "id",         "type": "uuid",     "required": true  },
     { "name": "zname",      "type": "string",   "required": true  },

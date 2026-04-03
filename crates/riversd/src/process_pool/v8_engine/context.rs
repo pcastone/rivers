@@ -381,6 +381,14 @@ fn ctx_dataview_callback(
     }
 
     // X4.2: Not in pre-fetched data -- try DataViewExecutor via async bridge
+    // Namespace the name with the entry-point prefix so it matches the registry key
+    let namespaced_name = TASK_DV_NAMESPACE.with(|n| {
+        n.borrow().as_ref()
+            .filter(|ns| !ns.is_empty() && !name.contains(':'))
+            .map(|ns| format!("{ns}:{name}"))
+            .unwrap_or_else(|| name.clone())
+    });
+
     let executor = TASK_DV_EXECUTOR.with(|e| e.borrow().clone());
     if let Some(exec) = executor {
         // X4.3: Extract optional params from second V8 argument
@@ -406,7 +414,7 @@ fn ctx_dataview_callback(
 
         match get_rt_handle() {
             Ok(rt) => {
-                match rt.block_on(exec.execute(&name, query_params, "GET", &trace_id)) {
+                match rt.block_on(exec.execute(&namespaced_name, query_params, "GET", &trace_id)) {
                     Ok(response) => {
                         // Convert QueryResult rows to JSON
                         let json = serde_json::json!({

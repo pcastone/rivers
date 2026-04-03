@@ -80,6 +80,7 @@ mod tests {
             String::new(),
             String::new(),
             String::new(),
+            String::new(),
         );
 
         let result = execute_rest_view(&mut ctx, &config, None, None).await.unwrap();
@@ -135,6 +136,7 @@ mod tests {
             String::new(),
             String::new(),
             String::new(),
+            String::new(),
         );
         let error = ViewError::Handler("test error".into());
 
@@ -151,6 +153,7 @@ mod tests {
         let ctx = ViewContext::new(
             ParsedRequest::new("GET", "/test"),
             "trace-1".into(),
+            String::new(),
             String::new(),
             String::new(),
             String::new(),

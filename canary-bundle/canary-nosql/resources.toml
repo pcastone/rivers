@@ -1,35 +1,41 @@
 [[datasources]]
 name       = "mongo"
 driver     = "mongodb"
+x-type     = "mongodb"
 lockbox    = "canary-mongo"
 required   = true
 
 [[datasources]]
 name       = "es"
 driver     = "elasticsearch"
+x-type     = "elasticsearch"
 lockbox    = "canary-es"
 required   = true
 
 [[datasources]]
 name       = "couch"
 driver     = "couchdb"
+x-type     = "couchdb"
 lockbox    = "canary-couch"
 required   = true
 
 [[datasources]]
 name       = "cassandra"
 driver     = "cassandra"
+x-type     = "cassandra"
 lockbox    = "canary-cassandra"
 required   = true
 
 [[datasources]]
 name       = "ldap"
 driver     = "ldap"
+x-type     = "ldap"
 lockbox    = "canary-ldap"
 required   = true
 
 [[datasources]]
 name       = "redis"
 driver     = "redis"
+x-type     = "redis"
 lockbox    = "canary-redis"
 required   = true

@@ -46,8 +46,8 @@ function storeCrud(ctx) {
         var value = { message: "canary-crud-test", ts: Date.now() };
         var valueStr = JSON.stringify(value);
 
-        // Set with TTL (60 seconds — plenty for the test)
-        ctx.store.set(key, valueStr, { ttl: 60 });
+        // Set with TTL (60000 ms = 60 seconds — plenty for the test)
+        ctx.store.set(key, valueStr, 60000);
         t.assert("set_ok", true, "key=" + key);
 
         // Get

@@ -14,6 +14,7 @@ use rivers_runtime::DataViewExecutor;
 
 #[derive(Clone, Default)]
 struct SharedTaskCapabilities {
+    node_id: String,
     storage_engine: Option<Arc<dyn StorageEngine>>,
     driver_factory: Option<Arc<DriverFactory>>,
     dataview_executor: Option<Arc<DataViewExecutor>>,
@@ -51,6 +52,7 @@ pub fn sync_from_app_context(ctx: &crate::server::AppContext) {
         .and_then(|guard| guard.clone());
 
     let capabilities = SharedTaskCapabilities {
+        node_id: ctx.config.app_id.clone().unwrap_or_else(|| "node-0".to_string()),
         storage_engine: ctx.storage_engine.clone(),
         driver_factory: ctx.driver_factory.clone(),
         dataview_executor,
@@ -82,6 +84,10 @@ pub fn enrich(mut builder: TaskContextBuilder, app_id: &str) -> TaskContextBuild
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
+
+    if !capabilities.node_id.is_empty() {
+        builder = builder.node_id(capabilities.node_id.clone());
+    }
 
     if let Some(storage_engine) = capabilities.storage_engine {
         builder = builder.storage(storage_engine);

@@ -51,7 +51,7 @@ function ctxRequest(ctx) {
         // body may be null for GET requests — just verify the key exists
         t.assert("has_body_key", "body" in req, "body key present");
         // path_params may be empty object for routes without path params
-        t.assert("has_params", req.params !== null && req.params !== undefined, "type=" + typeof req.params);
+        t.assert("has_path_params", req.path_params !== null && req.path_params !== undefined, "type=" + typeof req.path_params);
     } catch (e) {
         return t.fail(String(e));
     }
@@ -77,15 +77,23 @@ function ctxResdata(ctx) {
 function ctxData(ctx) {
     var t = new TestResult("RT-CTX-DATA", "RUNTIME", "processpool section 9.8");
     try {
+        // ctx.data is an object for pre-fetched DataView results.
+        // For CodeComponent handlers, ctx.data starts empty — handlers use ctx.dataview() instead.
         t.assert("data_exists", ctx.data !== null && ctx.data !== undefined, "type=" + typeof ctx.data);
         t.assert("data_is_object", typeof ctx.data === "object", "type=" + typeof ctx.data);
-        // The view config pre-fetches "list_records" — verify it landed on ctx.data
-        t.assert("has_list_records", ctx.data.list_records !== undefined,
-            "keys=" + Object.keys(ctx.data).join(","));
-        if (ctx.data.list_records) {
-            t.assert("list_records_has_rows",
-                ctx.data.list_records.rows !== undefined || Array.isArray(ctx.data.list_records),
-                "type=" + typeof ctx.data.list_records);
+
+        // Verify ctx.dataview() can fetch the data dynamically
+        var result = ctx.dataview("list_records", { limit: 3 });
+        t.assert("dataview_fetch_works", result !== null && result !== undefined,
+            "type=" + typeof result);
+        if (result && result.rows) {
+            t.assert("has_rows", result.rows.length > 0,
+                "row_count=" + result.rows.length);
+        } else if (Array.isArray(result)) {
+            t.assert("has_rows", result.length > 0,
+                "array_length=" + result.length);
+        } else {
+            t.assert("has_rows", false, "unexpected result=" + JSON.stringify(result));
         }
     } catch (e) {
         return t.fail(String(e));

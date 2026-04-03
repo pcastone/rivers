@@ -16,6 +16,8 @@ pub struct ParsedRequest {
     /// Request path.
     pub path: String,
     /// Parsed query string parameters.
+    /// Serialized as "query" per spec — `ctx.request.query` in handlers.
+    #[serde(rename = "query")]
     pub query_params: HashMap<String, String>,
     /// HTTP headers.
     pub headers: HashMap<String, String>,
@@ -80,8 +82,10 @@ pub struct ViewContext {
     pub trace_id: String,
     /// Session data, if authenticated.
     pub session: Option<serde_json::Value>,
-    /// Application ID.
+    /// Application ID (stable UUID from manifest).
     pub app_id: String,
+    /// Entry-point slug — used to namespace DataView lookups.
+    pub dv_namespace: String,
     /// Node identifier.
     pub node_id: String,
     /// Environment: "dev" | "staging" | "prod".
@@ -100,6 +104,7 @@ impl ViewContext {
         request: ParsedRequest,
         trace_id: String,
         app_id: String,
+        dv_namespace: String,
         node_id: String,
         env: String,
     ) -> Self {
@@ -109,6 +114,7 @@ impl ViewContext {
             trace_id,
             session: None,
             app_id,
+            dv_namespace,
             node_id,
             env,
             data: HashMap::new(),

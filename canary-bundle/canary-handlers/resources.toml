@@ -1,5 +1,6 @@
 [[datasources]]
 name       = "faker"
 driver     = "faker"
+x-type     = "faker"
 nopassword = true
 required   = true

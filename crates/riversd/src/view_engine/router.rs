@@ -28,6 +28,8 @@ pub struct ViewRoute {
     pub config: ApiViewConfig,
     /// App entry point — used to namespace DataView lookups.
     pub app_entry_point: String,
+    /// Stable appId UUID from the app manifest.
+    pub app_id: String,
 }
 
 /// Build a namespaced path: `/[prefix]/<bundle>/<app>/<view_path>`.
@@ -123,6 +125,13 @@ impl ViewRouter {
                     );
                 }
 
+                tracing::debug!(
+                    method = %method,
+                    path = %full_path,
+                    view_id = %qualified_id,
+                    "route registered"
+                );
+
                 routes.push(ViewRoute {
                     view_id: qualified_id,
                     method,
@@ -130,6 +139,7 @@ impl ViewRouter {
                     segments,
                     config: config.clone(),
                     app_entry_point: entry_point.to_string(),
+                    app_id: app.manifest.app_id.clone(),
                 });
             }
         }
@@ -181,6 +191,7 @@ impl ViewRouter {
                 segments,
                 config: config.clone(),
                 app_entry_point: String::new(),
+                app_id: String::new(),
             });
         }
 
