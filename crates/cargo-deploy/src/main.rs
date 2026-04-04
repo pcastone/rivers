@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rivers_core_config::config::TlsX509Config;
+use rcgen::{CertificateParams, DistinguishedName, DnType, Ia5String, SanType};
 
 /// Dylib extension for the current platform.
 #[cfg(target_os = "macos")]
@@ -160,12 +161,7 @@ fn deploy_dynamic(workspace_root: &Path, target_dir: &Path, deploy_path: &Path, 
 
     // Build plugin cdylibs
     println!("[3/5] Building plugin shared libraries...");
-    let mut plugin_args: Vec<&str> = Vec::new();
-    for p in PLUGINS {
-        plugin_args.push("-p");
-        plugin_args.push(p);
-    }
-    cargo_build(&plugin_args);
+    cargo_build(&plugin_build_args());
 
     // Create directory structure
     println!("[4/5] Assembling deploy directory...");
@@ -255,18 +251,84 @@ fn generate_tls(tls_dir: &Path) {
     let key_path = tls_dir.join("server.key");
 
     let x509 = TlsX509Config::default();
-    rivers_core::tls::generate_self_signed_cert(
-        &x509,
-        cert_path.to_str().unwrap(),
-        key_path.to_str().unwrap(),
-    )
-    .unwrap_or_else(|e| {
-        eprintln!("error: TLS cert generation failed: {e}");
-        std::process::exit(1);
-    });
+    generate_self_signed_cert(&x509, &cert_path, &key_path)
+        .unwrap_or_else(|e| {
+            eprintln!("error: TLS cert generation failed: {e}");
+            std::process::exit(1);
+        });
 
     println!("  cert: {}", cert_path.display());
     println!("  key:  {}", key_path.display());
+}
+
+/// Generate a self-signed certificate using rcgen, write PEM files to disk.
+fn generate_self_signed_cert(
+    x509: &TlsX509Config,
+    cert_path: &Path,
+    key_path: &Path,
+) -> Result<(), String> {
+    let mut params = CertificateParams::default();
+
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, &x509.common_name);
+    if let Some(ref org) = x509.organization {
+        dn.push(DnType::OrganizationName, org);
+    }
+    if let Some(ref country) = x509.country {
+        dn.push(DnType::CountryName, country);
+    }
+    if let Some(ref state) = x509.state {
+        dn.push(DnType::StateOrProvinceName, state);
+    }
+    if let Some(ref locality) = x509.locality {
+        dn.push(DnType::LocalityName, locality);
+    }
+    params.distinguished_name = dn;
+
+    let mut sans = Vec::new();
+    for s in &x509.san {
+        if let Ok(ip) = s.parse::<std::net::IpAddr>() {
+            sans.push(SanType::IpAddress(ip));
+        } else {
+            let ia5 = Ia5String::try_from(s.clone())
+                .map_err(|e| format!("invalid DNS SAN '{s}': {e}"))?;
+            sans.push(SanType::DnsName(ia5));
+        }
+    }
+    params.subject_alt_names = sans;
+
+    let not_before = ::time::OffsetDateTime::now_utc();
+    let not_after = not_before + ::time::Duration::days(x509.days as i64);
+    params.not_before = not_before;
+    params.not_after = not_after;
+
+    let key_pair = rcgen::KeyPair::generate()
+        .map_err(|e| format!("key generation failed: {e}"))?;
+    let cert = params
+        .self_signed(&key_pair)
+        .map_err(|e| format!("cert generation failed: {e}"))?;
+
+    let cert_pem = cert.pem();
+    let key_pem = key_pair.serialize_pem();
+
+    if let Some(parent) = cert_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create cert dir {}: {e}", parent.display()))?;
+    }
+
+    std::fs::write(cert_path, cert_pem)
+        .map_err(|e| format!("failed to write cert to {}: {e}", cert_path.display()))?;
+    std::fs::write(key_path, key_pem)
+        .map_err(|e| format!("failed to write key to {}: {e}", key_path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("chmod key file {}: {e}", key_path.display()))?;
+    }
+
+    Ok(())
 }
 
 fn write_version_file(deploy_path: &Path, version: &str, mode: &str) {
@@ -386,4 +448,99 @@ fn read_workspace_version(workspace_root: &Path) -> String {
         }
     }
     "unknown".to_string()
+}
+
+/// Build the cargo args for plugin cdylibs. Extracted for testability.
+fn plugin_build_args() -> Vec<&'static str> {
+    let mut args: Vec<&str> = vec!["--features", "plugin-exports"];
+    for p in PLUGINS {
+        args.push("-p");
+        args.push(p);
+    }
+    args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_build_args_include_plugin_exports_feature() {
+        let args = plugin_build_args();
+        assert!(
+            args.windows(2).any(|w| w == ["--features", "plugin-exports"]),
+            "plugin build must pass --features plugin-exports to export ABI symbols"
+        );
+    }
+
+    #[test]
+    fn plugin_build_args_include_all_plugins() {
+        let args = plugin_build_args();
+        for plugin in PLUGINS {
+            assert!(
+                args.contains(plugin),
+                "missing plugin in build args: {plugin}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_args_basic() {
+        let args = ["cargo-deploy", "deploy", "/tmp/rivers"];
+        let (path, static_mode) = parse_args(&args).unwrap();
+        assert_eq!(path, "/tmp/rivers");
+        assert!(!static_mode);
+    }
+
+    #[test]
+    fn parse_args_static_flag() {
+        let args = ["cargo-deploy", "deploy", "/tmp/rivers", "--static"];
+        let (path, static_mode) = parse_args(&args).unwrap();
+        assert_eq!(path, "/tmp/rivers");
+        assert!(static_mode);
+    }
+
+    #[test]
+    fn parse_args_missing_path() {
+        let args = ["cargo-deploy", "deploy"];
+        assert!(parse_args(&args).is_err());
+    }
+
+    /// E2E: build a plugin with plugin-exports and verify the dylib exports _rivers_abi_version.
+    /// Run with: cargo test -p cargo-deploy -- --ignored
+    #[test]
+    #[ignore]
+    fn plugin_dylib_exports_abi_version_symbol() {
+        let workspace = find_workspace_root().expect("must run inside workspace");
+        let target_dir = workspace.join("target/release");
+
+        // Build one plugin with the feature flag
+        let status = Command::new("cargo")
+            .args(["build", "--release", "--features", "plugin-exports", "-p", "rivers-plugin-nats"])
+            .status()
+            .expect("cargo build failed to start");
+        assert!(status.success(), "cargo build failed");
+
+        let dylib = target_dir.join(format!("librivers_plugin_nats.{DYLIB_EXT}"));
+        assert!(dylib.exists(), "plugin dylib not found at {}", dylib.display());
+
+        // Check for the ABI symbol using nm
+        let output = Command::new("nm")
+            .args(["-g", dylib.to_str().unwrap()])
+            .output()
+            .expect("nm failed to start");
+        let symbols = String::from_utf8_lossy(&output.stdout);
+
+        assert!(
+            symbols.contains("_rivers_abi_version"),
+            "plugin dylib missing _rivers_abi_version symbol.\n\
+             This means --features plugin-exports was not applied.\n\
+             nm output:\n{symbols}"
+        );
+        assert!(
+            symbols.contains("_rivers_register_driver"),
+            "plugin dylib missing _rivers_register_driver symbol.\n\
+             nm output:\n{symbols}"
+        );
+    }
 }
