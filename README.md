@@ -182,6 +182,53 @@ That's it. No controller code, no ORM, no boilerplate. `riversd` loads the bundl
 | `rivers-engine-wasm` | Wasmtime WASM engine (cdylib) |
 | `rivers-plugin-*` | 10 datasource driver plugins (cdylib each) |
 
+## Deploy
+
+`cargo deploy` builds and assembles a complete Rivers distribution into a target directory, including binaries, shared libraries, plugins, TLS certificates, and a VERSION file.
+
+### Install
+
+```bash
+cargo install --path crates/cargo-deploy
+```
+
+### Usage
+
+```bash
+# Dynamic mode — thin binaries + shared engine/plugin libraries
+cargo deploy /opt/rivers
+
+# Static mode — single fat binary, no shared libraries
+cargo deploy /opt/rivers --static
+```
+
+### Output Structure
+
+**Dynamic mode:**
+
+```
+/opt/rivers/
+├── bin/
+│   ├── riversd
+│   ├── riversctl
+│   ├── rivers-lockbox
+│   ├── rivers-keystore
+│   └── riverpackage
+├── lib/
+│   ├── librivers_engine_v8.dylib
+│   └── librivers_engine_wasm.dylib
+├── plugins/
+│   ├── librivers_plugin_cassandra.dylib
+│   ├── librivers_plugin_mongodb.dylib
+│   └── ... (10 driver plugins)
+├── config/tls/
+│   ├── server.crt
+│   └── server.key
+└── VERSION
+```
+
+**Static mode** produces only `bin/`, `config/tls/`, and `VERSION` — no shared libraries.
+
 ## Build Modes
 
 ### Static (default)
