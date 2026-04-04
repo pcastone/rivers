@@ -160,12 +160,7 @@ fn deploy_dynamic(workspace_root: &Path, target_dir: &Path, deploy_path: &Path, 
 
     // Build plugin cdylibs
     println!("[3/5] Building plugin shared libraries...");
-    let mut plugin_args: Vec<&str> = Vec::new();
-    for p in PLUGINS {
-        plugin_args.push("-p");
-        plugin_args.push(p);
-    }
-    cargo_build(&plugin_args);
+    cargo_build(&plugin_build_args());
 
     // Create directory structure
     println!("[4/5] Assembling deploy directory...");
@@ -386,4 +381,61 @@ fn read_workspace_version(workspace_root: &Path) -> String {
         }
     }
     "unknown".to_string()
+}
+
+/// Build the cargo args for plugin cdylibs. Extracted for testability.
+fn plugin_build_args() -> Vec<&'static str> {
+    let mut args: Vec<&str> = vec!["--features", "plugin-exports"];
+    for p in PLUGINS {
+        args.push("-p");
+        args.push(p);
+    }
+    args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_build_args_include_plugin_exports_feature() {
+        let args = plugin_build_args();
+        assert!(
+            args.windows(2).any(|w| w == ["--features", "plugin-exports"]),
+            "plugin build must pass --features plugin-exports to export ABI symbols"
+        );
+    }
+
+    #[test]
+    fn plugin_build_args_include_all_plugins() {
+        let args = plugin_build_args();
+        for plugin in PLUGINS {
+            assert!(
+                args.contains(plugin),
+                "missing plugin in build args: {plugin}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_args_basic() {
+        let args = ["cargo-deploy", "deploy", "/tmp/rivers"];
+        let (path, static_mode) = parse_args(&args).unwrap();
+        assert_eq!(path, "/tmp/rivers");
+        assert!(!static_mode);
+    }
+
+    #[test]
+    fn parse_args_static_flag() {
+        let args = ["cargo-deploy", "deploy", "/tmp/rivers", "--static"];
+        let (path, static_mode) = parse_args(&args).unwrap();
+        assert_eq!(path, "/tmp/rivers");
+        assert!(static_mode);
+    }
+
+    #[test]
+    fn parse_args_missing_path() {
+        let args = ["cargo-deploy", "deploy"];
+        assert!(parse_args(&args).is_err());
+    }
 }
