@@ -63,8 +63,10 @@ _build-dynamic-crates:
         -p rivers-plugin-influxdb \
         -p rivers-plugin-kafka \
         -p rivers-plugin-ldap \
+        -p rivers-plugin-exec \
         -p rivers-plugin-mongodb \
         -p rivers-plugin-nats \
+        -p rivers-plugin-neo4j \
         -p rivers-plugin-rabbitmq \
         -p rivers-plugin-redis-streams
 
