@@ -438,4 +438,42 @@ mod tests {
         let args = ["cargo-deploy", "deploy"];
         assert!(parse_args(&args).is_err());
     }
+
+    /// E2E: build a plugin with plugin-exports and verify the dylib exports _rivers_abi_version.
+    /// Run with: cargo test -p cargo-deploy -- --ignored
+    #[test]
+    #[ignore]
+    fn plugin_dylib_exports_abi_version_symbol() {
+        let workspace = find_workspace_root().expect("must run inside workspace");
+        let target_dir = workspace.join("target/release");
+
+        // Build one plugin with the feature flag
+        let status = Command::new("cargo")
+            .args(["build", "--release", "--features", "plugin-exports", "-p", "rivers-plugin-nats"])
+            .status()
+            .expect("cargo build failed to start");
+        assert!(status.success(), "cargo build failed");
+
+        let dylib = target_dir.join(format!("librivers_plugin_nats.{DYLIB_EXT}"));
+        assert!(dylib.exists(), "plugin dylib not found at {}", dylib.display());
+
+        // Check for the ABI symbol using nm
+        let output = Command::new("nm")
+            .args(["-g", dylib.to_str().unwrap()])
+            .output()
+            .expect("nm failed to start");
+        let symbols = String::from_utf8_lossy(&output.stdout);
+
+        assert!(
+            symbols.contains("_rivers_abi_version"),
+            "plugin dylib missing _rivers_abi_version symbol.\n\
+             This means --features plugin-exports was not applied.\n\
+             nm output:\n{symbols}"
+        );
+        assert!(
+            symbols.contains("_rivers_register_driver"),
+            "plugin dylib missing _rivers_register_driver symbol.\n\
+             nm output:\n{symbols}"
+        );
+    }
 }
