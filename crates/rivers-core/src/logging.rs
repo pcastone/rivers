@@ -162,6 +162,20 @@ impl EventHandler for LogHandler {
             }
         }
 
+        // Per-app log routing: prefer app_id from event payload, fall back to self.app_id
+        let effective_app_id = event
+            .payload
+            .get("app_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.app_id);
+
+        if !effective_app_id.is_empty() && effective_app_id != "default" {
+            if let Some(router) = crate::app_log_router::global_router() {
+                router.write(effective_app_id, &line);
+            }
+        }
+
         Ok(())
     }
 
