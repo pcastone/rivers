@@ -605,6 +605,7 @@ async fn x4_dataview_executor_end_to_end() {
         invalidates: Vec::new(),
         validate_result: false,
         strict_parameters: false,
+        max_rows: 1000,
     };
     registry.register(dv_config);
 
@@ -773,6 +774,7 @@ async fn au13_ctx_dataview_dynamic_with_executor() {
         get_parameters: Vec::new(), post_parameters: Vec::new(),
         put_parameters: Vec::new(), delete_parameters: Vec::new(),
         streaming: false,
+        max_rows: 1000,
     });
 
     let mut ds_params = HashMap::new();
