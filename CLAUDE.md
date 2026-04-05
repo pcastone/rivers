@@ -8,8 +8,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 2. **Check in before executing** — share the plan and get approval before starting work.
 3. **Mark tasks complete as you go** and give high-level explanations of changes at each step.
 4. **Simplicity first** — every change should impact as little code as possible. Reuse existing code, scripts, and patterns before creating new ones.
-5. **Log every decision** in `todo/changelog.md` with: file affected, what was decided, spec reference, and resolution method.
-6. **Git commit** after each logical group of completed tasks with a summary of changes.
+5. **Log every decision** in `changedecisionlog.md` with: file affected, what was decided, spec reference, and resolution method.
+6. **Log high level changes** in `changedecisionlog.md` with: file affected, what was decided, spec reference, and resolution method. 
+7. **Git commit** after each logical group of completed tasks with a summary of changes.
 
 ## Project Overview
 

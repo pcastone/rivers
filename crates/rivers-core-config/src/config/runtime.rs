@@ -211,6 +211,11 @@ pub struct LoggingConfig {
 
     /// Optional path for a local log file (in addition to stdout).
     pub local_file_path: Option<String>,
+
+    /// Directory for per-application log files. Each loaded app gets `<app_name>.log`.
+    /// If not set, app logs go to the main `local_file_path`.
+    #[serde(default)]
+    pub app_log_dir: Option<String>,
 }
 
 impl Default for LoggingConfig {
@@ -219,6 +224,7 @@ impl Default for LoggingConfig {
             level: LogLevel::Info,
             format: default_log_format(),
             local_file_path: None,
+            app_log_dir: None,
         }
     }
 }
