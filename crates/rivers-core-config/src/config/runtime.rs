@@ -8,6 +8,18 @@ use crate::event::LogLevel;
 
 use super::server::ServerConfig;
 
+// ── [metrics] ───────────────────────────────────────────────────────
+
+/// `[metrics]` -- Prometheus metrics configuration.
+#[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
+pub struct MetricsConfig {
+    /// Whether metrics collection is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Port for the Prometheus HTTP scrape endpoint (default: 9091).
+    pub port: Option<u16>,
+}
+
 // ── [runtime] ───────────────────────────────────────────────────────
 
 /// `[runtime]` -- ProcessPool runtime configuration.

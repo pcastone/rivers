@@ -157,6 +157,21 @@ pub async fn run_server_no_ssl(
     // Initialize runtime wiring (DataView engine, StorageEngine, gossip)
     crate::runtime::initialize_runtime(&ctx.pool, &ctx.config).await;
 
+    // Metrics: start Prometheus exporter
+    #[cfg(feature = "metrics")]
+    if let Some(ref metrics_cfg) = config.metrics {
+        if metrics_cfg.enabled {
+            let port = metrics_cfg.port.unwrap_or(9091);
+            match metrics_exporter_prometheus::PrometheusBuilder::new()
+                .with_http_listener(([0, 0, 0, 0], port))
+                .install()
+            {
+                Ok(()) => tracing::info!(port = port, "prometheus metrics exporter started on :{port}"),
+                Err(e) => tracing::warn!(error = %e, "failed to start metrics exporter"),
+            }
+        }
+    }
+
     // Initialize StorageEngine if configured (prerequisite for sessions, cache, polling)
     if config.storage_engine.backend != "none" {
         match rivers_runtime::rivers_core::storage::create_storage_engine(&config.storage_engine) {
@@ -289,6 +304,21 @@ pub async fn run_server_with_listener_and_log(
 
     // Initialize runtime wiring (DataView engine, StorageEngine, gossip)
     crate::runtime::initialize_runtime(&ctx.pool, &ctx.config).await;
+
+    // Metrics: start Prometheus exporter
+    #[cfg(feature = "metrics")]
+    if let Some(ref metrics_cfg) = config.metrics {
+        if metrics_cfg.enabled {
+            let port = metrics_cfg.port.unwrap_or(9091);
+            match metrics_exporter_prometheus::PrometheusBuilder::new()
+                .with_http_listener(([0, 0, 0, 0], port))
+                .install()
+            {
+                Ok(()) => tracing::info!(port = port, "prometheus metrics exporter started on :{port}"),
+                Err(e) => tracing::warn!(error = %e, "failed to start metrics exporter"),
+            }
+        }
+    }
 
     // Initialize StorageEngine if configured (prerequisite for sessions, cache, polling)
     if config.storage_engine.backend != "none" {

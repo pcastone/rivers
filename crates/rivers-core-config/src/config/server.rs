@@ -12,8 +12,8 @@ use super::security::SecurityConfig;
 use super::storage::StorageEngineConfig;
 use super::tls::{AdminApiConfig, ClusterConfig, TlsConfig};
 use super::runtime::{
-    EnginesConfig, EnvironmentOverride, GraphqlServerConfig, LoggingConfig, PluginsConfig,
-    RuntimeConfig, StaticFilesConfig,
+    EnginesConfig, EnvironmentOverride, GraphqlServerConfig, LoggingConfig, MetricsConfig,
+    PluginsConfig, RuntimeConfig, StaticFilesConfig,
 };
 
 // ── Top-level ServerConfig ──────────────────────────────────────────
@@ -77,6 +77,10 @@ pub struct ServerConfig {
     /// Driver plugin shared library directory.
     #[serde(default)]
     pub plugins: PluginsConfig,
+
+    /// Prometheus metrics endpoint.
+    #[serde(default)]
+    pub metrics: Option<MetricsConfig>,
 
     /// Per-environment config overrides (keyed by environment name).
     #[serde(default)]

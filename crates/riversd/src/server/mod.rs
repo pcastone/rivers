@@ -10,6 +10,8 @@ mod handlers;
 mod admin_auth;
 mod drivers;
 mod lifecycle;
+#[cfg(feature = "metrics")]
+pub mod metrics;
 mod validation;
 
 // ── Re-exports — preserve `crate::server::*` import paths ────────
