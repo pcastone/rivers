@@ -27,6 +27,12 @@ fn extract_log_fields(scope: &mut v8::HandleScope, val: v8::Local<v8::Value>) ->
     String::new()
 }
 
+fn current_app_name() -> String {
+    super::task_locals::TASK_APP_NAME.with(|c| {
+        c.borrow().clone().unwrap_or_else(|| "unknown".to_string())
+    })
+}
+
 /// Inject the `Rivers` global utility namespace.
 ///
 /// - `Rivers.log.{info,warn,error}` -- native V8 callbacks -> Rust `tracing` (P2.1).
@@ -60,10 +66,11 @@ pub(super) fn inject_rivers_global(
          _rv: v8::ReturnValue| {
             let msg = args.get(0).to_rust_string_lossy(scope);
             let fields = extract_log_fields(scope, args.get(1));
+            let app = current_app_name();
             if fields.is_empty() {
-                tracing::info!(target: "rivers.handler", "{}", msg);
+                tracing::info!(target: "rivers.handler", app = %app, "{}", msg);
             } else {
-                tracing::info!(target: "rivers.handler", fields = %fields, "{}", msg);
+                tracing::info!(target: "rivers.handler", app = %app, fields = %fields, "{}", msg);
             }
         },
     )
@@ -78,10 +85,11 @@ pub(super) fn inject_rivers_global(
          _rv: v8::ReturnValue| {
             let msg = args.get(0).to_rust_string_lossy(scope);
             let fields = extract_log_fields(scope, args.get(1));
+            let app = current_app_name();
             if fields.is_empty() {
-                tracing::warn!(target: "rivers.handler", "{}", msg);
+                tracing::warn!(target: "rivers.handler", app = %app, "{}", msg);
             } else {
-                tracing::warn!(target: "rivers.handler", fields = %fields, "{}", msg);
+                tracing::warn!(target: "rivers.handler", app = %app, fields = %fields, "{}", msg);
             }
         },
     )
@@ -96,10 +104,11 @@ pub(super) fn inject_rivers_global(
          _rv: v8::ReturnValue| {
             let msg = args.get(0).to_rust_string_lossy(scope);
             let fields = extract_log_fields(scope, args.get(1));
+            let app = current_app_name();
             if fields.is_empty() {
-                tracing::error!(target: "rivers.handler", "{}", msg);
+                tracing::error!(target: "rivers.handler", app = %app, "{}", msg);
             } else {
-                tracing::error!(target: "rivers.handler", fields = %fields, "{}", msg);
+                tracing::error!(target: "rivers.handler", app = %app, fields = %fields, "{}", msg);
             }
         },
     )
