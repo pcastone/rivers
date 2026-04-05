@@ -52,10 +52,10 @@ pub fn load_engines(lib_dir: &Path, callbacks: &HostCallbacks) -> Vec<EngineLoad
             .and_then(|f| f.to_str())
             .unwrap_or("");
 
-        // Match librivers_v8.* or librivers_wasm.*
-        let engine_name = if file_name.starts_with("librivers_v8") {
+        // Match librivers_engine_v8.* or librivers_engine_wasm.*
+        let engine_name = if file_name.starts_with("librivers_engine_v8") {
             "v8"
-        } else if file_name.starts_with("librivers_wasm") {
+        } else if file_name.starts_with("librivers_engine_wasm") {
             "wasm"
         } else {
             continue; // Not an engine library
