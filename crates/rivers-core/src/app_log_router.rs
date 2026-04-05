@@ -9,7 +9,19 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
+
+static GLOBAL_ROUTER: OnceLock<Arc<AppLogRouter>> = OnceLock::new();
+
+/// Set the global app log router. Called once during server startup.
+pub fn set_global_router(router: Arc<AppLogRouter>) {
+    let _ = GLOBAL_ROUTER.set(router);
+}
+
+/// Get the global app log router, if configured.
+pub fn global_router() -> Option<&'static Arc<AppLogRouter>> {
+    GLOBAL_ROUTER.get()
+}
 
 /// Registry of per-app log file writers.
 pub struct AppLogRouter {

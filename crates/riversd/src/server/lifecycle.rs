@@ -201,6 +201,17 @@ pub async fn run_server_no_ssl(
     config.security.session.cookie.validate()
         .map_err(|e| ServerError::Config(e))?;
 
+    // Per-app logging: create router if app_log_dir is configured
+    if let Some(ref app_log_dir) = config.base.logging.app_log_dir {
+        let router = std::sync::Arc::new(
+            rivers_runtime::rivers_core::app_log_router::AppLogRouter::new(
+                std::path::Path::new(app_log_dir),
+            ),
+        );
+        rivers_runtime::rivers_core::app_log_router::set_global_router(router);
+        tracing::info!(dir = %app_log_dir, "per-app logging enabled");
+    }
+
     // Register LogHandler on EventBus
     {
         let log_handler = Arc::new(rivers_runtime::rivers_core::logging::LogHandler::from_config(
@@ -324,6 +335,17 @@ pub async fn run_server_with_listener_and_log(
     // AM1.7: Validate session cookie http_only=true enforcement
     config.security.session.cookie.validate()
         .map_err(|e| ServerError::Config(e))?;
+
+    // Per-app logging: create router if app_log_dir is configured
+    if let Some(ref app_log_dir) = config.base.logging.app_log_dir {
+        let router = std::sync::Arc::new(
+            rivers_runtime::rivers_core::app_log_router::AppLogRouter::new(
+                std::path::Path::new(app_log_dir),
+            ),
+        );
+        rivers_runtime::rivers_core::app_log_router::set_global_router(router);
+        tracing::info!(dir = %app_log_dir, "per-app logging enabled");
+    }
 
     // Register LogHandler on EventBus (Observe tier, wildcard subscriber)
     {
