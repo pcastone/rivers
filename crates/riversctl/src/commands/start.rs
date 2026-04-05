@@ -64,7 +64,7 @@ pub fn cmd_start(args: &[String]) -> Result<(), String> {
 fn print_startup_info(binary: &Path, explicit_config: &Option<String>, explicit_port: &Option<String>) {
     use super::doctor::discover_config;
 
-    println!("rivers: starting riversd");
+    println!("rivers: starting riversd v{}", env!("CARGO_PKG_VERSION"));
     println!("  binary:  {}", binary.display());
 
     // Config
