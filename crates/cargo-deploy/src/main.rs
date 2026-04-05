@@ -248,12 +248,14 @@ fn deploy_static(_workspace_root: &Path, target_dir: &Path, deploy_path: &Path, 
 fn scaffold_runtime(deploy_path: &Path, version: &str, mode: &str) {
     let tls_dir = deploy_path.join("config/tls");
     let log_dir = deploy_path.join("log");
+    let app_log_dir = deploy_path.join("log/apps");
     let apphome_dir = deploy_path.join("apphome");
     let data_dir = deploy_path.join("data");
     let lockbox_dir = deploy_path.join("lockbox");
 
     create_dir(&tls_dir);
     create_dir(&log_dir);
+    create_dir(&app_log_dir);
     create_dir(&apphome_dir);
     create_dir(&data_dir);
 
@@ -311,6 +313,7 @@ log_level = "info"
 level           = "info"
 format          = "json"
 local_file_path = "{r}/log/riversd.log"
+app_log_dir     = "{r}/log/apps"
 
 [base.tls]
 cert     = "{r}/config/tls/server.crt"
