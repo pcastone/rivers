@@ -11,6 +11,9 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// Maximum app log file size before rotation (10 MB).
+const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024;
+
 static GLOBAL_ROUTER: OnceLock<Arc<AppLogRouter>> = OnceLock::new();
 
 /// Set the global app log router. Called once during server startup.
@@ -60,10 +63,34 @@ impl AppLogRouter {
         Ok(())
     }
 
+    /// Check file size and rotate if over MAX_LOG_SIZE.
+    /// Renames current file to `<name>.log.1` and opens a new writer.
+    fn rotate_if_needed(base_dir: &Path, app_name: &str, writer: &mut BufWriter<File>) {
+        let size = writer.get_ref().metadata().map(|m| m.len()).unwrap_or(0);
+        if size < MAX_LOG_SIZE {
+            return;
+        }
+
+        // Flush before rotating
+        let _ = writer.flush();
+
+        let current = base_dir.join(format!("{app_name}.log"));
+        let rotated = base_dir.join(format!("{app_name}.log.1"));
+
+        // Rename current → .1 (overwrites old .1)
+        let _ = std::fs::rename(&current, &rotated);
+
+        // Open fresh file
+        if let Ok(file) = OpenOptions::new().create(true).append(true).open(&current) {
+            *writer = BufWriter::new(file);
+        }
+    }
+
     /// Write a log line to the app's log file. Returns false if app not registered.
     pub fn write(&self, app_name: &str, line: &str) -> bool {
         let mut writers = self.writers.lock().unwrap();
         if let Some(writer) = writers.get_mut(app_name) {
+            Self::rotate_if_needed(&self.base_dir, app_name, writer);
             let _ = writeln!(writer, "{}", line);
             true
         } else {
@@ -141,5 +168,25 @@ mod tests {
         assert!(!router.is_registered("app"));
         router.register("app").unwrap();
         assert!(router.is_registered("app"));
+    }
+
+    #[test]
+    fn rotate_on_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let router = AppLogRouter::new(dir.path());
+        router.register("big-app").unwrap();
+
+        // Write enough data to exceed MAX_LOG_SIZE
+        let big_line = "x".repeat(1024); // 1KB per line
+        for _ in 0..(MAX_LOG_SIZE / 1024 + 100) {
+            router.write("big-app", &big_line);
+        }
+        router.flush_all();
+
+        // Rotated file should exist
+        assert!(dir.path().join("big-app.log.1").exists(), "rotated file should exist");
+        // Current file should be smaller than MAX_LOG_SIZE
+        let current_size = std::fs::metadata(dir.path().join("big-app.log")).unwrap().len();
+        assert!(current_size < MAX_LOG_SIZE, "current file should be under limit after rotation");
     }
 }
