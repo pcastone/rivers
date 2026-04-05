@@ -1,14 +1,22 @@
-# Rivers — Dual Static/Dynamic Build System
-#
-# Static mode (default): single monolithic binaries, everything statically linked.
-# Dynamic mode: thin binaries + shared runtime dylib + cdylib engines/plugins.
+# Rivers — Build, Test, Package, Deploy
 #
 # Usage:
-#   just build            # Static monolithic binaries (default)
-#   just build-dynamic    # Thin binaries + shared libs
-#   just clean            # Clean build artifacts
+#   just build              # Static monolithic binaries (default)
+#   just build-dynamic      # Thin binaries + shared libs
+#   just deploy <path>      # Deploy via cargo deploy (dynamic)
+#   just deploy-static <p>  # Deploy via cargo deploy (static)
+#   just dist-source        # Source code zip (like GitHub release)
+#   just dist-zip           # Binary zip via cargo deploy
+#   just package-deb        # Debian packages
+#   just package-all        # All package formats
 
-# ── Static Build (default) ───────────────────────────────────────
+# ── Variables ────────────────────────────────────────────────────
+
+version := `grep '^version' Cargo.toml | head -1 | sed 's/version = "//;s/"//'`
+arch := `uname -m`
+os := if os() == "macos" { "darwin" } else { os() }
+
+# ── Build ────────────────────────────────────────────────────────
 
 # Build monolithic static binaries (~80MB riversd)
 build:
@@ -22,20 +30,22 @@ build-debug:
 test:
     cargo test
 
+# Check the workspace compiles
+check:
+    cargo check
+
+# Clean all build artifacts
+clean:
+    cargo clean
+
 # ── Dynamic Build ────────────────────────────────────────────────
 
-# Build dynamic mode: thin binaries + shared runtime dylib + cdylib engines/plugins.
-# The rivers-runtime crate-type is temporarily switched to dylib for the build,
-# then reverted back to rlib so the workspace stays in static mode by default.
+# Build dynamic mode: thin binaries + shared runtime dylib + cdylib engines/plugins
 build-dynamic: _set-dylib _build-dynamic-crates _set-rlib _assemble-dynamic
 
-# Step 1: Switch rivers-runtime to dylib output
 _set-dylib:
     sed -i '' 's/crate-type = \["rlib"\]/crate-type = ["dylib"]/' crates/rivers-runtime/Cargo.toml
 
-# Step 2: Build all crates with the right flags
-# Note: LTO=off required because prefer-dynamic is incompatible with LTO.
-# prefer-dynamic ensures serde_json/tokio/etc symbols resolve through the dylib.
 _build-dynamic-crates:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -53,16 +63,16 @@ _build-dynamic-crates:
         -p rivers-plugin-influxdb \
         -p rivers-plugin-kafka \
         -p rivers-plugin-ldap \
+        -p rivers-plugin-exec \
         -p rivers-plugin-mongodb \
         -p rivers-plugin-nats \
+        -p rivers-plugin-neo4j \
         -p rivers-plugin-rabbitmq \
         -p rivers-plugin-redis-streams
 
-# Step 3: Revert rivers-runtime back to rlib
 _set-rlib:
     sed -i '' 's/crate-type = \["dylib"\]/crate-type = ["rlib"]/' crates/rivers-runtime/Cargo.toml
 
-# Step 4: Assemble the dynamic release directory
 _assemble-dynamic:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -74,34 +84,29 @@ _assemble-dynamic:
     cp target/release/riversd "$RELEASE_DIR/bin/"
     cp target/release/riversctl "$RELEASE_DIR/bin/"
 
-    # Runtime dylib
     for ext in dylib so; do
         [ -f "target/release/librivers_runtime.$ext" ] && \
             cp "target/release/librivers_runtime.$ext" "$RELEASE_DIR/lib/" || true
     done
 
-    # Rust std dylib (needed for prefer-dynamic builds)
     SYSROOT=$(rustc --print sysroot)
     TRIPLE=$(rustc -vV | awk '/^host:/{print $2}')
     for f in "$SYSROOT/lib/rustlib/$TRIPLE/lib"/libstd-*.dylib "$SYSROOT/lib/rustlib/$TRIPLE/lib"/libstd-*.so; do
         [ -f "$f" ] && cp "$f" "$RELEASE_DIR/lib/" && break
     done
 
-    # Engine cdylibs
     for ext in dylib so; do
         for f in target/release/librivers_engine_*.$ext; do
             [ -f "$f" ] && cp "$f" "$RELEASE_DIR/lib/" || true
         done
     done
 
-    # Plugin cdylibs
     for ext in dylib so; do
         for f in target/release/librivers_plugin_*.$ext; do
             [ -f "$f" ] && cp "$f" "$RELEASE_DIR/plugins/" || true
         done
     done
 
-    # Fix dylib install names on macOS (rpath → @executable_path/../lib)
     if [ "$(uname)" = "Darwin" ]; then
         DEPS_DYLIB="$(find target/release/deps -name 'librivers_runtime.dylib' -maxdepth 1 | head -1)"
         if [ -n "$DEPS_DYLIB" ]; then
@@ -117,33 +122,144 @@ _assemble-dynamic:
     echo "    lib/     $(ls "$RELEASE_DIR/lib/" | tr '\n' ' ')"
     echo "    plugins/ $(ls "$RELEASE_DIR/plugins/" | tr '\n' ' ')"
 
-    # Smoke test
     echo ""
     "$RELEASE_DIR/bin/riversd" --version
     "$RELEASE_DIR/bin/riversctl" version
 
-# ── Utilities ────────────────────────────────────────────────────
+# ── Deploy (via cargo deploy) ────────────────────────────────────
 
-# Clean all build artifacts
-clean:
-    cargo clean
+# Deploy dynamic dist to a target directory
+deploy path:
+    cargo deploy {{path}}
 
-# Check the workspace compiles
-check:
-    cargo check
+# Deploy static dist to a target directory
+deploy-static path:
+    cargo deploy {{path}} --static
 
-# List binary sizes for the static build
-sizes:
-    @ls -lh target/release/riversd target/release/riversctl 2>/dev/null || echo "No release binaries — run 'just build' first"
+# ── Distribution ─────────────────────────────────────────────────
 
-# List binary/lib sizes for the dynamic build
-sizes-dynamic:
-    @echo "==> Binaries:"
-    @ls -lh release/dynamic/bin/* 2>/dev/null || echo "  (none)"
-    @echo "==> Libraries:"
-    @ls -lh release/dynamic/lib/* 2>/dev/null || echo "  (none)"
+# Create source code zip (mirrors GitHub release source archive)
+dist-source:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    VERSION="{{version}}"
+    OUTDIR="release"
+    ZIPNAME="rivers-${VERSION}-source.zip"
+    mkdir -p "$OUTDIR"
+    echo "==> Creating source dist: ${OUTDIR}/${ZIPNAME}"
+    git archive --format=zip --prefix="rivers-${VERSION}/" HEAD -o "${OUTDIR}/${ZIPNAME}"
+    echo "  -> ${OUTDIR}/${ZIPNAME}"
+    ls -lh "${OUTDIR}/${ZIPNAME}"
 
-# ── Packaging ──────────────────────────────────────────────────────
+# Create binary zip via cargo deploy (dynamic mode)
+dist-zip:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    VERSION="{{version}}"
+    OS="{{os}}"
+    ARCH="{{arch}}"
+    STAGING="dist/zip/rivers-${VERSION}-${OS}-${ARCH}"
+    OUTDIR="release"
+    ZIPNAME="rivers-${VERSION}-${OS}-${ARCH}.zip"
+    rm -rf "$STAGING"
+    cargo deploy "$STAGING"
+    cp LICENSE "$STAGING/" 2>/dev/null || true
+    cp README.md "$STAGING/" 2>/dev/null || true
+    mkdir -p "$OUTDIR"
+    (cd dist/zip && zip -r "../../${OUTDIR}/${ZIPNAME}" "rivers-${VERSION}-${OS}-${ARCH}/")
+    echo ""
+    echo "  -> ${OUTDIR}/${ZIPNAME}"
+    ls -lh "${OUTDIR}/${ZIPNAME}"
+
+# Create binary zip via cargo deploy (static mode)
+dist-zip-static:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    VERSION="{{version}}"
+    OS="{{os}}"
+    ARCH="{{arch}}"
+    STAGING="dist/zip/rivers-${VERSION}-${OS}-${ARCH}-static"
+    OUTDIR="release"
+    ZIPNAME="rivers-${VERSION}-${OS}-${ARCH}-static.zip"
+    rm -rf "$STAGING"
+    cargo deploy "$STAGING" --static
+    cp LICENSE "$STAGING/" 2>/dev/null || true
+    cp README.md "$STAGING/" 2>/dev/null || true
+    mkdir -p "$OUTDIR"
+    (cd dist/zip && zip -r "../../${OUTDIR}/${ZIPNAME}" "rivers-${VERSION}-${OS}-${ARCH}-static/")
+    echo ""
+    echo "  -> ${OUTDIR}/${ZIPNAME}"
+    ls -lh "${OUTDIR}/${ZIPNAME}"
+
+# ── Local Release (versioned layout with symlink) ────────────────
+
+# Create local release layout in release/<version>-<timestamp>/
+release:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    VERSION="{{version}}"
+    TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+    RELEASE_NAME="${VERSION}-${TIMESTAMP}"
+    DEST="release/${RELEASE_NAME}"
+
+    echo "→ building binaries (release)..."
+    cargo build --release -p riversd -p riversctl -p riverpackage -p rivers-lockbox -p rivers-keystore
+
+    for bin in riversd riversctl riverpackage rivers-lockbox rivers-keystore; do
+        if [[ ! -f "target/release/${bin}" ]]; then
+            echo "error: binary not found: target/release/${bin}" >&2
+            exit 1
+        fi
+    done
+
+    echo "→ creating ${DEST}/"
+    mkdir -p "${DEST}/bin" "${DEST}/config" "${DEST}/log" "${DEST}/apphome"
+
+    for bin in riversd riversctl riverpackage rivers-lockbox rivers-keystore; do
+        cp "target/release/${bin}" "${DEST}/bin/${bin}"
+        echo "   bin/${bin}  ($(du -sh "${DEST}/bin/${bin}" | cut -f1))"
+    done
+
+    cat > "${DEST}/config/riversd.toml" << 'TOML'
+    # riversd.toml — default server configuration
+    #
+    # bundle_path MUST appear before any [section] header (top-level TOML key).
+    # Uncomment and set the line below:
+    #
+    # bundle_path = "apphome/<your-bundle>/"
+
+    [base]
+    host      = "0.0.0.0"
+    port      = 8080
+    log_level = "info"
+
+    [base.logging]
+    local_file_path = "log/riversd.log"
+    TOML
+    echo "   config/riversd.toml"
+
+    ln -sfn "${RELEASE_NAME}" release/latest
+    echo "   latest -> ${RELEASE_NAME}"
+
+    # Prune to 3 releases
+    RELEASES=()
+    while IFS= read -r name; do
+        RELEASES+=("$name")
+    done < <(find release -maxdepth 1 -mindepth 1 -type d ! -name '.*' ! -name dynamic | xargs -I{} basename {} | sort)
+
+    EXCESS=$(( ${#RELEASES[@]} - 3 ))
+    if (( EXCESS > 0 )); then
+        echo "→ pruning ${EXCESS} old release(s)..."
+        for (( i=0; i<EXCESS; i++ )); do
+            echo "   removing ${RELEASES[$i]}"
+            rm -rf "release/${RELEASES[$i]}"
+        done
+    fi
+
+    echo ""
+    echo "✓ release ready: ${DEST}"
+
+# ── Packaging (deb/rpm/tarball/windows) ──────────────────────────
 
 # Build .deb packages (rivers, rivers-lib, rivers-plugins)
 package-deb:
@@ -164,3 +280,20 @@ package-tarball:
 # Build all package formats
 package-all:
     ./scripts/build-packages.sh all
+
+# ── Info ─────────────────────────────────────────────────────────
+
+# List binary sizes for the static build
+sizes:
+    @ls -lh target/release/riversd target/release/riversctl 2>/dev/null || echo "No release binaries — run 'just build' first"
+
+# List binary/lib sizes for the dynamic build
+sizes-dynamic:
+    @echo "==> Binaries:"
+    @ls -lh release/dynamic/bin/* 2>/dev/null || echo "  (none)"
+    @echo "==> Libraries:"
+    @ls -lh release/dynamic/lib/* 2>/dev/null || echo "  (none)"
+
+# Show all available recipes
+help:
+    @just --list

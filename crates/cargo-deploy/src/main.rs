@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rivers_core_config::config::TlsX509Config;
+use rcgen::{CertificateParams, DistinguishedName, DnType, Ia5String, SanType};
 
 /// Dylib extension for the current platform.
 #[cfg(target_os = "macos")]
@@ -21,11 +22,13 @@ const PLUGINS: &[&str] = &[
     "rivers-plugin-cassandra",
     "rivers-plugin-couchdb",
     "rivers-plugin-elasticsearch",
+    "rivers-plugin-exec",
     "rivers-plugin-influxdb",
     "rivers-plugin-kafka",
     "rivers-plugin-ldap",
     "rivers-plugin-mongodb",
     "rivers-plugin-nats",
+    "rivers-plugin-neo4j",
     "rivers-plugin-rabbitmq",
     "rivers-plugin-redis-streams",
 ];
@@ -35,11 +38,13 @@ const PLUGIN_LIB_NAMES: &[&str] = &[
     "rivers_plugin_cassandra",
     "rivers_plugin_couchdb",
     "rivers_plugin_elasticsearch",
+    "rivers_plugin_exec",
     "rivers_plugin_influxdb",
     "rivers_plugin_kafka",
     "rivers_plugin_ldap",
     "rivers_plugin_mongodb",
     "rivers_plugin_nats",
+    "rivers_plugin_neo4j",
     "rivers_plugin_rabbitmq",
     "rivers_plugin_redis_streams",
 ];
@@ -140,10 +145,11 @@ fn cargo_build(args: &[&str]) {
 // ── Deploy: dynamic mode ────────────────────────────────────────
 
 fn deploy_dynamic(workspace_root: &Path, target_dir: &Path, deploy_path: &Path, version: &str) {
-    // Build binaries without static features
+    // Build binaries — disable static engines/plugins but keep builtin drivers (sqlite, faker, etc.)
     println!("[1/5] Building binaries (dynamic)...");
     cargo_build(&[
         "--no-default-features",
+        "--features", "static-builtin-drivers",
         "-p", "riversd",
         "-p", "riversctl",
         "-p", "rivers-lockbox",
@@ -167,12 +173,10 @@ fn deploy_dynamic(workspace_root: &Path, target_dir: &Path, deploy_path: &Path, 
     let bin_dir = deploy_path.join("bin");
     let lib_dir = deploy_path.join("lib");
     let plugins_dir = deploy_path.join("plugins");
-    let tls_dir = deploy_path.join("config/tls");
 
     create_dir(&bin_dir);
     create_dir(&lib_dir);
     create_dir(&plugins_dir);
-    create_dir(&tls_dir);
 
     // Copy binaries
     for name in BINARIES {
@@ -201,10 +205,9 @@ fn deploy_dynamic(workspace_root: &Path, target_dir: &Path, deploy_path: &Path, 
         }
     }
 
-    // TLS + VERSION
-    println!("[5/5] Generating TLS certificate...");
-    generate_tls(&tls_dir);
-    write_version_file(deploy_path, version, "dynamic");
+    // Runtime scaffolding
+    println!("[5/5] Scaffolding runtime...");
+    scaffold_runtime(deploy_path, version, "dynamic");
 
     print_summary(deploy_path, workspace_root);
 }
@@ -225,43 +228,205 @@ fn deploy_static(_workspace_root: &Path, target_dir: &Path, deploy_path: &Path, 
     // Create directory structure (no lib/ or plugins/)
     println!("[2/3] Assembling deploy directory...");
     let bin_dir = deploy_path.join("bin");
-    let tls_dir = deploy_path.join("config/tls");
-
     create_dir(&bin_dir);
-    create_dir(&tls_dir);
 
     // Copy binaries
     for name in BINARIES {
         copy_file(&target_dir.join(name), &bin_dir.join(name));
     }
 
-    // TLS + VERSION
-    println!("[3/3] Generating TLS certificate...");
-    generate_tls(&tls_dir);
-    write_version_file(deploy_path, version, "static");
+    // Runtime scaffolding
+    println!("[3/3] Scaffolding runtime...");
+    scaffold_runtime(deploy_path, version, "static");
 
     print_summary(deploy_path, _workspace_root);
 }
 
 // ── Shared helpers ──────────────────────────────────────────────
 
+/// Create all runtime directories, config, TLS certs, lockbox, and VERSION.
+fn scaffold_runtime(deploy_path: &Path, version: &str, mode: &str) {
+    let tls_dir = deploy_path.join("config/tls");
+    let log_dir = deploy_path.join("log");
+    let apphome_dir = deploy_path.join("apphome");
+    let data_dir = deploy_path.join("data");
+    let lockbox_dir = deploy_path.join("lockbox");
+
+    create_dir(&tls_dir);
+    create_dir(&log_dir);
+    create_dir(&apphome_dir);
+    create_dir(&data_dir);
+
+    // TLS certificate
+    println!("  generating TLS certificate...");
+    generate_tls(&tls_dir);
+
+    // Default config
+    println!("  writing config/riversd.toml...");
+    write_default_config(deploy_path);
+
+    // Lockbox
+    println!("  initializing lockbox...");
+    init_lockbox(deploy_path, &lockbox_dir);
+
+    // VERSION
+    write_version_file(deploy_path, version, mode);
+}
+
 fn generate_tls(tls_dir: &Path) {
     let cert_path = tls_dir.join("server.crt");
     let key_path = tls_dir.join("server.key");
 
     let x509 = TlsX509Config::default();
-    rivers_core::tls::generate_self_signed_cert(
-        &x509,
-        cert_path.to_str().unwrap(),
-        key_path.to_str().unwrap(),
-    )
-    .unwrap_or_else(|e| {
-        eprintln!("error: TLS cert generation failed: {e}");
-        std::process::exit(1);
-    });
+    generate_self_signed_cert(&x509, &cert_path, &key_path)
+        .unwrap_or_else(|e| {
+            eprintln!("error: TLS cert generation failed: {e}");
+            std::process::exit(1);
+        });
 
     println!("  cert: {}", cert_path.display());
     println!("  key:  {}", key_path.display());
+}
+
+/// Write the default riversd.toml config.
+fn write_default_config(deploy_path: &Path) {
+    let config_path = deploy_path.join("config/riversd.toml");
+    let config = r#"# riversd.toml — Rivers server configuration
+#
+# Uncomment bundle_path to load an application bundle at startup:
+# bundle_path = "apphome/<your-bundle>/"
+
+[base]
+host      = "0.0.0.0"
+port      = 8080
+log_level = "info"
+
+[base.logging]
+level           = "info"
+format          = "json"
+local_file_path = "log/riversd.log"
+
+[base.tls]
+cert     = "config/tls/server.crt"
+key      = "config/tls/server.key"
+redirect = false
+
+[storage_engine]
+backend = "memory"
+
+[lockbox]
+path       = "lockbox"
+key_source = "file"
+key_file   = "lockbox/identity.key"
+
+# [base.admin_api]
+# enabled = true
+# host    = "127.0.0.1"
+# port    = 9090
+"#;
+    std::fs::write(&config_path, config).unwrap_or_else(|e| {
+        eprintln!("error: failed to write config: {e}");
+        std::process::exit(1);
+    });
+    println!("  config: {}", config_path.display());
+}
+
+/// Initialize a lockbox directory with identity key, entries dir, and aliases.
+fn init_lockbox(deploy_path: &Path, lockbox_dir: &Path) {
+    let bin_dir = deploy_path.join("bin");
+    let lockbox_bin = bin_dir.join("rivers-lockbox");
+
+    if !lockbox_bin.exists() {
+        eprintln!("  warn: rivers-lockbox binary not found, skipping lockbox init");
+        return;
+    }
+
+    let status = Command::new(&lockbox_bin)
+        .arg("init")
+        .env("RIVERS_LOCKBOX_DIR", lockbox_dir)
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            println!("  lockbox: {}", lockbox_dir.display());
+        }
+        Ok(s) => {
+            eprintln!("  warn: lockbox init exited with {s}");
+        }
+        Err(e) => {
+            eprintln!("  warn: lockbox init failed: {e}");
+        }
+    }
+}
+
+/// Generate a self-signed certificate using rcgen, write PEM files to disk.
+fn generate_self_signed_cert(
+    x509: &TlsX509Config,
+    cert_path: &Path,
+    key_path: &Path,
+) -> Result<(), String> {
+    let mut params = CertificateParams::default();
+
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, &x509.common_name);
+    if let Some(ref org) = x509.organization {
+        dn.push(DnType::OrganizationName, org);
+    }
+    if let Some(ref country) = x509.country {
+        dn.push(DnType::CountryName, country);
+    }
+    if let Some(ref state) = x509.state {
+        dn.push(DnType::StateOrProvinceName, state);
+    }
+    if let Some(ref locality) = x509.locality {
+        dn.push(DnType::LocalityName, locality);
+    }
+    params.distinguished_name = dn;
+
+    let mut sans = Vec::new();
+    for s in &x509.san {
+        if let Ok(ip) = s.parse::<std::net::IpAddr>() {
+            sans.push(SanType::IpAddress(ip));
+        } else {
+            let ia5 = Ia5String::try_from(s.clone())
+                .map_err(|e| format!("invalid DNS SAN '{s}': {e}"))?;
+            sans.push(SanType::DnsName(ia5));
+        }
+    }
+    params.subject_alt_names = sans;
+
+    let not_before = ::time::OffsetDateTime::now_utc();
+    let not_after = not_before + ::time::Duration::days(x509.days as i64);
+    params.not_before = not_before;
+    params.not_after = not_after;
+
+    let key_pair = rcgen::KeyPair::generate()
+        .map_err(|e| format!("key generation failed: {e}"))?;
+    let cert = params
+        .self_signed(&key_pair)
+        .map_err(|e| format!("cert generation failed: {e}"))?;
+
+    let cert_pem = cert.pem();
+    let key_pem = key_pair.serialize_pem();
+
+    if let Some(parent) = cert_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create cert dir {}: {e}", parent.display()))?;
+    }
+
+    std::fs::write(cert_path, cert_pem)
+        .map_err(|e| format!("failed to write cert to {}: {e}", cert_path.display()))?;
+    std::fs::write(key_path, key_pem)
+        .map_err(|e| format!("failed to write key to {}: {e}", key_path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("chmod key file {}: {e}", key_path.display()))?;
+    }
+
+    Ok(())
 }
 
 fn write_version_file(deploy_path: &Path, version: &str, mode: &str) {
@@ -314,8 +479,25 @@ fn print_summary(deploy_path: &Path, _workspace_root: &Path) {
         print_dir_listing(&plugins_dir);
     }
 
+    // Runtime structure
+    let config_path = deploy_path.join("config/riversd.toml");
+    if config_path.exists() {
+        println!("Config:    config/riversd.toml");
+    }
+    let tls_dir = deploy_path.join("config/tls");
+    if tls_dir.exists() {
+        println!("TLS:       config/tls/server.crt, config/tls/server.key");
+    }
+    let lockbox_dir = deploy_path.join("lockbox");
+    if lockbox_dir.exists() {
+        println!("Lockbox:   lockbox/");
+    }
+    println!("Logs:      log/");
+    println!("Bundles:   apphome/");
+
     let version_path = deploy_path.join("VERSION");
     if version_path.exists() {
+        println!();
         println!("Version:");
         if let Ok(v) = std::fs::read_to_string(&version_path) {
             for line in v.lines() {
@@ -325,7 +507,10 @@ fn print_summary(deploy_path: &Path, _workspace_root: &Path) {
     }
 
     println!();
-    println!("Done.");
+    println!("Ready to run:");
+    println!("  cd {}", deploy_path.display());
+    println!("  ./bin/riversctl doctor");
+    println!("  ./bin/riversctl start");
 }
 
 fn print_dir_listing(dir: &Path) {

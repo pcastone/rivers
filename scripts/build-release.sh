@@ -34,10 +34,12 @@ cargo build --release \
     -p rivers-plugin-couchdb \
     -p rivers-plugin-elasticsearch \
     -p rivers-plugin-influxdb \
+    -p rivers-plugin-exec \
     -p rivers-plugin-kafka \
     -p rivers-plugin-ldap \
     -p rivers-plugin-mongodb \
     -p rivers-plugin-nats \
+    -p rivers-plugin-neo4j \
     -p rivers-plugin-rabbitmq \
     -p rivers-plugin-redis-streams
 
@@ -56,7 +58,7 @@ cp "target/release/librivers_engine_v8.${DYLIB_EXT}" "${RELEASE_DIR}/lib/" 2>/de
 cp "target/release/librivers_engine_wasm.${DYLIB_EXT}" "${RELEASE_DIR}/lib/" 2>/dev/null || true
 
 # Plugin shared libraries
-for plugin in cassandra couchdb elasticsearch influxdb kafka ldap mongodb nats rabbitmq redis_streams; do
+for plugin in cassandra couchdb elasticsearch exec influxdb kafka ldap mongodb nats neo4j rabbitmq redis_streams; do
     src="target/release/librivers_plugin_${plugin}.${DYLIB_EXT}"
     if [ -f "$src" ]; then
         cp "$src" "${RELEASE_DIR}/plugins/"

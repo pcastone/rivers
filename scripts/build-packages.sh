@@ -297,6 +297,53 @@ build_tarball() {
     echo "  -> ${out}/rivers-${VERSION}-${os}-${ARCH}.tar.gz"
 }
 
+# ── Zip (via cargo deploy) ─────────────────────────────────────────
+
+build_zip() {
+    echo ""
+    echo "=== Building zip distribution ==="
+
+    if ! command -v cargo-deploy &> /dev/null; then
+        echo "==> Installing cargo-deploy..."
+        cargo install --path "${REPO_ROOT}/crates/cargo-deploy" --quiet
+    fi
+
+    local os
+    case "$(uname -s)" in
+        Linux)  os="linux" ;;
+        Darwin) os="darwin" ;;
+        *)      os="$(uname -s | tr '[:upper:]' '[:lower:]')" ;;
+    esac
+
+    local mode="${2:-dynamic}"
+    local suffix=""
+    local deploy_args=()
+    if [[ "$mode" == "static" ]]; then
+        suffix="-static"
+        deploy_args=("--static")
+    fi
+
+    local staging="${DIST_DIR}/zip/rivers-${VERSION}-${os}-${ARCH}${suffix}"
+    rm -rf "$staging"
+
+    echo "==> Running cargo deploy (${mode})..."
+    cargo deploy "$staging" "${deploy_args[@]+"${deploy_args[@]}"}"
+
+    # Add LICENSE and README
+    cp "${REPO_ROOT}/LICENSE" "$staging/" 2>/dev/null || true
+    cp "${REPO_ROOT}/README.md" "$staging/" 2>/dev/null || true
+
+    local release_dir="${REPO_ROOT}/release"
+    mkdir -p "$release_dir"
+
+    local zipname="rivers-${VERSION}-${os}-${ARCH}${suffix}.zip"
+    (cd "${DIST_DIR}/zip" && zip -r "${release_dir}/${zipname}" "rivers-${VERSION}-${os}-${ARCH}${suffix}/")
+
+    echo ""
+    echo "  -> release/${zipname}"
+    ls -lh "${release_dir}/${zipname}"
+}
+
 # ── Main ────────────────────────────────────────────────────────────
 
 case "${1:-help}" in
@@ -304,8 +351,10 @@ case "${1:-help}" in
     rpm)     build_rpm ;;
     windows) build_windows ;;
     tarball) build_tarball ;;
+    zip)     build_zip "$@" ;;
     all)
         build_tarball
+        build_zip "$@"
         build_deb
         build_rpm
         build_windows
@@ -314,12 +363,13 @@ case "${1:-help}" in
         find "$DIST_DIR" -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.zip' -o -name '*.tar.gz' \) | sort
         ;;
     *)
-        echo "Usage: $0 <deb|rpm|windows|tarball|all>"
+        echo "Usage: $0 <deb|rpm|windows|tarball|zip|all>"
         echo ""
         echo "  deb      Build .deb packages (rivers, rivers-lib, rivers-plugins)"
         echo "  rpm      Build .rpm packages (rivers, rivers-lib, rivers-plugins)"
         echo "  windows  Build Windows .zip (cross-compiled x86_64)"
         echo "  tarball  Build portable .tar.gz for current platform"
+        echo "  zip      Build .zip via cargo deploy (default: dynamic, or: zip static)"
         echo "  all      Build all formats"
         exit 1
         ;;

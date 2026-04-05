@@ -24,3 +24,8 @@ redis = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 async-memcached = { workspace = true }
+
+[dev-dependencies]
+test-case = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
+uuid = { workspace = true }
