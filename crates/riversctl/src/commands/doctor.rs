@@ -2,25 +2,34 @@ use std::path::{Path, PathBuf};
 
 use super::start::find_riversd_binary;
 
-/// Run pre-launch health checks.
+/// Run pre-launch health checks. With `--fix`, auto-repair fixable issues.
 pub fn cmd_doctor(args: &[String]) -> Result<(), String> {
     let mut passed = 0u32;
     let mut failed = 0u32;
+    let mut fixed = 0u32;
 
-    // Parse --config flag
-    let explicit_config: Option<PathBuf> = {
-        let mut cfg = None;
-        let mut i = 0;
-        while i < args.len() {
-            if (args[i] == "--config" || args[i] == "-c") && i + 1 < args.len() {
-                cfg = Some(PathBuf::from(&args[i + 1]));
+    // Parse flags
+    let mut explicit_config: Option<PathBuf> = None;
+    let mut fix_mode = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--config" | "-c" if i + 1 < args.len() => {
+                explicit_config = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
-            } else {
+            }
+            "--fix" => {
+                fix_mode = true;
                 i += 1;
             }
+            _ => { i += 1; }
         }
-        cfg
-    };
+    }
+
+    if fix_mode {
+        println!("  doctor --fix: will attempt to repair fixable issues");
+        println!();
+    }
 
     // Check 1: riversd binary exists
     match find_riversd_binary() {
@@ -96,8 +105,22 @@ pub fn cmd_doctor(args: &[String]) -> Result<(), String> {
                             passed += 1;
                         }
                         Err(e) => {
-                            println!("  [FAIL] lockbox keystore: {e}");
-                            failed += 1;
+                            if fix_mode {
+                                match fix_lockbox_permissions(path) {
+                                    Ok(()) => {
+                                        println!("  [FIXED] lockbox keystore permissions → 0600");
+                                        fixed += 1;
+                                        passed += 1;
+                                    }
+                                    Err(fe) => {
+                                        println!("  [FAIL] lockbox keystore: {e} (fix failed: {fe})");
+                                        failed += 1;
+                                    }
+                                }
+                            } else {
+                                println!("  [FAIL] lockbox keystore: {e}");
+                                failed += 1;
+                            }
                         }
                     }
                 }
@@ -112,10 +135,32 @@ pub fn cmd_doctor(args: &[String]) -> Result<(), String> {
     // Check 6: TLS cert/key files exist
     if let Some(ref cfg) = config {
         if let Some(ref tls) = cfg.base.tls {
-            if let Some(ref cert) = tls.cert {
-                if Path::new(cert).is_file() {
+            let cert_path = tls.cert.as_deref();
+            let key_path = tls.key.as_deref();
+            let cert_exists = cert_path.map(|p| Path::new(p).is_file()).unwrap_or(false);
+            let key_exists = key_path.map(|p| Path::new(p).is_file()).unwrap_or(false);
+
+            if let Some(cert) = cert_path {
+                if cert_exists {
                     println!("  [PASS] TLS cert: {cert}");
                     passed += 1;
+                } else if fix_mode {
+                    if let Some(key) = key_path {
+                        match fix_generate_tls_cert(cert, key, &tls.x509) {
+                            Ok(()) => {
+                                println!("  [FIXED] TLS cert + key generated");
+                                fixed += 2;
+                                passed += 2;
+                            }
+                            Err(e) => {
+                                println!("  [FAIL] TLS cert not found: {cert} (fix failed: {e})");
+                                failed += 1;
+                            }
+                        }
+                    } else {
+                        println!("  [FAIL] TLS cert not found: {cert} (no key path configured)");
+                        failed += 1;
+                    }
                 } else {
                     println!("  [FAIL] TLS cert not found: {cert}");
                     failed += 1;
@@ -123,16 +168,20 @@ pub fn cmd_doctor(args: &[String]) -> Result<(), String> {
             } else {
                 println!("  [SKIP] TLS cert not configured (will auto-generate)");
             }
-            if let Some(ref key) = tls.key {
-                if Path::new(key).is_file() {
-                    println!("  [PASS] TLS key: {key}");
-                    passed += 1;
+
+            // Only check key separately if we didn't already generate both above
+            if cert_exists || !fix_mode {
+                if let Some(key) = key_path {
+                    if key_exists {
+                        println!("  [PASS] TLS key: {key}");
+                        passed += 1;
+                    } else {
+                        println!("  [FAIL] TLS key not found: {key}");
+                        failed += 1;
+                    }
                 } else {
-                    println!("  [FAIL] TLS key not found: {key}");
-                    failed += 1;
+                    println!("  [SKIP] TLS key not configured (will auto-generate)");
                 }
-            } else {
-                println!("  [SKIP] TLS key not configured (will auto-generate)");
             }
         } else {
             println!("  [SKIP] TLS not configured");
@@ -144,7 +193,6 @@ pub fn cmd_doctor(args: &[String]) -> Result<(), String> {
         if let Some(ref log_path) = cfg.base.logging.local_file_path {
             if let Some(log_dir) = Path::new(log_path).parent() {
                 if log_dir.is_dir() {
-                    // Try creating a temp file to verify write access
                     let test_file = log_dir.join(".rivers-doctor-test");
                     match std::fs::write(&test_file, b"") {
                         Ok(()) => {
@@ -154,6 +202,18 @@ pub fn cmd_doctor(args: &[String]) -> Result<(), String> {
                         }
                         Err(e) => {
                             println!("  [FAIL] log directory not writable: {} — {e}", log_dir.display());
+                            failed += 1;
+                        }
+                    }
+                } else if fix_mode {
+                    match std::fs::create_dir_all(log_dir) {
+                        Ok(()) => {
+                            println!("  [FIXED] log directory created: {}", log_dir.display());
+                            fixed += 1;
+                            passed += 1;
+                        }
+                        Err(e) => {
+                            println!("  [FAIL] log directory not found: {} (fix failed: {e})", log_dir.display());
                             failed += 1;
                         }
                     }
@@ -236,11 +296,18 @@ pub fn cmd_doctor(args: &[String]) -> Result<(), String> {
     }
 
     println!();
-    if failed > 0 {
-        println!("doctor: {passed} passed, {failed} failed");
-        std::process::exit(1);
+    if fixed > 0 {
+        print!("doctor: {passed} passed, {failed} failed, {fixed} fixed");
     } else {
-        println!("doctor: {passed} passed, 0 failed");
+        print!("doctor: {passed} passed, {failed} failed");
+    }
+    if failed > 0 && !fix_mode {
+        println!(" (run with --fix to repair)");
+    } else {
+        println!();
+    }
+    if failed > 0 {
+        std::process::exit(1);
     }
     Ok(())
 }
@@ -260,6 +327,35 @@ fn check_lockbox_permissions(path: &Path) -> Result<(), String> {
 #[cfg(not(unix))]
 fn check_lockbox_permissions(_path: &Path) -> Result<(), String> {
     Ok(())
+}
+
+// ── Fix helpers (--fix) ─────────────────────────────────────────────
+
+/// Set lockbox keystore file permissions to 0600.
+#[cfg(unix)]
+fn fix_lockbox_permissions(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("chmod failed: {e}"))
+}
+
+#[cfg(not(unix))]
+fn fix_lockbox_permissions(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+/// Generate a self-signed TLS certificate and key using rivers-core.
+fn fix_generate_tls_cert(
+    cert_path: &str,
+    key_path: &str,
+    x509: &rivers_runtime::rivers_core_config::config::TlsX509Config,
+) -> Result<(), String> {
+    // Ensure parent directories exist
+    if let Some(parent) = Path::new(cert_path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    rivers_runtime::rivers_core::tls::generate_self_signed_cert(x509, cert_path, key_path)
 }
 
 /// Discover a config file from conventional locations.
