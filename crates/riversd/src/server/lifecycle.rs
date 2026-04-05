@@ -645,6 +645,11 @@ pub async fn run_server_with_listener_and_log(
     shutdown_clone.mark_draining();
     shutdown_clone.wait_for_drain().await;
 
+    // Flush per-app logs before exit
+    if let Some(router) = rivers_runtime::rivers_core::app_log_router::global_router() {
+        router.flush_all();
+    }
+
     // Abort admin server if running
     if let Some(handle) = admin_handle {
         handle.abort();

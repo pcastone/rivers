@@ -220,8 +220,9 @@ pub async fn load_and_wire_bundle(
         view_count += app.config.api.views.len();
 
         // Register app with per-app log router (no-op if router not configured)
+        // Use entry_point (not app_name) — must match TASK_APP_NAME used by V8 callbacks.
         if let Some(router) = rivers_runtime::rivers_core::app_log_router::global_router() {
-            let app_name = &app.manifest.app_name;
+            let app_name = entry_point;
             if let Err(e) = router.register(app_name) {
                 tracing::warn!(app = %app_name, error = %e, "failed to create app log file");
             } else {

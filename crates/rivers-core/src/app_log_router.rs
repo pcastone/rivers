@@ -50,8 +50,13 @@ impl AppLogRouter {
             .append(true)
             .open(&path)
             .map_err(|e| format!("open {}: {e}", path.display()))?;
-        let writer = BufWriter::new(file);
-        self.writers.lock().unwrap().insert(app_name.to_string(), writer);
+        let new_writer = BufWriter::new(file);
+        let mut writers = self.writers.lock().unwrap();
+        // Flush existing writer before replacing to prevent data loss on hot reload
+        if let Some(old) = writers.get_mut(app_name) {
+            let _ = old.flush();
+        }
+        writers.insert(app_name.to_string(), new_writer);
         Ok(())
     }
 
@@ -60,7 +65,6 @@ impl AppLogRouter {
         let mut writers = self.writers.lock().unwrap();
         if let Some(writer) = writers.get_mut(app_name) {
             let _ = writeln!(writer, "{}", line);
-            let _ = writer.flush();
             true
         } else {
             false
@@ -78,6 +82,12 @@ impl AppLogRouter {
     /// Check if an app is registered.
     pub fn is_registered(&self, app_name: &str) -> bool {
         self.writers.lock().unwrap().contains_key(app_name)
+    }
+}
+
+impl Drop for AppLogRouter {
+    fn drop(&mut self) {
+        self.flush_all();
     }
 }
 
@@ -103,6 +113,9 @@ mod tests {
         router.write("app-a", "line 1 for A");
         router.write("app-b", "line 1 for B");
         router.write("app-a", "line 2 for A");
+
+        // Flush buffered writes before reading (no per-write flush — BufWriter batches)
+        router.flush_all();
 
         let a_content = std::fs::read_to_string(dir.path().join("app-a.log")).unwrap();
         let b_content = std::fs::read_to_string(dir.path().join("app-b.log")).unwrap();
