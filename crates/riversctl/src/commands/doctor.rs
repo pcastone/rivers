@@ -11,6 +11,7 @@ pub fn cmd_doctor(args: &[String]) -> Result<(), String> {
     // Parse flags
     let mut explicit_config: Option<PathBuf> = None;
     let mut fix_mode = false;
+    let mut lint_mode = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -20,6 +21,10 @@ pub fn cmd_doctor(args: &[String]) -> Result<(), String> {
             }
             "--fix" => {
                 fix_mode = true;
+                i += 1;
+            }
+            "--lint" => {
+                lint_mode = true;
                 i += 1;
             }
             _ => { i += 1; }
@@ -158,6 +163,32 @@ pub fn cmd_doctor(args: &[String]) -> Result<(), String> {
                 if cert_exists {
                     println!("  [PASS] TLS cert: {cert}");
                     passed += 1;
+                    // Check cert expiry
+                    let expiry = rivers_runtime::rivers_core::tls::cert_expiry_summary(cert);
+                    if expiry.starts_with("EXPIRED") {
+                        if fix_mode {
+                            if let Some(ref key) = tls.key {
+                                match rivers_runtime::rivers_core::tls::generate_self_signed_cert(
+                                    &tls.x509, cert, key,
+                                ) {
+                                    Ok(()) => {
+                                        println!("  [FIXED] TLS cert renewed (was: {expiry})");
+                                        fixed += 1;
+                                    }
+                                    Err(e) => {
+                                        println!("  [FAIL] TLS cert expired ({expiry}) — renewal failed: {e}");
+                                        failed += 1;
+                                    }
+                                }
+                            }
+                        } else {
+                            println!("  [FAIL] TLS cert expired: {expiry}");
+                            failed += 1;
+                        }
+                    } else {
+                        println!("  [PASS] TLS cert expiry: {expiry}");
+                        passed += 1;
+                    }
                 } else if fix_mode {
                     if let Some(key) = key_path {
                         match fix_generate_tls_cert(cert, key, &tls.x509) {
@@ -335,6 +366,44 @@ pub fn cmd_doctor(args: &[String]) -> Result<(), String> {
         }
     }
 
+    // Lint: bundle validation (when --lint is passed)
+    if lint_mode {
+        if let Some(ref cfg) = config {
+            if let Some(ref bundle_path) = cfg.bundle_path {
+                println!();
+                println!("  === Lint: {bundle_path} ===");
+                match rivers_runtime::load_bundle(std::path::Path::new(bundle_path)) {
+                    Ok(bundle) => {
+                        // Structural validation
+                        match rivers_runtime::validate_bundle(&bundle) {
+                            Ok(()) => {
+                                println!("  [PASS] bundle structure valid");
+                                passed += 1;
+                            }
+                            Err(errors) => {
+                                for e in &errors {
+                                    println!("  [FAIL] {e}");
+                                }
+                                failed += errors.len() as u32;
+                            }
+                        }
+
+                        // Per-app convention checks
+                        for app in &bundle.apps {
+                            lint_app_conventions(app, &mut passed, &mut failed);
+                        }
+                    }
+                    Err(e) => {
+                        println!("  [FAIL] cannot load bundle: {e}");
+                        failed += 1;
+                    }
+                }
+            } else {
+                println!("  [SKIP] --lint: no bundle_path configured");
+            }
+        }
+    }
+
     println!();
     if fixed > 0 {
         print!("doctor: {passed} passed, {failed} failed, {fixed} fixed");
@@ -350,6 +419,53 @@ pub fn cmd_doctor(args: &[String]) -> Result<(), String> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn lint_app_conventions(
+    app: &rivers_runtime::LoadedApp,
+    passed: &mut u32,
+    failed: &mut u32,
+) {
+    let name = &app.manifest.app_name;
+
+    // Check: views exist (common mistake: [views.*] instead of [api.views.*])
+    if app.config.api.views.is_empty() {
+        println!("  [WARN] {name}: no views defined — check [api.views.*] (not [views.*])");
+    } else {
+        println!("  [PASS] {name}: {} views defined", app.config.api.views.len());
+        *passed += 1;
+    }
+
+    // Check: schema files exist for DataViews that reference them
+    for (dv_key, dv) in &app.config.data.dataviews {
+        let schema_refs = [
+            dv.return_schema.as_deref(),
+            dv.get_schema.as_deref(),
+            dv.post_schema.as_deref(),
+            dv.put_schema.as_deref(),
+            dv.delete_schema.as_deref(),
+        ];
+        for schema_ref in schema_refs.into_iter().flatten() {
+            let schema_path = app.app_dir.join(schema_ref);
+            if schema_path.exists() {
+                *passed += 1;
+            } else {
+                println!("  [FAIL] {name}: schema not found: {} (expected at {})", schema_ref, schema_path.display());
+                *failed += 1;
+            }
+        }
+        let _ = dv_key; // key used for iteration; name field used in DataViewConfig
+    }
+
+    // Check: datasource references in DataViews resolve
+    for dv in app.config.data.dataviews.values() {
+        if app.config.data.datasources.contains_key(&dv.datasource) {
+            *passed += 1;
+        } else {
+            println!("  [FAIL] {name}: dataview '{}' references unknown datasource '{}'", dv.name, dv.datasource);
+            *failed += 1;
+        }
+    }
 }
 
 /// Check that a file has mode 600 (owner read+write only).

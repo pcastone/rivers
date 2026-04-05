@@ -15,11 +15,12 @@ pub enum TlsCommand {
     Show    { port: Option<u16> },
     List,
     Expire  { port: Option<u16> },
+    Renew   { port: Option<u16> },
 }
 
 /// Parse `riversctl tls <subcommand> [args]`.
 pub fn parse_tls_args(args: &[&str]) -> Result<TlsCommand, String> {
-    let sub = args.first().ok_or("Usage: riversctl tls <gen|request|import|show|list|expire>")?;
+    let sub = args.first().ok_or("Usage: riversctl tls <gen|request|import|show|list|expire|renew>")?;
     let rest = &args[1..];
 
     match *sub {
@@ -27,6 +28,7 @@ pub fn parse_tls_args(args: &[&str]) -> Result<TlsCommand, String> {
         "request" => Ok(TlsCommand::Request { port: parse_port(rest)? }),
         "show"    => Ok(TlsCommand::Show    { port: parse_port(rest)? }),
         "list"    => Ok(TlsCommand::List),
+        "renew"   => Ok(TlsCommand::Renew   { port: parse_port(rest)? }),
         "import"  => {
             if rest.len() < 2 {
                 return Err("Usage: riversctl tls import <cert> <key> [--port P]".to_string());
@@ -108,6 +110,7 @@ pub fn run_tls_cmd(cmd: TlsCommand, config: &ServerConfig) -> Result<(), String>
         TlsCommand::Import { cert, key, port } => cmd_import(config, &cert, &key, port),
         TlsCommand::Gen { port }               => cmd_gen(config, port),
         TlsCommand::Request { port }           => cmd_request(config, port),
+        TlsCommand::Renew { port }             => cmd_renew(config, port),
     }
 }
 
@@ -255,6 +258,45 @@ fn cmd_request(config: &ServerConfig, port: Option<u16>) -> Result<(), String> {
 
     let csr = rivers_runtime::rivers_core::tls::generate_csr(&x509)?;
     print!("{csr}");
+    Ok(())
+}
+
+fn cmd_renew(config: &ServerConfig, port: Option<u16>) -> Result<(), String> {
+    let target_port = port.unwrap_or(config.base.port);
+    let (cert_path, key_path) = resolve_cert_paths(config, port)?;
+
+    let x509 = if target_port == config.base.port {
+        config.base.tls.as_ref()
+            .map(|t| t.x509.clone())
+            .unwrap_or_default()
+    } else {
+        rivers_runtime::rivers_core_config::config::TlsX509Config::default()
+    };
+
+    // Show current cert info if it exists
+    if Path::new(&cert_path).is_file() {
+        match rivers_runtime::rivers_core::tls::inspect_cert(&cert_path) {
+            Ok(info) => {
+                println!("Current cert: {}", info.expiry_summary);
+                println!("  Subject: {}", info.subject);
+            }
+            Err(e) => println!("Current cert: unreadable ({e})"),
+        }
+    } else {
+        println!("No existing cert found — generating new");
+    }
+
+    // Generate new cert
+    rivers_runtime::rivers_core::tls::generate_self_signed_cert(&x509, &cert_path, &key_path)?;
+
+    println!("TLS certificate renewed:");
+    println!("  cert: {cert_path}");
+    println!("  key:  {key_path}");
+
+    // Show new cert expiry
+    if let Ok(info) = rivers_runtime::rivers_core::tls::inspect_cert(&cert_path) {
+        println!("  expires: {}", info.not_after);
+    }
     Ok(())
 }
 
