@@ -156,6 +156,7 @@ fn validate_bundle_allows_valid_service_reference() {
                     app_entry_point: None,
                     source: None,
                     spa: None,
+                    init: None,
                 },
                 resources: ResourcesConfig::default(),
                 config: AppConfig::default(),
@@ -172,6 +173,7 @@ fn validate_bundle_allows_valid_service_reference() {
                     app_entry_point: None,
                     source: None,
                     spa: None,
+                    init: None,
                 },
                 resources: ResourcesConfig {
                     datasources: vec![],
