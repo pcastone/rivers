@@ -96,8 +96,22 @@ pub fn cmd_doctor(args: &[String]) -> Result<(), String> {
             if let Some(ref keystore_path) = lockbox_cfg.path {
                 let path = Path::new(keystore_path);
                 if !path.exists() {
-                    println!("  [FAIL] lockbox keystore not found: {keystore_path}");
-                    failed += 1;
+                    if fix_mode {
+                        match fix_init_lockbox(keystore_path) {
+                            Ok(()) => {
+                                println!("  [FIXED] lockbox initialized: {keystore_path}");
+                                fixed += 1;
+                                passed += 1;
+                            }
+                            Err(e) => {
+                                println!("  [FAIL] lockbox not found: {keystore_path} (fix failed: {e})");
+                                failed += 1;
+                            }
+                        }
+                    } else {
+                        println!("  [FAIL] lockbox keystore not found: {keystore_path}");
+                        failed += 1;
+                    }
                 } else {
                     match check_lockbox_permissions(path) {
                         Ok(()) => {
@@ -356,6 +370,31 @@ fn fix_generate_tls_cert(
             .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
     rivers_runtime::rivers_core::tls::generate_self_signed_cert(x509, cert_path, key_path)
+}
+
+/// Initialize lockbox by running the sibling `rivers-lockbox init` binary.
+fn fix_init_lockbox(lockbox_path: &str) -> Result<(), String> {
+    // Find rivers-lockbox binary next to riversctl
+    let lockbox_bin = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.join("rivers-lockbox")))
+        .ok_or_else(|| "cannot locate rivers-lockbox binary".to_string())?;
+
+    if !lockbox_bin.is_file() {
+        return Err(format!("rivers-lockbox not found at {}", lockbox_bin.display()));
+    }
+
+    let status = std::process::Command::new(&lockbox_bin)
+        .arg("init")
+        .env("RIVERS_LOCKBOX_DIR", lockbox_path)
+        .status()
+        .map_err(|e| format!("failed to run rivers-lockbox: {e}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("rivers-lockbox init exited with {status}"))
+    }
 }
 
 /// Discover a config file from conventional locations.
