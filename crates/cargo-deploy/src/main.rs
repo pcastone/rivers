@@ -291,10 +291,16 @@ fn generate_tls(tls_dir: &Path) {
 /// Write the default riversd.toml config.
 fn write_default_config(deploy_path: &Path) {
     let config_path = deploy_path.join("config/riversd.toml");
-    let config = r#"# riversd.toml — Rivers server configuration
+
+    // Canonicalize to get absolute path for all config references
+    let root = deploy_path.canonicalize().unwrap_or_else(|_| deploy_path.to_path_buf());
+    let r = root.display();
+
+    let config = format!(
+        r#"# riversd.toml — Rivers server configuration
 #
 # Uncomment bundle_path to load an application bundle at startup:
-# bundle_path = "apphome/<your-bundle>/"
+# bundle_path = "{r}/apphome/<your-bundle>/"
 
 [base]
 host      = "0.0.0.0"
@@ -304,27 +310,39 @@ log_level = "info"
 [base.logging]
 level           = "info"
 format          = "json"
-local_file_path = "log/riversd.log"
+local_file_path = "{r}/log/riversd.log"
 
 [base.tls]
-cert     = "config/tls/server.crt"
-key      = "config/tls/server.key"
+cert     = "{r}/config/tls/server.crt"
+key      = "{r}/config/tls/server.key"
 redirect = false
+
+[base.tls.x509]
+common_name = "localhost"
+san         = ["localhost", "127.0.0.1"]
+days        = 365
 
 [storage_engine]
 backend = "memory"
 
 [lockbox]
-path       = "lockbox"
+path       = "{r}/lockbox"
 key_source = "file"
-key_file   = "lockbox/identity.key"
+key_file   = "{r}/lockbox/identity.key"
+
+[engines]
+dir = "{r}/lib"
+
+[plugins]
+dir = "{r}/plugins"
 
 # [base.admin_api]
 # enabled = true
 # host    = "127.0.0.1"
 # port    = 9090
-"#;
-    std::fs::write(&config_path, config).unwrap_or_else(|e| {
+"#
+    );
+    std::fs::write(&config_path, &config).unwrap_or_else(|e| {
         eprintln!("error: failed to write config: {e}");
         std::process::exit(1);
     });
