@@ -286,7 +286,7 @@ pub async fn load_and_wire_bundle(
 
     // Build DriverFactory with all drivers (built-in + plugins)
     let mut factory = rivers_runtime::rivers_core::DriverFactory::new();
-    register_all_drivers(&mut factory, &config.plugins.ignore);
+    register_all_drivers(&mut factory, &config.plugins.ignore, &config.engines.dir, &config.plugins.dir);
 
     let app_count = bundle.apps.len();
     let dv_count = registry.count();
