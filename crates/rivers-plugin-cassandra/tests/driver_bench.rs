@@ -1,7 +1,7 @@
 //! Cassandra driver RPS benchmark.
 //! Run: cargo test -p rivers-plugin-cassandra --test driver_bench -- --nocapture
 use std::time::{Duration, Instant};
-use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query};
+use rivers_driver_sdk::{DatabaseDriver, Query};
 use rivers_plugin_cassandra::CassandraDriver;
 
 const TIMEOUT: Duration = Duration::from_secs(10);

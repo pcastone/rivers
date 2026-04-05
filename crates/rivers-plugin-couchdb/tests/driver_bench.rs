@@ -1,7 +1,7 @@
 //! Couchdb driver RPS benchmark.
 //! Run: cargo test -p rivers-plugin-couchdb --test driver_bench -- --nocapture
 use std::time::{Duration, Instant};
-use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query};
+use rivers_driver_sdk::{DatabaseDriver, Query};
 use rivers_plugin_couchdb::CouchDBDriver;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
