@@ -5227,6 +5227,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "toml 0.8.23",
+ "uuid",
 ]
 
 [[package]]
@@ -5620,6 +5621,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "hex",
+ "libc",
  "rand 0.8.5",
  "reqwest",
  "rivers-runtime",

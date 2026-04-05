@@ -115,8 +115,23 @@ fn launch_daemon(binary: &Path, args: &[String]) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("failed to start riversd: {e}"))?;
 
-    println!("rivers: riversd started (pid {})", child.id());
+    let pid = child.id();
+    write_pid_file(pid);
+    println!("rivers: riversd started (pid {pid})");
     Ok(())
+}
+
+fn write_pid_file(pid: u32) {
+    let pid_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.canonicalize().ok())
+        .and_then(|exe| exe.parent().and_then(|b| b.parent()).map(|r| r.join("run")))
+        .unwrap_or_else(|| std::path::PathBuf::from("run"));
+    let _ = std::fs::create_dir_all(&pid_dir);
+    let pid_path = pid_dir.join("riversd.pid");
+    if let Err(e) = std::fs::write(&pid_path, pid.to_string()) {
+        eprintln!("warning: could not write PID file {}: {e}", pid_path.display());
+    }
 }
 
 /// Launch riversd in the foreground (replaces process on Unix, waits on Windows).

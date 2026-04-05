@@ -21,6 +21,7 @@ hex = { workspace = true }
 chrono = { workspace = true }
 sha2 = { workspace = true }
 rivers-runtime = { path = "../rivers-runtime" }
+libc = "0.2"
 
 # Optional: admin API commands (status, deploy, drivers, etc.)
 reqwest = { workspace = true, optional = true }
