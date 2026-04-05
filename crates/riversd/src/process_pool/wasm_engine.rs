@@ -25,6 +25,29 @@ thread_local! {
     /// Set before WASM execution, cleared after. WASM host functions access this
     /// to perform keystore operations without exposing key bytes to WASM memory.
     static TASK_KEYSTORE: RefCell<Option<KeystoreContext>> = RefCell::new(None);
+
+    /// Human-readable app name for the current task — used for per-app log routing.
+    /// Set before WASM execution from `TaskContext.app_id`, cleared after.
+    /// WASM logging host functions read this to route log lines to AppLogRouter.
+    static TASK_APP_NAME: RefCell<Option<String>> = RefCell::new(None);
+}
+
+/// Get the current app name from the WASM thread-local (for log routing).
+fn current_app_name() -> String {
+    TASK_APP_NAME.with(|c| {
+        c.borrow().clone().unwrap_or_else(|| "wasm".to_string())
+    })
+}
+
+/// Write a structured log line to the app's per-app log file (in addition to tracing).
+fn write_to_app_log(app: &str, level: &str, msg: &str) {
+    if let Some(router) = rivers_runtime::rivers_core::app_log_router::global_router() {
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let line = format!(
+            r#"{{"timestamp":"{timestamp}","level":"{level}","app":"{app}","message":"{msg}"}}"#
+        );
+        router.write(app, &line);
+    }
 }
 
 // ── V2.11: WASM Module Cache ────────────────────────────────────
@@ -78,14 +101,23 @@ pub(crate) async fn execute_wasm_task(
             *ks.borrow_mut() = keystore_arc.map(|k| KeystoreContext { keystore: k });
         });
 
-        // Guard: ensure keystore is cleared on all exit paths
-        struct KeystoreGuard;
-        impl Drop for KeystoreGuard {
+        // Set app name for per-app log routing (matches V8 TASK_APP_NAME pattern).
+        let app_name_for_task = if ctx.app_id.is_empty() {
+            "wasm".to_string()
+        } else {
+            ctx.app_id.clone()
+        };
+        TASK_APP_NAME.with(|n| *n.borrow_mut() = Some(app_name_for_task));
+
+        // Guard: ensure keystore and app name are cleared on all exit paths
+        struct TaskGuard;
+        impl Drop for TaskGuard {
             fn drop(&mut self) {
                 TASK_KEYSTORE.with(|ks| *ks.borrow_mut() = None);
+                TASK_APP_NAME.with(|n| *n.borrow_mut() = None);
             }
         }
-        let _ks_guard = KeystoreGuard;
+        let _task_guard = TaskGuard;
 
         // X6.5: Shared engine with fuel AND epoch-based preemption.
         // Using a singleton engine so cached modules are compatible.
@@ -176,7 +208,9 @@ pub(crate) async fn execute_wasm_task(
                 let data = memory.data(&caller);
                 if let Some(slice) = data.get(ptr as usize..(ptr as usize + len as usize)) {
                     let msg = String::from_utf8_lossy(slice);
-                    tracing::info!(target: "rivers.wasm", "{}", msg);
+                    let app = current_app_name();
+                    tracing::info!(target: "rivers.wasm", app = %app, "{}", msg);
+                    write_to_app_log(&app, "INFO", &msg);
                 }
             }
         }).map_err(|e| TaskError::Internal(format!("linker log_info: {e}")))?;
@@ -186,7 +220,9 @@ pub(crate) async fn execute_wasm_task(
                 let data = memory.data(&caller);
                 if let Some(slice) = data.get(ptr as usize..(ptr as usize + len as usize)) {
                     let msg = String::from_utf8_lossy(slice);
-                    tracing::warn!(target: "rivers.wasm", "{}", msg);
+                    let app = current_app_name();
+                    tracing::warn!(target: "rivers.wasm", app = %app, "{}", msg);
+                    write_to_app_log(&app, "WARN", &msg);
                 }
             }
         }).map_err(|e| TaskError::Internal(format!("linker log_warn: {e}")))?;
@@ -196,7 +232,9 @@ pub(crate) async fn execute_wasm_task(
                 let data = memory.data(&caller);
                 if let Some(slice) = data.get(ptr as usize..(ptr as usize + len as usize)) {
                     let msg = String::from_utf8_lossy(slice);
-                    tracing::error!(target: "rivers.wasm", "{}", msg);
+                    let app = current_app_name();
+                    tracing::error!(target: "rivers.wasm", app = %app, "{}", msg);
+                    write_to_app_log(&app, "ERROR", &msg);
                 }
             }
         }).map_err(|e| TaskError::Internal(format!("linker log_error: {e}")))?;
