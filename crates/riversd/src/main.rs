@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use rivers_runtime::rivers_core::ServerConfig;
+use rivers_runtime::home;
 use riversd::cli::{parse_args, CliCommand};
 
 fn main() {
@@ -45,7 +46,7 @@ fn main() {
                 std::process::exit(1);
             }
         }
-    } else if let Some(path) = discover_config() {
+    } else if let Some(path) = home::discover_config() {
         match rivers_runtime::loader::load_server_config(&path) {
             Ok(config) => (config, Some(path)),
             Err(e) => {
@@ -249,17 +250,3 @@ async fn async_main(
     }
 }
 
-/// Discover a config file from conventional locations relative to the binary.
-///
-/// Probes in order:
-/// 1. `./config/riversd.toml`  — same-directory layout (dev / custom installs)
-/// 2. `../config/riversd.toml` — release layout (`bin/riversd` next to `config/`)
-///
-/// Returns the first path that exists as a file.
-fn discover_config() -> Option<PathBuf> {
-    let candidates = [
-        PathBuf::from("config/riversd.toml"),
-        PathBuf::from("../config/riversd.toml"),
-    ];
-    candidates.into_iter().find(|p| p.is_file())
-}

@@ -43,6 +43,8 @@ pub mod tiered_cache;
 pub mod validate;
 /// API view (endpoint) configuration types.
 pub mod view;
+/// Rivers home directory and config discovery.
+pub mod home;
 
 pub use bundle::{app_config_schema, bundle_manifest_schema, AppConfig, AppManifest, BundleManifest, KeystoreDataConfig, ResourceKeystore, ResourcesConfig};
 pub use datasource::DatasourceConfig;

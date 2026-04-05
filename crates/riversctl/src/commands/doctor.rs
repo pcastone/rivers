@@ -138,11 +138,7 @@ fn check_lockbox_permissions(_path: &Path) -> Result<(), String> {
 
 /// Discover a config file from conventional locations.
 pub fn discover_config() -> Option<PathBuf> {
-    let candidates = [
-        PathBuf::from("config/riversd.toml"),
-        PathBuf::from("../config/riversd.toml"),
-    ];
-    candidates.into_iter().find(|p| p.is_file())
+    rivers_runtime::home::discover_config()
 }
 
 #[cfg(feature = "tls")]
