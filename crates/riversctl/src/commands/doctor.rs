@@ -241,6 +241,32 @@ pub fn cmd_doctor(args: &[String]) -> Result<(), String> {
         }
     }
 
+    // Check: App log directory (if configured)
+    if let Some(ref cfg) = config {
+        if let Some(ref app_log_dir) = cfg.base.logging.app_log_dir {
+            let dir = Path::new(app_log_dir);
+            if dir.is_dir() {
+                println!("  [PASS] app log directory: {app_log_dir}");
+                passed += 1;
+            } else if fix_mode {
+                match std::fs::create_dir_all(dir) {
+                    Ok(()) => {
+                        println!("  [FIXED] app log directory created: {app_log_dir}");
+                        fixed += 1;
+                        passed += 1;
+                    }
+                    Err(e) => {
+                        println!("  [FAIL] app log directory: {app_log_dir} (fix failed: {e})");
+                        failed += 1;
+                    }
+                }
+            } else {
+                println!("  [FAIL] app log directory not found: {app_log_dir}");
+                failed += 1;
+            }
+        }
+    }
+
     // Check 8: Engine libraries directory
     if let Some(ref cfg) = config {
         let engines_dir = &cfg.engines.dir;
