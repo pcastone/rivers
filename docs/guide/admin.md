@@ -707,6 +707,49 @@ Uses `tracing::info!` with the tracing subscriber's formatter. Intended for deve
 
 Use the admin API log management endpoints (AW3.2) to change log levels at runtime without restarting the server. Changes via `/admin/log/set` persist until the next `/admin/log/reset` or process restart.
 
+### Per-Application Logging
+
+When `app_log_dir` is configured, each loaded app gets its own log file:
+
+```toml
+[base.logging]
+level           = "info"
+format          = "json"
+local_file_path = "/opt/rivers/log/riversd.log"
+app_log_dir     = "/opt/rivers/log/apps"
+```
+
+Result:
+```
+log/
+├── riversd.log        <- server logs (startup, config, driver loading)
+└── apps/
+    ├── my-api.log     <- Rivers.log.info/warn/error from my-api handlers
+    └── admin.log      <- Rivers.log from admin handlers
+```
+
+App log files rotate automatically at 10MB (`<app>.log.1`).
+
+### Prometheus Metrics
+
+Enable the built-in Prometheus metrics exporter:
+
+```toml
+[metrics]
+enabled = true
+port = 9091       # default
+```
+
+Scrape endpoint: `http://localhost:9091/metrics`
+
+Available metrics:
+- `rivers_http_requests_total` -- counter by method and status
+- `rivers_http_request_duration_ms` -- histogram by method
+- `rivers_engine_executions_total` -- counter by engine and success
+- `rivers_engine_execution_duration_ms` -- histogram by engine
+- `rivers_active_connections` -- gauge
+- `rivers_loaded_apps` -- gauge
+
 ### Environment overrides
 
 ```toml

@@ -35,8 +35,14 @@ Admin client and management tool. Authenticates to the admin API using Ed25519 s
 | Command | Description |
 |---------|-------------|
 | `riversctl start` | Start riversd (convenience wrapper). |
+| `riversctl stop` | Stop a running riversd daemon. |
+| `riversctl status` | Show riversd running state, PID, port, bundle. |
 | `riversctl deploy <bundle_path>` | Deploy a bundle via admin API. |
+| `riversctl doctor` | Pre-launch health checks. |
+| `riversctl doctor --fix` | Auto-repair fixable issues. |
+| `riversctl doctor --lint` | Validate bundle TOML conventions. |
 | `riversctl tls gen` | Generate self-signed TLS certificate. |
+| `riversctl tls renew` | Regenerate self-signed TLS certificate. |
 | `riversctl tls request <domain>` | Generate CSR for a domain. |
 | `riversctl tls import <cert> <key>` | Import certificate and key pair. |
 | `riversctl tls show <cert>` | Display certificate details. |
@@ -45,13 +51,89 @@ Admin client and management tool. Authenticates to the admin API using Ed25519 s
 
 ```sh
 riversctl start
+riversctl stop
+riversctl status
 riversctl deploy ./address-book-bundle
+riversctl doctor
+riversctl doctor --fix
+riversctl doctor --lint
+riversctl doctor --fix --lint
 riversctl tls gen
+riversctl tls renew
 riversctl tls request api.example.com
 riversctl tls import ./cert.pem ./key.pem
 riversctl tls show ./cert.pem
 riversctl tls list
 riversctl tls expire ./cert.pem
+```
+
+### riversctl stop
+
+Stop a running riversd daemon. Reads the PID file, sends SIGTERM, waits up to 30 seconds for graceful shutdown, then SIGKILL if needed.
+
+```bash
+riversctl stop
+```
+
+PID file location: `<RIVERS_HOME>/run/riversd.pid`
+
+### riversctl status
+
+Show whether riversd is running, its PID, port, and configured bundle path.
+
+```bash
+riversctl status
+```
+
+Output:
+```
+rivers: riversd is running (pid 12345)
+  config: /opt/rivers/config/riversd.toml
+  port:   8080
+  bundle: /opt/rivers/apphome/my-bundle/
+```
+
+### riversctl doctor
+
+Pre-launch health checks. Verifies riversd binary, config, TLS certs, log directories, lockbox, engine/plugin directories, and bundle path.
+
+```bash
+riversctl doctor                    # Run all checks
+riversctl doctor --fix              # Auto-repair fixable issues
+riversctl doctor --lint             # Validate bundle TOML conventions
+riversctl doctor --fix --lint       # Both
+```
+
+**`--fix` auto-repairs:**
+- Lockbox missing -> runs `rivers-lockbox init`
+- Lockbox permissions wrong -> `chmod 0600`
+- TLS cert/key missing -> generates self-signed cert
+- TLS cert expired -> regenerates cert
+- Log directory missing -> `mkdir -p`
+- App log directory missing -> `mkdir -p`
+
+**`--lint` checks:**
+- Bundle structure valid
+- Views defined (warns about `[views.*]` vs `[api.views.*]`)
+- Schema files exist
+- Datasource references resolve
+
+### riversctl tls renew
+
+Regenerate the self-signed TLS certificate. Shows current cert info before renewal.
+
+```bash
+riversctl tls renew
+```
+
+Output:
+```
+Current cert: 365 days left
+  Subject: CN=localhost
+TLS certificate renewed:
+  cert: /opt/rivers/config/tls/server.crt
+  key:  /opt/rivers/config/tls/server.key
+  expires: 2027-04-05
 ```
 
 ### exec subcommands
@@ -146,4 +228,27 @@ Checks: manifest, app configs, schema files, datasource references, DataView ref
 
 ```sh
 riverpackage --pre-flight ./address-book-bundle
+```
+
+### riverpackage init
+
+Scaffold a new Rivers application bundle.
+
+```bash
+riverpackage init my-app                    # Uses faker driver (default)
+riverpackage init my-api --driver postgres  # PostgreSQL datasource
+riverpackage init my-api --driver sqlite    # SQLite datasource
+riverpackage init my-api --driver mysql     # MySQL datasource
+```
+
+Creates:
+```
+my-app/
+├── manifest.toml
+└── my-app/
+    ├── manifest.toml
+    ├── resources.toml
+    ├── app.toml
+    └── schemas/
+        └── item.schema.json
 ```

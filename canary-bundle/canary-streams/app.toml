@@ -2,11 +2,19 @@
 # STREAM Profile — Datasources
 # ─────────────────────────────────────────────
 
-# Kafka disabled for local testing
-# [data.datasources.canary-kafka]
-# name       = "canary-kafka"
-# driver     = "kafka"
-# nopassword = true
+[data.datasources.canary-kafka]
+name       = "canary-kafka"
+driver     = "kafka"
+host       = "192.168.2.203"
+port       = 9092
+nopassword = true
+
+[data.datasources.canary-redis]
+name       = "canary-redis"
+driver     = "redis"
+host       = "192.168.2.206"
+port       = 6379
+nopassword = true
 
 [data.datasources.canary-faker]
 name       = "canary-faker"

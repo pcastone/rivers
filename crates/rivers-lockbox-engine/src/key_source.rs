@@ -80,7 +80,10 @@ pub fn check_file_permissions(path: &Path) -> Result<(), LockBoxError> {
     })?;
 
     let mode = metadata.mode() & 0o777;
-    if mode != 0o600 {
+    let is_dir = metadata.is_dir();
+    // Directories need execute bit (0700), files need 0600
+    let allowed = if is_dir { mode == 0o700 } else { mode == 0o600 };
+    if !allowed {
         return Err(LockBoxError::InsecureFilePermissions {
             path: path.display().to_string(),
             mode,

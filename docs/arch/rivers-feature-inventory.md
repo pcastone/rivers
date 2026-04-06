@@ -705,6 +705,19 @@ Extracted from all specification documents. Top-level features with granular sub
 - Optional local file logging with async buffered writer
 - Fixed event-to-level mapping (not reconfigurable per event)
 
+### 16.6 Per-Application Log Files
+- `AppLogRouter` routes handler logs to `<app_log_dir>/<app_name>.log`
+- Both V8 and WASM engines write to per-app files
+- 10MB rotation with single backup
+- Config: `[base.logging] app_log_dir = "..."`
+
+### 16.7 Prometheus Metrics (optional)
+- Feature-gated: `[metrics] enabled = true, port = 9091`
+- Counters: `rivers_http_requests_total`, `rivers_engine_executions_total`
+- Histograms: `rivers_http_request_duration_ms`, `rivers_engine_execution_duration_ms`
+- Gauges: `rivers_active_connections`, `rivers_loaded_apps`
+- Implementation: `metrics` + `metrics-exporter-prometheus` crates
+
 ---
 
 ## 17. Configuration
@@ -855,4 +868,25 @@ Summary of shaping decisions that modified the specification corpus:
 
 ---
 
-*Extracted from 21 top-level specification documents. 20 shaping decisions (SHAPE-1 through SHAPE-20) applied. Security hardening: 14 of 17 audit findings resolved (v0.52.7). Known issue: parameter binding mismatch across SQL drivers (Issue #54).*
+## 22. CLI Tools (v0.53.0)
+
+### riverpackage init
+- `riverpackage init <name> [--driver faker|postgres|sqlite|mysql]`
+- Scaffolds complete bundle with manifest, resources, app.toml, schemas
+
+### riversctl stop / status
+- `riversctl stop` — reads PID file, sends SIGTERM, waits 30s, SIGKILL fallback
+- `riversctl status` — shows running state, PID, port, bundle
+- PID file: `<RIVERS_HOME>/run/riversd.pid`
+
+### riversctl doctor --lint / --fix
+- `--lint` — validates bundle: views, schema files, datasource refs, conventions
+- `--fix` — auto-repairs: lockbox init, permissions, TLS cert gen/renewal, log dirs
+
+### riversctl tls renew
+- Regenerates self-signed cert using configured x509 params
+- Shows current cert info before renewal
+
+---
+
+*Extracted from 22 top-level specification documents. 20 shaping decisions (SHAPE-1 through SHAPE-20) applied. Security hardening: 14 of 17 audit findings resolved (v0.52.7). Known issue: parameter binding mismatch across SQL drivers (Issue #54).*

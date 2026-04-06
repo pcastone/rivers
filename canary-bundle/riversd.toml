@@ -1,0 +1,36 @@
+bundle_path = "./"
+
+[base]
+host      = "0.0.0.0"
+port      = 9900
+log_level = "info"
+
+[base.logging]
+level       = "info"
+format      = "json"
+app_log_dir = "log/apps"
+
+[base.tls]
+cert     = "/Users/pcastone/Projects/rust/rivers.pub/canary-bundle/config/tls/server.crt"
+key      = "/Users/pcastone/Projects/rust/rivers.pub/canary-bundle/config/tls/server.key"
+redirect = false
+
+[storage_engine]
+backend = "memory"
+
+[security.session]
+enabled        = true
+ttl_s          = 3600
+idle_timeout_s = 600
+
+[security.session.cookie]
+name      = "rivers_session"
+path      = "/"
+secure    = false
+http_only = true
+same_site = "Lax"
+
+[lockbox]
+path       = "/Users/pcastone/Projects/rust/rivers.pub/sec/lockbox/rivers.rkeystore"
+key_source = "file"
+key_file   = "/Users/pcastone/Projects/rust/rivers.pub/sec/lockbox/identity.key"

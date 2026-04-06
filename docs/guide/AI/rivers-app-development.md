@@ -1,6 +1,18 @@
 # Rivers Application Development — Build Spec
 
-**Rivers v0.52.5**
+**Rivers v0.53.0**
+
+## Getting Started (v0.53.0)
+
+The recommended way to create a new bundle is `riverpackage init`:
+
+```bash
+riverpackage init my-bundle/
+```
+
+This scaffolds the full bundle directory structure with template manifests, empty schema directories, and placeholder config files. You can then edit the generated TOML files to define your app.
+
+---
 
 ## What You Are Building
 
@@ -731,7 +743,8 @@ function handler(ctx) {
     // WebSocket context (only in ws_hooks handlers)
     // ctx.ws.connection_id, ctx.ws.message
 
-    // Globals
+    // Globals — structured logging
+    // When app_log_dir is configured, output goes to log/apps/<app-name>.log (v0.53.0)
     Rivers.log.info("message", { key: "value" });
     Rivers.crypto.randomHex(16);
     Rivers.crypto.hashPassword("secret");
@@ -784,9 +797,57 @@ MUST: Append decisions, gaps, and ambiguities — never replace.
 
 ---
 
+## New Config Fields (v0.53.0)
+
+### Per-App Logging
+
+```toml
+[base.logging]
+level           = "info"
+format          = "json"
+local_file_path = "log/riversd.log"
+app_log_dir     = "log/apps"            # Per-app log directory
+```
+
+When `app_log_dir` is set, each app's `Rivers.log.*` calls write to `log/apps/<app-name>.log` instead of the main server log. This is useful for debugging individual apps without filtering.
+
+### Metrics
+
+```toml
+[metrics]
+enabled  = true
+endpoint = "/metrics"
+```
+
+Exposes a Prometheus-compatible metrics endpoint on the main server port.
+
+### Engines
+
+```toml
+[engines]
+v8_path   = "lib/librivers_engine_v8.dylib"
+wasm_path = "lib/librivers_engine_wasm.dylib"
+```
+
+Explicit paths to engine dylibs for dynamic build mode. The correct filename pattern is `librivers_engine_v8.dylib` (not `librivers_v8.dylib`).
+
+### Plugins
+
+```toml
+[plugins]
+directory = "plugins/"
+```
+
+Directory where Rivers searches for plugin dylibs (`librivers_plugin_*.dylib`).
+
+---
+
 ## Verification
 
 ```bash
+# Scaffold a new bundle (recommended starting point)
+riverpackage init {bundle-name}/
+
 # Validate bundle
 riversctl validate {bundle-path}/
 

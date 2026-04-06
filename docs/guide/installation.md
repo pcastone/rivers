@@ -59,6 +59,41 @@ codegen-units = 1
 strip = "symbols"
 ```
 
+### Deploying with cargo deploy
+
+`cargo deploy` builds and assembles a complete Rivers instance:
+
+```bash
+# Install the deploy tool (once)
+cargo install --path crates/cargo-deploy
+
+# Dynamic mode — thin binaries + shared engine/plugin libraries
+cargo deploy /opt/rivers
+
+# Static mode — single fat binary
+cargo deploy /opt/rivers --static
+```
+
+Output structure:
+```
+/opt/rivers/
+├── bin/           (riversd, riversctl, rivers-lockbox, rivers-keystore, riverpackage)
+├── lib/           (librivers_engine_v8.dylib, librivers_engine_wasm.dylib)
+├── plugins/       (12 driver plugin dylibs)
+├── config/
+│   ├── riversd.toml  (pre-configured with absolute paths)
+│   └── tls/          (auto-generated self-signed cert)
+├── lockbox/       (initialized with identity key)
+├── log/
+│   └── apps/      (per-app log files created at runtime)
+├── run/           (PID file written on start)
+├── apphome/       (place bundles here)
+├── data/
+└── VERSION
+```
+
+All paths in `riversd.toml` are absolute -- binaries work from any directory.
+
 ---
 
 ## AW1.3 Installation Layout
@@ -132,6 +167,9 @@ Binary discovery for `riversctl start`:
 
 ```bash
 riversctl doctor --config /opt/rivers/config/riversd.toml
+riversctl doctor --config /opt/rivers/config/riversd.toml --fix
+riversctl doctor --config /opt/rivers/config/riversd.toml --lint
+riversctl doctor --config /opt/rivers/config/riversd.toml --fix --lint
 ```
 
 Checks performed:
@@ -141,6 +179,24 @@ Checks performed:
 - Config passes validation rules
 - Storage engine is available (in-memory always passes)
 - LockBox keystore permissions (if configured)
+- TLS certificate exists and is not expired
+- Log directories exist and are writable
+- Engine and plugin directories exist (dynamic mode)
+- Bundle path is valid
+
+**`--fix` auto-repairs:**
+- Lockbox missing -> runs `rivers-lockbox init`
+- Lockbox permissions wrong -> `chmod 0600`
+- TLS cert/key missing -> generates self-signed cert
+- TLS cert expired -> regenerates cert
+- Log directory missing -> `mkdir -p`
+- App log directory missing -> `mkdir -p`
+
+**`--lint` validates bundle conventions:**
+- Bundle structure valid
+- Views defined (warns about `[views.*]` vs `[api.views.*]`)
+- Schema files exist
+- Datasource references resolve
 
 ### CLI flags reference
 
@@ -501,6 +557,49 @@ local_file_path = "/var/log/rivers/riversd.log"  # optional; stdout always activ
 The CLI flag `--log-level` overrides `base.logging.level`. Log levels can also be changed at runtime via the admin API (`riversctl log set`).
 
 When `local_file_path` is set, logs are written to both stdout and the file using a non-blocking appender.
+
+#### Per-Application Logging
+
+When `app_log_dir` is configured, each loaded app gets its own log file:
+
+```toml
+[base.logging]
+level           = "info"
+format          = "json"
+local_file_path = "/opt/rivers/log/riversd.log"
+app_log_dir     = "/opt/rivers/log/apps"
+```
+
+Result:
+```
+log/
+├── riversd.log        <- server logs (startup, config, driver loading)
+└── apps/
+    ├── my-api.log     <- Rivers.log.info/warn/error from my-api handlers
+    └── admin.log      <- Rivers.log from admin handlers
+```
+
+App log files rotate automatically at 10MB (`<app>.log.1`).
+
+#### Prometheus Metrics
+
+Enable the built-in Prometheus metrics exporter:
+
+```toml
+[metrics]
+enabled = true
+port = 9091       # default
+```
+
+Scrape endpoint: `http://localhost:9091/metrics`
+
+Available metrics:
+- `rivers_http_requests_total` -- counter by method and status
+- `rivers_http_request_duration_ms` -- histogram by method
+- `rivers_engine_executions_total` -- counter by engine and success
+- `rivers_engine_execution_duration_ms` -- histogram by engine
+- `rivers_active_connections` -- gauge
+- `rivers_loaded_apps` -- gauge
 
 ### Backpressure
 

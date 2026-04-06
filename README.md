@@ -224,10 +224,40 @@ cargo deploy /opt/rivers --static
 ├── config/tls/
 │   ├── server.crt
 │   └── server.key
+├── log/
+│   └── apps/               # Per-app log files (when app_log_dir configured)
+├── run/                     # PID files (riversd.pid)
+├── lockbox/                 # Age-encrypted secret store
+├── data/                    # StorageEngine persistent data
+├── apphome/                 # Per-app runtime state
 └── VERSION
 ```
 
 **Static mode** produces only `bin/`, `config/tls/`, and `VERSION` — no shared libraries.
+
+## Quick Reference
+
+```bash
+# Scaffold a new app
+riverpackage init my-app --driver postgres
+
+# Deploy Rivers
+cargo deploy /opt/rivers
+
+# Health check + fix
+/opt/rivers/bin/riversctl doctor --fix
+
+# Start / status / stop
+/opt/rivers/bin/riversctl start
+/opt/rivers/bin/riversctl status
+/opt/rivers/bin/riversctl stop
+
+# Validate bundle config
+/opt/rivers/bin/riversctl doctor --lint
+
+# Renew TLS cert
+/opt/rivers/bin/riversctl tls renew
+```
 
 ## Build Modes
 

@@ -3,34 +3,56 @@
 # ─────────────────────────────────────────────
 
 [data.datasources.canary-mongo]
-name       = "canary-mongo"
-driver     = "mongodb"
-nopassword = true
+name               = "canary-mongo"
+driver             = "mongodb"
+host               = "192.168.2.212"
+port               = 27017
+database           = "canary"
+username           = "rivers"
+credentials_source = "lockbox://mongodb/test"
 
 [data.datasources.canary-es]
-name       = "canary-es"
-driver     = "elasticsearch"
-nopassword = true
+name               = "canary-es"
+driver             = "elasticsearch"
+host               = "192.168.2.218"
+port               = 9200
+credentials_source = "lockbox://elasticsearch/test"
 
 [data.datasources.canary-couch]
-name       = "canary-couch"
-driver     = "couchdb"
-nopassword = true
+name               = "canary-couch"
+driver             = "couchdb"
+host               = "192.168.2.221"
+port               = 5984
+database           = "canary"
+username           = "rivers"
+credentials_source = "lockbox://couchdb/test"
 
 [data.datasources.canary-cassandra]
-name       = "canary-cassandra"
-driver     = "cassandra"
-nopassword = true
+name               = "canary-cassandra"
+driver             = "cassandra"
+host               = "192.168.2.224"
+port               = 9042
+credentials_source = "lockbox://cassandra/test"
 
 [data.datasources.canary-ldap]
-name       = "canary-ldap"
-driver     = "ldap"
-nopassword = true
+name               = "canary-ldap"
+driver             = "ldap"
+host               = "192.168.2.227"
+port               = 389
+database           = "dc=rivers,dc=test"
+username           = "cn=admin,dc=rivers,dc=test"
+credentials_source = "lockbox://ldap/test"
 
 [data.datasources.canary-redis]
-name       = "canary-redis"
-driver     = "redis"
-nopassword = true
+name               = "canary-redis"
+driver             = "redis"
+host               = "192.168.2.206"
+port               = 6379
+credentials_source = "lockbox://redis/test"
+
+[data.datasources.canary-redis.extra]
+cluster = "true"
+hosts   = "192.168.2.206:6379,192.168.2.207:6379,192.168.2.208:6379"
 
 # ─────────────────────────────────────────────
 # DataViews — MongoDB
@@ -114,12 +136,7 @@ required = true
 [data.dataviews.es_search]
 name       = "es_search"
 datasource = "canary-es"
-query      = '{"index":"canary","body":{"query":{"match":{"title":"$1"}}}}'
-
-[[data.dataviews.es_search.parameters]]
-name     = "query_text"
-type     = "string"
-required = true
+query      = '{"index":"canary","body":{"query":{"match_all":{}}}}'
 
 # ─────────────────────────────────────────────
 # DataViews — CouchDB
@@ -133,7 +150,7 @@ query      = '{"operation":"find","selector":{}}'
 [data.dataviews.couch_put_doc]
 name       = "couch_put_doc"
 datasource = "canary-couch"
-query      = '{"operation":"put","id":"$1"}'
+query      = '{"operation":"insert","id":"$1"}'
 
 [[data.dataviews.couch_put_doc.parameters]]
 name     = "doc_id"
@@ -148,7 +165,7 @@ required = true
 [data.dataviews.couch_get_doc]
 name       = "couch_get_doc"
 datasource = "canary-couch"
-query      = '{"operation":"get","id":"$1"}'
+query      = "get $doc_id"
 
 [[data.dataviews.couch_get_doc.parameters]]
 name     = "doc_id"
@@ -167,7 +184,7 @@ query      = "SELECT key FROM system.local"
 [data.dataviews.cassandra_insert]
 name       = "cassandra_insert"
 datasource = "canary-cassandra"
-query      = "INSERT INTO canary.records (id, name, value) VALUES ($1, $2, $3)"
+query      = "INSERT INTO canary.records (id, name, value) VALUES (:id, :name, :value)"
 
 [[data.dataviews.cassandra_insert.parameters]]
 name     = "id"
@@ -187,7 +204,7 @@ required = true
 [data.dataviews.cassandra_select_by_id]
 name       = "cassandra_select_by_id"
 datasource = "canary-cassandra"
-query      = "SELECT id, name, value FROM canary.records WHERE id = $1"
+query      = "SELECT id, name, value FROM canary.records WHERE id = :id"
 
 [[data.dataviews.cassandra_select_by_id.parameters]]
 name     = "id"
@@ -201,12 +218,12 @@ required = true
 [data.dataviews.ldap_ping]
 name       = "ldap_ping"
 datasource = "canary-ldap"
-query      = "dc=canary,dc=test sub (objectClass=*)"
+query      = "ping"
 
 [data.dataviews.ldap_search]
 name       = "ldap_search"
 datasource = "canary-ldap"
-query      = "dc=canary,dc=test sub ($1)"
+query      = "search dc=rivers,dc=test sub (objectClass=*)"
 
 [[data.dataviews.ldap_search.parameters]]
 name     = "filter"

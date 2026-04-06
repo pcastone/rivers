@@ -1,22 +1,17 @@
-# Kafka disabled for local testing (no broker available)
-# [[datasources]]
-# name       = "canary-kafka"
-# driver     = "kafka"
-# x-type     = "kafka"
-# lockbox    = "canary-kafka"
-# required   = true
+[[datasources]]
+name       = "canary-kafka"
+driver     = "kafka"
+lockbox    = "kafka/test"
+required   = true
 
-# Redis disabled for local testing (no server available)
-# [[datasources]]
-# name       = "canary-redis"
-# driver     = "redis"
-# x-type     = "redis"
-# lockbox    = "canary-redis"
-# required   = true
+[[datasources]]
+name       = "canary-redis"
+driver     = "redis"
+lockbox    = "redis/test"
+required   = true
 
 [[datasources]]
 name       = "canary-faker"
 driver     = "faker"
-x-type     = "faker"
 nopassword = true
 required   = true
