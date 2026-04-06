@@ -1,6 +1,6 @@
 # Rivers V1 Administration — Operations Spec
 
-**Rivers v0.52.5**
+**Rivers v0.53.0**
 
 ## Environment
 
@@ -202,6 +202,28 @@ local_file_path = "/var/log/rivers/riversd.log"   # optional
 
 Defaults: `level = "info"`, `format = "json"`, `local_file_path = null`.
 
+### Per-App Logging (v0.53.0)
+
+```toml
+[base.logging]
+level           = "info"
+format          = "json"
+local_file_path = "log/riversd.log"
+app_log_dir     = "log/apps"
+```
+
+When `app_log_dir` is set, each app's handler logs (`Rivers.log.*`) are written to a separate file:
+
+```
+log/
+├── riversd.log                  # Server-level logs
+└── apps/
+    ├── orders-service.log       # Per-app handler logs
+    └── app-main.log
+```
+
+This makes it straightforward to tail logs for a single app without filtering the main server log.
+
 ### Log Levels
 
 | Level | Use |
@@ -258,6 +280,26 @@ trace_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 # Circuit breaker events
 event_type = "DatasourceCircuitOpened"
 ```
+
+---
+
+## Metrics Endpoint (v0.53.0)
+
+### Configuration
+
+```toml
+[metrics]
+enabled  = true
+endpoint = "/metrics"
+```
+
+### Usage
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+Returns Prometheus-compatible metrics including request counts, latency histograms, active connections, datasource pool utilization, and circuit breaker state.
 
 ---
 
@@ -625,18 +667,28 @@ just build-dynamic
 
 Produces thin binaries + shared libraries:
 - `riversd` (~5-10MB)
-- `lib/librivers_engine_v8.dylib`
-- `lib/librivers_engine_wasm.dylib`
+- `lib/librivers_engine_v8.dylib` (correct filename pattern — not `librivers_v8.dylib`)
+- `lib/librivers_engine_wasm.dylib` (correct filename pattern — not `librivers_wasm.dylib`)
 - `plugins/librivers_plugin_*.dylib` (10 plugins)
 
 ### Deployment
 
+`cargo deploy` is the recommended deployment method (v0.53.0):
+
 ```bash
-cargo deploy <path>              # Dynamic mode
+cargo deploy <path>              # Dynamic mode (recommended)
 cargo deploy <path> --static     # Static mode (single fat binary)
 ```
 
 Both modes generate a self-signed TLS certificate at `<path>/config/tls/` so riversd can start immediately.
+
+### cargo deploy Workflow
+
+1. Builds all crates in the appropriate mode (static or dynamic)
+2. Copies binaries and dylibs to the target path
+3. Generates TLS certificates if not present
+4. Writes `run/riversd.pid` location for `riversctl stop/status`
+5. Validates the deployment structure
 
 ---
 
@@ -672,7 +724,12 @@ riverpackage import-exec <path>        # Import exec driver scripts
 
 ```bash
 riversctl start --config riversd.toml       # Start riversd
+riversctl stop                               # Graceful shutdown via PID file (v0.53.0)
+riversctl status                             # Check if riversd is running (v0.53.0)
 riversctl doctor                             # Health check diagnostics
+riversctl doctor --fix                       # Auto-fix common issues (v0.53.0)
+riversctl doctor --lint                      # Lint config without fixing (v0.53.0)
+riversctl tls renew                          # Renew TLS certificates (v0.53.0)
 riversctl validate <bundle-path>             # Validate bundle (9 checks)
 riversctl validate --schema server|app|bundle  # Output JSON Schema
 riversctl exec hash <input>                  # Hash utility
@@ -680,6 +737,10 @@ riversctl exec verify <input> <hash>         # Verify hash
 riversctl admin status                       # Query admin API
 riversctl admin deploy <bundle>              # Deploy via admin API
 ```
+
+### PID File
+
+Rivers writes its PID to `run/riversd.pid` on startup. The `riversctl stop` and `riversctl status` commands use this file to locate the running process. The PID file is removed on clean shutdown.
 
 ---
 

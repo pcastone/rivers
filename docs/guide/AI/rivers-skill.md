@@ -1,6 +1,6 @@
 ---
 name: rivers-dev
-description: Build Rivers application bundles — declarative REST APIs, WebSocket, SSE, streaming, and GraphQL endpoints using TOML configuration, JSON schemas, and JavaScript/WASM CodeComponent handlers. Use when building Rivers apps, writing handlers, configuring datasources/DataViews/views, or administering riversd. Covers the full Rivers v0.52.5 stack.
+description: Build Rivers application bundles — declarative REST APIs, WebSocket, SSE, streaming, and GraphQL endpoints using TOML configuration, JSON schemas, and JavaScript/WASM CodeComponent handlers. Use when building Rivers apps, writing handlers, configuring datasources/DataViews/views, or administering riversd. Covers the full Rivers v0.53.0 stack.
 ---
 
 # Rivers Application Development Skill
@@ -256,6 +256,7 @@ function handler(ctx) {
 
 ```javascript
 // Structured logging (trace_id auto-included)
+// Output goes to log/apps/<app-name>.log when app_log_dir is configured (v0.53.0)
 Rivers.log.info("user login", { userId: 123 });
 Rivers.log.warn("rate limit approaching");
 Rivers.log.error("payment failed", { reason: "declined" });
@@ -448,6 +449,23 @@ enabled = true
 path       = "lockbox/keystore.rkeystore"
 key_source = "env"
 key_env_var = "RIVERS_LOCKBOX_KEY"
+
+[base.logging]
+level           = "info"
+format          = "json"
+local_file_path = "log/riversd.log"
+app_log_dir     = "log/apps"            # Per-app log directory (v0.53.0)
+
+[metrics]
+enabled  = true
+endpoint = "/metrics"                   # Prometheus-compatible metrics (v0.53.0)
+
+[engines]
+v8_path   = "lib/librivers_engine_v8.dylib"     # Correct dylib filename
+wasm_path = "lib/librivers_engine_wasm.dylib"
+
+[plugins]
+directory = "plugins/"                  # Plugin dylib search directory
 ```
 
 ---
@@ -488,13 +506,21 @@ rivers-keystore info <path> <name>        # Key metadata
 rivers-keystore delete <path> <name>      # Delete key
 rivers-keystore rotate <path> <name>      # Rotate key
 
+# Control (additional commands)
+riversctl stop                             # Graceful shutdown via PID file
+riversctl status                           # Check if riversd is running
+riversctl doctor --fix                     # Auto-fix common issues
+riversctl doctor --lint                    # Lint config without fixing
+riversctl tls renew                        # Renew TLS certificates
+
 # Packaging
+riverpackage init my-bundle/              # Scaffold a new bundle (recommended)
 riverpackage validate my-bundle/          # Validate bundle structure
 riverpackage preflight my-bundle/         # Pre-deployment checks
 riverpackage pack my-bundle/              # Package for deployment
 riverpackage import-exec <path>           # Import exec scripts
 
-# Deployment
+# Deployment (recommended)
 cargo deploy <path>                       # Deploy dynamic mode
 cargo deploy <path> --static              # Deploy static mode
 ```
