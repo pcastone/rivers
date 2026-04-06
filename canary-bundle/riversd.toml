@@ -11,6 +11,8 @@ format      = "json"
 app_log_dir = "log/apps"
 
 [base.tls]
+cert     = "/Users/pcastone/Projects/rust/rivers.pub/canary-bundle/config/tls/server.crt"
+key      = "/Users/pcastone/Projects/rust/rivers.pub/canary-bundle/config/tls/server.key"
 redirect = false
 
 [storage_engine]
