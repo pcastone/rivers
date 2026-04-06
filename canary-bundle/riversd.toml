@@ -18,6 +18,18 @@ redirect = false
 [storage_engine]
 backend = "memory"
 
+[security.session]
+enabled        = true
+ttl_s          = 3600
+idle_timeout_s = 600
+
+[security.session.cookie]
+name      = "rivers_session"
+path      = "/"
+secure    = false
+http_only = true
+same_site = "Lax"
+
 [lockbox]
 path       = "/Users/pcastone/Projects/rust/rivers.pub/sec/lockbox/rivers.rkeystore"
 key_source = "file"

@@ -11,12 +11,15 @@ function login(ctx) {
 
     // Canary accepts fixed test credentials
     if (body.username === "canary" && body.password === "canary-test") {
-        // Return IdentityClaims — framework creates session from these
+        // Return guard result — allow=true + session_claims for framework to create session
         return {
-            sub: "canary-user-001",
-            role: "tester",
-            email: "canary@test.local",
-            groups: ["canary-fleet"]
+            allow: true,
+            session_claims: {
+                subject: "canary-user-001",
+                role: "tester",
+                email: "canary@test.local",
+                groups: ["canary-fleet"]
+            }
         };
     }
 
