@@ -624,4 +624,102 @@ mod tests {
         let err = driver.validate(&data, &schema, ValidationDirection::Input).unwrap_err();
         assert!(matches!(err, ValidationError::ConstraintViolation { .. }));
     }
+
+    // ── Connection path resolution tests ────────────────────────────
+
+    fn make_params(host: &str, database: &str) -> ConnectionParams {
+        ConnectionParams {
+            host: host.into(),
+            port: 0,
+            database: database.into(),
+            username: String::new(),
+            password: String::new(),
+            options: HashMap::new(),
+        }
+    }
+
+    fn q(statement: &str, params: Vec<(&str, QueryValue)>) -> Query {
+        let mut query = Query::new("t", statement);
+        query.parameters = params.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        query
+    }
+
+    #[tokio::test]
+    async fn connect_uses_database_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let driver = SqliteDriver::new();
+        let params = make_params("", db_path.to_str().unwrap());
+
+        let mut conn = driver.connect(&params).await.unwrap();
+        conn.ddl_execute(&q("CREATE TABLE t (id INTEGER PRIMARY KEY)", vec![])).await.unwrap();
+
+        assert!(db_path.exists(), "SQLite file should exist on disk");
+    }
+
+    #[tokio::test]
+    async fn connect_falls_back_to_host_when_database_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("fallback.db");
+        let driver = SqliteDriver::new();
+        let params = make_params(db_path.to_str().unwrap(), "");
+
+        let mut conn = driver.connect(&params).await.unwrap();
+        conn.ddl_execute(&q("CREATE TABLE t (id INTEGER PRIMARY KEY)", vec![])).await.unwrap();
+
+        assert!(db_path.exists(), "SQLite file should exist via host fallback");
+    }
+
+    #[tokio::test]
+    async fn connect_errors_when_both_empty() {
+        let driver = SqliteDriver::new();
+        let params = make_params("", "");
+
+        match driver.connect(&params).await {
+            Err(e) => {
+                let msg = format!("{e:?}");
+                assert!(msg.contains("no database path"), "should mention 'no database path', got: {msg}");
+            }
+            Ok(_) => panic!("should error when both host and database are empty"),
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_creates_parent_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("nested/deep/dir/test.db");
+        let driver = SqliteDriver::new();
+        let params = make_params("", db_path.to_str().unwrap());
+
+        let mut conn = driver.connect(&params).await.unwrap();
+        conn.ddl_execute(&q("CREATE TABLE t (id INTEGER PRIMARY KEY)", vec![])).await.unwrap();
+
+        assert!(db_path.exists(), "SQLite file should exist in nested directory");
+    }
+
+    #[tokio::test]
+    async fn connect_insert_then_select_across_connections() {
+        // Regression test: INSERT + SELECT on SEPARATE connections to the SAME file
+        // must return data (not null). This catches the in-memory DB bug.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("persist.db");
+        let driver = SqliteDriver::new();
+        let params = make_params("", db_path.to_str().unwrap());
+
+        // Connection 1: create table + insert a row
+        let mut conn1 = driver.connect(&params).await.unwrap();
+        conn1.ddl_execute(&q("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)", vec![])).await.unwrap();
+        conn1.execute(&q("INSERT INTO items (id, name) VALUES (42, 'test-item')", vec![])).await.unwrap();
+
+        // Connection 2: select (different connection, same file)
+        let mut conn2 = driver.connect(&params).await.unwrap();
+        let result = conn2.execute(&q("SELECT name FROM items WHERE id = 42", vec![])).await.unwrap();
+
+        assert_eq!(result.rows.len(), 1, "SELECT on conn2 should see conn1's INSERT");
+        assert_eq!(
+            result.rows[0].get("name"),
+            Some(&QueryValue::String("test-item".into())),
+            "should read back the inserted value"
+        );
+    }
 }
