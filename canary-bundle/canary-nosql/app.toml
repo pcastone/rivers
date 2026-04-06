@@ -134,12 +134,12 @@ required = true
 [data.dataviews.es_search]
 name       = "es_search"
 datasource = "canary-es"
-query      = '{"index":"canary","body":{"query":{"match":{"title":"$1"}}}}'
+query      = '{"index":"canary"}'
 
 [[data.dataviews.es_search.parameters]]
-name     = "query_text"
+name     = "query"
 type     = "string"
-required = true
+required = false
 
 # ─────────────────────────────────────────────
 # DataViews — CouchDB
@@ -168,7 +168,7 @@ required = true
 [data.dataviews.couch_get_doc]
 name       = "couch_get_doc"
 datasource = "canary-couch"
-query      = "get"
+query      = "get $doc_id"
 
 [[data.dataviews.couch_get_doc.parameters]]
 name     = "doc_id"

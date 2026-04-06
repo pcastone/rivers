@@ -137,7 +137,7 @@ function esSearch(ctx) {
         ctx.dataview("es_index_doc", { doc_id: docId, title: "canary search test", body: "searchable content" });
 
         // Search for it
-        var result = ctx.dataview("es_search", { query_text: "canary" });
+        var result = ctx.dataview("es_search", { query: JSON.stringify({"match_all":{}}) });
         t.assert("search_result_not_null", result !== null, "result=" + JSON.stringify(result));
         t.assert("search_ok", true, "search query executed");
     } catch (e) {
