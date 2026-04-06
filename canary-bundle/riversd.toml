@@ -17,12 +17,6 @@ redirect = false
 backend = "memory"
 
 [lockbox]
-path       = "/Users/pcastone/Projects/rust/rivers.pub/sec/lockbox"
+path       = "/Users/pcastone/Projects/rust/rivers.pub/sec/lockbox/rivers.rkeystore"
 key_source = "file"
 key_file   = "/Users/pcastone/Projects/rust/rivers.pub/sec/lockbox/identity.key"
-
-[engines]
-dir = "lib"
-
-[plugins]
-dir = "plugins"
