@@ -1,35 +1,35 @@
 [[datasources]]
 name       = "mongo"
 driver     = "mongodb"
-nopassword = true
+lockbox    = "mongodb/test"
 required   = true
 
 [[datasources]]
 name       = "es"
 driver     = "elasticsearch"
-nopassword = true
+lockbox    = "elasticsearch/test"
 required   = true
 
 [[datasources]]
 name       = "couch"
 driver     = "couchdb"
-nopassword = true
+lockbox    = "couchdb/test"
 required   = true
 
 [[datasources]]
 name       = "cassandra"
 driver     = "cassandra"
-nopassword = true
+lockbox    = "cassandra/test"
 required   = true
 
 [[datasources]]
 name       = "ldap"
 driver     = "ldap"
-nopassword = true
+lockbox    = "ldap/test"
 required   = true
 
 [[datasources]]
 name       = "redis"
 driver     = "redis"
-nopassword = true
+lockbox    = "redis/test"
 required   = true

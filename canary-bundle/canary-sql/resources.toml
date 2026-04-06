@@ -1,13 +1,13 @@
 [[datasources]]
 name       = "pg"
 driver     = "postgres"
-nopassword = true
+lockbox    = "postgres/test"
 required   = true
 
 [[datasources]]
 name       = "mysql"
 driver     = "mysql"
-nopassword = true
+lockbox    = "mysql/test"
 required   = true
 
 [[datasources]]

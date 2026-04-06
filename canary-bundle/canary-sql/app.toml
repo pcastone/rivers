@@ -3,22 +3,22 @@
 # ─────────────────────────────────────────────
 
 [data.datasources.canary-pg]
-name       = "canary-pg"
-driver     = "postgres"
-host       = "192.168.2.209"
-port       = 5432
-database   = "rivers"
-username   = "rivers"
-nopassword = true
+name               = "canary-pg"
+driver             = "postgres"
+host               = "192.168.2.209"
+port               = 5432
+database           = "rivers"
+username           = "rivers"
+credentials_source = "lockbox://postgres/test"
 
 [data.datasources.canary-mysql]
-name       = "canary-mysql"
-driver     = "mysql"
-host       = "192.168.2.215"
-port       = 3306
-database   = "rivers"
-username   = "rivers"
-nopassword = true
+name               = "canary-mysql"
+driver             = "mysql"
+host               = "192.168.2.215"
+port               = 3306
+database           = "rivers"
+username           = "rivers"
+credentials_source = "lockbox://mysql/test"
 
 [data.datasources.canary-sqlite]
 name       = "canary-sqlite"

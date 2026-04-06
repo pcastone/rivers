@@ -2,19 +2,24 @@ bundle_path = "./"
 
 [base]
 host      = "0.0.0.0"
-port      = 8080
+port      = 9900
 log_level = "info"
 
 [base.logging]
-level           = "info"
-format          = "json"
-app_log_dir     = "log/apps"
+level       = "info"
+format      = "json"
+app_log_dir = "log/apps"
 
 [base.tls]
 redirect = false
 
 [storage_engine]
 backend = "memory"
+
+[lockbox]
+path       = "/Users/pcastone/Projects/rust/rivers.pub/sec/lockbox"
+key_source = "file"
+key_file   = "/Users/pcastone/Projects/rust/rivers.pub/sec/lockbox/identity.key"
 
 [engines]
 dir = "lib"
