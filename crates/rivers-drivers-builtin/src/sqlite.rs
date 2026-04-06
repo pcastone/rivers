@@ -68,6 +68,13 @@ impl DatabaseDriver for SqliteDriver {
             ));
         };
 
+        tracing::info!(
+            target: "rivers.sqlite",
+            db_path = %path,
+            from_field = if !params.database.is_empty() { "database" } else { "host" },
+            "sqlite: opening connection"
+        );
+
         // Create parent directories if they don't exist (skip for :memory:)
         if path != ":memory:" {
             if let Some(parent) = std::path::Path::new(&path).parent() {
