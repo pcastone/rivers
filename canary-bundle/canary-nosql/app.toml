@@ -48,6 +48,10 @@ host               = "192.168.2.206"
 port               = 6379
 credentials_source = "lockbox://redis/test"
 
+[data.datasources.canary-redis.extra]
+cluster = "true"
+hosts   = "192.168.2.206:6379,192.168.2.207:6379,192.168.2.208:6379"
+
 # ─────────────────────────────────────────────
 # DataViews — MongoDB
 # ─────────────────────────────────────────────
@@ -217,12 +221,12 @@ required = true
 [data.dataviews.ldap_ping]
 name       = "ldap_ping"
 datasource = "canary-ldap"
-query      = "dc=canary,dc=test sub (objectClass=*)"
+query      = "dc=rivers,dc=test sub (objectClass=*)"
 
 [data.dataviews.ldap_search]
 name       = "ldap_search"
 datasource = "canary-ldap"
-query      = "dc=canary,dc=test sub ($1)"
+query      = "dc=rivers,dc=test sub ($1)"
 
 [[data.dataviews.ldap_search.parameters]]
 name     = "filter"
