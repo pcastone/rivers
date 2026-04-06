@@ -203,6 +203,40 @@ Key tutorials in `docs/guide/tutorials/`:
 | Faker datasource | `datasource-faker.md` |
 | PostgreSQL datasource | `datasource-postgresql.md` |
 
+## Test Infrastructure
+
+Integration tests run against a Podman cluster on **192.168.2.161** (CentOS Stream 9, 128GB RAM). Full details in `sec/test-infrastructure.md`.
+
+| Service | IPs | Port | Credentials |
+|---------|-----|------|-------------|
+| PostgreSQL (primary + 2 replicas) | .209-.211 | 5432 | `rivers` / `rivers_test` / db: `rivers` |
+| MySQL (InnoDB Cluster, 3 nodes) | .215-.217 | 3306 | `rivers` / `rivers_test` / db: `rivers` |
+| Redis (Cluster, 3 nodes) | .206-.208 | 6379 | `rivers_test` |
+| MongoDB (Replica Set `rivers-rs`, 3 nodes) | .212-.214 | 27017 | `rivers` / `rivers_test` |
+| Elasticsearch (Cluster `rivers-es`, 3 nodes) | .218-.220 | 9200 | security disabled |
+| CouchDB (Cluster, 3 nodes) | .221-.223 | 5984 | `rivers` / `rivers_test` |
+| Cassandra (Ring `rivers`, 3 nodes) | .224-.226 | 9042 | — |
+| Kafka (3 brokers) | .203-.205 | 9092 | — |
+| Zookeeper (3 nodes) | .200-.202 | 2181 | — |
+| LDAP (single node) | .227 | 389 | `cn=admin,dc=rivers,dc=test` / `rivers_test` |
+
+**27 containers, 9 clusters + 1 standalone.** All IPs on `192.168.2.x` subnet via macvlan.
+
+Quick verification:
+```bash
+curl -s http://192.168.2.218:9200/_cluster/health?pretty    # ES
+psql -h 192.168.2.209 -U rivers -d rivers -c "SELECT 1"    # PostgreSQL
+redis-cli -h 192.168.2.206 -a rivers_test cluster info      # Redis
+```
+
+### Default Ports (riversd)
+
+| Port | Purpose |
+|------|---------|
+| 8080 | Main HTTP/HTTPS server (configurable via `[base] port`) |
+| 9090 | Admin API (configurable via `[base.admin_api] port`) |
+| 9091 | Prometheus metrics exporter (configurable via `[metrics] port`) |
+
 ## Tracking
 
 - `todo/tasks.md` — Current work items
@@ -210,3 +244,4 @@ Key tutorials in `docs/guide/tutorials/`:
 - `bugs/` — Bug reports with root cause analysis
 - `docs/dreams/` — Project reflection documents
 - `docs/superpowers/plans/` — Implementation plans
+- `sec/test-infrastructure.md` — Full test cluster details, connection strings, container management
