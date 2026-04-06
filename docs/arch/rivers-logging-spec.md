@@ -241,6 +241,31 @@ File writes use an async buffered writer (`tokio::io::BufWriter` over a `tokio::
 
 This means file writes do not add latency to the `LogHandler` execution path under normal load. On shutdown, the writer flushes and closes before the process exits.
 
+### 6.3 Per-Application Log Files
+
+When `app_log_dir` is configured in `[base.logging]`, each loaded application receives a dedicated log file:
+
+```toml
+[base.logging]
+app_log_dir = "/opt/rivers/log/apps"
+```
+
+**Behavior:**
+- On bundle load, `AppLogRouter` creates `<app_log_dir>/<entry_point>.log` for each app
+- `Rivers.log.info/warn/error` calls in V8 and WASM handlers write to both:
+  1. The central tracing subscriber (stdout + `local_file_path`)
+  2. The per-app log file via `AppLogRouter`
+- EventBus events with `app_id` context also route to per-app files
+- Log files rotate at 10MB (`<name>.log.1`, single backup)
+- Writers use `BufWriter` buffering; flush on rotation, shutdown, and Drop
+
+**Implementation:**
+- `rivers-core/src/app_log_router.rs` — `AppLogRouter` file writer registry (global via `OnceLock`)
+- `riversd/src/process_pool/v8_engine/task_locals.rs` — `TASK_APP_NAME` thread-local
+- `riversd/src/process_pool/v8_engine/rivers_global.rs` — `write_to_app_log()` in V8 callbacks
+- `riversd/src/process_pool/wasm_engine.rs` — equivalent WASM logging
+- `rivers-core/src/logging.rs` — EventBus `LogHandler` per-app routing
+
 ---
 
 ## 7. Security Boundaries
@@ -272,9 +297,10 @@ Rivers does not perform string-scanning redaction of log messages. The security 
 level           = "info"                           # debug | info | warn | error
 format          = "json"                           # json | text
 local_file_path = "/var/log/rivers/riversd.log"   # optional
+app_log_dir     = "/opt/rivers/log/apps"           # optional — per-app log files
 ```
 
-Defaults: `level = "info"`, `format = "json"`, `local_file_path = null`.
+Defaults: `level = "info"`, `format = "json"`, `local_file_path = null`, `app_log_dir = null`.
 
 Environment override:
 
