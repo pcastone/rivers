@@ -168,7 +168,7 @@ required = true
 [data.dataviews.couch_get_doc]
 name       = "couch_get_doc"
 datasource = "canary-couch"
-query      = '{"operation":"get","id":"$1"}'
+query      = "get"
 
 [[data.dataviews.couch_get_doc.parameters]]
 name     = "doc_id"

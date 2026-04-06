@@ -130,8 +130,14 @@ impl LdapConnection {
             ));
         }
 
-        // Find the scope token (sub, one, base) and split around it
-        let parts: Vec<&str> = trimmed.splitn(3, ' ').collect();
+        // Strip the operation prefix if present (operation is already parsed by dispatch)
+        let body = if trimmed.starts_with("search ") || trimmed.starts_with("find ") || trimmed.starts_with("select ") {
+            trimmed.splitn(2, ' ').nth(1).unwrap_or(trimmed)
+        } else {
+            trimmed
+        };
+
+        let parts: Vec<&str> = body.splitn(3, ' ').collect();
         if parts.len() < 3 {
             return Err(DriverError::Query(format!(
                 "ldap search: statement must be 'base_dn scope filter', got '{trimmed}'"

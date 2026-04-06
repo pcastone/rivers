@@ -169,9 +169,26 @@ struct IndexResponse {
 // ── Operation implementations ──────────────────────────────────────────
 
 impl ElasticConnection {
-    /// POST /{target}/_search with body from parameters.
+    /// Resolve the index name: try parsing "index" from the JSON statement first,
+    /// fall back to query.target. This handles namespaced targets like "nosql:canary-es".
+    fn resolve_index(&self, query: &Query) -> String {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&query.statement) {
+            if let Some(idx) = json.get("index").and_then(|v| v.as_str()) {
+                return idx.to_string();
+            }
+        }
+        // Fall back to target, stripping namespace prefix if present
+        if let Some((_ns, name)) = query.target.split_once(':') {
+            name.to_string()
+        } else {
+            query.target.clone()
+        }
+    }
+
+    /// POST /{index}/_search with body from parameters.
     async fn exec_search(&self, query: &Query) -> Result<QueryResult, DriverError> {
-        let path = format!("/{}/_search", query.target);
+        let index = self.resolve_index(query);
+        let path = format!("/{}/_search", index);
         let body = params_to_json(&query.parameters);
 
         let resp = self
@@ -223,7 +240,7 @@ impl ElasticConnection {
 
     /// POST /{target}/_doc with body from parameters.
     async fn exec_index(&self, query: &Query) -> Result<QueryResult, DriverError> {
-        let path = format!("/{}/_doc", query.target);
+        let path = format!("/{}/_doc", self.resolve_index(query));
         let body = params_to_json(&query.parameters);
 
         let resp = self
@@ -256,7 +273,7 @@ impl ElasticConnection {
     /// POST /{target}/_update/{id} with body from parameters.
     async fn exec_update(&self, query: &Query) -> Result<QueryResult, DriverError> {
         let id = extract_id(&query.parameters)?;
-        let path = format!("/{}/_update/{}", query.target, id);
+        let path = format!("/{}/_update/{}", self.resolve_index(query), id);
 
         // Build the update body: fields other than "id" go into "doc".
         let fields: HashMap<String, QueryValue> = query
@@ -293,7 +310,7 @@ impl ElasticConnection {
     /// DELETE /{target}/_doc/{id}
     async fn exec_delete(&self, query: &Query) -> Result<QueryResult, DriverError> {
         let id = extract_id(&query.parameters)?;
-        let path = format!("/{}/_doc/{}", query.target, id);
+        let path = format!("/{}/_doc/{}", self.resolve_index(query), id);
 
         let resp = self
             .request(reqwest::Method::DELETE, &path)
