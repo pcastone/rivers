@@ -57,7 +57,25 @@ impl DatabaseDriver for SqliteDriver {
         &self,
         params: &ConnectionParams,
     ) -> Result<Box<dyn Connection>, DriverError> {
-        let path = params.database.clone();
+        // Resolve path: database field first, fall back to host (common for SQLite configs)
+        let path = if !params.database.is_empty() {
+            params.database.clone()
+        } else if !params.host.is_empty() {
+            params.host.clone()
+        } else {
+            return Err(DriverError::Connection(
+                "sqlite: no database path — set 'database' or 'host' in datasource config".into(),
+            ));
+        };
+
+        // Create parent directories if they don't exist (skip for :memory:)
+        if path != ":memory:" {
+            if let Some(parent) = std::path::Path::new(&path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+            }
+        }
 
         // Open connection on a blocking thread since rusqlite is synchronous.
         let conn = tokio::task::spawn_blocking(move || -> Result<rusqlite::Connection, DriverError> {
