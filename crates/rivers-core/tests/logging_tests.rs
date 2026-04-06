@@ -16,6 +16,7 @@ fn make_handler(level: LogLevel, format: LogFormat) -> LogHandler {
                 LogFormat::Text => "text".into(),
             },
             local_file_path: None,
+            app_log_dir: None,
         },
         "test-app".into(),
         "node-1".into(),

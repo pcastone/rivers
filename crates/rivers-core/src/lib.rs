@@ -14,6 +14,8 @@ pub use rivers_core_config::error;
 pub use rivers_core_config::event;
 pub use rivers_core_config::lockbox_config;
 
+/// Per-application log file routing.
+pub mod app_log_router;
 /// Driver registry and plugin loading.
 pub mod driver_factory;
 /// Built-in driver re-exports (feature-gated).

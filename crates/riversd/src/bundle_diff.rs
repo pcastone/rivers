@@ -274,6 +274,7 @@ mod tests {
                 get_parameters: vec![], post_parameters: vec![],
                 put_parameters: vec![], delete_parameters: vec![],
                 streaming: false,
+                max_rows: 1000,
             });
         }
 
@@ -328,6 +329,7 @@ mod tests {
                     app_entry_point: None,
                     source: None,
                     spa: None,
+                    init: None,
                 },
                 resources: rivers_runtime::ResourcesConfig::default(),
                 config: rivers_runtime::AppConfig {

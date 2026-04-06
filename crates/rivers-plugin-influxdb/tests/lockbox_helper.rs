@@ -1,3 +1,5 @@
+use rivers_driver_sdk::ConnectionParams;
+
 // Shared lockbox credential helper — included via include!()
 fn conn_params(entry: &str) -> ConnectionParams {
     let dir = find_lockbox_dir().expect("cannot find sec/lockbox/");

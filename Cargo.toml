@@ -34,7 +34,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-version = "0.52.10"
+version = "0.53.0"
 license = "MIT"
 
 [workspace.dependencies]
@@ -97,6 +97,8 @@ aes-gcm = "0.10"
 percent-encoding = "2"
 jsonschema = "0.28"
 neo4rs = "0.9.0-rc.9"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
 test-case = "3"
 
 [profile.release]

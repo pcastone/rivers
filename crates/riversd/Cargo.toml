@@ -5,7 +5,8 @@ version.workspace = true
 license.workspace = true
 
 [features]
-default = ["static-engines", "static-plugins", "static-builtin-drivers"]
+default = ["static-engines", "static-plugins", "static-builtin-drivers", "metrics"]
+metrics = ["dep:metrics-exporter-prometheus"]
 static-engines = ["v8", "wasmtime", "bcrypt", "hmac", "base64"]
 static-builtin-drivers = ["rivers-runtime/drivers"]
 static-plugins = [
@@ -59,6 +60,8 @@ bcrypt = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 reqwest = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true, optional = true }
 
 # Optional: static plugin deps (included with "static-plugins" feature)
 rivers-plugin-cassandra = { path = "../rivers-plugin-cassandra", optional = true, default-features = false }

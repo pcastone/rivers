@@ -193,7 +193,7 @@ dist-zip-static:
 
 # ── Local Release (versioned layout with symlink) ────────────────
 
-# Create local release layout in release/<version>-<timestamp>/
+# Create local release layout in release/<version>-<timestamp>/ using cargo deploy
 release:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -202,50 +202,24 @@ release:
     RELEASE_NAME="${VERSION}-${TIMESTAMP}"
     DEST="release/${RELEASE_NAME}"
 
-    echo "→ building binaries (release)..."
-    cargo build --release -p riversd -p riversctl -p riverpackage -p rivers-lockbox -p rivers-keystore
+    # Ensure cargo-deploy is installed
+    if ! command -v cargo-deploy &> /dev/null; then
+        echo "→ installing cargo-deploy..."
+        cargo install --path crates/cargo-deploy --quiet
+    fi
 
-    for bin in riversd riversctl riverpackage rivers-lockbox rivers-keystore; do
-        if [[ ! -f "target/release/${bin}" ]]; then
-            echo "error: binary not found: target/release/${bin}" >&2
-            exit 1
-        fi
-    done
+    echo "→ deploying to ${DEST}/"
+    cargo deploy "$DEST"
 
-    echo "→ creating ${DEST}/"
-    mkdir -p "${DEST}/bin" "${DEST}/config" "${DEST}/log" "${DEST}/apphome"
-
-    for bin in riversd riversctl riverpackage rivers-lockbox rivers-keystore; do
-        cp "target/release/${bin}" "${DEST}/bin/${bin}"
-        echo "   bin/${bin}  ($(du -sh "${DEST}/bin/${bin}" | cut -f1))"
-    done
-
-    cat > "${DEST}/config/riversd.toml" << 'TOML'
-    # riversd.toml — default server configuration
-    #
-    # bundle_path MUST appear before any [section] header (top-level TOML key).
-    # Uncomment and set the line below:
-    #
-    # bundle_path = "apphome/<your-bundle>/"
-
-    [base]
-    host      = "0.0.0.0"
-    port      = 8080
-    log_level = "info"
-
-    [base.logging]
-    local_file_path = "log/riversd.log"
-    TOML
-    echo "   config/riversd.toml"
-
+    # Symlink release/latest → this release
     ln -sfn "${RELEASE_NAME}" release/latest
     echo "   latest -> ${RELEASE_NAME}"
 
-    # Prune to 3 releases
+    # Prune to 3 releases (exclude symlinks and non-versioned dirs)
     RELEASES=()
     while IFS= read -r name; do
         RELEASES+=("$name")
-    done < <(find release -maxdepth 1 -mindepth 1 -type d ! -name '.*' ! -name dynamic | xargs -I{} basename {} | sort)
+    done < <(find release -maxdepth 1 -mindepth 1 -type d ! -name '.*' ! -name dynamic ! -name zip | xargs -I{} basename {} | sort)
 
     EXCESS=$(( ${#RELEASES[@]} - 3 ))
     if (( EXCESS > 0 )); then
@@ -255,6 +229,30 @@ release:
             rm -rf "release/${RELEASES[$i]}"
         done
     fi
+
+    echo ""
+    echo "✓ release ready: ${DEST}"
+    echo "  cd ${DEST} && ./bin/riversctl doctor"
+
+# Create local release layout (static mode)
+release-static:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    VERSION="{{version}}"
+    TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+    RELEASE_NAME="${VERSION}-${TIMESTAMP}"
+    DEST="release/${RELEASE_NAME}"
+
+    if ! command -v cargo-deploy &> /dev/null; then
+        echo "→ installing cargo-deploy..."
+        cargo install --path crates/cargo-deploy --quiet
+    fi
+
+    echo "→ deploying (static) to ${DEST}/"
+    cargo deploy "$DEST" --static
+
+    ln -sfn "${RELEASE_NAME}" release/latest
+    echo "   latest -> ${RELEASE_NAME}"
 
     echo ""
     echo "✓ release ready: ${DEST}"

@@ -6,9 +6,12 @@
 /// bundle-load and future code paths share one inventory.
 ///
 /// Drivers listed in `ignore` are skipped with an INFO log.
+/// `engines_dir` and `plugins_dir` are from config (absolute paths).
 pub fn register_all_drivers(
     factory: &mut rivers_runtime::rivers_core::DriverFactory,
     ignore: &[String],
+    _engines_dir: &str,
+    plugins_dir: &str,
 ) {
     // Built-in drivers — statically linked when feature is enabled
     #[cfg(feature = "static-builtin-drivers")]
@@ -41,33 +44,11 @@ pub fn register_all_drivers(
         }
     }
 
-    // Dynamic drivers from lib/ directory (builtin drivers dylib)
-    let lib_dir = std::path::Path::new("lib");
-    if lib_dir.is_dir() {
-        let results = rivers_runtime::rivers_core::driver_factory::load_plugins(lib_dir, factory);
-        for result in &results {
-            match result {
-                rivers_runtime::rivers_core::driver_factory::PluginLoadResult::Success { path, driver_names } => {
-                    // Check if any loaded driver names are in the ignore list
-                    let ignored: Vec<&str> = driver_names.iter()
-                        .filter(|d| ignore.iter().any(|i| i == *d))
-                        .map(|d| d.as_str())
-                        .collect();
-                    if !ignored.is_empty() {
-                        tracing::info!(path = %path, drivers = ?ignored, "driver library loaded but drivers ignored per config");
-                    } else {
-                        tracing::info!(path = %path, drivers = ?driver_names, "loaded driver library");
-                    }
-                }
-                rivers_runtime::rivers_core::driver_factory::PluginLoadResult::Failed { path, reason } => {
-                    tracing::warn!(path = %path, reason = %reason, "failed to load driver library");
-                }
-            }
-        }
-    }
+    // Engine dylibs in engines_dir (lib/) are loaded separately by the engine loader
+    // via _rivers_engine_abi_version — do NOT scan lib/ for driver plugins.
 
-    // Dynamic plugin drivers from plugins/ directory
-    let plugin_dir = std::path::Path::new("plugins");
+    // Dynamic plugin drivers from plugins directory
+    let plugin_dir = std::path::Path::new(plugins_dir);
     if plugin_dir.is_dir() {
         let results = rivers_runtime::rivers_core::driver_factory::load_plugins(plugin_dir, factory);
         for result in &results {

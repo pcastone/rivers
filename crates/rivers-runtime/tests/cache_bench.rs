@@ -193,6 +193,7 @@ async fn bench_2_faker_cached_vs_uncached() {
         get_schema: None, post_schema: None, put_schema: None, delete_schema: None,
         get_parameters: vec![], post_parameters: vec![],
         put_parameters: vec![], delete_parameters: vec![], streaming: false,
+        max_rows: 1000,
     };
 
     // Uncached
@@ -288,6 +289,7 @@ async fn bench_3_sqlite_cached_vs_uncached() {
         get_schema: None, post_schema: None, put_schema: None, delete_schema: None,
         get_parameters: vec![], post_parameters: vec![],
         put_parameters: vec![], delete_parameters: vec![], streaming: false,
+        max_rows: 1000,
     };
 
     // Uncached
@@ -497,6 +499,7 @@ async fn bench_5_postgres_cached_vs_uncached() {
         get_schema: None, post_schema: None, put_schema: None, delete_schema: None,
         get_parameters: vec![], post_parameters: vec![],
         put_parameters: vec![], delete_parameters: vec![], streaming: false,
+        max_rows: 1000,
     };
 
     // Uncached

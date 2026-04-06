@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use rivers_driver_sdk::broker::{BrokerConsumerConfig, BrokerSubscription, OutboundMessage};
-use rivers_driver_sdk::{ConnectionParams, MessageBrokerDriver};
+use rivers_driver_sdk::MessageBrokerDriver;
 use rivers_plugin_rabbitmq::RabbitMqDriver;
 
 const TIMEOUT: Duration = Duration::from_secs(10);

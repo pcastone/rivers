@@ -8,6 +8,18 @@ use crate::event::LogLevel;
 
 use super::server::ServerConfig;
 
+// ── [metrics] ───────────────────────────────────────────────────────
+
+/// `[metrics]` -- Prometheus metrics configuration.
+#[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
+pub struct MetricsConfig {
+    /// Whether metrics collection is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Port for the Prometheus HTTP scrape endpoint (default: 9091).
+    pub port: Option<u16>,
+}
+
 // ── [runtime] ───────────────────────────────────────────────────────
 
 /// `[runtime]` -- ProcessPool runtime configuration.
@@ -211,6 +223,11 @@ pub struct LoggingConfig {
 
     /// Optional path for a local log file (in addition to stdout).
     pub local_file_path: Option<String>,
+
+    /// Directory for per-application log files. Each loaded app gets `<app_name>.log`.
+    /// If not set, app logs go to the main `local_file_path`.
+    #[serde(default)]
+    pub app_log_dir: Option<String>,
 }
 
 impl Default for LoggingConfig {
@@ -219,6 +236,7 @@ impl Default for LoggingConfig {
             level: LogLevel::Info,
             format: default_log_format(),
             local_file_path: None,
+            app_log_dir: None,
         }
     }
 }

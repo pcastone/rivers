@@ -9,7 +9,7 @@ mod commands;
 #[cfg(feature = "tls")]
 mod tls_cmd;
 
-use commands::{start, doctor, validate, exec, admin};
+use commands::{start, doctor, validate, exec, admin, stop, status};
 
 #[tokio::main]
 async fn main() {
@@ -25,9 +25,11 @@ async fn main() {
 
     let result: Result<(), String> = match args[1].as_str() {
         "start"  => start::cmd_start(&args[2..]),
+        "stop"   => stop::cmd_stop(&args[2..]),
+        "status" => status::cmd_status(&args[2..]),
         "doctor" => doctor::cmd_doctor(&args[2..]),
         #[cfg(feature = "admin-api")]
-        "status" => admin::cmd_status(&admin_url).await,
+        "api-status" => admin::cmd_status(&admin_url).await,
         #[cfg(feature = "admin-api")]
         "deploy" => {
             if args.len() < 3 { eprintln!("Usage: riversctl deploy <bundle_path>"); std::process::exit(1); }
@@ -40,7 +42,7 @@ async fn main() {
         #[cfg(feature = "admin-api")]
         "health"      => admin::cmd_health(&admin_url).await,
         #[cfg(feature = "admin-api")]
-        "stop"        => admin::cmd_stop(&admin_url).await,
+        "api-stop"    => admin::cmd_stop(&admin_url).await,
         #[cfg(feature = "admin-api")]
         "graceful"    => admin::cmd_graceful(&admin_url).await,
         #[cfg(feature = "admin-api")]
@@ -94,6 +96,8 @@ fn print_usage() {
     eprintln!("Local commands:");
     eprintln!("  start [--config <path>] [--log-level <lvl>] [--no-admin-auth] [--no-ssl [--port <port>]]");
     eprintln!("                  Find and launch riversd (bundle_path comes from config)");
+    eprintln!("  stop            Stop riversd via SIGTERM (reads PID file; SIGKILL after 30s)");
+    eprintln!("  status          Show whether riversd is running (reads PID file)");
     eprintln!("  doctor [--config <path>]");
     eprintln!("                  Run pre-launch health checks");
     eprintln!("  tls gen [--port P]");
@@ -118,12 +122,12 @@ fn print_usage() {
     eprintln!("                  Output JSON Schema for a config type to stdout");
     eprintln!();
     eprintln!("Admin API commands (require a running riversd):");
-    eprintln!("  status          Server status");
+    eprintln!("  api-status      Server status via HTTP admin API");
     eprintln!("  deploy <path>   Deploy a bundle");
     eprintln!("  drivers         List registered drivers");
     eprintln!("  datasources     List configured datasources");
     eprintln!("  health          Verbose health check");
-    eprintln!("  stop            Stop riversd immediately (SIGKILL fallback)");
+    eprintln!("  api-stop        Stop riversd immediately via HTTP admin API (SIGKILL fallback)");
     eprintln!("  graceful        Stop riversd gracefully — drain in-flight requests (SIGTERM fallback)");
     eprintln!("  log levels      View current log levels");
     eprintln!("  log set <e> <l> Change log level");

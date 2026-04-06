@@ -1,9 +1,10 @@
 #![warn(missing_docs)]
 //! riverpackage — Rivers bundle validator and packager.
 //!
-//! Commands: validate, preflight, pack
+//! Commands: init, validate, preflight, pack
 
 use std::path::Path;
+use uuid::Uuid;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -18,6 +19,14 @@ fn main() {
         "--version" | "-V" | "version" => {
             println!("riverpackage {} ({})", env!("CARGO_PKG_VERSION"), std::env::consts::ARCH);
             return;
+        }
+        "init" => {
+            let bundle_name = if args.len() >= 3 { &args[2] } else {
+                eprintln!("Usage: riverpackage init <bundle-name> [--driver <driver>]");
+                std::process::exit(1);
+            };
+            let driver = parse_flag(&args, "--driver").unwrap_or("faker");
+            cmd_init(bundle_name, driver)
         }
         "validate" => cmd_validate(bundle_dir),
         "preflight" => cmd_preflight(bundle_dir),
@@ -53,10 +62,206 @@ fn print_usage() {
     eprintln!("Usage: riverpackage <command> [bundle_dir] [options]");
     eprintln!();
     eprintln!("Commands:");
+    eprintln!("  init <name> [--driver <d>]  Scaffold a new bundle (drivers: faker, postgres, sqlite, mysql)");
     eprintln!("  validate [dir]              Validate bundle structure and configs");
     eprintln!("  preflight [dir]             Validate + check schema/parameter orphans");
     eprintln!("  pack [dir] [output]         Package bundle into a .zip file");
     eprintln!("  import-exec <name> <path>   Generate ExecDriver TOML config for a script");
+}
+
+/// Extract a named flag value from args, e.g. `--driver faker` → `Some("faker")`.
+fn parse_flag<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.windows(2)
+        .find(|w| w[0] == flag)
+        .map(|w| w[1].as_str())
+}
+
+fn cmd_init(bundle_arg: &str, driver: &str) -> Result<(), String> {
+    // Normalise driver alias
+    let driver = match driver {
+        "pg" => "postgres",
+        other => other,
+    };
+    if !matches!(driver, "faker" | "postgres" | "sqlite" | "mysql") {
+        return Err(format!(
+            "unknown driver '{}' — supported: faker, postgres, sqlite, mysql",
+            driver
+        ));
+    }
+
+    // bundle_arg may be a path like /tmp/my-app — the logical app name is the basename.
+    let bundle_root = Path::new(bundle_arg);
+    let bundle_name = bundle_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("cannot determine bundle name from '{}'", bundle_arg))?;
+
+    // Top-level bundle directory must not already exist
+    if bundle_root.exists() {
+        return Err(format!("directory '{}' already exists", bundle_arg));
+    }
+
+    let app_dir = bundle_root.join(bundle_name);
+    let schemas_dir = app_dir.join("schemas");
+
+    std::fs::create_dir_all(&schemas_dir)
+        .map_err(|e| format!("create directory '{}': {e}", schemas_dir.display()))?;
+
+    // --- bundle manifest.toml ---
+    let bundle_manifest = format!(
+        "bundleName    = \"{name}\"\nbundleVersion = \"1.0.0\"\napps          = [\"{name}\"]\n",
+        name = bundle_name
+    );
+    write_file(&bundle_root.join("manifest.toml"), &bundle_manifest)?;
+
+    // --- app manifest.toml ---
+    let app_id = Uuid::new_v4();
+    let app_manifest = format!(
+        "appName    = \"{name}\"\nappId      = \"{id}\"\ntype       = \"service\"\nentryPoint = \"{name}\"\n",
+        name = bundle_name,
+        id = app_id,
+    );
+    write_file(&app_dir.join("manifest.toml"), &app_manifest)?;
+
+    // --- resources.toml (varies by driver) ---
+    let (ds_name, resources_toml) = build_resources(bundle_name, driver);
+    write_file(&app_dir.join("resources.toml"), &resources_toml)?;
+
+    // --- app.toml ---
+    let app_toml = build_app_toml(bundle_name, driver, &ds_name);
+    write_file(&app_dir.join("app.toml"), &app_toml)?;
+
+    // --- schemas/item.schema.json ---
+    let schema_json = build_schema_json(driver);
+    write_file(&schemas_dir.join("item.schema.json"), &schema_json)?;
+
+    // Success output
+    println!("Bundle created: {}/", bundle_arg);
+    println!("  {}/manifest.toml", bundle_arg);
+    println!("  {dir}/{name}/manifest.toml", dir = bundle_arg, name = bundle_name);
+    println!("  {dir}/{name}/resources.toml", dir = bundle_arg, name = bundle_name);
+    println!("  {dir}/{name}/app.toml", dir = bundle_arg, name = bundle_name);
+    println!("  {dir}/{name}/schemas/item.schema.json", dir = bundle_arg, name = bundle_name);
+    println!();
+    println!("Next steps:");
+    println!("  1. Edit {dir}/{name}/resources.toml with your datasource", dir = bundle_arg, name = bundle_name);
+    println!("  2. Edit {dir}/{name}/schemas/ with your data model", dir = bundle_arg, name = bundle_name);
+    println!("  3. Edit {dir}/{name}/app.toml with your DataViews and Views", dir = bundle_arg, name = bundle_name);
+    println!("  4. riverpackage validate {}/", bundle_arg);
+
+    Ok(())
+}
+
+/// Write `content` to `path`, propagating errors as `String`.
+fn write_file(path: &Path, content: &str) -> Result<(), String> {
+    std::fs::write(path, content)
+        .map_err(|e| format!("write '{}': {e}", path.display()))
+}
+
+/// Build resources.toml content and return `(datasource_name, toml_text)`.
+fn build_resources(bundle_name: &str, driver: &str) -> (String, String) {
+    match driver {
+        "faker" => (
+            "data".into(),
+            "[[datasources]]\nname       = \"data\"\ndriver     = \"faker\"\nnopassword = true\nrequired   = true\n".into(),
+        ),
+        "postgres" => (
+            "db".into(),
+            format!(
+                "[[datasources]]\nname     = \"db\"\ndriver   = \"postgres\"\nhost     = \"localhost\"\nport     = 5432\ndatabase = \"{name}\"\nusername = \"postgres\"\nrequired = true\n",
+                name = bundle_name
+            ),
+        ),
+        "sqlite" => (
+            "db".into(),
+            format!(
+                "[[datasources]]\nname     = \"db\"\ndriver   = \"sqlite\"\nhost     = \"{name}.db\"\nrequired = true\n",
+                name = bundle_name
+            ),
+        ),
+        "mysql" => (
+            "db".into(),
+            format!(
+                "[[datasources]]\nname     = \"db\"\ndriver   = \"mysql\"\nhost     = \"localhost\"\nport     = 3306\ndatabase = \"{name}\"\nusername = \"root\"\nrequired = true\n",
+                name = bundle_name
+            ),
+        ),
+        // unreachable — validated above
+        _ => ("db".into(), String::new()),
+    }
+}
+
+/// Build app.toml content for the scaffolded app.
+fn build_app_toml(bundle_name: &str, _driver: &str, ds_name: &str) -> String {
+    let schema_path = "schemas/item.schema.json";
+    format!(
+        r#"[data.dataviews.list_items]
+datasource   = "{ds}"
+query        = "SELECT * FROM items LIMIT ${{limit}}"
+return_schema = "{schema}"
+
+[[data.dataviews.list_items.parameters]]
+name    = "limit"
+type    = "integer"
+default = 20
+
+[api.views.items]
+method      = "GET"
+path        = "/items"
+dataview    = "list_items"
+description = "List {name} items"
+"#,
+        ds = ds_name,
+        schema = schema_path,
+        name = bundle_name,
+    )
+}
+
+/// Build schemas/item.schema.json content.
+fn build_schema_json(driver: &str) -> String {
+    if driver == "faker" {
+        r#"{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "faker": "datatype.uuid"
+    },
+    "name": {
+      "type": "string",
+      "faker": "name.fullName"
+    },
+    "email": {
+      "type": "string",
+      "faker": "internet.email"
+    }
+  },
+  "required": ["id", "name", "email"]
+}
+"#
+        .into()
+    } else {
+        r#"{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "integer"
+    },
+    "name": {
+      "type": "string"
+    },
+    "email": {
+      "type": "string",
+      "format": "email"
+    }
+  },
+  "required": ["id", "name", "email"]
+}
+"#
+        .into()
+    }
 }
 
 fn cmd_validate(bundle_dir: &str) -> Result<(), String> {

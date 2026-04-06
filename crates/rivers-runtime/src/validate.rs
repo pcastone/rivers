@@ -324,6 +324,7 @@ mod tests {
                 app_entry_point: None,
                 source: None,
                 spa: None,
+                init: None,
             },
             resources,
             config,

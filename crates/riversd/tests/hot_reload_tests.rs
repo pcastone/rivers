@@ -318,6 +318,7 @@ fn changed_logging_config_is_safe_to_reload() {
         level: LogLevel::Debug,
         format: "text".into(),
         local_file_path: Some("/var/log/rivers.log".into()),
+        app_log_dir: None,
     };
     assert_eq!(check_reload_scope(&current, &new), ReloadScope::Safe);
 }

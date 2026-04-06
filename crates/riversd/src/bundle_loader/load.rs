@@ -219,6 +219,17 @@ pub async fn load_and_wire_bundle(
         // Count views for logging
         view_count += app.config.api.views.len();
 
+        // Register app with per-app log router (no-op if router not configured)
+        // Use entry_point (not app_name) — must match TASK_APP_NAME used by V8 callbacks.
+        if let Some(router) = rivers_runtime::rivers_core::app_log_router::global_router() {
+            let app_name = entry_point;
+            if let Err(e) = router.register(app_name) {
+                tracing::warn!(app = %app_name, error = %e, "failed to create app log file");
+            } else {
+                tracing::info!(app = %app_name, "app log file created");
+            }
+        }
+
         // Register dataviews — namespaced by entry_point to prevent collisions
         for dv in app.config.data.dataviews.values() {
             let mut namespaced_dv = dv.clone();
@@ -286,7 +297,7 @@ pub async fn load_and_wire_bundle(
 
     // Build DriverFactory with all drivers (built-in + plugins)
     let mut factory = rivers_runtime::rivers_core::DriverFactory::new();
-    register_all_drivers(&mut factory, &config.plugins.ignore);
+    register_all_drivers(&mut factory, &config.plugins.ignore, &config.engines.dir, &config.plugins.dir);
 
     let app_count = bundle.apps.len();
     let dv_count = registry.count();

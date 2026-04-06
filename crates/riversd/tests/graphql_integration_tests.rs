@@ -71,6 +71,7 @@ async fn schema_with_real_executor_resolves_query() {
         get_parameters: Vec::new(), post_parameters: Vec::new(),
         put_parameters: Vec::new(), delete_parameters: Vec::new(),
         streaming: false,
+        max_rows: 1000,
     });
 
     // Connection params

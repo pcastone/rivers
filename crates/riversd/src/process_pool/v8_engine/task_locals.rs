@@ -90,6 +90,9 @@ thread_local! {
     /// When `Some`, `Rivers.keystore.*` and `Rivers.crypto.encrypt/decrypt` are available.
     /// When `None`, those functions throw "keystore not configured".
     pub(super) static TASK_KEYSTORE: RefCell<Option<KeystoreContext>> = RefCell::new(None);
+
+    /// Human-readable app name for the current task — used for per-app log routing.
+    pub(super) static TASK_APP_NAME: RefCell<Option<String>> = RefCell::new(None);
 }
 
 /// Get the current tokio runtime handle from the thread-local.
@@ -114,6 +117,7 @@ impl TaskLocals {
         TASK_ENV.with(|e| *e.borrow_mut() = Some(ctx.env.clone()));
         TASK_STORE.with(|s| s.borrow_mut().clear());
         TASK_TRACE_ID.with(|t| *t.borrow_mut() = Some(ctx.trace_id.clone()));
+        TASK_APP_NAME.with(|n| *n.borrow_mut() = Some(ctx.app_id.clone()));
         TASK_HTTP_ENABLED.with(|h| *h.borrow_mut() = ctx.http.is_some());
         TASK_STORAGE.with(|s| *s.borrow_mut() = ctx.storage.clone());
         let store_ns = if ctx.app_id.is_empty() {
@@ -172,5 +176,6 @@ impl Drop for TaskLocals {
         TASK_DV_NAMESPACE.with(|n| *n.borrow_mut() = None);
         TASK_LOCKBOX.with(|lb| *lb.borrow_mut() = None);
         TASK_KEYSTORE.with(|ks| *ks.borrow_mut() = None);
+        TASK_APP_NAME.with(|n| *n.borrow_mut() = None);
     }
 }

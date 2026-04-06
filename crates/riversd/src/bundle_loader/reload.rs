@@ -65,7 +65,7 @@ pub async fn rebuild_views_and_dataviews(
                 drop(guard);
                 // Re-create factory with all drivers
                 let mut factory = rivers_runtime::rivers_core::DriverFactory::new();
-                register_all_drivers(&mut factory, &config.plugins.ignore);
+                register_all_drivers(&mut factory, &config.plugins.ignore, &config.engines.dir, &config.plugins.dir);
                 let factory = Arc::new(factory);
 
                 // Build cache — L1 always active, L2 only when StorageEngine available
