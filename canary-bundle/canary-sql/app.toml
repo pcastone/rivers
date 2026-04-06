@@ -51,7 +51,7 @@ required = true
 [data.dataviews.pg_insert]
 name       = "pg_insert"
 datasource = "canary-pg"
-query      = "INSERT INTO canary_records (id, zname, age, email) VALUES ($id, $zname, $age, $email)"
+query      = "INSERT INTO canary_records (id, zname, age) VALUES ($id, $zname, $age)"
 
 [[data.dataviews.pg_insert.parameters]]
 name = "id"
@@ -68,15 +68,10 @@ name = "age"
 type = "integer"
 required = true
 
-[[data.dataviews.pg_insert.parameters]]
-name = "email"
-type = "string"
-required = false
-
 [data.dataviews.pg_select_all]
 name       = "pg_select_all"
 datasource = "canary-pg"
-query      = "SELECT id, zname, age, email FROM canary_records ORDER BY created_at DESC"
+query      = "SELECT id, zname, age FROM canary_records"
 
 [data.dataviews.pg_update]
 name       = "pg_update"
@@ -121,7 +116,7 @@ required = true
 [data.dataviews.pg_cached]
 name       = "pg_cached"
 datasource = "canary-pg"
-query      = "SELECT id, zname, age, email FROM canary_records ORDER BY created_at DESC"
+query      = "SELECT id, zname, age FROM canary_records"
 
 [data.dataviews.pg_cached.caching]
 ttl_seconds = 60
