@@ -247,7 +247,17 @@ impl CouchDBConnection {
     async fn exec_get(&self, query: &Query) -> Result<QueryResult, DriverError> {
         let doc_id = get_param_str(&query.parameters, "id")
             .or_else(|_| get_param_str(&query.parameters, "doc_id"))
-            .or_else(|_| get_param_str(&query.parameters, "_id"))?;
+            .or_else(|_| get_param_str(&query.parameters, "_id"))
+            .or_else(|_| {
+                // Fallback: positional param (DollarPositional rewrites names to "001", "002", ...)
+                query.parameters.values().next()
+                    .map(|v| match v {
+                        QueryValue::String(s) => s.clone(),
+                        QueryValue::Integer(i) => i.to_string(),
+                        other => format!("{:?}", other),
+                    })
+                    .ok_or_else(|| DriverError::Query("couchdb: missing required parameter '_id'".into()))
+            })?;
 
         let url = format!("{}/{}", self.db_url(), doc_id);
         let resp = self

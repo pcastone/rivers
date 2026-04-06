@@ -39,6 +39,8 @@ name               = "canary-ldap"
 driver             = "ldap"
 host               = "192.168.2.227"
 port               = 389
+database           = "dc=rivers,dc=test"
+username           = "cn=admin,dc=rivers,dc=test"
 credentials_source = "lockbox://ldap/test"
 
 [data.datasources.canary-redis]
@@ -134,12 +136,7 @@ required = true
 [data.dataviews.es_search]
 name       = "es_search"
 datasource = "canary-es"
-query      = '{"index":"canary"}'
-
-[[data.dataviews.es_search.parameters]]
-name     = "query"
-type     = "string"
-required = false
+query      = '{"index":"canary","body":{"query":{"match_all":{}}}}'
 
 # ─────────────────────────────────────────────
 # DataViews — CouchDB

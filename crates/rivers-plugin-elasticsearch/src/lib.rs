@@ -185,11 +185,24 @@ impl ElasticConnection {
         }
     }
 
-    /// POST /{index}/_search with body from parameters.
+    /// POST /{index}/_search with body from statement JSON or parameters.
     async fn exec_search(&self, query: &Query) -> Result<QueryResult, DriverError> {
         let index = self.resolve_index(query);
         let path = format!("/{}/_search", index);
-        let body = params_to_json(&query.parameters);
+
+        // Try to extract search body from the JSON statement first,
+        // fall back to converting parameters to JSON.
+        let body = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&query.statement) {
+            if let Some(body) = json.get("body") {
+                body.clone()
+            } else {
+                // Statement is JSON but has no "body" — use parameters
+                params_to_json(&query.parameters)
+            }
+        } else {
+            // Statement is not JSON — use parameters as body
+            params_to_json(&query.parameters)
+        };
 
         let resp = self
             .request(reqwest::Method::POST, &path)
