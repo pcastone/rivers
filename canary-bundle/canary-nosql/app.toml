@@ -3,33 +3,49 @@
 # ─────────────────────────────────────────────
 
 [data.datasources.canary-mongo]
-name       = "canary-mongo"
-driver     = "mongodb"
+name     = "canary-mongo"
+driver   = "mongodb"
+host     = "192.168.2.212"
+port     = 27017
+database = "canary"
+username = "rivers"
 nopassword = true
 
 [data.datasources.canary-es]
-name       = "canary-es"
-driver     = "elasticsearch"
+name     = "canary-es"
+driver   = "elasticsearch"
+host     = "192.168.2.218"
+port     = 9200
 nopassword = true
 
 [data.datasources.canary-couch]
-name       = "canary-couch"
-driver     = "couchdb"
+name     = "canary-couch"
+driver   = "couchdb"
+host     = "192.168.2.221"
+port     = 5984
+database = "canary"
+username = "rivers"
 nopassword = true
 
 [data.datasources.canary-cassandra]
-name       = "canary-cassandra"
-driver     = "cassandra"
+name     = "canary-cassandra"
+driver   = "cassandra"
+host     = "192.168.2.224"
+port     = 9042
 nopassword = true
 
 [data.datasources.canary-ldap]
-name       = "canary-ldap"
-driver     = "ldap"
+name     = "canary-ldap"
+driver   = "ldap"
+host     = "192.168.2.227"
+port     = 389
 nopassword = true
 
 [data.datasources.canary-redis]
-name       = "canary-redis"
-driver     = "redis"
+name     = "canary-redis"
+driver   = "redis"
+host     = "192.168.2.206"
+port     = 6379
 nopassword = true
 
 # ─────────────────────────────────────────────

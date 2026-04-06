@@ -5,17 +5,25 @@
 [data.datasources.canary-pg]
 name       = "canary-pg"
 driver     = "postgres"
+host       = "192.168.2.209"
+port       = 5432
+database   = "rivers"
+username   = "rivers"
 nopassword = true
 
 [data.datasources.canary-mysql]
 name       = "canary-mysql"
 driver     = "mysql"
+host       = "192.168.2.215"
+port       = 3306
+database   = "rivers"
+username   = "rivers"
 nopassword = true
 
 [data.datasources.canary-sqlite]
 name       = "canary-sqlite"
 driver     = "sqlite"
-database   = ":memory:"
+database   = "canary-sql/data/canary.db"
 nopassword = true
 
 # ─────────────────────────────────────────────
