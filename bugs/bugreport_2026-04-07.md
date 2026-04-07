@@ -43,3 +43,4 @@ The v8-timeout test crashes the server, making it impossible to run the full can
 | Date | Context | Notes |
 |------|---------|-------|
 | 2026-04-07 | Canary fleet test run from release/canary deploy | Process exits after v8-timeout, 49 subsequent tests fail |
+| 2026-04-07 | Fixed — cancellable watchdog + deferred termination | Server survives both v8-timeout and v8-heap OOM tests |
