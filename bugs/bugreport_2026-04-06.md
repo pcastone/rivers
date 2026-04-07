@@ -87,7 +87,19 @@ Five regression tests at `sqlite.rs:654-731` cover all failure modes:
 
 The fix addresses both theories from the root cause analysis. The IPAM team confirmation is no longer blocking — regardless of whether they used `host=` or `database=`, the driver now handles both. Recommend closing this bug.
 
+### DDL Persistence Tests (added 2026-04-07)
+
+Two additional regression tests specifically verify DDL goes to disk, not `:memory:`:
+
+| Test | Validates |
+|------|-----------|
+| `ddl_persists_to_disk_not_memory` | CREATE TABLE via `ddl_execute()`, drop connection, fresh connection verifies table in `sqlite_master` + INSERT/SELECT on persisted schema |
+| `ddl_multiple_statements_persist` | `execute_batch` with 2 tables + 1 index, all objects survive across connections |
+
+These catch the exact failure mode: if `ddl_execute()` runs against an in-memory DB, the fresh connection won't find the tables.
+
 ## Occurrence Log
 | Date | Context | Notes |
 |------|---------|-------|
 | 2026-04-06 | IPAM team deploy from v0.53.0 source | Third SQLite-related issue in this sprint |
+| 2026-04-07 | DDL persistence tests added | 2 new tests verify CREATE TABLE writes to disk file, not :memory: |
