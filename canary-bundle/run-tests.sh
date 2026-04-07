@@ -63,6 +63,12 @@ echo "  $(date)"
 echo "  Base: $BASE"
 echo "  ────────────────────────────────────────────────"
 
+# Warm up the V8 engine with a lightweight request before guard login.
+# The first request after server start compiles the script cache;
+# without this, the guard handler may fail with "script execution failed".
+curl -sk -m 5 "$BASE/handlers/canary/rt/ctx/trace-id" >/dev/null 2>&1
+sleep 1
+
 # ── AUTH Profile — login first to get session cookie ─────────────
 
 echo ""
@@ -94,12 +100,13 @@ test_ep "crypto-hmac"        GET  "$BASE/handlers/canary/rt/rivers/crypto-hmac"
 test_ep "rivers-log"         GET  "$BASE/handlers/canary/rt/rivers/log"
 test_ep "v8-codegen"         GET  "$BASE/handlers/canary/rt/v8/codegen"
 test_ep "v8-console"         GET  "$BASE/handlers/canary/rt/v8/console"
-test_ep "v8-timeout"         GET  "$BASE/handlers/canary/rt/v8/timeout"
-test_ep "v8-heap"            GET  "$BASE/handlers/canary/rt/v8/heap"
 test_ep "error-sanitize"     GET  "$BASE/handlers/canary/rt/error/sanitize"
 test_ep "eventbus-publish"   POST "$BASE/handlers/canary/rt/eventbus/publish" '{}'
 test_ep "header-blocklist"   GET  "$BASE/handlers/canary/rt/header/blocklist"
 test_ep "faker-determinism"  GET  "$BASE/handlers/canary/rt/faker/determinism"
+# V8 security tests last — v8-timeout takes 5s, v8-heap may crash server
+test_ep "v8-timeout"         GET  "$BASE/handlers/canary/rt/v8/timeout"
+test_ep "v8-heap"            GET  "$BASE/handlers/canary/rt/v8/heap"
 
 # ── SQL Profile (auth=session, uses PG/MySQL/SQLite) ─────────────
 
