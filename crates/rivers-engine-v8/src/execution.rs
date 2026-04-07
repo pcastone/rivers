@@ -53,13 +53,25 @@ pub(crate) fn execute_js(ctx: SerializedTaskContext) -> Result<rivers_engine_sdk
     // Acquire isolate
     let mut isolate = acquire_isolate(DEFAULT_HEAP_LIMIT);
 
-    // Start watchdog thread — terminates execution after timeout
+    // Start cancellable watchdog thread — terminates execution after timeout.
+    // The `cancelled` flag prevents the watchdog from terminating a recycled
+    // isolate after the handler completes normally.
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watchdog_cancelled = cancelled.clone();
     let isolate_handle = isolate.thread_safe_handle();
     let watchdog = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(timeout_ms));
-        isolate_handle.terminate_execution();
+        // Sleep in small increments so we can check the cancel flag
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        while std::time::Instant::now() < deadline {
+            if watchdog_cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return; // Handler finished — do not terminate
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if !watchdog_cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            isolate_handle.terminate_execution();
+        }
     });
-
     let result = {
         let handle_scope = &mut v8::HandleScope::new(&mut isolate);
         let context = v8::Context::new(handle_scope, Default::default());
@@ -106,17 +118,21 @@ pub(crate) fn execute_js(ctx: SerializedTaskContext) -> Result<rivers_engine_sdk
 
         let result = func.call(tc, recv, &[ctx_arg]);
 
-        // Cancel watchdog if execution completed before timeout
-        drop(watchdog);
+        // Cancel watchdog BEFORE any further isolate access
+        cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = watchdog.join();
+
+        if tc.has_terminated() {
+            clear_task_locals();
+            // Isolate is terminated — it will be dropped (not recycled) when
+            // the early return unwinds the stack. This is correct: a terminated
+            // isolate must not be reused.
+            return Err(format!("handler execution timed out after {}ms", timeout_ms));
+        }
 
         if tc.has_caught() {
             let exception = tc.exception().unwrap();
             let msg = exception.to_rust_string_lossy(tc);
-            // Check if this was a timeout termination
-            if start.elapsed().as_millis() as u64 >= timeout_ms {
-                clear_task_locals();
-                return Err(format!("handler execution timed out after {}ms", timeout_ms));
-            }
             clear_task_locals();
             return Err(msg);
         }
@@ -150,7 +166,8 @@ pub(crate) fn execute_js(ctx: SerializedTaskContext) -> Result<rivers_engine_sdk
         return_value
     };
 
-    // Release isolate back to pool
+    // Release isolate back to pool (only reached on successful execution —
+    // terminated isolates are dropped by early-return unwinding)
     release_isolate(isolate);
     clear_task_locals();
 

@@ -288,15 +288,16 @@ pub(crate) async fn execute_js_task(
 
         }; // <-- V8 scopes dropped here
 
-        // Wave 10: Deregister from pool watchdog
+        // Wave 10: Deregister from pool watchdog BEFORE touching the isolate.
+        // This prevents the watchdog from calling terminate_execution() on
+        // an isolate that's about to be dropped or recycled.
         if let Some(ref reg) = registry {
             reg.lock().unwrap().remove(&worker_id);
         }
 
         // V2.8: Return isolate to pool for reuse.
-        // Remove the near-heap-limit callback before recycling so it
-        // can be re-registered on the next use.
-        // X5.5: Check heap usage against threshold -- recycle if too high.
+        // On timeout/error: drop the isolate (don't recycle — may be in bad state).
+        // On success: remove heap callback, check threshold, then recycle or drop.
         if task_result.is_ok() {
             isolate.remove_near_heap_limit_callback(near_heap_limit_cb, effective_heap);
 
@@ -320,6 +321,10 @@ pub(crate) async fn execute_js_task(
             } else {
                 release_isolate(isolate);
             }
+        } else {
+            // Timeout or error — drop isolate without recycling.
+            // A terminated/errored isolate may be in an inconsistent state.
+            drop(isolate);
         }
 
         task_result
