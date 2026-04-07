@@ -477,6 +477,62 @@ function initDdlSuccess(ctx) {
     ctx.resdata = t.finish();
 }
 
+// SQL-SQLITE-DDL-PERSIST — proves DDL + data persist to disk (bugreport_2026-04-06.md)
+//
+// This test exercises the full chain:
+//   1. Init handler created canary_records table via DDL at startup
+//   2. INSERT a row with a unique ID
+//   3. SELECT it back via a different DataView (different query path)
+//   4. DELETE the row (cleanup)
+//   5. Verify the DELETE worked
+//
+// If SQLite silently opens :memory: instead of the on-disk file,
+// the init DDL won't be visible and step 1 fails with "no such table".
+// If INSERT goes to memory and SELECT opens a fresh connection,
+// step 3 returns no rows.
+function sqliteDdlPersist(ctx) {
+    var t = new TestResult("SQL-SQLITE-DDL-PERSIST", "SQL", "bugreport_2026-04-06.md");
+    try {
+        // Step 1: Verify the table exists (created by init handler DDL)
+        var all = ctx.dataview("sqlite_select_all");
+        t.assert("table_exists", all !== null && all.rows !== undefined,
+            "sqlite_select_all returned " + (all ? "result" : "null") +
+            " — table must exist from init DDL");
+
+        // Step 2: INSERT a unique row
+        var id = "ddl-persist-" + Rivers.crypto.randomHex(8);
+        ctx.dataview("sqlite_insert", { id: id, zname: "DDLTest", age: 42 });
+        t.assert("insert_ok", true, "id=" + id);
+
+        // Step 3: SELECT it back by ID (proves data persists on disk)
+        var result = ctx.dataview("sqlite_select_by_id", { id: id });
+        t.assert("select_not_null", result !== null && result.rows !== undefined,
+            "select returned " + (result ? typeof result : "null"));
+
+        if (result && result.rows && result.rows.length > 0) {
+            t.assertEquals("select_zname", "DDLTest", result.rows[0].zname);
+            t.assertEquals("select_age", 42, result.rows[0].age);
+            t.assert("data_persisted", true,
+                "INSERT → SELECT roundtrip succeeded on disk-backed SQLite");
+        } else {
+            t.assert("data_persisted", false,
+                "SELECT returned 0 rows — data did NOT persist (possible :memory: bug)");
+        }
+
+        // Step 4: DELETE (cleanup)
+        ctx.dataview("sqlite_delete", { id: id });
+
+        // Step 5: Verify deleted
+        var verify = ctx.dataview("sqlite_select_by_id", { id: id });
+        var gone = !verify || !verify.rows || verify.rows.length === 0;
+        t.assert("cleanup_ok", gone, "row deleted after test");
+
+    } catch (e) {
+        return t.fail(String(e));
+    }
+    ctx.resdata = t.finish();
+}
+
 // SQL-SQLITE-CRUD-INSERT
 function sqliteInsert(ctx) {
     var t = new TestResult("SQL-SQLITE-CRUD-INSERT", "SQL", "rivers-data-layer-spec.md section 3.1");

@@ -152,6 +152,7 @@ test_ep "mysql-update"       PUT  "$BASE/sql/canary/sql/mysql/update" '{}'
 test_ep "mysql-delete"       DELETE "$BASE/sql/canary/sql/mysql/delete" '{}'
 test_ep "mysql-ddl-reject"   POST "$BASE/sql/canary/sql/mysql/ddl-reject" '{}'
 # SQLite
+test_ep "sqlite-ddl-persist" GET  "$BASE/sql/canary/sql/sqlite/ddl-persist"
 test_ep "sqlite-param-order" GET  "$BASE/sql/canary/sql/sqlite/param-order"
 test_ep "sqlite-insert"      POST "$BASE/sql/canary/sql/sqlite/insert" '{}'
 test_ep "sqlite-select"      GET  "$BASE/sql/canary/sql/sqlite/select"

@@ -437,6 +437,18 @@ entrypoint = "mysqlDdlReject"
 
 # ── SQLite Views ──
 
+[api.views.sqlite_ddl_persist]
+path      = "/canary/sql/sqlite/ddl-persist"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.sqlite_ddl_persist.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/sql-tests.ts"
+entrypoint = "sqliteDdlPersist"
+
 [api.views.sqlite_param_order]
 path      = "/canary/sql/sqlite/param-order"
 method    = "GET"
