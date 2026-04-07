@@ -79,7 +79,7 @@ Dynamic Mode (just build-dynamic / cargo deploy)
 
 | Crate | Role |
 |-------|------|
-| `rivers-runtime` | Facade crate — re-exports core, config, driver-sdk, engine-sdk. Contains ProcessPool shared types, `home` module for config discovery. In static mode: rlib. In dynamic mode: dylib. |
+| `rivers-runtime` | Facade crate — re-exports core, config, driver-sdk, engine-sdk. Contains ProcessPool shared types, `home` module for config discovery, and the 4-layer bundle validation pipeline (`validate_structural`, `validate_existence`, `validate_crossref`, `validate_syntax`, `validate_engine`, `validate_pipeline`, `validate_result`, `validate_format`). In static mode: rlib. In dynamic mode: dylib. |
 | `riversd` | Server binary — HTTP server, routing, ProcessPool dispatch, engine loader, host callbacks, per-app logging, metrics. |
 | `riversctl` | CLI tool — start/stop/status riversd, doctor (--fix/--lint), admin API, TLS management (gen/renew/show/expire). |
 | `rivers-core` | Config types, DriverFactory, StorageEngine, LockBox, EventBus, AppLogRouter, TLS cert generation. |
@@ -149,11 +149,15 @@ cargo deploy /opt/rivers
 
 # Lifecycle
 riversctl doctor --fix          # health check + auto-repair
-riversctl doctor --lint          # validate bundle conventions
 riversctl start                  # daemon (writes PID to run/riversd.pid)
 riversctl start --foreground     # interactive/systemd
 riversctl status                 # show running state
 riversctl stop                   # SIGTERM + wait 30s
+
+# Bundle validation
+riverpackage validate <bundle_dir>                    # text output (4-layer pipeline)
+riverpackage validate <bundle_dir> --format json      # JSON output
+riverpackage validate <bundle_dir> --config <path>    # specify config for engine discovery
 
 # TLS
 riversctl tls gen                # generate self-signed cert

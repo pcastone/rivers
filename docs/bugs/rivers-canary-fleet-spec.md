@@ -2604,8 +2604,14 @@ Tests operational infrastructure added in v0.53.0: PID file lifecycle, Prometheu
 | OPS-CONFIG-DISCOVERY | `/canary/ops/config/discovery` | GET | `riversd.toml` discovered from expected path | httpd §1.2 |
 | OPS-RIVERSCTL-STATUS | (harness) | — | `riversctl status` reports running state correctly | httpd §2.5 |
 | OPS-RIVERSCTL-STOP | (harness) | — | `riversctl stop` sends SIGTERM and process exits | httpd §2.5 |
-| OPS-DOCTOR-LINT-PASS | (harness) | — | `riversctl doctor --lint` passes on valid canary bundle | doctor §3.1 |
-| OPS-DOCTOR-LINT-FAIL | (harness) | — | `riversctl doctor --lint` fails on intentionally broken bundle | doctor §3.1 |
+| OPS-VALIDATE-PASS | (harness) | — | `riverpackage validate canary-bundle/ --format json` exits 0, all layers pass | bundle-validation §7.2 |
+| OPS-VALIDATE-FAIL-STRUCTURAL | (harness) | — | `riverpackage validate` exits 1 on bundle with unknown TOML key, error code `S002` | bundle-validation §4.1 |
+| OPS-VALIDATE-FAIL-EXISTENCE | (harness) | — | `riverpackage validate` exits 1 on bundle with missing handler, error code `E001` | bundle-validation §4.2 |
+| OPS-VALIDATE-FAIL-CROSSREF | (harness) | — | `riverpackage validate` exits 1 on DataView→unknown datasource, error code `X001` | bundle-validation §4.3 |
+| OPS-VALIDATE-JSON-FORMAT | (harness) | — | `riverpackage validate --format json` outputs valid JSON matching spec §8.2 | bundle-validation §8.2 |
+| OPS-VALIDATE-EXIT-CODE | (harness) | — | Exit codes: 0 pass, 1 errors, 2 missing bundle | bundle-validation §7.2 |
+| OPS-VALIDATE-DID-YOU-MEAN | (harness) | — | Unknown key produces "did you mean?" suggestion | bundle-validation §A |
+| OPS-VALIDATE-SKIP-ENGINE | (harness) | — | Without engine dylibs, Layer 4 skipped with W003 warning | bundle-validation §12 |
 | OPS-DOCTOR-FIX-LOCKBOX | (harness) | — | `riversctl doctor --fix` auto-repairs missing lockbox | doctor §3.2 |
 | OPS-DOCTOR-FIX-LOGDIRS | (harness) | — | `riversctl doctor --fix` creates missing log directories | doctor §3.2 |
 | OPS-DOCTOR-FIX-PERMS | (harness) | — | `riversctl doctor --fix` corrects file permissions | doctor §3.2 |

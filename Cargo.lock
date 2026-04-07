@@ -5666,6 +5666,7 @@ version = "0.53.0"
 dependencies = [
  "async-trait",
  "hex",
+ "libloading",
  "rivers-core",
  "rivers-core-config",
  "rivers-driver-sdk",

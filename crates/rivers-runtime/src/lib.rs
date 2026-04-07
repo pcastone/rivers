@@ -41,6 +41,22 @@ pub mod schema;
 pub mod tiered_cache;
 /// Config validation — structural and cross-reference checks.
 pub mod validate;
+/// Bundle validation pipeline — result types, error codes, report builder.
+pub mod validate_result;
+/// Bundle validation pipeline — text and JSON output formatters, Levenshtein helper.
+pub mod validate_format;
+/// Bundle validation pipeline — Layer 1: structural TOML validation.
+pub mod validate_structural;
+/// Layer 2 — Resource existence validation (files, directories, config files).
+pub mod validate_existence;
+/// Bundle validation pipeline — Layer 3: logical cross-reference checks.
+pub mod validate_crossref;
+/// Bundle validation pipeline — engine dylib FFI loading for Layer 4.
+pub mod validate_engine;
+/// Bundle validation pipeline — Layer 4: syntax verification (schemas, imports, compile checks).
+pub mod validate_syntax;
+/// Full validation pipeline — orchestrates Layers 1-4 for `riverpackage validate`.
+pub mod validate_pipeline;
 /// API view (endpoint) configuration types.
 pub mod view;
 /// Rivers home directory and config discovery.
@@ -55,3 +71,10 @@ pub use pseudo_dataview::{DatasourceBuilder, PseudoDataView, PseudoDataViewError
 pub use validate::{validate_app_config, validate_bundle, validate_known_drivers, validate_server_config};
 pub use dataview_engine::{DataViewExecutor, DataViewRegistry};
 pub use view::ApiViewConfig;
+pub use validate_result::{ValidationReport, ValidationResult, ValidationStatus, ValidationSeverity, ValidationSummary, LayerResults, error_codes};
+pub use validate_format::{format_text, format_json, levenshtein_distance, did_you_mean, suggest_key};
+pub use validate_structural::validate_structural;
+pub use validate_crossref::validate_crossref;
+pub use validate_existence::validate_existence;
+pub use validate_pipeline::{validate_bundle_full, validate_bundle_live, ValidationConfig, LockBoxChecker, ServiceHealthChecker};
+pub use validate_engine::{EngineConfig, EngineHandles, EngineHandle};

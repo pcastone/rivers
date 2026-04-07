@@ -172,12 +172,14 @@ pub fn check_permission(
 
 /// Deployment state machine.
 ///
-/// Per spec §15.6: PENDING → RESOLVING → STARTING → RUNNING / FAILED.
+/// Per spec §15.6: PENDING → VALIDATING → RESOLVING → STARTING → RUNNING / FAILED.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DeploymentState {
     /// Deployment is queued and awaiting processing.
     Pending,
+    /// Bundle validation running (Layers 1-4 + live checks).
+    Validating,
     /// Resolving dependencies and configuration.
     Resolving,
     /// Application is starting up.
@@ -229,6 +231,10 @@ impl Deployment {
     /// Transition to a new state.
     pub fn transition(&mut self, new_state: DeploymentState) -> Result<(), AdminError> {
         let valid = match (&self.state, &new_state) {
+            (DeploymentState::Pending, DeploymentState::Validating) => true,
+            (DeploymentState::Validating, DeploymentState::Resolving) => true,
+            (DeploymentState::Validating, DeploymentState::Failed) => true,
+            // Legacy: allow direct Pending → Resolving for callers not yet using validation
             (DeploymentState::Pending, DeploymentState::Resolving) => true,
             (DeploymentState::Resolving, DeploymentState::Starting) => true,
             (DeploymentState::Resolving, DeploymentState::Failed) => true,

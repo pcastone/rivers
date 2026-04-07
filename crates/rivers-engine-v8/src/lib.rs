@@ -90,6 +90,114 @@ pub extern "C" fn _rivers_engine_shutdown() {
     }
 }
 
+// ── Compile Check FFI ────────────────────────────────────────────
+
+/// Compile-only check for JS/TS source. No execution, no side effects.
+///
+/// Returns a heap-allocated JSON string. Caller frees via `_rivers_free_string`.
+///
+/// Success: `{"ok":true,"exports":["onCreateOrder","default"]}`
+/// Error: `{"ok":false,"error":{"filename":"orders.ts","line":14,"column":8,"message":"..."}}`
+#[no_mangle]
+pub extern "C" fn _rivers_compile_check(
+    source_ptr: *const u8,
+    source_len: usize,
+    filename_ptr: *const u8,
+    filename_len: usize,
+) -> *const std::ffi::c_char {
+    let source = if source_ptr.is_null() || source_len == 0 {
+        return alloc_json_string(r#"{"ok":false,"error":{"message":"empty source"}}"#);
+    } else {
+        unsafe { std::slice::from_raw_parts(source_ptr, source_len) }
+    };
+
+    let filename = if filename_ptr.is_null() || filename_len == 0 {
+        "unknown.js"
+    } else {
+        let bytes = unsafe { std::slice::from_raw_parts(filename_ptr, filename_len) };
+        std::str::from_utf8(bytes).unwrap_or("unknown.js")
+    };
+
+    let source_str = match std::str::from_utf8(source) {
+        Ok(s) => s,
+        Err(e) => {
+            return alloc_json_string(&format!(
+                r#"{{"ok":false,"error":{{"message":"invalid UTF-8: {}"}}}}"#,
+                e
+            ));
+        }
+    };
+
+    // Ensure V8 is initialized
+    v8_runtime::ensure_v8_initialized();
+
+    // Compile in a throwaway isolate using Script::compile (same as execution.rs)
+    let mut isolate = v8_runtime::acquire_isolate(v8_runtime::DEFAULT_HEAP_LIMIT);
+    let result = {
+        let handle_scope = &mut v8::HandleScope::new(&mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        let v8_source = v8_runtime::v8_str(scope, source_str);
+
+        match v8::Script::compile(scope, v8_source, None) {
+            Some(_script) => {
+                // Compile succeeded. Export enumeration requires full module
+                // instantiation which is beyond compile-check scope.
+                // Report success with empty export list.
+                format!(r#"{{"ok":true,"exports":[]}}"#)
+            }
+            None => {
+                // Compilation failed — extract error from TryCatch
+                let tc = &mut v8::TryCatch::new(scope);
+                // Re-attempt compilation in TryCatch to capture the error
+                let v8_source2 = v8_runtime::v8_str(tc, source_str);
+                v8::Script::compile(tc, v8_source2, None);
+                if let Some(exception) = tc.exception() {
+                    let msg = exception.to_rust_string_lossy(tc);
+                    let json_msg = msg.replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                        .replace('\n', "\\n");
+                    format!(
+                        r#"{{"ok":false,"error":{{"filename":"{}","message":"{}"}}}}"#,
+                        filename.replace('"', "\\\""),
+                        json_msg,
+                    )
+                } else {
+                    format!(r#"{{"ok":false,"error":{{"message":"compilation failed"}}}}"#)
+                }
+            }
+        }
+    };
+
+    v8_runtime::release_isolate(isolate);
+    alloc_json_string(&result)
+}
+
+/// Free a string returned by `_rivers_compile_check`.
+#[no_mangle]
+pub extern "C" fn _rivers_free_string(ptr: *const std::ffi::c_char) {
+    if !ptr.is_null() {
+        unsafe {
+            drop(std::ffi::CString::from_raw(ptr as *mut std::ffi::c_char));
+        }
+    }
+}
+
+/// Allocate a C string from a Rust string, returning a pointer to heap memory.
+fn alloc_json_string(s: &str) -> *const std::ffi::c_char {
+    match std::ffi::CString::new(s) {
+        Ok(cstr) => cstr.into_raw() as *const std::ffi::c_char,
+        Err(_) => {
+            // Fallback: strip null bytes
+            let clean = s.replace('\0', "");
+            std::ffi::CString::new(clean)
+                .unwrap_or_default()
+                .into_raw() as *const std::ffi::c_char
+        }
+    }
+}
+
 /// Cancel a running task (stub — full watchdog integration is Phase 5).
 #[no_mangle]
 pub extern "C" fn _rivers_engine_cancel(_task_id: usize) -> i32 {
