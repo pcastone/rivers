@@ -53,11 +53,28 @@ pub(super) extern "C" fn host_dataview_execute(
     };
     let trace_id = input["trace_id"].as_str().unwrap_or("engine-callback").to_string();
 
-    // Convert JSON params to HashMap<String, QueryValue>
+    // Convert JSON params to HashMap<String, QueryValue>, coercing to native types
     use rivers_runtime::rivers_driver_sdk::QueryValue;
     let params: HashMap<String, QueryValue> = input["params"]
         .as_object()
-        .map(|o| o.iter().map(|(k, v)| (k.clone(), QueryValue::Json(v.clone()))).collect())
+        .map(|o| o.iter().map(|(k, v)| {
+            let qv = match v {
+                serde_json::Value::Number(n) => {
+                    if let Some(i) = n.as_i64() {
+                        QueryValue::Integer(i)
+                    } else if let Some(f) = n.as_f64() {
+                        QueryValue::Float(f)
+                    } else {
+                        QueryValue::Json(v.clone())
+                    }
+                }
+                serde_json::Value::String(s) => QueryValue::String(s.clone()),
+                serde_json::Value::Bool(b) => QueryValue::Boolean(*b),
+                serde_json::Value::Null => QueryValue::Null,
+                _ => QueryValue::Json(v.clone()),
+            };
+            (k.clone(), qv)
+        }).collect())
         .unwrap_or_default();
 
     // Try app-namespace prefix from trace_id or input, fall back to scanning registry
