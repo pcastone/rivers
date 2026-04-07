@@ -69,7 +69,7 @@ pub use env_override::apply_environment_overrides;
 pub use loader::{load_bundle, load_server_config, LoadedApp, LoadedBundle};
 pub use pseudo_dataview::{DatasourceBuilder, PseudoDataView, PseudoDataViewError};
 pub use validate::{validate_app_config, validate_bundle, validate_known_drivers, validate_server_config};
-pub use dataview_engine::{DataViewExecutor, DataViewRegistry};
+pub use dataview_engine::{DataViewError, DataViewExecutor, DataViewRegistry};
 pub use view::ApiViewConfig;
 pub use validate_result::{ValidationReport, ValidationResult, ValidationStatus, ValidationSeverity, ValidationSummary, LayerResults, error_codes};
 pub use validate_format::{format_text, format_json, levenshtein_distance, did_you_mean, suggest_key};

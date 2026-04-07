@@ -30,17 +30,26 @@ pub(super) extern "C" fn host_dataview_execute(
 ) -> i32 {
     let ctx = match HOST_CONTEXT.get() {
         Some(c) => c,
-        None => return -1,
+        None => {
+            tracing::error!("host_dataview_execute: HOST_CONTEXT not set");
+            return -1;
+        }
     };
 
     let input = match read_input(input_ptr, input_len) {
         Ok(v) => v,
-        Err(_) => return -2,
+        Err(e) => {
+            tracing::error!(error = %e, "host_dataview_execute: failed to read input");
+            return -2;
+        }
     };
 
     let name = match input["name"].as_str() {
         Some(n) => n.to_string(),
-        None => return -3,
+        None => {
+            tracing::error!(input = %input, "host_dataview_execute: missing 'name' field");
+            return -3;
+        }
     };
     let trace_id = input["trace_id"].as_str().unwrap_or("engine-callback").to_string();
 
@@ -51,13 +60,37 @@ pub(super) extern "C" fn host_dataview_execute(
         .map(|o| o.iter().map(|(k, v)| (k.clone(), QueryValue::Json(v.clone()))).collect())
         .unwrap_or_default();
 
+    // Try app-namespace prefix from trace_id or input, fall back to scanning registry
+    let app_prefix = input["app_prefix"].as_str().map(|s| s.to_string());
+
     let executor_lock = ctx.dataview_executor.clone();
     match ctx.rt_handle.block_on(async {
         let executor = {
             let guard = executor_lock.read().await;
             guard.clone().ok_or_else(|| "DataViewExecutor not initialized".to_string())?
         };
-        executor.execute(&name, params, "GET", &trace_id).await.map_err(|e| e.to_string())
+        // Try the bare name first
+        match executor.execute(&name, params.clone(), "GET", &trace_id).await {
+            Ok(r) => Ok(r),
+            Err(rivers_runtime::DataViewError::NotFound { .. }) => {
+                // DataViews are registered as "{entry_point}:{name}" — try with prefix
+                if let Some(prefix) = &app_prefix {
+                    let namespaced = format!("{}:{}", prefix, name);
+                    executor.execute(&namespaced, params, "GET", &trace_id).await
+                        .map_err(|e| format!("{e:?}"))
+                } else {
+                    // No prefix hint — scan for any match ending in ":{name}"
+                    let suffix = format!(":{}", name);
+                    if let Some(full_name) = executor.find_by_suffix(&suffix) {
+                        executor.execute(&full_name, params, "GET", &trace_id).await
+                            .map_err(|e| format!("{e:?}"))
+                    } else {
+                        Err(format!("DataView '{}' not found (tried bare and namespaced)", name))
+                    }
+                }
+            }
+            Err(e) => Err(format!("{e:?}")),
+        }
     }) {
         Ok(response) => {
             // Serialize DataViewResponse.query_result to JSON
@@ -71,6 +104,7 @@ pub(super) extern "C" fn host_dataview_execute(
             0
         }
         Err(e) => {
+            tracing::error!(dataview = %name, error = %e, "host_dataview_execute failed");
             let err_val = serde_json::json!({"error": e});
             write_output(out_ptr, out_len, &err_val);
             -10

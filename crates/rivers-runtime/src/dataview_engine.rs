@@ -442,6 +442,14 @@ impl DataViewRegistry {
         self.views.get(name)
     }
 
+    /// Find a DataView whose name ends with the given suffix.
+    ///
+    /// Used by host callbacks to resolve unqualified names like `"list_records"`
+    /// against namespaced entries like `"handlers:list_records"`.
+    pub fn find_by_suffix(&self, suffix: &str) -> Option<String> {
+        self.views.keys().find(|k| k.ends_with(suffix)).cloned()
+    }
+
     /// Return the number of registered DataViews.
     pub fn count(&self) -> usize {
         self.views.len()
@@ -529,6 +537,14 @@ impl DataViewExecutor {
             cache,
             event_bus: None,
         }
+    }
+
+    /// Find a DataView whose name ends with the given suffix.
+    ///
+    /// Delegates to the underlying registry. Used by host callbacks
+    /// to resolve unqualified names to namespaced entries.
+    pub fn find_by_suffix(&self, suffix: &str) -> Option<String> {
+        self.registry.find_by_suffix(suffix)
     }
 
     /// Set the EventBus for cache invalidation events.
