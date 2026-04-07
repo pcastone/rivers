@@ -127,17 +127,21 @@ pub(super) extern "C" fn near_heap_limit_cb(
 ) -> usize {
     if !data.is_null() {
         let cb_data = unsafe { &*(data as *const HeapCallbackData) };
-        // Set OOM flag — do NOT call terminate_execution() from inside V8's
-        // GC thread. Calling terminate from here can cause V8 to abort the
-        // process. Instead, the pool watchdog checks this flag every 10ms
-        // and terminates from its own thread.
         if !cb_data.oom_triggered.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            // First trigger — terminate from here. If this causes a crash,
-            // the watchdog will catch it on subsequent allocations.
-            cb_data.handle.terminate_execution();
+            // First trigger — log it, then spawn a thread that terminates
+            // from a clean context (not V8's GC thread).
+            eprintln!("[HEAP-GUARD] near_heap_limit_cb fired at {}MB, granting 64MB headroom",
+                current_heap_limit / (1024 * 1024));
+            let handle = cb_data.handle.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                handle.terminate_execution();
+            });
         }
     }
-    // Grant generous headroom so V8 has room to process the termination
-    // rather than immediately hitting the fatal OOM handler
-    current_heap_limit + 32 * 1024 * 1024
+    // Grant generous headroom so V8 can:
+    // 1. Finish the current GC cycle
+    // 2. Return to user code
+    // 3. Process the termination from the spawned thread
+    current_heap_limit + 64 * 1024 * 1024
 }

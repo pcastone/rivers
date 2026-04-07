@@ -166,6 +166,9 @@ pub(crate) fn execute_js(ctx: SerializedTaskContext) -> Result<rivers_engine_sdk
         return_value
     };
 
+    // Reset the OOM flag for next handler execution
+    crate::v8_runtime::HEAP_OOM_TRIGGERED.store(false, std::sync::atomic::Ordering::SeqCst);
+
     // Release isolate back to pool (only reached on successful execution —
     // terminated isolates are dropped by early-return unwinding)
     release_isolate(isolate);
