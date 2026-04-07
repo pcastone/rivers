@@ -31,10 +31,27 @@ While `terminate_execution()` is thread-safe by design, calling it simultaneousl
 Additionally, the TryCatch scope in execution.rs checks `has_terminated()` after compilation and top-level execution, but if termination occurs during **global scope injection** (ctx object, Rivers globals) before the handler function is called, those injection steps don't have TryCatch protection.
 
 ## Fix Applied
-None — requires architectural fix:
-1. Single termination authority (remove duplicate watchdog, use pool-level only)
-2. TryCatch protection around all V8 scope operations, not just compilation/execution
-3. Consider `std::panic::catch_unwind` around the V8 execution thread to prevent process abort
+
+### V8 Timeout (engine dylib — `crates/rivers-engine-v8/src/execution.rs`)
+- Replaced fire-and-forget watchdog thread with **cancellable watchdog** using `AtomicBool` flag
+- Watchdog checks cancel flag every 50ms instead of sleeping the full timeout
+- After handler completes, flag is set and watchdog thread is joined before touching the isolate
+- `has_terminated()` checked after `func.call()` — terminated isolates are dropped, never recycled
+
+### V8 Timeout (ProcessPool — `crates/riversd/src/process_pool/v8_engine/execution.rs`)
+- Deregister from pool watchdog **BEFORE** touching the isolate (prevents race with watchdog thread)
+- On timeout/error: explicitly `drop(isolate)` instead of recycling
+
+### V8 Heap OOM (engine dylib — `crates/rivers-engine-v8/src/v8_runtime.rs`)
+- `near_heap_limit_callback` no longer calls `terminate_execution()` directly from V8's GC thread
+- Instead: sets `HEAP_OOM_TRIGGERED` flag, spawns thread that terminates after 1ms delay
+- Grants 64MB headroom (was 0MB — returning `current_heap_limit` with no growth)
+- Flag reset after each handler execution
+
+### V8 Heap OOM (ProcessPool — `crates/riversd/src/process_pool/v8_engine/init.rs`)
+- `HeapCallbackData` struct with `oom_triggered` flag + `IsolateHandle`
+- Same deferred-thread approach as engine dylib
+- Execution path checks `oom_hit` flag — OOM-tainted isolates are dropped, never recycled
 
 ## Impact
 The v8-timeout test crashes the server, making it impossible to run the full canary test suite in sequence. All tests after v8-timeout fail with TIMEOUT.
