@@ -214,7 +214,8 @@ async fn view_dispatch_handler(
             if result.body.get("allow").and_then(|v| v.as_bool()).unwrap_or(false) {
                 if let Some(claims) = result.body.get("session_claims").cloned() {
                     if let Some(ref mgr) = ctx.session_manager {
-                        let subject = claims.get("subject")
+                        let subject = claims.get("sub")
+                            .or(claims.get("subject"))
                             .or(claims.get("username"))
                             .and_then(|v| v.as_str())
                             .unwrap_or("anonymous")

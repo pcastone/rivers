@@ -23,17 +23,22 @@ async fn execute_ctx_dataview_returns_prefetched() {
 }
 
 #[tokio::test]
-async fn execute_ctx_dataview_missing_returns_null() {
-    // ctx.dataview() returns null (not throw) when data not pre-fetched
+async fn execute_ctx_dataview_missing_throws() {
+    // ctx.dataview() throws when data not pre-fetched (error sanitization)
     let ctx = make_js_task(
         r#"function handler(ctx) {
-            var result = ctx.dataview("nonexistent");
-            return { got: result };
+            var threw = false;
+            try {
+                ctx.dataview("nonexistent");
+            } catch(e) {
+                threw = true;
+            }
+            return { threw: threw };
         }"#,
         "handler",
     );
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
-    assert!(result.value["got"].is_null());
+    assert_eq!(result.value["threw"], true);
 }
 
 // ── V2.3: ctx.streamDataview -- mock iterator protocol ─────────
@@ -375,16 +380,21 @@ async fn x4_dataview_prefetch_returns_data() {
 }
 
 #[tokio::test]
-async fn x4_dataview_missing_returns_null() {
+async fn x4_dataview_missing_throws() {
     let ctx = make_js_task(
         r#"function handler(ctx) {
-            var result = ctx.dataview("nonexistent");
-            return { is_null: result === null };
+            var threw = false;
+            try {
+                ctx.dataview("nonexistent");
+            } catch(e) {
+                threw = true;
+            }
+            return { threw: threw };
         }"#,
         "handler",
     );
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
-    assert_eq!(result.value["is_null"], true);
+    assert_eq!(result.value["threw"], true);
 }
 
 // ── X7: ctx.datasource().build() Tests ──────────────────────

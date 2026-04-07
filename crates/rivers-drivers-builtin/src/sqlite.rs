@@ -212,10 +212,14 @@ impl Connection for SqliteConnection {
 
 /// Build a vector of `(name, value)` pairs for rusqlite named-parameter binding.
 /// Each parameter key is prefixed with `:` if not already present.
+/// Keys are sorted to ensure deterministic binding order (HashMap iteration is
+/// unordered; sorted keys make positional `$001, $002, …` bindings correct).
 fn bind_params(parameters: &HashMap<String, QueryValue>) -> Vec<(String, Box<dyn rusqlite::types::ToSql>)> {
-    parameters
-        .iter()
-        .map(|(key, val)| {
+    let mut keys: Vec<&String> = parameters.keys().collect();
+    keys.sort();
+    keys.into_iter()
+        .map(|key| {
+            let val = &parameters[key];
             let name = if key.starts_with(':') || key.starts_with('@') || key.starts_with('$') {
                 key.clone()
             } else {

@@ -11,10 +11,6 @@ view_type = "Rest"
 auth      = "none"
 guard     = true
 
-[api.views.login.session]
-ttl_s          = 3600
-idle_timeout_s = 600
-
 [api.views.login.handler]
 type       = "codecomponent"
 language   = "typescript"

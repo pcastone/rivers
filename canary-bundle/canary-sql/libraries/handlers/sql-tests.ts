@@ -44,6 +44,9 @@ TestResult.prototype.fail = function(err) {
 function pgParamOrder(ctx) {
     var t = new TestResult("SQL-PG-PARAM-ORDER", "SQL", "rivers-data-layer-spec.md section 8.3");
     try {
+        // Seed: insert the row we'll query (idempotent — ignore duplicate key)
+        try { ctx.dataview("pg_insert", { id: "seed-param-pg", zname: "Alice", age: 30 }); } catch(e) {}
+
         // DataView uses $zname and $age — zname sorts AFTER age alphabetically
         // but appears FIRST in the query. If the translation layer works,
         // $1=zname value, $2=age value (order of appearance, not alphabetical).
@@ -164,6 +167,11 @@ function pgDelete(ctx) {
 function pgMaxRows(ctx) {
     var t = new TestResult("SQL-PG-MAX-ROWS", "SQL", "feature-inventory section 21.5");
     try {
+        // Seed: ensure at least 15 rows exist so max_rows=10 can be tested
+        for (var i = 0; i < 15; i++) {
+            try { ctx.dataview("pg_insert", { id: "seed-maxrows-" + i, zname: "MaxRow" + i, age: 20 + i }); } catch(e) {}
+        }
+
         var result = ctx.dataview("pg_cached");
         t.assert("result_not_null", result !== null, "result type=" + typeof result);
         if (result && result.rows) {
@@ -183,6 +191,9 @@ function pgMaxRows(ctx) {
 function mysqlParamOrder(ctx) {
     var t = new TestResult("SQL-MYSQL-PARAM-ORDER", "SQL", "rivers-data-layer-spec.md section 8.3");
     try {
+        // Seed: insert the row we'll query (idempotent — ignore duplicate key)
+        try { ctx.dataview("mysql_insert", { id: "seed-param-mysql", zname: "Bob", age: 40 }); } catch(e) {}
+
         var result = ctx.dataview("mysql_param_test", { zname: "Bob", age: 40 });
 
         t.assert("result_not_null", result !== null, "result=" + JSON.stringify(result));
@@ -307,6 +318,9 @@ function mysqlDelete(ctx) {
 function sqliteParamOrder(ctx) {
     var t = new TestResult("SQL-SQLITE-PARAM-ORDER", "SQL", "rivers-data-layer-spec.md section 8.3");
     try {
+        // Seed: insert the row we'll query (idempotent — ignore duplicate key)
+        try { ctx.dataview("sqlite_insert", { id: "seed-param-sqlite", zname: "Charlie", age: 50 }); } catch(e) {}
+
         var result = ctx.dataview("sqlite_param_test", { zname: "Charlie", age: 50 });
 
         t.assert("result_not_null", result !== null, "result=" + JSON.stringify(result));

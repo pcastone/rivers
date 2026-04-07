@@ -6,9 +6,10 @@ port      = 9900
 log_level = "info"
 
 [base.logging]
-level       = "info"
-format      = "json"
-app_log_dir = "log/apps"
+level           = "info"
+format          = "json"
+local_file_path = "/Users/pcastone/Projects/rust/rivers.pub/canary-bundle/log/riversd.log"
+app_log_dir     = "/Users/pcastone/Projects/rust/rivers.pub/canary-bundle/log/apps"
 
 [base.tls]
 cert     = "/Users/pcastone/Projects/rust/rivers.pub/canary-bundle/config/tls/server.crt"
@@ -34,3 +35,23 @@ same_site = "Lax"
 path       = "/Users/pcastone/Projects/rust/rivers.pub/sec/lockbox/rivers.rkeystore"
 key_source = "file"
 key_file   = "/Users/pcastone/Projects/rust/rivers.pub/sec/lockbox/identity.key"
+
+[engines]
+dir = "/Users/pcastone/Projects/rust/rivers.pub/release/canary/lib"
+
+[plugins]
+# Static plugins are compiled into riversd — don't also load cdylib versions
+# (cdylib plugins have their own tokio copy, causing "no reactor" panics)
+dir = "/Users/pcastone/Projects/rust/rivers.pub/canary-bundle/config/empty-plugins"
+
+[static_files]
+enabled      = true
+root_path    = "/Users/pcastone/Projects/rust/rivers.pub/canary-bundle/canary-main/libraries/spa"
+index_file   = "index.html"
+spa_fallback = true
+exclude_paths = ["/canary-fleet"]
+
+# [base.admin_api]
+# enabled = true
+# host    = "127.0.0.1"
+# port    = 9091

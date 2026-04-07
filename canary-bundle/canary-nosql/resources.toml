@@ -1,35 +1,41 @@
 [[datasources]]
 name       = "mongo"
 driver     = "mongodb"
+x-type     = "mongodb"
 lockbox    = "mongodb/test"
 required   = true
 
 [[datasources]]
 name       = "es"
 driver     = "elasticsearch"
+x-type     = "elasticsearch"
 lockbox    = "elasticsearch/test"
 required   = true
 
 [[datasources]]
 name       = "couch"
 driver     = "couchdb"
+x-type     = "couchdb"
 lockbox    = "couchdb/test"
 required   = true
 
 [[datasources]]
 name       = "cassandra"
 driver     = "cassandra"
+x-type     = "cassandra"
 lockbox    = "cassandra/test"
 required   = true
 
 [[datasources]]
 name       = "ldap"
 driver     = "ldap"
+x-type     = "ldap"
 lockbox    = "ldap/test"
 required   = true
 
 [[datasources]]
 name       = "redis"
 driver     = "redis"
+x-type     = "redis"
 lockbox    = "redis/test"
 required   = true

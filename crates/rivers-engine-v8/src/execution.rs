@@ -19,6 +19,24 @@ use crate::HOST_CALLBACKS;
 /// Default handler execution timeout in milliseconds.
 const DEFAULT_TIMEOUT_MS: u64 = 5000;
 
+/// RAII guard that ensures the watchdog thread is cancelled and joined on all
+/// exit paths (including early returns from compile errors, missing functions,
+/// etc.) and resets the HEAP_OOM_TRIGGERED flag.
+struct WatchdogGuard {
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    watchdog: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for WatchdogGuard {
+    fn drop(&mut self) {
+        self.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = self.watchdog.take() {
+            let _ = handle.join();
+        }
+        crate::v8_runtime::HEAP_OOM_TRIGGERED.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 pub(crate) fn execute_js(ctx: SerializedTaskContext) -> Result<rivers_engine_sdk::SerializedTaskResult, String> {
     let start = Instant::now();
 
@@ -72,6 +90,7 @@ pub(crate) fn execute_js(ctx: SerializedTaskContext) -> Result<rivers_engine_sdk
             isolate_handle.terminate_execution();
         }
     });
+    let _watchdog_guard = WatchdogGuard { cancelled: cancelled.clone(), watchdog: Some(watchdog) };
     let result = {
         let handle_scope = &mut v8::HandleScope::new(&mut isolate);
         let context = v8::Context::new(handle_scope, Default::default());
@@ -118,9 +137,8 @@ pub(crate) fn execute_js(ctx: SerializedTaskContext) -> Result<rivers_engine_sdk
 
         let result = func.call(tc, recv, &[ctx_arg]);
 
-        // Cancel watchdog BEFORE any further isolate access
+        // Signal watchdog to stop (it will be joined by WatchdogGuard on drop)
         cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
-        let _ = watchdog.join();
 
         if tc.has_terminated() {
             clear_task_locals();
@@ -166,8 +184,7 @@ pub(crate) fn execute_js(ctx: SerializedTaskContext) -> Result<rivers_engine_sdk
         return_value
     };
 
-    // Reset the OOM flag for next handler execution
-    crate::v8_runtime::HEAP_OOM_TRIGGERED.store(false, std::sync::atomic::Ordering::SeqCst);
+    // OOM flag reset is handled by WatchdogGuard::drop on all exit paths.
 
     // Release isolate back to pool (only reached on successful execution —
     // terminated isolates are dropped by early-return unwinding)
@@ -233,6 +250,16 @@ fn inject_ctx_object<'s>(
         if let Some(parsed) = v8::json::parse(scope, req_src) {
             let req_key = v8_str(scope, "request");
             obj.set(scope, req_key.into(), parsed);
+        }
+    }
+
+    // ctx.session (from args if present — matches ProcessPool injection)
+    if let Some(session) = ctx.args.get("session") {
+        let sess_json = serde_json::to_string(session).unwrap_or_default();
+        let sess_src = v8_str(scope, &sess_json);
+        if let Some(parsed) = v8::json::parse(scope, sess_src) {
+            let sess_key = v8_str(scope, "session");
+            obj.set(scope, sess_key.into(), parsed);
         }
     }
 
@@ -387,21 +414,51 @@ fn dataview_callback(
                 input.as_ptr(), input.len(),
                 &mut out_ptr, &mut out_len,
             );
-            if result == 0 && !out_ptr.is_null() && out_len > 0 {
+            if !out_ptr.is_null() && out_len > 0 {
                 let bytes = unsafe { std::slice::from_raw_parts(out_ptr, out_len) };
                 let json_str = String::from_utf8_lossy(bytes);
-                let v8_val = v8_str(scope, &json_str);
-                if let Some(parsed) = v8::json::parse(scope, v8_val) {
-                    rv.set(parsed);
+                if result == 0 {
+                    // Success — return the parsed result
+                    let v8_val = v8_str(scope, &json_str);
+                    if let Some(parsed) = v8::json::parse(scope, v8_val) {
+                        rv.set(parsed);
+                        unsafe { rivers_engine_sdk::free_json_buffer(out_ptr, out_len) };
+                        return;
+                    }
+                } else {
+                    // Error — extract error message and throw JS exception
+                    let err_msg = if let Ok(err_obj) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                        err_obj["error"].as_str().unwrap_or(&json_str).to_string()
+                    } else {
+                        json_str.to_string()
+                    };
                     unsafe { rivers_engine_sdk::free_json_buffer(out_ptr, out_len) };
+                    let msg = v8_str(scope, &err_msg);
+                    let exception = v8::Exception::error(scope, msg);
+                    scope.throw_exception(exception);
                     return;
                 }
                 unsafe { rivers_engine_sdk::free_json_buffer(out_ptr, out_len) };
+            } else if result < 0 {
+                // Host callback returned error but no output buffer — throw generic error
+                let msg = v8_str(scope, &format!(
+                    "ctx.dataview('{}') failed (host error code {})", name, result
+                ));
+                let exception = v8::Exception::error(scope, msg);
+                scope.throw_exception(exception);
+                return;
             }
         }
     }
 
-    rv.set(v8::null(scope).into());
+    // DataView not found in pre-fetched data and no host callback resolved it —
+    // throw a JS exception so handlers see a clear error instead of silent null.
+    let msg = v8_str(scope, &format!(
+        "ctx.dataview('{}') not found. Declare in view config: dataviews = [\"{}\"]",
+        name, name
+    ));
+    let exception = v8::Exception::error(scope, msg);
+    scope.throw_exception(exception);
 }
 
 // ── Rivers Global (log, crypto) ─────────────────────────────────
@@ -456,14 +513,16 @@ fn inject_rivers_global(scope: &mut v8::HandleScope) {
     let rivers_key = v8_str(scope, "Rivers");
     global.set(scope, rivers_key.into(), rivers_obj.into());
 
-    // console.log
+    // console.log, console.warn, console.error
     let console_obj = v8::Object::new(scope);
-    let console_log_fn = v8::Function::builder(log_callback)
-        .data(v8::Integer::new(scope, 2).into())
-        .build(scope)
-        .unwrap();
-    let cl_key = v8_str(scope, "log");
-    console_obj.set(scope, cl_key.into(), console_log_fn.into());
+    for (name, level) in [("log", 2i32), ("warn", 3), ("error", 4)] {
+        let func = v8::Function::builder(log_callback)
+            .data(v8::Integer::new(scope, level).into())
+            .build(scope)
+            .unwrap();
+        let key = v8_str(scope, name);
+        console_obj.set(scope, key.into(), func.into());
+    }
     let console_key = v8_str(scope, "console");
     global.set(scope, console_key.into(), console_obj.into());
 }

@@ -67,13 +67,12 @@ function pollData(ctx) {
         }
 
         // Include a timestamp so the hash changes on each poll tick
-        ctx.resdata = {
-            poll_data: data,
-            polled_at: new Date().toISOString(),
-            verdict: t.finish()
-        };
+        var verdict = t.finish();
+        verdict.poll_data = data;
+        verdict.polled_at = new Date().toISOString();
+        ctx.resdata = verdict;
     } catch (e) {
-        ctx.resdata = { verdict: t.fail(String(e)) };
+        ctx.resdata = t.fail(String(e));
     }
 }
 

@@ -448,12 +448,14 @@ fn ctx_dataview_callback(
         }
     }
 
-    // Fallback: no executor and not pre-fetched -- warn and return null
-    tracing::warn!(
-        target: "rivers.handler",
-        "ctx.dataview('{}') not in pre-fetched data and no executor available. \
-         Declare in view config: dataviews = [\"{}\"]",
+    // Fallback: no executor and not pre-fetched — throw a JS exception
+    // so handlers see a clear error instead of silent null.
+    let err_msg = format!(
+        "ctx.dataview('{}') not found. Declare in view config: dataviews = [\"{}\"]",
         name, name
     );
-    rv.set(v8::null(scope).into());
+    tracing::warn!(target: "rivers.handler", "{}", err_msg);
+    let msg = v8::String::new(scope, &err_msg).unwrap();
+    let exception = v8::Exception::error(scope, msg);
+    scope.throw_exception(exception);
 }

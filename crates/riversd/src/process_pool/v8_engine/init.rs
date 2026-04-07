@@ -81,14 +81,14 @@ pub(crate) fn clear_script_cache() {
 }
 
 /// RAII guard that frees a raw pointer when dropped.
-/// Used to clean up the IsolateHandle passed to the near-heap-limit callback.
+/// Used to clean up the HeapCallbackData passed to the near-heap-limit callback.
 pub(super) struct RawPtrGuard(pub(super) *mut std::ffi::c_void);
 
 impl Drop for RawPtrGuard {
     fn drop(&mut self) {
         if !self.0.is_null() {
             unsafe {
-                drop(Box::from_raw(self.0 as *mut v8::IsolateHandle));
+                drop(Box::from_raw(self.0 as *mut HeapCallbackData));
             }
         }
     }

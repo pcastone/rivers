@@ -117,10 +117,10 @@ required = true
 name       = "pg_cached"
 datasource = "canary-pg"
 query      = "SELECT id, zname, age FROM canary_records"
+max_rows   = 10
 
 [data.dataviews.pg_cached.caching]
 ttl_seconds = 60
-max_rows    = 10
 
 [data.dataviews.pg_ddl_trap]
 name       = "pg_ddl_trap"
@@ -203,6 +203,11 @@ query      = "DELETE FROM canary_records WHERE id = $id"
 name     = "id"
 type     = "string"
 required = true
+
+[data.dataviews.mysql_ddl_trap]
+name       = "mysql_ddl_trap"
+datasource = "canary-mysql"
+query      = "DROP TABLE canary_records"
 
 # ── SQLite DataViews ──
 

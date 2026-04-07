@@ -33,21 +33,18 @@ retry_attempts = 1
 name       = "proxy_sql_pg_select"
 datasource = "canary-sql-api"
 query      = "/canary/sql/pg/select"
-method     = "GET"
 
 # Proxy to canary-handlers trace-id endpoint
 [data.dataviews.proxy_handlers_trace_id]
 name       = "proxy_handlers_trace_id"
 datasource = "canary-handlers-api"
 query      = "/canary/rt/ctx/trace-id"
-method     = "GET"
 
 # Proxy to a non-existent endpoint to test error propagation
 [data.dataviews.proxy_error_target]
 name       = "proxy_error_target"
 datasource = "canary-handlers-api"
 query      = "/canary/rt/does-not-exist"
-method     = "GET"
 
 # ---------------------------------------------
 # Views -- proxy test endpoints
@@ -80,7 +77,7 @@ type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/proxy-tests.ts"
 entrypoint = "proxySqlPassthrough"
-dataviews  = ["proxy_sql_pg_select"]
+dataview   = "proxy_sql_pg_select"
 
 # -- PROXY-HANDLER-PASSTHROUGH: proxy to canary-handlers trace-id --
 
@@ -95,7 +92,7 @@ type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/proxy-tests.ts"
 entrypoint = "proxyHandlerPassthrough"
-dataviews  = ["proxy_handlers_trace_id"]
+dataview   = "proxy_handlers_trace_id"
 
 # -- PROXY-ERROR-PROPAGATION: proxy to failing endpoint --
 
@@ -110,7 +107,7 @@ type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/proxy-tests.ts"
 entrypoint = "proxyErrorPropagation"
-dataviews  = ["proxy_error_target"]
+dataview   = "proxy_error_target"
 
 # ---------------------------------------------
 # SPA Config

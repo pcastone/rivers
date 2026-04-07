@@ -265,3 +265,83 @@ fn multiple_cookies_parses_correct_one() {
     );
     assert_eq!(id.unwrap(), "sess_correct");
 }
+
+// ── Guard → Session → Cookie (regression: bugreport_2026-04-06_2) ─
+
+#[tokio::test]
+async fn guard_flat_claims_creates_session_and_cookie() {
+    // Simulates the view_dispatch.rs guard session creation flow:
+    // Guard handler returns flat IdentityClaims → parse → create session → build cookie
+    let config = default_config();
+    let mgr = make_manager(config.clone());
+
+    // Flat claims as returned by a guard handler (no session_claims wrapper)
+    let guard_body = serde_json::json!({
+        "allow": true,
+        "sub": "canary-user-001",
+        "role": "tester",
+        "email": "canary@test.local",
+        "groups": ["canary-fleet"],
+    });
+
+    // Step 1: Parse guard result (same as guard.rs logic)
+    let allow = guard_body.get("allow").and_then(|v| v.as_bool()).unwrap_or(false);
+    assert!(allow);
+
+    // Step 2: Extract claims — prefer explicit session_claims, fall back to flat body
+    let claims = guard_body.get("session_claims").cloned().unwrap_or_else(|| {
+        let obj = guard_body.as_object().unwrap();
+        let filtered: serde_json::Map<String, serde_json::Value> = obj
+            .iter()
+            .filter(|(k, _)| k.as_str() != "allow" && k.as_str() != "redirect_url")
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        serde_json::Value::Object(filtered)
+    });
+
+    // Step 3: Extract subject (sub > subject > username > anonymous)
+    let subject = claims.get("sub")
+        .or(claims.get("subject"))
+        .or(claims.get("username"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("anonymous")
+        .to_string();
+    assert_eq!(subject, "canary-user-001");
+
+    // Step 4: Create session
+    let session = mgr.create_session(subject, claims).await.unwrap();
+    assert!(session.session_id.starts_with("sess_"));
+    assert_eq!(session.subject, "canary-user-001");
+
+    // Step 5: Build Set-Cookie header
+    let cookie = build_set_cookie(&session.session_id, &config);
+    assert!(cookie.contains(&session.session_id));
+    assert!(cookie.contains("HttpOnly"));
+    assert!(cookie.contains("Secure"));
+
+    // Step 6: Validate the session round-trips
+    let validated = mgr.validate_session(&session.session_id).await.unwrap().unwrap();
+    assert_eq!(validated.subject, "canary-user-001");
+    assert_eq!(validated.claims["role"], "tester");
+}
+
+#[tokio::test]
+async fn guard_wrapped_claims_creates_session_and_cookie() {
+    // Explicit session_claims wrapper (backward-compatible path)
+    let config = default_config();
+    let mgr = make_manager(config.clone());
+
+    let claims = serde_json::json!({"sub": "wrapped-user", "role": "admin"});
+
+    let session = mgr
+        .create_session("wrapped-user".into(), claims)
+        .await
+        .unwrap();
+
+    let cookie = build_set_cookie(&session.session_id, &config);
+    assert!(cookie.contains(&session.session_id));
+
+    let validated = mgr.validate_session(&session.session_id).await.unwrap().unwrap();
+    assert_eq!(validated.subject, "wrapped-user");
+    assert_eq!(validated.claims["role"], "admin");
+}

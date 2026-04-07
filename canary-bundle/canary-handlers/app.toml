@@ -71,7 +71,7 @@ type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/ctx-surface.ts"
 entrypoint = "ctxData"
-dataviews  = ["list_records"]
+dataview   = "list_records"
 
 # ─────────────────────────
 

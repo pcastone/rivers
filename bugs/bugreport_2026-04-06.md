@@ -52,7 +52,40 @@ The SQLite driver should:
 3. Log a warning if `database` is empty
 
 ## Fix Applied
-Pending — need confirmation from IPAM team on their exact `resources.toml` config.
+Fixed in commit 9699297 (2026-04-06), with tracing in e3a2811 and test coverage in b4e83a8.
+
+## Independent Findings
+
+**Reviewed: 2026-04-07 — Bug is FIXED. No additional work required.**
+
+### Code Review
+
+Verified `crates/rivers-drivers-builtin/src/sqlite.rs:56-94`. The `connect()` method now:
+
+1. **Falls back from `database` → `host`** (line 61-64) — resolves Theory A (host/database mismatch). If `params.database` is empty, `params.host` is used instead.
+2. **Returns explicit error if both are empty** (line 66-68) — no more silent in-memory DB.
+3. **Creates parent directories** (line 78-85) — resolves Theory B (missing dirs). Skips for `:memory:`.
+4. **Logs the resolved path and source field** (line 71-76) — aids future debugging.
+
+### Test Coverage
+
+Five regression tests at `sqlite.rs:654-731` cover all failure modes:
+
+| Test | Validates |
+|------|-----------|
+| `connect_uses_database_field` | Happy path — `database` field works |
+| `connect_falls_back_to_host_when_database_empty` | Theory A — `host` fallback |
+| `connect_errors_when_both_empty` | Error message when no path given |
+| `connect_creates_parent_directories` | Theory B — nested dir creation |
+| `connect_insert_then_select_across_connections` | Original bug — cross-connection persistence |
+
+### Bundle Loader
+
+`crates/riversd/src/bundle_loader/load.rs:243-246` is unchanged — `host` and `database` are still passed through from TOML as-is. The fix correctly lives in the driver layer, not the loader, which is the right boundary.
+
+### Verdict
+
+The fix addresses both theories from the root cause analysis. The IPAM team confirmation is no longer blocking — regardless of whether they used `host=` or `database=`, the driver now handles both. Recommend closing this bug.
 
 ## Occurrence Log
 | Date | Context | Notes |

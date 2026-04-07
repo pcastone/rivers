@@ -8,76 +8,263 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   background: #0f1117;
   color: #e0e0e0;
-  padding: 2rem;
+  padding: 1.5rem 2rem;
 }
+
+/* ── Header ─────────────────────────────────────── */
 
 .header {
   text-align: center;
-  margin-bottom: 1.5rem;
+  margin-bottom: 1rem;
 }
 
 .header h1 {
-  font-size: 1.5rem;
+  font-size: 1.4rem;
   color: #f0f0f0;
+  letter-spacing: 0.02em;
 }
 
 .subtitle {
-  font-size: 0.85rem;
-  color: #888;
-  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  color: #666;
+  margin-top: 0.2rem;
 }
 
-.status-bar {
-  text-align: center;
-  padding: 0.75rem;
-  border-radius: 6px;
-  font-weight: 600;
-  margin-bottom: 1.5rem;
+.server-status {
+  display: inline-block;
+  font-size: 0.75rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: 10px;
+  margin-top: 0.4rem;
 }
 
-.status-pending {
-  background: #2a2a3a;
-  color: #aaa;
-}
-
-.status-pass {
-  background: #0d3320;
+.server-status.connected {
+  background: #0d2818;
   color: #4ade80;
 }
 
-.status-fail {
-  background: #3b1111;
+.server-status.disconnected {
+  background: #2a0f0f;
   color: #f87171;
 }
 
-.profile {
-  margin-bottom: 1.5rem;
+.server-status.pending {
+  background: #2a2a3a;
+  color: #888;
 }
 
-.profile h2 {
-  font-size: 1rem;
-  color: #aaa;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  margin-bottom: 0.75rem;
-  border-bottom: 1px solid #2a2a3a;
-  padding-bottom: 0.4rem;
+/* ── Summary Bar ────────────────────────────────── */
+
+.summary-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.7rem 1.2rem;
+  border-radius: 8px;
+  margin-bottom: 1.2rem;
+  transition: background 0.3s;
 }
+
+.summary-bar.idle {
+  background: #1a1a2a;
+  border: 1px solid #2a2a3a;
+}
+
+.summary-bar.running {
+  background: #1a1a2a;
+  border: 1px solid #2563eb;
+}
+
+.summary-bar.all-pass {
+  background: #0d3320;
+  border: 1px solid #166534;
+}
+
+.summary-bar.has-fail {
+  background: #2a1111;
+  border: 1px solid #991b1b;
+}
+
+.summary-counts {
+  display: flex;
+  gap: 1.2rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.count-pass { color: #4ade80; }
+.count-fail { color: #f87171; }
+.count-error { color: #fbbf24; }
+.count-total { color: #aaa; }
+.count-pending { color: #888; }
+
+.summary-progress {
+  flex: 1;
+  max-width: 200px;
+  height: 4px;
+  background: #2a2a3a;
+  border-radius: 2px;
+  margin: 0 1.5rem;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  background: #2563eb;
+  border-radius: 2px;
+  transition: width 0.2s;
+}
+
+.btn {
+  padding: 0.45rem 1.2rem;
+  border: none;
+  border-radius: 5px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.btn-primary {
+  background: #2563eb;
+  color: #fff;
+}
+
+.btn-primary:hover {
+  background: #1d4ed8;
+}
+
+.btn-primary:disabled {
+  background: #374151;
+  color: #666;
+  cursor: not-allowed;
+}
+
+.btn-profile {
+  background: #1e293b;
+  color: #93c5fd;
+  font-size: 0.7rem;
+  padding: 0.3rem 0.7rem;
+}
+
+.btn-profile:hover {
+  background: #1e3a5f;
+}
+
+.btn-profile:disabled {
+  background: #1a1a2a;
+  color: #555;
+  cursor: not-allowed;
+}
+
+/* ── Profile Sections ───────────────────────────── */
+
+.profile {
+  margin-bottom: 0.6rem;
+  border: 1px solid #2a2a3a;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.profile-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 1rem;
+  cursor: pointer;
+  user-select: none;
+  background: #14151f;
+  transition: background 0.15s;
+}
+
+.profile-header:hover {
+  background: #1a1b28;
+}
+
+.profile-left {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.profile-chevron {
+  color: #555;
+  font-size: 0.7rem;
+  transition: transform 0.2s;
+  width: 1em;
+}
+
+.profile.open .profile-chevron {
+  transform: rotate(90deg);
+}
+
+.profile-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #ccc;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.profile-count {
+  font-size: 0.75rem;
+  color: #666;
+  font-weight: 400;
+}
+
+.profile-count .pass-num { color: #4ade80; }
+.profile-count .fail-num { color: #f87171; }
+
+.profile-right {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.profile-body {
+  display: none;
+  padding: 0.5rem 0.8rem 0.8rem;
+}
+
+.profile.open .profile-body {
+  display: block;
+}
+
+/* ── Test Cards ─────────────────────────────────── */
 
 .test-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 0.5rem;
 }
 
 .test-card {
-  border-radius: 6px;
-  padding: 0.75rem 1rem;
+  border-radius: 5px;
+  padding: 0.5rem 0.7rem;
   border: 1px solid #2a2a3a;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  position: relative;
+}
+
+.test-card:hover {
+  border-color: #3a3a5a;
 }
 
 .test-card.pending {
   background: #1a1a2a;
+}
+
+.test-card.running {
+  background: #1a1a2a;
+  border-color: #2563eb;
+  animation: pulse-border 1.2s infinite;
+}
+
+@keyframes pulse-border {
+  0%, 100% { border-color: #2563eb; }
+  50% { border-color: #1a1a2a; }
 }
 
 .test-card.pass {
@@ -90,51 +277,147 @@ body {
   border-color: #991b1b;
 }
 
-.test-label {
+.test-card.error {
+  background: #2a1f0f;
+  border-color: #92400e;
+}
+
+.test-card.timeout {
+  background: #2a1f0f;
+  border-color: #92400e;
+}
+
+.test-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.test-id {
+  font-size: 0.72rem;
   font-weight: 600;
-  font-size: 0.9rem;
-  margin-bottom: 0.3rem;
+  color: #ccc;
+  font-family: "SF Mono", "Fira Code", monospace;
 }
 
-.test-status {
-  font-size: 0.8rem;
-  font-weight: 700;
-  text-transform: uppercase;
+.test-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
 }
 
-.pass .test-status {
-  color: #4ade80;
+.pending .test-status-dot { background: #555; }
+.running .test-status-dot { background: #2563eb; animation: pulse-dot 1s infinite; }
+.pass .test-status-dot { background: #4ade80; }
+.fail .test-status-dot { background: #f87171; }
+.error .test-status-dot { background: #fbbf24; }
+.timeout .test-status-dot { background: #fbbf24; }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
 }
 
-.fail .test-status {
-  color: #f87171;
+.test-duration {
+  font-size: 0.65rem;
+  color: #666;
+  margin-top: 0.2rem;
 }
+
+.test-run-btn {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.5rem;
+  background: none;
+  border: none;
+  color: #2563eb;
+  font-size: 0.7rem;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+  padding: 0.1rem 0.3rem;
+}
+
+.test-card:hover .test-run-btn {
+  opacity: 1;
+}
+
+.test-run-btn:hover {
+  color: #60a5fa;
+}
+
+/* ── Expanded Detail ────────────────────────────── */
 
 .test-detail {
-  font-size: 0.7rem;
-  color: #888;
+  display: none;
+  margin-top: 0.4rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid #2a2a3a;
+  font-size: 0.68rem;
+}
+
+.test-card.expanded .test-detail {
+  display: block;
+}
+
+.assertion-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.15rem 0;
+  color: #aaa;
+}
+
+.assertion-pass { color: #4ade80; }
+.assertion-fail { color: #f87171; }
+
+.assertion-detail {
+  color: #666;
+  font-style: italic;
+}
+
+.test-error {
+  color: #f87171;
   margin-top: 0.3rem;
   word-break: break-all;
 }
 
-.run-btn {
-  display: block;
-  margin: 1.5rem auto 0;
-  padding: 0.6rem 2rem;
-  background: #2563eb;
-  color: #fff;
-  border: none;
-  border-radius: 6px;
-  font-size: 0.9rem;
-  font-weight: 600;
+.test-raw-toggle {
+  color: #2563eb;
   cursor: pointer;
+  margin-top: 0.3rem;
+  font-size: 0.65rem;
 }
 
-.run-btn:hover {
-  background: #1d4ed8;
+.test-raw-toggle:hover {
+  color: #60a5fa;
 }
 
-.run-btn:disabled {
-  background: #374151;
-  cursor: not-allowed;
+.test-raw {
+  display: none;
+  margin-top: 0.3rem;
+  padding: 0.4rem;
+  background: #0a0b12;
+  border-radius: 4px;
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 0.6rem;
+  color: #888;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.test-raw.visible {
+  display: block;
+}
+
+/* ── Timestamp ──────────────────────────────────── */
+
+.run-timestamp {
+  text-align: center;
+  font-size: 0.7rem;
+  color: #555;
+  margin-top: 1rem;
 }

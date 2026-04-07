@@ -88,6 +88,12 @@ pub async fn execute_guard_handler(
 }
 
 /// Parse a JSON value from the guard handler into a GuardResult.
+///
+/// Supports two return shapes per spec §3:
+/// 1. Wrapped: `{ allow: true, session_claims: { sub: "...", ... } }`
+/// 2. Flat: `{ allow: true, sub: "...", role: "..." }` — claims are the body itself
+///
+/// For shape 2, the body (minus control keys) becomes `session_claims`.
 fn parse_guard_result(value: &serde_json::Value) -> Result<GuardResult, GuardError> {
     let allow = value
         .get("allow")
@@ -99,7 +105,29 @@ fn parse_guard_result(value: &serde_json::Value) -> Result<GuardResult, GuardErr
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let session_claims = value.get("session_claims").cloned();
+    // Prefer explicit session_claims key; fall back to flat body as claims
+    let session_claims = if let Some(explicit) = value.get("session_claims") {
+        Some(explicit.clone())
+    } else if allow {
+        // Flat claims: the handler returned IdentityClaims directly.
+        // Strip control keys (allow, redirect_url) — the rest are claims.
+        if let Some(obj) = value.as_object() {
+            let claims: serde_json::Map<String, serde_json::Value> = obj
+                .iter()
+                .filter(|(k, _)| k.as_str() != "allow" && k.as_str() != "redirect_url")
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if claims.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(claims))
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     Ok(GuardResult {
         allow,
@@ -360,6 +388,63 @@ mod tests {
         let result = execute_guard_handler(&pool, &entrypoint, &request, None, "trace-1").await;
         // Should fail with EngineUnavailable since stub workers are used
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_guard_result_flat_claims_extracted() {
+        // Regression: bugreport_2026-04-06_2
+        // Guard handler returns flat IdentityClaims (no session_claims wrapper).
+        // parse_guard_result should extract the body as session_claims.
+        let value = serde_json::json!({
+            "allow": true,
+            "sub": "canary-user-001",
+            "role": "tester",
+            "email": "canary@test.local",
+            "groups": ["canary-fleet"],
+        });
+        let result = parse_guard_result(&value).unwrap();
+        assert!(result.allow);
+        let claims = result.session_claims.expect("flat claims should become session_claims");
+        assert_eq!(claims["sub"], "canary-user-001");
+        assert_eq!(claims["role"], "tester");
+        assert_eq!(claims["email"], "canary@test.local");
+        // "allow" should be stripped from claims
+        assert!(claims.get("allow").is_none(), "control key 'allow' should be stripped");
+    }
+
+    #[test]
+    fn test_parse_guard_result_flat_claims_not_extracted_on_reject() {
+        // When allow=false, flat body should NOT become session_claims
+        let value = serde_json::json!({
+            "allow": false,
+            "sub": "attacker",
+        });
+        let result = parse_guard_result(&value).unwrap();
+        assert!(!result.allow);
+        assert!(result.session_claims.is_none(), "rejected guard should not produce session_claims");
+    }
+
+    #[test]
+    fn test_parse_guard_result_explicit_session_claims_preferred() {
+        // When both explicit session_claims AND flat claims exist,
+        // the explicit key takes precedence.
+        let value = serde_json::json!({
+            "allow": true,
+            "sub": "flat-user",
+            "session_claims": {"sub": "explicit-user", "role": "admin"},
+        });
+        let result = parse_guard_result(&value).unwrap();
+        let claims = result.session_claims.unwrap();
+        assert_eq!(claims["sub"], "explicit-user", "explicit session_claims should win");
+    }
+
+    #[test]
+    fn test_parse_guard_result_allow_only_no_claims() {
+        // Guard returns just {allow: true} with no identity info
+        let value = serde_json::json!({"allow": true});
+        let result = parse_guard_result(&value).unwrap();
+        assert!(result.allow);
+        assert!(result.session_claims.is_none(), "no claims to extract");
     }
 
     #[tokio::test]

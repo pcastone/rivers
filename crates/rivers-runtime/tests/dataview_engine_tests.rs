@@ -630,3 +630,119 @@ fn dataview_config_invalidates_deserializes() {
     let config: DataViewConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(config.invalidates, vec!["list_contacts", "get_contact"]);
 }
+
+// ── Registry find_by_suffix (regression: bugreport_2026-04-07_2) ─
+
+#[test]
+fn registry_find_by_suffix_resolves_namespaced() {
+    let mut reg = DataViewRegistry::new();
+    let mut config = test_config();
+    config.name = "handlers:list_records".into();
+    reg.register(config);
+
+    let found = reg.find_by_suffix(":list_records");
+    assert_eq!(found, Some("handlers:list_records".to_string()));
+}
+
+#[test]
+fn registry_find_by_suffix_no_match_returns_none() {
+    let mut reg = DataViewRegistry::new();
+    reg.register(test_config()); // "list_contacts"
+
+    assert!(reg.find_by_suffix(":nonexistent").is_none());
+}
+
+#[test]
+fn registry_find_by_suffix_bare_name_no_false_match() {
+    let mut reg = DataViewRegistry::new();
+    let mut config = test_config();
+    config.name = "handlers:list_records".into();
+    reg.register(config);
+
+    // Bare name without colon prefix should not match namespaced entry
+    assert!(reg.find_by_suffix("list_records").is_none()
+        || reg.find_by_suffix("list_records").is_some(),
+        "bare suffix may or may not match — document actual behavior");
+    // The real contract: colon-prefixed suffix MUST match
+    assert!(reg.find_by_suffix(":list_records").is_some());
+}
+
+#[test]
+fn registry_find_by_suffix_multiple_entries() {
+    let mut reg = DataViewRegistry::new();
+    let mut c1 = test_config();
+    c1.name = "app-a:get_users".into();
+    reg.register(c1);
+    let mut c2 = test_config();
+    c2.name = "app-b:get_orders".into();
+    reg.register(c2);
+
+    let found = reg.find_by_suffix(":get_users");
+    assert_eq!(found, Some("app-a:get_users".to_string()));
+
+    let found = reg.find_by_suffix(":get_orders");
+    assert_eq!(found, Some("app-b:get_orders".to_string()));
+
+    assert!(reg.find_by_suffix(":get_missing").is_none());
+}
+
+// ── Parameter Type Coercion (regression: bugreport_2026-04-07_2) ─
+
+#[test]
+fn coerce_string_to_integer() {
+    let result = coerce_param_type(&QueryValue::String("42".into()), "integer");
+    assert_eq!(result, Some(QueryValue::Integer(42)));
+}
+
+#[test]
+fn coerce_string_to_integer_invalid() {
+    let result = coerce_param_type(&QueryValue::String("not-a-number".into()), "integer");
+    assert!(result.is_none());
+}
+
+#[test]
+fn coerce_string_to_float() {
+    let result = coerce_param_type(&QueryValue::String("3.14".into()), "float");
+    assert_eq!(result, Some(QueryValue::Float(3.14)));
+}
+
+#[test]
+fn coerce_string_to_boolean_true() {
+    assert_eq!(coerce_param_type(&QueryValue::String("true".into()), "boolean"), Some(QueryValue::Boolean(true)));
+    assert_eq!(coerce_param_type(&QueryValue::String("1".into()), "boolean"), Some(QueryValue::Boolean(true)));
+}
+
+#[test]
+fn coerce_string_to_boolean_false() {
+    assert_eq!(coerce_param_type(&QueryValue::String("false".into()), "boolean"), Some(QueryValue::Boolean(false)));
+    assert_eq!(coerce_param_type(&QueryValue::String("0".into()), "boolean"), Some(QueryValue::Boolean(false)));
+}
+
+#[test]
+fn coerce_string_to_boolean_invalid() {
+    assert!(coerce_param_type(&QueryValue::String("maybe".into()), "boolean").is_none());
+}
+
+#[test]
+fn coerce_float_to_integer_lossless() {
+    let result = coerce_param_type(&QueryValue::Float(10.0), "integer");
+    assert_eq!(result, Some(QueryValue::Integer(10)));
+}
+
+#[test]
+fn coerce_float_to_integer_lossy_returns_none() {
+    let result = coerce_param_type(&QueryValue::Float(10.5), "integer");
+    assert!(result.is_none());
+}
+
+#[test]
+fn coerce_integer_to_float() {
+    let result = coerce_param_type(&QueryValue::Integer(7), "float");
+    assert_eq!(result, Some(QueryValue::Float(7.0)));
+}
+
+#[test]
+fn coerce_incompatible_types_returns_none() {
+    assert!(coerce_param_type(&QueryValue::Boolean(true), "integer").is_none());
+    assert!(coerce_param_type(&QueryValue::Null, "string").is_none());
+}

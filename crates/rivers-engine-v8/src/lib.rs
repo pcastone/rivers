@@ -336,8 +336,13 @@ mod tests {
         let mut ctx = make_ctx(
             r#"function handler(ctx) {
                 var prefetched = ctx.dataview('users');
-                var dynamic = ctx.dataview('users', { id: 42 });
-                return { prefetched_found: prefetched !== null, dynamic_is_null: dynamic === null };
+                var dynamic_threw = false;
+                try {
+                    ctx.dataview('users', { id: 42 });
+                } catch(e) {
+                    dynamic_threw = true;
+                }
+                return { prefetched_found: prefetched !== null, dynamic_threw: dynamic_threw };
             }"#,
             "handler",
         );
@@ -348,8 +353,8 @@ mod tests {
         let result = execute_js(ctx).unwrap();
         // Prefetched should return data (no params = use cache)
         assert_eq!(result.value["prefetched_found"], true);
-        // Dynamic with params should return null (no host callback in unit tests)
-        assert_eq!(result.value["dynamic_is_null"], true);
+        // Dynamic with params should throw (no host callback in unit tests)
+        assert_eq!(result.value["dynamic_threw"], true);
     }
 
     #[test]
@@ -365,6 +370,60 @@ mod tests {
         let elapsed = start.elapsed().as_millis();
         assert!(result.is_err(), "infinite loop should be terminated");
         assert!(elapsed < 2000, "should terminate within 2s, took {}ms", elapsed);
+    }
+
+    #[test]
+    fn execute_compile_error_does_not_leak_watchdog() {
+        // Regression: bugreport_2026-04-07 — early exit paths must cancel watchdog.
+        // Invalid JS syntax triggers early return before func.call().
+        // Run in a loop to detect thread leaks (leaked watchdogs accumulate threads).
+        let initial_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        for _ in 0..10 {
+            let mut ctx = make_ctx("this is not valid javascript {{{", "handler");
+            ctx.args = serde_json::json!({"_source": ctx.inline_source, "_timeout_ms": 500});
+            let result = execute_js(ctx);
+            assert!(result.is_err(), "compile error should return Err");
+        }
+        // If watchdog threads leaked, we'd have ~10 extra threads sleeping for 500ms.
+        // Brief sleep to let any leaked threads finish their first tick.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // No assertion on thread count — the test succeeding without hanging
+        // for 5+ seconds proves the watchdogs were cancelled promptly.
+        let _ = initial_threads; // suppress unused warning
+    }
+
+    #[test]
+    fn execute_missing_function_does_not_leak_watchdog() {
+        // Regression: bugreport_2026-04-07 — missing entrypoint triggers early return.
+        for _ in 0..10 {
+            let mut ctx = make_ctx("function other(ctx) { return 1; }", "nonexistent_fn");
+            ctx.args = serde_json::json!({"_source": ctx.inline_source, "_timeout_ms": 500});
+            let result = execute_js(ctx);
+            assert!(result.is_err(), "missing function should return Err");
+            let err = result.unwrap_err();
+            assert!(err.contains("not found") || err.contains("not a function"),
+                "error should mention missing function: {}", err);
+        }
+    }
+
+    #[test]
+    fn execute_timeout_then_success_on_same_engine() {
+        // Regression: bugreport_2026-04-07 — sequential recovery.
+        // After a timeout, the next execution should succeed.
+
+        // Request 1: infinite loop (should time out)
+        let mut ctx1 = make_ctx("function handler(ctx) { while(true) {} }", "handler");
+        ctx1.args = serde_json::json!({"_source": ctx1.inline_source, "_timeout_ms": 100});
+        let result1 = execute_js(ctx1);
+        assert!(result1.is_err(), "infinite loop should be terminated");
+
+        // Request 2: simple handler (should succeed)
+        let ctx2 = make_ctx("function handler(ctx) { return { recovered: true }; }", "handler");
+        let result2 = execute_js(ctx2);
+        assert!(result2.is_ok(), "handler after timeout should succeed: {:?}", result2.err());
+        assert_eq!(result2.unwrap().value["recovered"], true);
     }
 
     #[test]

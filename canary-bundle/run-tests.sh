@@ -204,8 +204,38 @@ test_ep "poll-data"          GET  "$BASE/streams/canary/stream/poll/data"
 
 echo ""
 echo "  ── V8 Security (slow) ──"
-test_ep "v8-timeout"         GET  "$BASE/handlers/canary/rt/v8/timeout"
-test_ep "v8-heap"            GET  "$BASE/handlers/canary/rt/v8/heap"
+# These tests deliberately trigger timeout/OOM — need longer curl timeout
+ORIG_TIMEOUT=8
+test_ep_v8sec() {
+  local label="$1" test_id="$2" method="$3" url="$4"
+  local resp http_status
+  # Get both response body and HTTP status
+  resp=$(curl -sk -m 15 -b "$COOKIES" -c "$COOKIES" -X "$method" -w '\n%{http_code}' "$url" 2>/dev/null) || true
+  if [ -z "$resp" ]; then
+    printf "  ? %-42s TIMEOUT\n" "$label"
+    ERR=$((ERR+1)); return
+  fi
+  http_status=$(echo "$resp" | tail -1)
+  local body
+  body=$(echo "$resp" | sed '$d')
+
+  # For V8 security tests, the expected outcome is:
+  #   - Server responds (didn't crash) with 500 + timeout/OOM error
+  #   - OR handler catches the error and returns {passed: true}
+  local js_passed
+  js_passed=$(echo "$body" | python3 -c "import json,sys; d=json.load(sys.stdin); print('1' if d.get('passed') else '0')" 2>/dev/null) || true
+
+  if [ "$js_passed" = "1" ]; then
+    printf "  PASS %-40s\n" "$test_id"; PASS=$((PASS+1))
+  elif [ "$http_status" = "500" ]; then
+    # 500 = server survived the attack and returned a graceful error (PASS)
+    printf "  PASS %-40s (500 — server survived)\n" "$test_id"; PASS=$((PASS+1))
+  else
+    printf "  FAIL %-40s (HTTP %s)\n" "$test_id" "$http_status"; FAIL=$((FAIL+1))
+  fi
+}
+test_ep_v8sec "v8-timeout" "RT-V8-TIMEOUT" GET  "$BASE/handlers/canary/rt/v8/timeout"
+test_ep_v8sec "v8-heap"    "RT-V8-HEAP"    GET  "$BASE/handlers/canary/rt/v8/heap"
 
 # ── Summary ──────────────────────────────────────────────────────
 
