@@ -89,7 +89,7 @@ pub fn load_engines(lib_dir: &Path, callbacks: &HostCallbacks) -> Vec<EngineLoad
 fn load_single_engine(
     path: &Path,
     name: &str,
-    _callbacks: &HostCallbacks,
+    callbacks: &HostCallbacks,
 ) -> Result<LoadedEngine, String> {
     // Load the library
     let lib = unsafe {
@@ -129,9 +129,16 @@ fn load_single_engine(
             .map(|f| *f)
     };
 
-    // Call init (optional)
+    // Call init with callbacks (preferred) or plain init (fallback)
     unsafe {
-        if let Ok(init_fn) = lib.get::<unsafe extern "C" fn() -> i32>(b"_rivers_engine_init") {
+        if let Ok(init_cb_fn) = lib.get::<unsafe extern "C" fn(*const HostCallbacks) -> i32>(
+            b"_rivers_engine_init_with_callbacks",
+        ) {
+            let result = init_cb_fn(callbacks as *const HostCallbacks);
+            if result != 0 {
+                return Err(format!("_rivers_engine_init_with_callbacks returned {}", result));
+            }
+        } else if let Ok(init_fn) = lib.get::<unsafe extern "C" fn() -> i32>(b"_rivers_engine_init") {
             let result = init_fn();
             if result != 0 {
                 return Err(format!("_rivers_engine_init returned {}", result));
