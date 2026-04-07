@@ -7,12 +7,19 @@ set -euo pipefail
 BASE_URL="${1:-https://localhost:8090}"
 BASE="$BASE_URL/canary-fleet"
 COOKIES=$(mktemp /tmp/canary-cookies.XXXXXX)
+CSRF_TOKEN=""
 PASS=0
 FAIL=0
 ERR=0
 
 cleanup() { rm -f "$COOKIES"; }
 trap cleanup EXIT
+
+# ── Extract CSRF token from cookie jar ───────────────────────────
+
+get_csrf_token() {
+  CSRF_TOKEN=$(grep rivers_csrf "$COOKIES" 2>/dev/null | awk '{print $NF}') || true
+}
 
 # ── Test helper ──────────────────────────────────────────────────
 
@@ -25,6 +32,7 @@ test_ep() {
   if [ "$method" = "POST" ] || [ "$method" = "PUT" ] || [ "$method" = "DELETE" ]; then
     resp=$(curl -sk -m 8 -b "$COOKIES" -c "$COOKIES" \
       -X "$method" -H "Content-Type: application/json" \
+      -H "X-CSRF-Token: ${CSRF_TOKEN}" \
       -d "${body:-{}}" "$url" 2>/dev/null) || true
   else
     resp=$(curl -sk -m 8 -b "$COOKIES" -c "$COOKIES" \
@@ -63,17 +71,36 @@ echo "  $(date)"
 echo "  Base: $BASE"
 echo "  ────────────────────────────────────────────────"
 
-# Warm up the V8 engine with a lightweight request before guard login.
-# The first request after server start compiles the script cache;
-# without this, the guard handler may fail with "script execution failed".
+# Warm up V8 engine — first request compiles script cache
 curl -sk -m 5 "$BASE/handlers/canary/rt/ctx/trace-id" >/dev/null 2>&1
 sleep 1
 
-# ── AUTH Profile — login first to get session cookie ─────────────
+# ── AUTH Profile — login to get session + CSRF cookies ───────────
 
 echo ""
 echo "  ── AUTH Profile (guard login) ──"
-test_ep "guard-login"        POST "$BASE/guard/canary/auth/login" '{"username":"canary","password":"canary-test"}'
+
+# Guard login — special handling (returns {allow,session_claims}, not {test_id,passed})
+GUARD_RESP=$(curl -sk -m 8 -b "$COOKIES" -c "$COOKIES" \
+  -X POST -H "Content-Type: application/json" \
+  -d '{"username":"canary","password":"canary-test"}' \
+  "$BASE/guard/canary/auth/login" 2>/dev/null) || true
+
+GUARD_ALLOW=$(echo "$GUARD_RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print('1' if d.get('allow') else '0')" 2>/dev/null) || true
+GUARD_CODE=$(echo "$GUARD_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('code',''))" 2>/dev/null) || true
+
+if [ "$GUARD_ALLOW" = "1" ]; then
+  printf "  PASS %-40s\n" "AUTH-GUARD-LOGIN"
+  PASS=$((PASS+1))
+  # Extract CSRF token for subsequent write requests
+  get_csrf_token
+elif [ -n "$GUARD_CODE" ] && [ "$GUARD_CODE" != "" ]; then
+  printf "  HTTP %-5s %-34s\n" "$GUARD_CODE" "guard-login"
+  ERR=$((ERR+1))
+else
+  printf "  FAIL %-40s\n" "guard-login"
+  FAIL=$((FAIL+1))
+fi
 
 # ── HANDLERS Profile (auth=none, no session needed) ──────────────
 
@@ -104,9 +131,6 @@ test_ep "error-sanitize"     GET  "$BASE/handlers/canary/rt/error/sanitize"
 test_ep "eventbus-publish"   POST "$BASE/handlers/canary/rt/eventbus/publish" '{}'
 test_ep "header-blocklist"   GET  "$BASE/handlers/canary/rt/header/blocklist"
 test_ep "faker-determinism"  GET  "$BASE/handlers/canary/rt/faker/determinism"
-# V8 security tests last — v8-timeout takes 5s, v8-heap may crash server
-test_ep "v8-timeout"         GET  "$BASE/handlers/canary/rt/v8/timeout"
-test_ep "v8-heap"            GET  "$BASE/handlers/canary/rt/v8/heap"
 
 # ── SQL Profile (auth=session, uses PG/MySQL/SQLite) ─────────────
 
@@ -175,6 +199,13 @@ test_ep "redis-admin-reject" POST "$BASE/nosql/canary/nosql/redis/admin-reject" 
 echo ""
 echo "  ── STREAMS Profile ──"
 test_ep "poll-data"          GET  "$BASE/streams/canary/stream/poll/data"
+
+# ── V8 Security (last — these are slow/destructive) ──────────────
+
+echo ""
+echo "  ── V8 Security (slow) ──"
+test_ep "v8-timeout"         GET  "$BASE/handlers/canary/rt/v8/timeout"
+test_ep "v8-heap"            GET  "$BASE/handlers/canary/rt/v8/heap"
 
 # ── Summary ──────────────────────────────────────────────────────
 
