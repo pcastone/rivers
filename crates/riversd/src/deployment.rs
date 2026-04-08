@@ -10,8 +10,6 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::admin::{Deployment, DeploymentState};
-use crate::init_handler::{ApplicationContext, InitHandlerConfig};
-use crate::process_pool::{Entrypoint, ProcessPoolManager, TaskContextBuilder};
 
 // ── App Type ────────────────────────────────────────────────────
 
@@ -492,63 +490,6 @@ impl AuthScopeCarryOver {
             false
         }
     }
-}
-
-// ── Init Handler Dispatch (§13.7) ────────────────────────────
-
-/// Execute an app's init handler via ProcessPool.
-///
-/// Per spec §13.7: fires after resource resolution, before app accepts traffic.
-pub async fn execute_init_handler(
-    pool: &ProcessPoolManager,
-    init_config: &InitHandlerConfig,
-    app_context: &ApplicationContext,
-) -> Result<(), String> {
-    let handler = match &init_config.init_handler {
-        Some(h) => h,
-        None => return Ok(()), // No init handler declared
-    };
-    let entrypoint_name = init_config
-        .init_entrypoint
-        .as_deref()
-        .unwrap_or("init");
-
-    let entrypoint = Entrypoint {
-        module: handler.clone(),
-        function: entrypoint_name.to_string(),
-        language: if handler.ends_with(".ts") {
-            "typescript"
-        } else {
-            "javascript"
-        }
-        .to_string(),
-    };
-
-    let args = serde_json::json!({
-        "app_id": app_context.app_id,
-        "app_name": app_context.app_name,
-        "config": app_context.config,
-    });
-
-    let builder = TaskContextBuilder::new()
-        .entrypoint(entrypoint)
-        .args(args)
-        .trace_id(format!("init:{}", app_context.app_id));
-    let builder = crate::task_enrichment::enrich(builder, &app_context.app_id);
-    let task_ctx = builder
-        .build()
-        .map_err(|e| format!("init handler context build: {e}"))?;
-
-    pool.dispatch("default", task_ctx)
-        .await
-        .map_err(|e| format!("init handler dispatch: {e}"))?;
-
-    tracing::info!(
-        target: "rivers.deployment",
-        app = %app_context.app_name,
-        "init handler executed"
-    );
-    Ok(())
 }
 
 // ── Error Types ─────────────────────────────────────────────────

@@ -1,17 +1,20 @@
 [[datasources]]
 name       = "canary-kafka"
 driver     = "kafka"
+x-type     = "kafka"
 lockbox    = "kafka/test"
 required   = true
 
 [[datasources]]
 name       = "canary-redis"
 driver     = "redis"
+x-type     = "redis"
 lockbox    = "redis/test"
 required   = true
 
 [[datasources]]
 name       = "canary-faker"
 driver     = "faker"
+x-type     = "faker"
 nopassword = true
 required   = true

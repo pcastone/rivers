@@ -104,6 +104,83 @@ pub extern "C" fn _rivers_engine_shutdown() {
     }
 }
 
+// ── Compile Check FFI ────────────────────────────────────────────
+
+/// Validate WASM bytes and enumerate exports. No execution.
+///
+/// Returns a heap-allocated JSON string. Caller frees via `_rivers_free_string`.
+#[no_mangle]
+pub extern "C" fn _rivers_compile_check(
+    source_ptr: *const u8,
+    source_len: usize,
+    _filename_ptr: *const u8,
+    _filename_len: usize,
+) -> *const std::ffi::c_char {
+    let bytes = if source_ptr.is_null() || source_len == 0 {
+        return alloc_json_string(r#"{"ok":false,"error":{"message":"empty WASM bytes"}}"#);
+    } else {
+        unsafe { std::slice::from_raw_parts(source_ptr, source_len) }
+    };
+
+    let engine = match WASM_ENGINE.as_ref() {
+        Ok(e) => e,
+        Err(e) => {
+            return alloc_json_string(&format!(
+                r#"{{"ok":false,"error":{{"message":"wasmtime engine unavailable: {}"}}}}"#,
+                e.replace('"', "\\\"")
+            ));
+        }
+    };
+
+    // Validate + compile to enumerate exports
+    match wasmtime::Module::new(engine, bytes) {
+        Ok(module) => {
+            let exports: Vec<String> = module
+                .exports()
+                .filter_map(|e| {
+                    if matches!(e.ty(), wasmtime::ExternType::Func(_)) {
+                        Some(e.name().to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            let exports_json: Vec<String> = exports.iter().map(|e| format!(r#""{}""#, e)).collect();
+            alloc_json_string(&format!(r#"{{"ok":true,"exports":[{}]}}"#, exports_json.join(",")))
+        }
+        Err(e) => {
+            let msg = format!("{e}").replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+            alloc_json_string(&format!(
+                r#"{{"ok":false,"error":{{"message":"{}"}}}}"#,
+                msg,
+            ))
+        }
+    }
+}
+
+/// Free a string returned by `_rivers_compile_check`.
+#[no_mangle]
+pub extern "C" fn _rivers_free_string(ptr: *const std::ffi::c_char) {
+    if !ptr.is_null() {
+        unsafe {
+            drop(std::ffi::CString::from_raw(ptr as *mut std::ffi::c_char));
+        }
+    }
+}
+
+fn alloc_json_string(s: &str) -> *const std::ffi::c_char {
+    match std::ffi::CString::new(s) {
+        Ok(cstr) => cstr.into_raw() as *const std::ffi::c_char,
+        Err(_) => {
+            let clean = s.replace('\0', "");
+            std::ffi::CString::new(clean)
+                .unwrap_or_default()
+                .into_raw() as *const std::ffi::c_char
+        }
+    }
+}
+
 /// Cancel a running task (epoch interrupt).
 #[no_mangle]
 pub extern "C" fn _rivers_engine_cancel(_task_id: usize) -> i32 {

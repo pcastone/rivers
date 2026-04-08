@@ -81,7 +81,7 @@ required = true
 [data.dataviews.mongo_find_by_name]
 name       = "mongo_find_by_name"
 datasource = "canary-mongo"
-query      = '{"collection":"canary","operation":"find","filter":{"name":"$1"}}'
+query      = '{"collection":"canary","operation":"find"}'
 
 [[data.dataviews.mongo_find_by_name.parameters]]
 name     = "name"
@@ -94,7 +94,7 @@ datasource = "canary-mongo"
 query      = '{"collection":"canary","operation":"delete"}'
 
 [[data.dataviews.mongo_delete_by_name.parameters]]
-name     = "_filter"
+name     = "name"
 type     = "string"
 required = true
 

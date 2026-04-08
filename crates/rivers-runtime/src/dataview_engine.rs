@@ -442,6 +442,14 @@ impl DataViewRegistry {
         self.views.get(name)
     }
 
+    /// Find a DataView whose name ends with the given suffix.
+    ///
+    /// Used by host callbacks to resolve unqualified names like `"list_records"`
+    /// against namespaced entries like `"handlers:list_records"`.
+    pub fn find_by_suffix(&self, suffix: &str) -> Option<String> {
+        self.views.keys().find(|k| k.ends_with(suffix)).cloned()
+    }
+
     /// Return the number of registered DataViews.
     pub fn count(&self) -> usize {
         self.views.len()
@@ -529,6 +537,14 @@ impl DataViewExecutor {
             cache,
             event_bus: None,
         }
+    }
+
+    /// Find a DataView whose name ends with the given suffix.
+    ///
+    /// Delegates to the underlying registry. Used by host callbacks
+    /// to resolve unqualified names to namespaced entries.
+    pub fn find_by_suffix(&self, suffix: &str) -> Option<String> {
+        self.registry.find_by_suffix(suffix)
     }
 
     /// Set the EventBus for cache invalidation events.
@@ -863,6 +879,33 @@ impl DataViewExecutor {
     /// Get a reference to the datasource connection params.
     pub fn datasource_params(&self) -> &Arc<HashMap<String, ConnectionParams>> {
         &self.datasource_params
+    }
+
+    /// Look up connection params for a datasource by exact name.
+    pub fn datasource_params_get(&self, name: &str) -> Option<&ConnectionParams> {
+        self.datasource_params.get(name)
+    }
+
+    /// Look up connection params by suffix match (e.g., `:canary-sqlite`).
+    ///
+    /// Used by host callbacks to resolve unqualified datasource names
+    /// against namespaced entries like `sql:canary-sqlite`.
+    pub fn datasource_params_by_suffix(&self, suffix: &str) -> Option<&ConnectionParams> {
+        self.datasource_params
+            .iter()
+            .find(|(k, _)| k.ends_with(suffix))
+            .map(|(_, v)| v)
+    }
+
+    /// Look up the driver name for a datasource.
+    ///
+    /// Checks the datasource name in the registry to find the associated driver.
+    pub fn driver_for_datasource(&self, datasource_name: &str) -> Option<String> {
+        // The driver is stored in the options map under "driver" key,
+        // or can be inferred from the DataView config's datasource reference.
+        self.datasource_params
+            .get(datasource_name)
+            .and_then(|p| p.options.get("driver").cloned())
     }
 
     /// List all configured datasource names.

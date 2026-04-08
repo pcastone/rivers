@@ -129,7 +129,7 @@ entrypoint = "onEventTriggered"
 path              = "/canary/stream/rest/ndjson"
 method            = "POST"
 view_type         = "Rest"
-stream_format     = "ndjson"
+streaming_format  = "ndjson"
 stream_timeout_ms = 10000
 auth              = "session"
 
@@ -143,7 +143,7 @@ entrypoint = "streamNdjson"
 path              = "/canary/stream/rest/poison"
 method            = "POST"
 view_type         = "Rest"
-stream_format     = "ndjson"
+streaming_format  = "ndjson"
 stream_timeout_ms = 10000
 auth              = "session"
 
@@ -222,4 +222,4 @@ type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/poll-handler.ts"
 entrypoint = "pollData"
-dataviews  = ["poll_data"]
+dataview   = "poll_data"

@@ -93,6 +93,12 @@ pub(super) fn inject_ctx_methods(
     let store_key_on_ctx = v8_str(scope, "store")?;
     ctx_obj.set(scope, store_key_on_ctx.into(), store_obj.into());
 
+    // ctx.ddl() -- native V8 callback for DDL execution (init handlers only)
+    let ddl_fn = v8::Function::new(scope, ctx_ddl_callback)
+        .ok_or_else(|| TaskError::Internal("failed to create ctx.ddl".into()))?;
+    let ddl_key = v8_str(scope, "ddl")?;
+    ctx_obj.set(scope, ddl_key.into(), ddl_fn.into());
+
     // X7: __ds_build native callback for ctx.datasource().build()
     let ds_build_fn = v8::Function::new(scope, ctx_datasource_build_callback)
         .ok_or_else(|| TaskError::Internal("failed to create __ds_build".into()))?;
@@ -351,6 +357,97 @@ fn ctx_store_del_callback(
 /// X4: Checks `ctx.data[name]` for pre-fetched data first (fast path).
 /// If not found, tries the DataViewExecutor via async bridge.
 /// If no executor available, falls back to warn + null.
+/// `ctx.ddl(datasource, statement)` — execute a DDL statement.
+///
+/// Uses TASK_DRIVER_FACTORY task-local to connect and call ddl_execute().
+/// Only succeeds if the driver supports DDL (Gate 1 blocks DDL via execute()).
+fn ctx_ddl_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let datasource = args.get(0).to_rust_string_lossy(scope);
+    let statement = args.get(1).to_rust_string_lossy(scope);
+
+    // Get DriverFactory and DataViewExecutor from task locals
+    let factory = TASK_DRIVER_FACTORY.with(|f| f.borrow().clone());
+    let executor = TASK_DV_EXECUTOR.with(|e| e.borrow().clone());
+    let rt_handle = RT_HANDLE.with(|h| h.borrow().clone());
+
+    let factory = match factory {
+        Some(f) => f,
+        None => {
+            throw_js_error(scope, "ctx.ddl(): DriverFactory not available");
+            return;
+        }
+    };
+    let rt = match rt_handle {
+        Some(h) => h,
+        None => {
+            throw_js_error(scope, "ctx.ddl(): Tokio runtime not available");
+            return;
+        }
+    };
+
+    // Resolve datasource connection params
+    let ds_params = executor.as_ref().and_then(|ex| {
+        ex.datasource_params_get(&datasource)
+            .or_else(|| {
+                let suffix = format!(":{}", datasource);
+                ex.datasource_params_by_suffix(&suffix)
+            })
+            .cloned()
+    });
+
+    let ds_params = match ds_params {
+        Some(p) => p,
+        None => {
+            throw_js_error(scope, &format!("ctx.ddl('{}', ...): datasource not found", datasource));
+            return;
+        }
+    };
+
+    let driver_name = ds_params.options.get("driver").cloned()
+        .unwrap_or_else(|| datasource.split(':').last().unwrap_or(&datasource).to_string());
+
+    // Execute DDL on Tokio runtime
+    let (tx, rx) = std::sync::mpsc::channel();
+    rt.spawn(async move {
+        let result = async {
+            let mut conn = factory.connect(&driver_name, &ds_params).await
+                .map_err(|e| format!("DDL connect to '{}' failed: {}", datasource, e))?;
+            let query = rivers_runtime::rivers_driver_sdk::Query::new("ddl", &statement);
+            conn.ddl_execute(&query).await
+                .map_err(|e| format!("DDL execute failed: {}", e))?;
+            Ok::<_, String>(())
+        }.await;
+        let _ = tx.send(result);
+    });
+
+    match rx.recv() {
+        Ok(Ok(())) => {
+            let result_json = serde_json::json!({"ok": true}).to_string();
+            let v8_val = v8::String::new(scope, &result_json).unwrap();
+            if let Some(parsed) = v8::json::parse(scope, v8_val) {
+                rv.set(parsed);
+            }
+        }
+        Ok(Err(e)) => {
+            throw_js_error(scope, &e);
+        }
+        Err(_) => {
+            throw_js_error(scope, "ctx.ddl(): task panicked");
+        }
+    }
+}
+
+/// Helper to throw a JS error from a V8 callback without borrow conflicts.
+fn throw_js_error(scope: &mut v8::HandleScope, message: &str) {
+    let msg = v8::String::new(scope, message).unwrap();
+    let exception = v8::Exception::error(scope, msg);
+    scope.throw_exception(exception);
+}
+
 ///
 /// V8 callback -- short constant strings, unwrap is safe.
 fn ctx_dataview_callback(
@@ -448,12 +545,14 @@ fn ctx_dataview_callback(
         }
     }
 
-    // Fallback: no executor and not pre-fetched -- warn and return null
-    tracing::warn!(
-        target: "rivers.handler",
-        "ctx.dataview('{}') not in pre-fetched data and no executor available. \
-         Declare in view config: dataviews = [\"{}\"]",
+    // Fallback: no executor and not pre-fetched — throw a JS exception
+    // so handlers see a clear error instead of silent null.
+    let err_msg = format!(
+        "ctx.dataview('{}') not found. Declare in view config: dataviews = [\"{}\"]",
         name, name
     );
-    rv.set(v8::null(scope).into());
+    tracing::warn!(target: "rivers.handler", "{}", err_msg);
+    let msg = v8::String::new(scope, &err_msg).unwrap();
+    let exception = v8::Exception::error(scope, msg);
+    scope.throw_exception(exception);
 }

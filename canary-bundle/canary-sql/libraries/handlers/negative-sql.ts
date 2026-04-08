@@ -48,14 +48,11 @@ function pgDdlReject(ctx) {
 function mysqlDdlReject(ctx) {
     var t = new TestResult("SQL-MYSQL-DDL-REJECT", "SQL", "feature-inventory section 21.1");
     try {
-        // Attempt DDL through mysql datasource — should be rejected
+        // This DataView has a DROP TABLE statement — should be rejected by Gate 1
         var threw = false;
         var errMsg = "";
         try {
-            // Use a dynamic query to attempt DROP TABLE on mysql
-            var ds = ctx.datasource("canary-mysql");
-            var dv = ds.fromQuery("DROP TABLE canary_records").build();
-            ctx.dataview(dv);
+            ctx.dataview("mysql_ddl_trap");
         } catch (e) {
             threw = true;
             errMsg = String(e);

@@ -1,17 +1,20 @@
 [[datasources]]
 name       = "pg"
 driver     = "postgres"
+x-type     = "postgres"
 lockbox    = "postgres/test"
 required   = true
 
 [[datasources]]
 name       = "mysql"
 driver     = "mysql"
+x-type     = "mysql"
 lockbox    = "mysql/test"
 required   = true
 
 [[datasources]]
 name       = "sqlite"
 driver     = "sqlite"
+x-type     = "sqlite"
 nopassword = true
 required   = true

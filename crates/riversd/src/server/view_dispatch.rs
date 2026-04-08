@@ -1,6 +1,7 @@
 //! View dispatch — route matching, REST view execution, query parsing.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use axum::extract::{Request, State};
 use axum::response::IntoResponse;
@@ -97,6 +98,48 @@ async fn view_dispatch_handler(
     matched: MatchedRoute,
 ) -> impl IntoResponse {
     let view_type = matched.config.view_type.as_str();
+
+    // ── Per-view rate limiting ──────────────────────────────────────
+    if let Some(rpm) = matched.config.rate_limit_per_minute {
+        if rpm > 0 {
+            use std::sync::LazyLock;
+            use tokio::sync::Mutex;
+
+            static VIEW_LIMITERS: LazyLock<Mutex<HashMap<String, Arc<crate::rate_limit::RateLimiter>>>> =
+                LazyLock::new(|| Mutex::new(HashMap::new()));
+
+            let view_key = matched.view_id.clone();
+            let limiter = {
+                let mut map = VIEW_LIMITERS.lock().await;
+                map.entry(view_key).or_insert_with(|| {
+                    Arc::new(crate::rate_limit::RateLimiter::new(&crate::rate_limit::RateLimitConfig {
+                        requests_per_minute: rpm,
+                        burst_size: matched.config.rate_limit_burst_size.unwrap_or(rpm / 2).max(1),
+                        strategy: crate::rate_limit::RateLimitStrategy::Ip,
+                    }))
+                }).clone()
+            };
+
+            // Resolve client IP — respects X-Forwarded-For behind trusted proxies
+            let direct_ip = request
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|ci| ci.0.ip().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let xff = request.headers().get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok());
+            let trusted_proxies = &ctx.config.security.trusted_proxies;
+            let client_ip = crate::rate_limit::resolve_client_ip(&direct_ip, xff, trusted_proxies);
+
+            if let crate::rate_limit::RateLimitResult::Limited { retry_after_secs } = limiter.check(&client_ip).await {
+                let mut resp = error_response::rate_limited("rate limit exceeded").into_axum_response();
+                if let Ok(val) = axum::http::HeaderValue::from_str(&retry_after_secs.to_string()) {
+                    resp.headers_mut().insert("retry-after", val);
+                }
+                return resp.into_response();
+            }
+        }
+    }
 
     // ── Dispatch switch: branch by view_type before body extraction ──
     match view_type {
@@ -201,8 +244,22 @@ async fn view_dispatch_handler(
     // ── Execute the view with the ProcessPool and DataViewExecutor ──
     let dv_guard = ctx.dataview_executor.read().await;
     let dv_ref = dv_guard.as_deref();
+    #[cfg(feature = "metrics")]
+    let exec_start = std::time::Instant::now();
     let view_result = view_engine::execute_rest_view(&mut view_ctx, &config, Some(&ctx.pool), dv_ref).await;
     drop(dv_guard);
+
+    #[cfg(feature = "metrics")]
+    {
+        let exec_duration = exec_start.elapsed().as_secs_f64() * 1000.0;
+        let success = view_result.is_ok();
+        let engine_label = match &config.handler {
+            rivers_runtime::view::HandlerConfig::Codecomponent { .. } => "v8",
+            rivers_runtime::view::HandlerConfig::Dataview { .. } => "dataview",
+            _ => "none",
+        };
+        crate::server::metrics::record_engine_execution(engine_label, exec_duration, success);
+    }
 
     // ── Step 4: Build response with session/CSRF cookies ────
     let mut set_cookies: Vec<String> = Vec::new();
@@ -214,7 +271,8 @@ async fn view_dispatch_handler(
             if result.body.get("allow").and_then(|v| v.as_bool()).unwrap_or(false) {
                 if let Some(claims) = result.body.get("session_claims").cloned() {
                     if let Some(ref mgr) = ctx.session_manager {
-                        let subject = claims.get("subject")
+                        let subject = claims.get("sub")
+                            .or(claims.get("subject"))
                             .or(claims.get("username"))
                             .and_then(|v| v.as_str())
                             .unwrap_or("anonymous")
@@ -247,6 +305,32 @@ async fn view_dispatch_handler(
                                 tracing::error!(error = %e, "failed to create session from guard result");
                             }
                         }
+                    }
+                }
+            } else {
+                // Guard handler returned allow=false — credential validation failed.
+                // Fire on_failed lifecycle hook (fire-and-forget).
+                if let Some(ref hooks) = config.guard_config.as_ref().and_then(|gc| gc.lifecycle_hooks.as_ref()) {
+                    if let Some(ref hook) = hooks.on_failed {
+                        let pool = ctx.pool.clone();
+                        let hook = hook.clone();
+                        let trace = trace_id.clone();
+                        tokio::spawn(async move {
+                            let entrypoint = crate::process_pool::Entrypoint {
+                                module: hook.module.clone(),
+                                function: hook.entrypoint.clone(),
+                                language: "javascript".to_string(),
+                            };
+                            let args = serde_json::json!({ "reason": "credential_validation_failed" });
+                            let builder = crate::process_pool::TaskContextBuilder::new()
+                                .entrypoint(entrypoint)
+                                .args(args)
+                                .trace_id(trace);
+                            let builder = crate::task_enrichment::enrich(builder, "");
+                            if let Ok(task_ctx) = builder.build() {
+                                let _ = pool.dispatch("default", task_ctx).await;
+                            }
+                        });
                     }
                 }
             }

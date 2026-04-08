@@ -212,10 +212,14 @@ impl Connection for SqliteConnection {
 
 /// Build a vector of `(name, value)` pairs for rusqlite named-parameter binding.
 /// Each parameter key is prefixed with `:` if not already present.
+/// Keys are sorted to ensure deterministic binding order (HashMap iteration is
+/// unordered; sorted keys make positional `$001, $002, …` bindings correct).
 fn bind_params(parameters: &HashMap<String, QueryValue>) -> Vec<(String, Box<dyn rusqlite::types::ToSql>)> {
-    parameters
-        .iter()
-        .map(|(key, val)| {
+    let mut keys: Vec<&String> = parameters.keys().collect();
+    keys.sort();
+    keys.into_iter()
+        .map(|key| {
+            let val = &parameters[key];
             let name = if key.starts_with(':') || key.starts_with('@') || key.starts_with('$') {
                 key.clone()
             } else {
@@ -702,6 +706,124 @@ mod tests {
         conn.ddl_execute(&q("CREATE TABLE t (id INTEGER PRIMARY KEY)", vec![])).await.unwrap();
 
         assert!(db_path.exists(), "SQLite file should exist in nested directory");
+    }
+
+    #[tokio::test]
+    async fn ddl_persists_to_disk_not_memory() {
+        // Verify that DDL (CREATE TABLE) writes to the on-disk file, not an
+        // in-memory database.  The test creates a table via ddl_execute(),
+        // drops the connection, opens a FRESH connection to the same file,
+        // and queries sqlite_master to confirm the table exists.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("ddl_persist.db");
+        let driver = SqliteDriver::new();
+        let params = make_params("", db_path.to_str().unwrap());
+
+        // Connection 1: CREATE TABLE via ddl_execute
+        {
+            let mut conn = driver.connect(&params).await.unwrap();
+            conn.ddl_execute(&q(
+                "CREATE TABLE orders (id INTEGER PRIMARY KEY, total REAL, customer TEXT)",
+                vec![],
+            ))
+            .await
+            .unwrap();
+        }
+        // conn is dropped — if this was :memory:, the table is gone
+
+        // File must exist on disk
+        assert!(db_path.exists(), "DDL should create file on disk");
+        assert!(
+            std::fs::metadata(&db_path).unwrap().len() > 0,
+            "DB file should not be empty after DDL"
+        );
+
+        // Connection 2: verify schema survived by querying sqlite_master
+        let mut conn2 = driver.connect(&params).await.unwrap();
+        let result = conn2
+            .execute(&q(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='orders'",
+                vec![],
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 1, "CREATE TABLE must persist across connections");
+        assert_eq!(
+            result.rows[0].get("name"),
+            Some(&QueryValue::String("orders".into())),
+            "table name should be 'orders'"
+        );
+
+        // Connection 2: verify we can INSERT + SELECT (schema is usable, not just metadata)
+        conn2
+            .execute(&q(
+                "INSERT INTO orders (id, total, customer) VALUES (1, 99.95, 'acme')",
+                vec![],
+            ))
+            .await
+            .unwrap();
+        let row = conn2
+            .execute(&q("SELECT customer FROM orders WHERE id = 1", vec![]))
+            .await
+            .unwrap();
+        assert_eq!(row.rows.len(), 1, "INSERT+SELECT on persisted DDL table should work");
+        assert_eq!(
+            row.rows[0].get("customer"),
+            Some(&QueryValue::String("acme".into())),
+        );
+    }
+
+    #[tokio::test]
+    async fn ddl_multiple_statements_persist() {
+        // Verify that ddl_execute with multiple statements (execute_batch)
+        // all persist to disk.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("ddl_multi.db");
+        let driver = SqliteDriver::new();
+        let params = make_params("", db_path.to_str().unwrap());
+
+        // Create two tables + an index in a single ddl_execute batch
+        {
+            let mut conn = driver.connect(&params).await.unwrap();
+            conn.ddl_execute(&q(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+                 CREATE TABLE sessions (id TEXT PRIMARY KEY, user_id INTEGER REFERENCES users(id));
+                 CREATE INDEX idx_sessions_user ON sessions(user_id);",
+                vec![],
+            ))
+            .await
+            .unwrap();
+        }
+
+        // Fresh connection: all objects must exist
+        let mut conn2 = driver.connect(&params).await.unwrap();
+        let tables = conn2
+            .execute(&q(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
+                vec![],
+            ))
+            .await
+            .unwrap();
+        let table_names: Vec<&str> = tables
+            .rows
+            .iter()
+            .filter_map(|r| r.get("name").and_then(|v| match v {
+                QueryValue::String(s) => Some(s.as_str()),
+                _ => None,
+            }))
+            .collect();
+        assert!(table_names.contains(&"users"), "users table must persist");
+        assert!(table_names.contains(&"sessions"), "sessions table must persist");
+
+        let indexes = conn2
+            .execute(&q(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sessions_user'",
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(indexes.rows.len(), 1, "index must persist across connections");
     }
 
     #[tokio::test]

@@ -40,19 +40,34 @@ thread_local! {
     static ISOLATE_POOL: RefCell<Vec<v8::OwnedIsolate>> = RefCell::new(Vec::new());
 }
 
+/// Flag to prevent multiple termination spawns from the heap callback.
+/// Reset after each handler execution in `execution.rs`.
+pub(crate) static HEAP_OOM_TRIGGERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Callback invoked when V8 isolate approaches heap limit.
 ///
-/// Terminates execution gracefully instead of crashing the process.
-/// The TryCatch scope in execute_js will catch the termination.
+/// Spawns a thread to terminate execution after a tiny delay (letting V8's
+/// GC finish cleanly). Grants 64MB headroom so V8 can process the termination
+/// instead of immediately hitting the fatal OOM handler.
 extern "C" fn near_heap_limit_callback(
     data: *mut std::ffi::c_void,
     current_heap_limit: usize,
     _initial_heap_limit: usize,
 ) -> usize {
-    let isolate = unsafe { &mut *(data as *mut v8::Isolate) };
-    isolate.terminate_execution();
-    // Return same limit — don't grow the heap
-    current_heap_limit
+    if !HEAP_OOM_TRIGGERED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        // First trigger — spawn a thread to terminate from a clean context.
+        if !data.is_null() {
+            let isolate = unsafe { &mut *(data as *mut v8::Isolate) };
+            let handle = isolate.thread_safe_handle();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                handle.terminate_execution();
+            });
+        }
+    }
+    // Grant generous headroom for V8 to process the deferred termination
+    current_heap_limit + 64 * 1024 * 1024
 }
 
 pub(crate) fn acquire_isolate(heap_limit: usize) -> v8::OwnedIsolate {

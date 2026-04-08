@@ -168,6 +168,9 @@ pub async fn rebuild_views_and_dataviews(
         }
     }
 
+    #[cfg(feature = "metrics")]
+    crate::server::metrics::set_loaded_apps(app_count);
+
     tracing::info!(
         apps = app_count,
         views = view_count,

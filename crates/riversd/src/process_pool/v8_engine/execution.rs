@@ -12,7 +12,7 @@ use super::super::v8_config::compile_typescript;
 use super::task_locals::TaskLocals;
 use super::init::{
     v8_str, ensure_v8_initialized, acquire_isolate, release_isolate,
-    RawPtrGuard, near_heap_limit_cb, DEFAULT_HEAP_LIMIT,
+    RawPtrGuard, near_heap_limit_cb, HeapCallbackData, DEFAULT_HEAP_LIMIT,
 };
 use super::context::{inject_ctx_object, inject_ctx_methods};
 use super::rivers_global::inject_rivers_global;
@@ -177,12 +177,14 @@ pub(crate) async fn execute_js_task(
         let effective_heap = if heap_bytes > 0 { heap_bytes } else { DEFAULT_HEAP_LIMIT };
         let mut isolate = acquire_isolate(effective_heap);
 
-        // Install near-heap-limit callback to terminate execution gracefully
-        // instead of letting V8 hit the fatal OOM handler (which aborts the process).
-        // We pass the IsolateHandle as the data pointer so the callback can
-        // call terminate_execution() before V8 reaches the fatal limit.
-        let heap_cb_handle = Box::new(isolate.thread_safe_handle());
-        let heap_cb_ptr = Box::into_raw(heap_cb_handle) as *mut std::ffi::c_void;
+        // Install near-heap-limit callback with HeapCallbackData.
+        // The callback sets oom_triggered flag + calls terminate_execution()
+        // with extra headroom so V8 can propagate the termination cleanly.
+        let heap_cb_data = Box::new(HeapCallbackData {
+            handle: isolate.thread_safe_handle(),
+            oom_triggered: std::sync::atomic::AtomicBool::new(false),
+        });
+        let heap_cb_ptr = Box::into_raw(heap_cb_data) as *mut std::ffi::c_void;
         let _heap_cb_guard = RawPtrGuard(heap_cb_ptr);
         isolate.add_near_heap_limit_callback(near_heap_limit_cb, heap_cb_ptr);
 
@@ -288,16 +290,24 @@ pub(crate) async fn execute_js_task(
 
         }; // <-- V8 scopes dropped here
 
-        // Wave 10: Deregister from pool watchdog
+        // Wave 10: Deregister from pool watchdog BEFORE touching the isolate.
+        // This prevents the watchdog from calling terminate_execution() on
+        // an isolate that's about to be dropped or recycled.
         if let Some(ref reg) = registry {
             reg.lock().unwrap().remove(&worker_id);
         }
 
+        // Check if near-heap-limit callback fired (OOM condition).
+        // If so, treat the isolate as tainted — do not recycle.
+        let oom_hit = {
+            let cb_data = unsafe { &*(heap_cb_ptr as *const HeapCallbackData) };
+            cb_data.oom_triggered.load(std::sync::atomic::Ordering::SeqCst)
+        };
+
         // V2.8: Return isolate to pool for reuse.
-        // Remove the near-heap-limit callback before recycling so it
-        // can be re-registered on the next use.
-        // X5.5: Check heap usage against threshold -- recycle if too high.
-        if task_result.is_ok() {
+        // On timeout/error/OOM: drop the isolate (don't recycle — may be in bad state).
+        // On success (no OOM): remove heap callback, check threshold, then recycle or drop.
+        if task_result.is_ok() && !oom_hit {
             isolate.remove_near_heap_limit_callback(near_heap_limit_cb, effective_heap);
 
             let should_recycle = if heap_threshold > 0.0 && effective_heap > 0 {
@@ -320,6 +330,10 @@ pub(crate) async fn execute_js_task(
             } else {
                 release_isolate(isolate);
             }
+        } else {
+            // Timeout or error — drop isolate without recycling.
+            // A terminated/errored isolate may be in an inconsistent state.
+            drop(isolate);
         }
 
         task_result

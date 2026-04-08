@@ -40,7 +40,8 @@ Admin client and management tool. Authenticates to the admin API using Ed25519 s
 | `riversctl deploy <bundle_path>` | Deploy a bundle via admin API. |
 | `riversctl doctor` | Pre-launch health checks. |
 | `riversctl doctor --fix` | Auto-repair fixable issues. |
-| `riversctl doctor --lint` | Validate bundle TOML conventions. |
+| `riverpackage validate <bundle>` | Four-layer bundle validation pipeline. |
+| `riverpackage validate <bundle> --format json` | Machine-readable JSON validation output. |
 | `riversctl tls gen` | Generate self-signed TLS certificate. |
 | `riversctl tls renew` | Regenerate self-signed TLS certificate. |
 | `riversctl tls request <domain>` | Generate CSR for a domain. |
@@ -56,8 +57,8 @@ riversctl status
 riversctl deploy ./address-book-bundle
 riversctl doctor
 riversctl doctor --fix
-riversctl doctor --lint
-riversctl doctor --fix --lint
+riverpackage validate ./my-bundle
+riverpackage validate ./my-bundle --format json
 riversctl tls gen
 riversctl tls renew
 riversctl tls request api.example.com
@@ -100,9 +101,9 @@ Pre-launch health checks. Verifies riversd binary, config, TLS certs, log direct
 ```bash
 riversctl doctor                    # Run all checks
 riversctl doctor --fix              # Auto-repair fixable issues
-riversctl doctor --lint             # Validate bundle TOML conventions
-riversctl doctor --fix --lint       # Both
 ```
+
+> **Note:** Bundle validation has moved to `riverpackage validate`. The `--lint` flag has been removed from `doctor`. Use `riverpackage validate <bundle_dir>` for bundle validation.
 
 **`--fix` auto-repairs:**
 - Lockbox missing -> runs `rivers-lockbox init`

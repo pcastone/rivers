@@ -13,8 +13,6 @@ fn main() {
         std::process::exit(1);
     }
 
-    let bundle_dir = if args.len() >= 3 { &args[2] } else { "." };
-
     let result = match args[1].as_str() {
         "--version" | "-V" | "version" => {
             println!("riverpackage {} ({})", env!("CARGO_PKG_VERSION"), std::env::consts::ARCH);
@@ -28,9 +26,13 @@ fn main() {
             let driver = parse_flag(&args, "--driver").unwrap_or("faker");
             cmd_init(bundle_name, driver)
         }
-        "validate" => cmd_validate(bundle_dir),
-        "preflight" => cmd_preflight(bundle_dir),
+        "validate" => cmd_validate(&args[2..]),
+        "preflight" => {
+            let bundle_dir = if args.len() >= 3 { &args[2] } else { "." };
+            cmd_preflight(bundle_dir)
+        }
         "pack" => {
+            let bundle_dir = if args.len() >= 3 { &args[2] } else { "." };
             let output = if args.len() >= 4 { &args[3] } else { "bundle.zip" };
             cmd_pack(bundle_dir, output)
         }
@@ -63,10 +65,17 @@ fn print_usage() {
     eprintln!();
     eprintln!("Commands:");
     eprintln!("  init <name> [--driver <d>]  Scaffold a new bundle (drivers: faker, postgres, sqlite, mysql)");
-    eprintln!("  validate [dir]              Validate bundle structure and configs");
+    eprintln!("  validate [dir] [--format text|json] [--config <path>]");
+    eprintln!("                              Validate bundle (Layers 1-4): structural, existence, cross-ref");
     eprintln!("  preflight [dir]             Validate + check schema/parameter orphans");
     eprintln!("  pack [dir] [output]         Package bundle into a .zip file");
     eprintln!("  import-exec <name> <path>   Generate ExecDriver TOML config for a script");
+    eprintln!();
+    eprintln!("Exit codes (validate):");
+    eprintln!("  0  All checks passed");
+    eprintln!("  1  Validation errors found");
+    eprintln!("  2  Config error (bundle directory not found)");
+    eprintln!("  3  Internal error");
 }
 
 /// Extract a named flag value from args, e.g. `--driver faker` → `Some("faker")`.
@@ -264,118 +273,94 @@ fn build_schema_json(driver: &str) -> String {
     }
 }
 
-fn cmd_validate(bundle_dir: &str) -> Result<(), String> {
+/// Run the full 4-layer validation pipeline on a bundle directory.
+///
+/// Returns the report (used by `cmd_validate`, `cmd_preflight`, and `cmd_pack`).
+fn run_validate(bundle_dir: &str) -> Result<rivers_runtime::ValidationReport, String> {
     let path = Path::new(bundle_dir);
-    let mut errors: Vec<String> = Vec::new();
-
-    // Check bundle manifest
-    let manifest_path = path.join("manifest.toml");
-    if !manifest_path.exists() {
-        errors.push("missing manifest.toml".into());
-    } else {
-        let content = std::fs::read_to_string(&manifest_path)
-            .map_err(|e| format!("read manifest.toml: {e}"))?;
-        match toml::from_str::<toml::Value>(&content) {
-            Ok(manifest) => {
-                if manifest.get("name").is_none() {
-                    errors.push("manifest.toml: missing 'name' field".into());
-                }
-                if manifest.get("version").is_none() {
-                    errors.push("manifest.toml: missing 'version' field".into());
-                }
-                // Check each app listed
-                if let Some(apps) = manifest.get("apps").and_then(|a| a.as_array()) {
-                    for app_val in apps {
-                        if let Some(app_name) = app_val.as_str() {
-                            validate_app(path, app_name, &mut errors);
-                        }
-                    }
-                }
-            }
-            Err(e) => errors.push(format!("manifest.toml parse error: {e}")),
-        }
+    if !path.is_dir() {
+        return Err(format!("'{}' is not a directory", bundle_dir));
     }
 
-    if errors.is_empty() {
-        println!("Bundle OK: {bundle_dir}");
-        Ok(())
-    } else {
-        for err in &errors {
-            eprintln!("  ERROR: {err}");
-        }
-        Err(format!("{} validation errors", errors.len()))
-    }
+    let config = rivers_runtime::ValidationConfig {
+        bundle_dir: path.to_path_buf(),
+        engines: None,
+    };
+
+    Ok(rivers_runtime::validate_bundle_full(&config))
 }
 
-fn validate_app(bundle_path: &Path, app_name: &str, errors: &mut Vec<String>) {
-    let app_dir = bundle_path.join(app_name);
-    if !app_dir.exists() {
-        errors.push(format!("app directory '{app_name}/' not found"));
-        return;
-    }
-
-    // Check app manifest
-    let app_manifest = app_dir.join("manifest.toml");
-    if !app_manifest.exists() {
-        errors.push(format!("{app_name}/manifest.toml missing"));
-    } else {
-        let content = std::fs::read_to_string(&app_manifest).ok();
-        if let Some(content) = content {
-            if toml::from_str::<toml::Value>(&content).is_err() {
-                errors.push(format!("{app_name}/manifest.toml parse error"));
-            }
-        }
-    }
-
-    // Check resources.toml
-    let resources = app_dir.join("resources.toml");
-    if !resources.exists() {
-        errors.push(format!("{app_name}/resources.toml missing"));
-    }
-
-    // Check app.toml
-    let app_toml = app_dir.join("app.toml");
-    if !app_toml.exists() {
-        errors.push(format!("{app_name}/app.toml missing"));
-    } else {
-        let content = std::fs::read_to_string(&app_toml).ok();
-        if let Some(content) = content {
-            if toml::from_str::<toml::Value>(&content).is_err() {
-                errors.push(format!("{app_name}/app.toml parse error"));
-            }
-        }
-    }
-
-    // Check schemas/ directory
-    let schemas_dir = app_dir.join("schemas");
-    if schemas_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&schemas_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "json") {
-                    let content = std::fs::read_to_string(&path).ok();
-                    if let Some(content) = content {
-                        if serde_json::from_str::<serde_json::Value>(&content).is_err() {
-                            errors.push(format!("{}: invalid JSON", path.display()));
-                        }
+fn cmd_validate(args: &[String]) -> Result<(), String> {
+    // Parse flags: --format text|json, --config <path>, positional bundle_dir
+    let mut format = "text";
+    let mut _config_path: Option<&str> = None;
+    let mut bundle_dir = ".";
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--format" if i + 1 < args.len() => {
+                format = match args[i + 1].as_str() {
+                    "json" => "json",
+                    "text" => "text",
+                    other => {
+                        eprintln!("Error: unknown format '{}' (expected: text, json)", other);
+                        std::process::exit(2);
                     }
-                }
+                };
+                i += 2;
+            }
+            "--config" if i + 1 < args.len() => {
+                _config_path = Some(&args[i + 1]);
+                i += 2;
+            }
+            arg if arg.starts_with('-') => {
+                eprintln!("Error: unknown flag '{}'", arg);
+                std::process::exit(2);
+            }
+            _ => {
+                bundle_dir = &args[i];
+                i += 1;
             }
         }
     }
+
+    let path = Path::new(bundle_dir);
+    if !path.is_dir() {
+        eprintln!("Error: '{}' is not a directory", bundle_dir);
+        std::process::exit(2);
+    }
+
+    let config = rivers_runtime::ValidationConfig {
+        bundle_dir: path.to_path_buf(),
+        engines: None,
+    };
+
+    let report = rivers_runtime::validate_bundle_full(&config);
+
+    match format {
+        "json" => println!("{}", rivers_runtime::format_json(&report)),
+        _ => print!("{}", rivers_runtime::format_text(&report)),
+    }
+
+    std::process::exit(report.exit_code());
 }
 
 fn cmd_preflight(bundle_dir: &str) -> Result<(), String> {
-    // Run validate first
-    cmd_validate(bundle_dir)?;
+    // Run full validation pipeline
+    let report = run_validate(bundle_dir)?;
 
-    // Additional preflight checks
+    if report.has_errors() {
+        // Print the text report so the user sees what went wrong
+        print!("{}", rivers_runtime::format_text(&report));
+        return Err(format!(
+            "{} validation error(s) found",
+            report.summary.total_failed
+        ));
+    }
+
+    // Additional preflight checks (schema reference orphans)
     let path = Path::new(bundle_dir);
     let mut warnings: Vec<String> = Vec::new();
-
-    // Check for schema files referenced in app.toml but missing
-    // Check for $variable <-> parameter orphans
-    // These require parsing app.toml DataView declarations
 
     let manifest_content = std::fs::read_to_string(path.join("manifest.toml"))
         .map_err(|e| format!("read manifest: {e}"))?;
@@ -503,8 +488,12 @@ mod tests {
 
     #[test]
     fn validate_catches_missing_manifest() {
-        let result = cmd_validate("/tmp/nonexistent_bundle_dir_12345");
-        assert!(result.is_err());
+        let report = run_validate("/tmp/nonexistent_bundle_dir_12345");
+        // Should return Ok(report) with errors inside
+        match report {
+            Ok(r) => assert!(r.has_errors(), "nonexistent dir should have errors"),
+            Err(_) => {} // Also acceptable — dir doesn't exist
+        }
     }
 
     #[test]
@@ -512,8 +501,12 @@ mod tests {
         // Use the reference bundle in the repo
         let bundle_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../address-book-bundle");
         if std::path::Path::new(bundle_dir).exists() {
-            let result = cmd_validate(bundle_dir);
-            assert!(result.is_ok(), "address-book-bundle should validate: {:?}", result.err());
+            let report = run_validate(bundle_dir).expect("run_validate should succeed");
+            assert!(
+                !report.has_errors(),
+                "address-book-bundle should validate without errors.\nReport:\n{}",
+                rivers_runtime::format_text(&report),
+            );
         }
     }
 
@@ -522,8 +515,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let manifest = tmp.path().join("manifest.toml");
         std::fs::write(&manifest, "invalid { toml content").unwrap();
-        let result = cmd_validate(tmp.path().to_str().unwrap());
-        assert!(result.is_err());
+        let report = run_validate(tmp.path().to_str().unwrap()).expect("run_validate should succeed");
+        assert!(report.has_errors(), "invalid TOML should produce errors");
     }
 
     #[test]
@@ -531,11 +524,30 @@ mod tests {
         let result = cmd_preflight("/tmp/nonexistent_12345");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn run_validate_returns_report_with_layers() {
+        let bundle_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../address-book-bundle");
+        if std::path::Path::new(bundle_dir).exists() {
+            let report = run_validate(bundle_dir).expect("run_validate should succeed");
+            assert_eq!(report.bundle_name, "address-book");
+            assert_eq!(report.bundle_version, "1.0.0");
+            // Should have at least the structural layer with results
+            assert!(!report.layers["structural_toml"].results.is_empty());
+        }
+    }
 }
 
 fn cmd_pack(bundle_dir: &str, output: &str) -> Result<(), String> {
     // Validate first
-    cmd_validate(bundle_dir)?;
+    let report = run_validate(bundle_dir)?;
+    if report.has_errors() {
+        print!("{}", rivers_runtime::format_text(&report));
+        return Err(format!(
+            "{} validation error(s) — cannot pack",
+            report.summary.total_failed
+        ));
+    }
 
     // Create a zip file
     // For V1: just report what would be packed (zip crate not in deps)

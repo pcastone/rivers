@@ -521,6 +521,9 @@ pub async fn load_and_wire_bundle(
     // Store bundle for services discovery
     ctx.loaded_bundle = Some(Arc::new(bundle));
 
+    #[cfg(feature = "metrics")]
+    crate::server::metrics::set_loaded_apps(app_count);
+
     tracing::info!(
         path = %bundle_path,
         apps = app_count,
@@ -543,8 +546,8 @@ async fn dispatch_init_handler(
     pool: &ProcessPoolManager,
     app: &rivers_runtime::LoadedApp,
     init_config: &InitHandlerConfig,
-    _executor: &Arc<DataViewExecutor>,
-    _ddl_whitelist: &[String],
+    executor: &Arc<DataViewExecutor>,
+    ddl_whitelist: &[String],
     timeout_s: u64,
 ) -> Result<(), String> {
     use crate::process_pool::Entrypoint;
@@ -578,8 +581,22 @@ async fn dispatch_init_handler(
         .args(args)
         .trace_id(format!("init-{}", entry_point));
 
-    // Wire shared capabilities (storage, driver_factory, dataview_executor, lockbox, keystore)
+    // Wire shared capabilities (storage, driver_factory, lockbox, keystore)
     let builder = crate::task_enrichment::enrich(builder, entry_point);
+
+    // Override dataview_executor with the exact instance passed in — the global
+    // shared state may not be synced yet during initial bundle load.
+    let builder = builder.dataview_executor(Arc::clone(executor));
+
+    // DDL whitelist (Gate 3) is enforced at the host callback level via DDL_WHITELIST
+    // OnceLock — set at startup by set_ddl_whitelist(). Log if whitelist is active.
+    if !ddl_whitelist.is_empty() {
+        tracing::debug!(
+            app_id = %app.manifest.app_id,
+            whitelist_entries = ddl_whitelist.len(),
+            "init handler: DDL whitelist active (Gate 3)"
+        );
+    }
 
     let task_ctx = builder.build().map_err(|e| format!("failed to build init task context: {e}"))?;
 

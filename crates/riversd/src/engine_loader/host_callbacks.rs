@@ -5,6 +5,7 @@
 //! defined in the sibling `host_context` module.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::host_context::{HOST_CONTEXT, HOST_KEYSTORE};
 
@@ -30,36 +31,109 @@ pub(super) extern "C" fn host_dataview_execute(
 ) -> i32 {
     let ctx = match HOST_CONTEXT.get() {
         Some(c) => c,
-        None => return -1,
+        None => {
+            tracing::error!("host_dataview_execute: HOST_CONTEXT not set");
+            return -1;
+        }
     };
 
     let input = match read_input(input_ptr, input_len) {
         Ok(v) => v,
-        Err(_) => return -2,
+        Err(e) => {
+            tracing::error!(error = %e, "host_dataview_execute: failed to read input");
+            return -2;
+        }
     };
 
     let name = match input["name"].as_str() {
         Some(n) => n.to_string(),
-        None => return -3,
+        None => {
+            tracing::error!(input = %input, "host_dataview_execute: missing 'name' field");
+            return -3;
+        }
     };
     let trace_id = input["trace_id"].as_str().unwrap_or("engine-callback").to_string();
 
-    // Convert JSON params to HashMap<String, QueryValue>
+    // Convert JSON params to HashMap<String, QueryValue>, coercing to native types
     use rivers_runtime::rivers_driver_sdk::QueryValue;
     let params: HashMap<String, QueryValue> = input["params"]
         .as_object()
-        .map(|o| o.iter().map(|(k, v)| (k.clone(), QueryValue::Json(v.clone()))).collect())
+        .map(|o| o.iter().map(|(k, v)| {
+            let qv = match v {
+                serde_json::Value::Number(n) => {
+                    if let Some(i) = n.as_i64() {
+                        QueryValue::Integer(i)
+                    } else if let Some(f) = n.as_f64() {
+                        QueryValue::Float(f)
+                    } else {
+                        QueryValue::Json(v.clone())
+                    }
+                }
+                serde_json::Value::String(s) => QueryValue::String(s.clone()),
+                serde_json::Value::Bool(b) => QueryValue::Boolean(*b),
+                serde_json::Value::Null => QueryValue::Null,
+                _ => QueryValue::Json(v.clone()),
+            };
+            (k.clone(), qv)
+        }).collect())
         .unwrap_or_default();
 
+    // Try app-namespace prefix from trace_id or input, fall back to scanning registry
+    let app_prefix = input["app_prefix"].as_str().map(|s| s.to_string());
+
     let executor_lock = ctx.dataview_executor.clone();
-    match ctx.rt_handle.block_on(async {
-        let executor = {
-            let guard = executor_lock.read().await;
-            guard.clone().ok_or_else(|| "DataViewExecutor not initialized".to_string())?
-        };
-        executor.execute(&name, params, "GET", &trace_id).await.map_err(|e| e.to_string())
-    }) {
-        Ok(response) => {
+
+    // Spawn execution on the Tokio runtime and wait for the result.
+    // This is critical: some drivers (e.g. MongoDB, Elasticsearch) require a
+    // Tokio reactor on the calling thread. `block_on()` alone doesn't set the
+    // thread-local reactor context, but `spawn` runs on a proper Tokio worker
+    // thread where the reactor IS available.
+    //
+    // If the spawned task panics, the tx sender is dropped without sending,
+    // causing rx.recv() to return Err — which we handle as error code -12.
+    let (tx, rx) = std::sync::mpsc::channel();
+    ctx.rt_handle.spawn({
+        let executor_lock = executor_lock.clone();
+        let name = name.clone();
+        let trace_id = trace_id.clone();
+        let app_prefix = app_prefix.clone();
+        async move {
+            let result = async {
+                let executor = {
+                    let guard = executor_lock.read().await;
+                    guard.clone().ok_or_else(|| "DataViewExecutor not initialized".to_string())?
+                };
+                // Try the bare name first
+                match executor.execute(&name, params.clone(), "GET", &trace_id).await {
+                    Ok(r) => Ok(r),
+                    Err(rivers_runtime::DataViewError::NotFound { .. }) => {
+                        // DataViews are registered as "{entry_point}:{name}" — try with prefix
+                        if let Some(prefix) = &app_prefix {
+                            let namespaced = format!("{}:{}", prefix, name);
+                            executor.execute(&namespaced, params, "GET", &trace_id).await
+                                .map_err(|e| format!("{e:?}"))
+                        } else {
+                            // No prefix hint — scan for any match ending in ":{name}"
+                            let suffix = format!(":{}", name);
+                            if let Some(full_name) = executor.find_by_suffix(&suffix) {
+                                executor.execute(&full_name, params, "GET", &trace_id).await
+                                    .map_err(|e| format!("{e:?}"))
+                            } else {
+                                Err(format!("DataView '{}' not found (tried bare and namespaced)", name))
+                            }
+                        }
+                    }
+                    Err(e) => Err(format!("{e:?}")),
+                }
+            }.await;
+            let _ = tx.send(result);
+        }
+    });
+
+    // Wait for the spawned task to complete (blocks the V8 thread, which is fine —
+    // this is the same blocking behavior as the previous block_on approach)
+    match rx.recv() {
+        Ok(Ok(response)) => {
             // Serialize DataViewResponse.query_result to JSON
             let result = serde_json::json!({
                 "rows": response.query_result.rows,
@@ -70,10 +144,15 @@ pub(super) extern "C" fn host_dataview_execute(
             write_output(out_ptr, out_len, &result);
             0
         }
-        Err(e) => {
+        Ok(Err(e)) => {
+            tracing::error!(dataview = %name, error = %e, "host_dataview_execute failed");
             let err_val = serde_json::json!({"error": e});
             write_output(out_ptr, out_len, &err_val);
             -10
+        }
+        Err(e) => {
+            tracing::error!(dataview = %name, error = %e, "host_dataview_execute: channel recv failed");
+            -12
         }
     }
 }
@@ -239,11 +318,19 @@ pub(super) extern "C" fn host_datasource_build(
         query.parameters.insert(k.clone(), QueryValue::Json(v.clone()));
     }
 
-    match ctx.rt_handle.block_on(async {
-        let mut conn = factory.connect(&driver, &conn_params).await
-            .map_err(|e| e.to_string())?;
-        conn.execute(&query).await.map_err(|e| e.to_string())
-    }) {
+    // Spawn on Tokio runtime (same reason as host_dataview_execute — drivers
+    // need a reactor on the calling thread).
+    let (ds_tx, ds_rx) = std::sync::mpsc::channel();
+    let factory = Arc::clone(factory);
+    ctx.rt_handle.spawn(async move {
+        let result = async {
+            let mut conn = factory.connect(&driver, &conn_params).await
+                .map_err(|e| e.to_string())?;
+            conn.execute(&query).await.map_err(|e| e.to_string())
+        }.await;
+        let _ = ds_tx.send(result);
+    });
+    match ds_rx.recv().unwrap_or_else(|_| Err("datasource task panicked".to_string())) {
         Ok(result) => {
             let json_result = serde_json::json!({
                 "rows": result.rows,
@@ -284,48 +371,55 @@ pub(super) extern "C" fn host_http_request(
     let body = input.get("body").cloned();
     let headers = input["headers"].as_object().cloned().unwrap_or_default();
 
-    match ctx.rt_handle.block_on(async {
-        let mut req = match method.to_uppercase().as_str() {
-            "GET" => ctx.http_client.get(&url),
-            "POST" => ctx.http_client.post(&url),
-            "PUT" => ctx.http_client.put(&url),
-            "DELETE" => ctx.http_client.delete(&url),
-            "PATCH" => ctx.http_client.patch(&url),
-            "HEAD" => ctx.http_client.head(&url),
-            _ => ctx.http_client.get(&url),
-        };
+    // Spawn on Tokio runtime for reactor context
+    let (http_tx, http_rx) = std::sync::mpsc::channel();
+    let http_client = ctx.http_client.clone();
+    ctx.rt_handle.spawn(async move {
+        let result = async {
+            let mut req = match method.to_uppercase().as_str() {
+                "GET" => http_client.get(&url),
+                "POST" => http_client.post(&url),
+                "PUT" => http_client.put(&url),
+                "DELETE" => http_client.delete(&url),
+                "PATCH" => http_client.patch(&url),
+                "HEAD" => http_client.head(&url),
+                _ => http_client.get(&url),
+            };
 
-        for (k, v) in &headers {
-            if let Some(val) = v.as_str() {
-                req = req.header(k.as_str(), val);
+            for (k, v) in &headers {
+                if let Some(val) = v.as_str() {
+                    req = req.header(k.as_str(), val);
+                }
             }
-        }
 
-        if let Some(body_val) = body {
-            if let Some(s) = body_val.as_str() {
-                req = req.body(s.to_string());
-            } else {
-                req = req.json(&body_val);
+            if let Some(body_val) = body {
+                if let Some(s) = body_val.as_str() {
+                    req = req.body(s.to_string());
+                } else {
+                    req = req.json(&body_val);
+                }
             }
-        }
 
-        let resp = req.send().await.map_err(|e| e.to_string())?;
-        let status = resp.status().as_u16();
-        let resp_headers: HashMap<String, String> = resp.headers().iter()
-            .filter_map(|(k, v)| v.to_str().ok().map(|val| (k.to_string(), val.to_string())))
-            .collect();
-        let resp_body = resp.text().await.map_err(|e| e.to_string())?;
+            let resp = req.send().await.map_err(|e| e.to_string())?;
+            let status = resp.status().as_u16();
+            let resp_headers: HashMap<String, String> = resp.headers().iter()
+                .filter_map(|(k, v)| v.to_str().ok().map(|val| (k.to_string(), val.to_string())))
+                .collect();
+            let resp_body = resp.text().await.map_err(|e| e.to_string())?;
 
-        // Try to parse body as JSON, fall back to string
-        let body_val = serde_json::from_str::<serde_json::Value>(&resp_body)
-            .unwrap_or_else(|_| serde_json::Value::String(resp_body));
+            // Try to parse body as JSON, fall back to string
+            let body_val = serde_json::from_str::<serde_json::Value>(&resp_body)
+                .unwrap_or_else(|_| serde_json::Value::String(resp_body));
 
-        Ok::<_, String>(serde_json::json!({
-            "status": status,
-            "headers": resp_headers,
-            "body": body_val,
-        }))
-    }) {
+            Ok::<_, String>(serde_json::json!({
+                "status": status,
+                "headers": resp_headers,
+                "body": body_val,
+            }))
+        }.await;
+        let _ = http_tx.send(result);
+    });
+    match http_rx.recv().unwrap_or_else(|_| Err("http request task panicked".to_string())) {
         Ok(result) => {
             write_output(out_ptr, out_len, &result);
             0
@@ -533,6 +627,185 @@ pub(super) extern "C" fn host_crypto_decrypt(
             let err_val = serde_json::json!({"error": err_msg});
             write_output(out_ptr, out_len, &err_val);
             -10
+        }
+    }
+}
+
+// ── ddl_execute ─────────────────────────────────────────────────
+
+/// Execute a DDL statement (CREATE TABLE, ALTER, DROP, etc.) via the driver.
+///
+/// Only intended for use by ApplicationInit handlers. The DDL whitelist
+/// check is performed by the DataViewExecutor (Gate 3).
+///
+/// Input: JSON `{"datasource": "my-db", "statement": "CREATE TABLE ...", "app_id": "..."}`
+/// Output: JSON `{"ok": true}` on success
+pub(super) extern "C" fn host_ddl_execute(
+    input_ptr: *const u8, input_len: usize,
+    out_ptr: *mut *mut u8, out_len: *mut usize,
+) -> i32 {
+    let ctx = match HOST_CONTEXT.get() {
+        Some(c) => c,
+        None => {
+            tracing::error!("host_ddl_execute: HOST_CONTEXT not set");
+            return -1;
+        }
+    };
+
+    let factory = match ctx.driver_factory.as_ref() {
+        Some(f) => f,
+        None => {
+            tracing::error!("host_ddl_execute: DriverFactory not available");
+            return -1;
+        }
+    };
+
+    let input = match read_input(input_ptr, input_len) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "host_ddl_execute: failed to read input");
+            return -2;
+        }
+    };
+
+    let datasource = match input["datasource"].as_str() {
+        Some(d) => d.to_string(),
+        None => {
+            tracing::error!("host_ddl_execute: missing 'datasource' field");
+            return -3;
+        }
+    };
+    let statement = match input["statement"].as_str() {
+        Some(s) => s.to_string(),
+        None => {
+            tracing::error!("host_ddl_execute: missing 'statement' field");
+            return -3;
+        }
+    };
+    let app_id = input["app_id"].as_str().unwrap_or("unknown").to_string();
+
+    // Gate 3: Check DDL whitelist
+    if let Some(whitelist) = super::host_context::DDL_WHITELIST.get() {
+        if !whitelist.is_empty() {
+            if !rivers_runtime::rivers_core_config::config::security::is_ddl_permitted(
+                &datasource,
+                &app_id,
+                whitelist,
+            ) {
+                tracing::warn!(
+                    datasource = %datasource,
+                    app_id = %app_id,
+                    "DDL rejected by whitelist (Gate 3)"
+                );
+                // Log rejection to per-app log
+                if let Some(router) = rivers_runtime::rivers_core::app_log_router::global_router() {
+                    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                    let stmt_preview: String = statement.chars().take(80).collect();
+                    let line = format!(
+                        r#"{{"timestamp":"{ts}","level":"warn","app":"{app_id}","event":"DdlRejected","datasource":"{datasource}","statement":"{stmt_preview}","reason":"whitelist_gate3"}}"#
+                    );
+                    router.write(&app_id, &line);
+                }
+                let err_val = serde_json::json!({"error": format!(
+                    "DDL not permitted for datasource '{}' in app '{}'",
+                    datasource, app_id
+                )});
+                write_output(out_ptr, out_len, &err_val);
+                return -4;
+            }
+        }
+    }
+
+    // Resolve connection params — try namespaced first (entry_point:datasource),
+    // then bare name
+    let executor_lock = ctx.dataview_executor.clone();
+
+    // Clone for per-app logging after the async block (originals move into spawn)
+    let log_datasource = datasource.clone();
+    let log_app_id = app_id.clone();
+    let log_statement = statement.clone();
+
+    let (ds_tx, ds_rx) = std::sync::mpsc::channel();
+    let factory = Arc::clone(factory);
+    ctx.rt_handle.spawn(async move {
+        let result = async {
+            // Get datasource params from executor
+            let (ds_params, driver_name) = {
+                let guard = executor_lock.read().await;
+                let executor = guard.as_ref()
+                    .ok_or_else(|| "DataViewExecutor not initialized".to_string())?;
+
+                // Try exact name first, then suffix match for unqualified names
+                let params = executor.datasource_params_get(&datasource)
+                    .or_else(|| {
+                        let suffix = format!(":{}", datasource);
+                        executor.datasource_params_by_suffix(&suffix)
+                    })
+                    .ok_or_else(|| format!("datasource '{}' not found", datasource))?
+                    .clone();
+
+                // Driver name from options or inferred from datasource name
+                let driver = params.options.get("driver").cloned()
+                    .unwrap_or_else(|| datasource.split(':').last().unwrap_or(&datasource).to_string());
+
+                (params, driver)
+            };
+
+            // Connect and execute DDL
+            let mut conn = factory.connect(&driver_name, &ds_params).await
+                .map_err(|e| format!("DDL connect to '{}' failed: {}", datasource, e))?;
+
+            let query = rivers_runtime::rivers_driver_sdk::Query::new("ddl", &statement);
+            conn.ddl_execute(&query).await
+                .map_err(|e| format!("DDL execute failed: {}", e))?;
+
+            tracing::info!(
+                datasource = %datasource,
+                app_id = %app_id,
+                statement = %statement.chars().take(80).collect::<String>(),
+                "DDL executed successfully"
+            );
+            Ok::<_, String>(())
+        }.await;
+        let _ = ds_tx.send(result);
+    });
+
+    // Write DDL result to per-app log via AppLogRouter
+    let ddl_result = ds_rx.recv();
+    let stmt_preview: String = log_statement.chars().take(80).collect();
+
+    match ddl_result {
+        Ok(Ok(())) => {
+            // Log success to per-app log
+            if let Some(router) = rivers_runtime::rivers_core::app_log_router::global_router() {
+                let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                let line = format!(
+                    r#"{{"timestamp":"{ts}","level":"info","app":"{log_app_id}","event":"DdlExecuted","datasource":"{log_datasource}","statement":"{stmt_preview}","status":"ok"}}"#
+                );
+                router.write(&log_app_id, &line);
+            }
+            let result = serde_json::json!({"ok": true});
+            write_output(out_ptr, out_len, &result);
+            0
+        }
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, "host_ddl_execute failed");
+            // Log failure to per-app log
+            if let Some(router) = rivers_runtime::rivers_core::app_log_router::global_router() {
+                let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                let escaped_err = e.replace('"', r#"\""#);
+                let line = format!(
+                    r#"{{"timestamp":"{ts}","level":"error","app":"{log_app_id}","event":"DdlFailed","datasource":"{log_datasource}","statement":"{stmt_preview}","error":"{escaped_err}"}}"#
+                );
+                router.write(&log_app_id, &line);
+            }
+            let err_val = serde_json::json!({"error": e});
+            write_output(out_ptr, out_len, &err_val);
+            -10
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "host_ddl_execute: channel recv failed");
+            -12
         }
     }
 }

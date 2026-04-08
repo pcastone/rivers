@@ -305,3 +305,61 @@ async fn execute_heap_limit_prevents_oom() {
     // Should either timeout or throw OOM -- should NOT succeed
     assert!(result.is_err(), "expected OOM or timeout, got Ok");
 }
+
+// ── Sequential Recovery (regression: bugreport_2026-04-07) ──
+
+#[tokio::test]
+async fn execute_timeout_then_success_on_same_pool() {
+    // Regression: request A times out, then request B on same pool succeeds.
+    // Proves the pool recovers after dropping a tainted isolate.
+
+    // Set up a watchdog thread (same pattern as execute_timeout_terminates)
+    let registry: ActiveTaskRegistry = Arc::new(StdMutex::new(HashMap::new()));
+    let (watchdog_cancel_tx, watchdog_cancel_rx) = std::sync::mpsc::channel();
+    let registry_clone = registry.clone();
+    let _watchdog = std::thread::Builder::new()
+        .name("test-watchdog-recovery".into())
+        .spawn(move || {
+            loop {
+                match watchdog_cancel_rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        let tasks = registry_clone.lock().unwrap();
+                        let timed_out: Vec<usize> = tasks.iter()
+                            .filter(|(_, t)| t.started_at.elapsed().as_millis() as u64 > t.timeout_ms)
+                            .map(|(id, _)| *id)
+                            .collect();
+                        drop(tasks);
+                        for id in timed_out {
+                            if let Some(task) = registry_clone.lock().unwrap().remove(&id) {
+                                match task.terminator {
+                                    TaskTerminator::V8(handle) => { handle.terminate_execution(); }
+                                    TaskTerminator::WasmEpoch(engine) => { engine.increment_epoch(); }
+                                    TaskTerminator::Callback(cb) => { cb(); }
+                                }
+                            }
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        })
+        .expect("failed to spawn test watchdog");
+
+    // Request A: infinite loop with short timeout → should fail
+    let ctx_a = make_js_task(
+        "function handler(ctx) { while(true) {} }",
+        "handler",
+    );
+    let result_a = execute_js_task(ctx_a, 100, 0, DEFAULT_HEAP_LIMIT, 0.8, Some(registry.clone())).await;
+    assert!(result_a.is_err(), "infinite loop should fail with timeout");
+
+    // Request B: simple handler → should succeed
+    let ctx_b = make_js_task(
+        "function handler(ctx) { return { recovered: true, seq: 2 }; }",
+        "handler",
+    );
+    let result_b = execute_js_task(ctx_b, 5000, 1, DEFAULT_HEAP_LIMIT, 0.8, Some(registry.clone())).await;
+    let _ = watchdog_cancel_tx.send(());
+    assert!(result_b.is_ok(), "handler after timeout should succeed: {:?}", result_b.err());
+    assert_eq!(result_b.unwrap().value["recovered"], true);
+}

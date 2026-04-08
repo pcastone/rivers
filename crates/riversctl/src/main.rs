@@ -9,7 +9,7 @@ mod commands;
 #[cfg(feature = "tls")]
 mod tls_cmd;
 
-use commands::{start, doctor, validate, exec, admin, stop, status};
+use commands::{start, doctor, exec, admin, stop, status};
 
 #[tokio::main]
 async fn main() {
@@ -73,7 +73,6 @@ async fn main() {
             }
             exec::cmd_exec(&args[2..])
         }
-        "validate" => validate::cmd_validate(&args[2..]),
         "--version" | "-V" | "version" => {
             println!("riversctl {} ({})", env!("CARGO_PKG_VERSION"), std::env::consts::ARCH);
             Ok(())
@@ -116,10 +115,6 @@ fn print_usage() {
     eprintln!("  exec verify <path> <sha256>");
     eprintln!("                  Verify a file matches an expected SHA-256 hash");
     eprintln!("  exec list       List declared exec commands (planned — not yet implemented)");
-    eprintln!("  validate <bundle_path>");
-    eprintln!("                  Validate a bundle (schema refs, driver names, cross-app deps)");
-    eprintln!("  validate --schema <server|app|bundle>");
-    eprintln!("                  Output JSON Schema for a config type to stdout");
     eprintln!();
     eprintln!("Admin API commands (require a running riversd):");
     eprintln!("  api-status      Server status via HTTP admin API");

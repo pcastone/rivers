@@ -81,38 +81,67 @@ pub(crate) fn clear_script_cache() {
 }
 
 /// RAII guard that frees a raw pointer when dropped.
-/// Used to clean up the IsolateHandle passed to the near-heap-limit callback.
+/// Used to clean up the HeapCallbackData passed to the near-heap-limit callback.
 pub(super) struct RawPtrGuard(pub(super) *mut std::ffi::c_void);
 
 impl Drop for RawPtrGuard {
     fn drop(&mut self) {
         if !self.0.is_null() {
             unsafe {
-                drop(Box::from_raw(self.0 as *mut v8::IsolateHandle));
+                drop(Box::from_raw(self.0 as *mut HeapCallbackData));
             }
         }
     }
 }
 
+/// Data passed to the near-heap-limit callback.
+///
+/// Contains both the IsolateHandle for termination and an atomic flag
+/// so the callback can signal OOM without calling terminate_execution()
+/// directly from V8's GC thread (which can abort the process).
+pub(super) struct HeapCallbackData {
+    /// Handle to terminate the isolate (called from the WATCHDOG thread, not GC).
+    pub handle: v8::IsolateHandle,
+    /// Set to true by the heap callback; checked by the watchdog and post-call code.
+    pub oom_triggered: std::sync::atomic::AtomicBool,
+}
+
 /// Near-heap-limit callback for V8 isolates (P4.1).
 ///
-/// When V8's heap approaches the configured limit, this callback terminates
-/// execution via the IsolateHandle passed as the `data` pointer.  This
-/// prevents V8 from hitting its fatal OOM handler (which aborts the process)
-/// and instead causes a catchable termination exception.
+/// Instead of calling `terminate_execution()` directly (which can crash
+/// when called from V8's GC thread), this callback:
+/// 1. Sets `oom_triggered` flag for the watchdog/post-call check
+/// 2. Calls `terminate_execution()` via the IsolateHandle (safe from here
+///    because we also grant headroom)
+/// 3. Grants extra headroom so V8 can process the termination
 ///
-/// We grant a small amount of extra headroom (5 MiB) so V8 has enough
-/// memory to process the termination rather than immediately triggering
-/// the fatal OOM handler.
+/// The combination of flag + terminate + headroom ensures:
+/// - The watchdog sees OOM immediately and won't recycle the isolate
+/// - V8 has enough memory to propagate the termination cleanly
+/// - If terminate_execution() is unsafe in this context, the headroom
+///   gives V8 room to return to user code where the flag is checked
 pub(super) extern "C" fn near_heap_limit_cb(
     data: *mut std::ffi::c_void,
     current_heap_limit: usize,
     _initial_heap_limit: usize,
 ) -> usize {
     if !data.is_null() {
-        let handle = unsafe { &*(data as *const v8::IsolateHandle) };
-        handle.terminate_execution();
+        let cb_data = unsafe { &*(data as *const HeapCallbackData) };
+        if !cb_data.oom_triggered.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            // First trigger — log it, then spawn a thread that terminates
+            // from a clean context (not V8's GC thread).
+            eprintln!("[HEAP-GUARD] near_heap_limit_cb fired at {}MB, granting 64MB headroom",
+                current_heap_limit / (1024 * 1024));
+            let handle = cb_data.handle.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                handle.terminate_execution();
+            });
+        }
     }
-    // Grant a small amount of extra headroom for the termination to propagate
-    current_heap_limit + 5 * 1024 * 1024
+    // Grant generous headroom so V8 can:
+    // 1. Finish the current GC cycle
+    // 2. Return to user code
+    // 3. Process the termination from the spawned thread
+    current_heap_limit + 64 * 1024 * 1024
 }
