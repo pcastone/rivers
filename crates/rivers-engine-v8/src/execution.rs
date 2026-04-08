@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use rivers_engine_sdk::SerializedTaskContext;
 
-use crate::task_context::{clear_task_locals, setup_task_locals, TASK_STORE};
+use crate::task_context::{clear_task_locals, setup_task_locals, TASK_APP_ID, TASK_STORE};
 use crate::v8_runtime::{
     acquire_isolate, release_isolate, v8_str, v8_to_json_value,
     DEFAULT_HEAP_LIMIT, SCRIPT_CACHE,
@@ -279,6 +279,9 @@ fn inject_ctx_object<'s>(
     // ctx.dataview() placeholder
     inject_dataview_method(scope, obj);
 
+    // ctx.ddl(datasource, statement) — DDL execution via host callback
+    inject_ddl_method(scope, obj);
+
     obj
 }
 
@@ -457,6 +460,93 @@ fn dataview_callback(
         "ctx.dataview('{}') not found. Declare in view config: dataviews = [\"{}\"]",
         name, name
     ));
+    let exception = v8::Exception::error(scope, msg);
+    scope.throw_exception(exception);
+}
+
+// ── ctx.ddl() Method ───────────────────────────────────────────
+
+fn inject_ddl_method<'s>(scope: &mut v8::HandleScope<'s>, ctx_obj: v8::Local<'s, v8::Object>) {
+    let ddl_fn = v8::Function::new(scope, ddl_callback).unwrap();
+    let key = v8_str(scope, "ddl");
+    ctx_obj.set(scope, key.into(), ddl_fn.into());
+}
+
+/// `ctx.ddl(datasource, statement)` — execute a DDL statement via host callback.
+///
+/// Returns `{"ok": true}` on success, throws a JS exception on failure.
+fn ddl_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let datasource = args.get(0).to_rust_string_lossy(scope);
+    let statement = args.get(1).to_rust_string_lossy(scope);
+
+    if datasource.is_empty() || statement.is_empty() {
+        let msg = v8_str(scope, "ctx.ddl() requires (datasource, statement) arguments");
+        let exception = v8::Exception::error(scope, msg);
+        scope.throw_exception(exception);
+        return;
+    }
+
+    // Get app_id from task-local
+    let app_id = TASK_APP_ID.with(|a| {
+        a.borrow().clone().unwrap_or_else(|| "unknown".to_string())
+    });
+
+    if let Some(callbacks) = HOST_CALLBACKS.get() {
+        if let Some(ddl_fn) = callbacks.ddl_execute {
+            let input = serde_json::json!({
+                "datasource": datasource,
+                "statement": statement,
+                "app_id": app_id,
+            }).to_string();
+
+            let mut out_ptr: *mut u8 = std::ptr::null_mut();
+            let mut out_len: usize = 0;
+            let result = ddl_fn(
+                input.as_ptr(), input.len(),
+                &mut out_ptr, &mut out_len,
+            );
+
+            if !out_ptr.is_null() && out_len > 0 {
+                let bytes = unsafe { std::slice::from_raw_parts(out_ptr, out_len) };
+                let json_str = String::from_utf8_lossy(bytes);
+                if result == 0 {
+                    // Success
+                    let v8_val = v8_str(scope, &json_str);
+                    if let Some(parsed) = v8::json::parse(scope, v8_val) {
+                        rv.set(parsed);
+                    }
+                    unsafe { rivers_engine_sdk::free_json_buffer(out_ptr, out_len) };
+                    return;
+                } else {
+                    // Error — extract message and throw
+                    let err_msg = if let Ok(err_obj) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                        err_obj["error"].as_str().unwrap_or(&json_str).to_string()
+                    } else {
+                        json_str.to_string()
+                    };
+                    unsafe { rivers_engine_sdk::free_json_buffer(out_ptr, out_len) };
+                    let msg = v8_str(scope, &err_msg);
+                    let exception = v8::Exception::error(scope, msg);
+                    scope.throw_exception(exception);
+                    return;
+                }
+            } else if result < 0 {
+                let msg = v8_str(scope, &format!(
+                    "ctx.ddl('{}', ...): host error code {}", datasource, result
+                ));
+                let exception = v8::Exception::error(scope, msg);
+                scope.throw_exception(exception);
+                return;
+            }
+        }
+    }
+
+    // No host callback available
+    let msg = v8_str(scope, "ctx.ddl(): host callback not available (ddl_execute not registered)");
     let exception = v8::Exception::error(scope, msg);
     scope.throw_exception(exception);
 }
