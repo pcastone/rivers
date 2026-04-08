@@ -115,6 +115,21 @@ pub struct ApiViewConfig {
     pub on_event: Option<OnEventConfig>,
 }
 
+/// Guard lifecycle hooks — all optional, all side-effects only.
+///
+/// Per technology-path-spec §9.5: hooks cannot influence auth flow.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct GuardLifecycleHooks {
+    /// Fires when session already exists and is valid.
+    pub on_session_valid: Option<HandlerStageConfig>,
+
+    /// Fires on invalid or expired session.
+    pub on_invalid_session: Option<HandlerStageConfig>,
+
+    /// Fires on credential validation failure.
+    pub on_failed: Option<HandlerStageConfig>,
+}
+
 /// Guard view configuration.
 ///
 /// Per `rivers-auth-session-spec.md` §3.
@@ -133,6 +148,10 @@ pub struct GuardConfig {
     /// Key name for token in response body (default: "token").
     #[serde(default = "default_token_body_key")]
     pub token_body_key: String,
+
+    /// Guard lifecycle hooks — side-effect-only callbacks.
+    #[serde(default)]
+    pub lifecycle_hooks: Option<GuardLifecycleHooks>,
 }
 
 fn default_token_body_key() -> String {

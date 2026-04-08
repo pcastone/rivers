@@ -54,9 +54,61 @@ pub async fn run_security_pipeline(
                     match mgr.validate_session(sid).await {
                         Ok(Some(sess)) => {
                             session = serde_json::to_value(&sess).ok();
+
+                            // Fire on_session_valid lifecycle hook (fire-and-forget)
+                            if let Some(ref hooks) = config.guard_config.as_ref().and_then(|gc| gc.lifecycle_hooks.as_ref()) {
+                                if let Some(ref hook) = hooks.on_session_valid {
+                                    let pool = ctx.pool.clone();
+                                    let hook = hook.clone();
+                                    let session_clone = session.clone();
+                                    let trace = trace_id.to_string();
+                                    tokio::spawn(async move {
+                                        let entrypoint = crate::process_pool::Entrypoint {
+                                            module: hook.module.clone(),
+                                            function: hook.entrypoint.clone(),
+                                            language: "javascript".to_string(),
+                                        };
+                                        let args = serde_json::json!({ "session": session_clone });
+                                        let builder = crate::process_pool::TaskContextBuilder::new()
+                                            .entrypoint(entrypoint)
+                                            .args(args)
+                                            .trace_id(trace);
+                                        let builder = crate::task_enrichment::enrich(builder, "");
+                                        if let Ok(task_ctx) = builder.build() {
+                                            let _ = pool.dispatch("default", task_ctx).await;
+                                        }
+                                    });
+                                }
+                            }
                         }
                         _ => {
                             clear_session_cookie = true;
+
+                            // Fire on_invalid_session lifecycle hook (fire-and-forget)
+                            if let Some(ref hooks) = config.guard_config.as_ref().and_then(|gc| gc.lifecycle_hooks.as_ref()) {
+                                if let Some(ref hook) = hooks.on_invalid_session {
+                                    let pool = ctx.pool.clone();
+                                    let hook = hook.clone();
+                                    let trace = trace_id.to_string();
+                                    let sid_clone = sid.clone();
+                                    tokio::spawn(async move {
+                                        let entrypoint = crate::process_pool::Entrypoint {
+                                            module: hook.module.clone(),
+                                            function: hook.entrypoint.clone(),
+                                            language: "javascript".to_string(),
+                                        };
+                                        let args = serde_json::json!({ "session_id": sid_clone });
+                                        let builder = crate::process_pool::TaskContextBuilder::new()
+                                            .entrypoint(entrypoint)
+                                            .args(args)
+                                            .trace_id(trace);
+                                        let builder = crate::task_enrichment::enrich(builder, "");
+                                        if let Ok(task_ctx) = builder.build() {
+                                            let _ = pool.dispatch("default", task_ctx).await;
+                                        }
+                                    });
+                                }
+                            }
                             // Fall through to guard redirect
                         }
                     }

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use rivers_runtime::view::{ApiViewConfig, HandlerStageConfig};
+use rivers_runtime::view::ApiViewConfig;
 
 use crate::process_pool::{
     Entrypoint, ProcessPoolManager, TaskContextBuilder, TaskError,
@@ -281,62 +281,6 @@ pub fn is_public_view(config: &ApiViewConfig) -> bool {
     }
 
     false // Protected by default
-}
-
-// ── Guard Lifecycle Hooks ────────────────────────────────────
-
-/// Guard lifecycle hooks — all optional, all side-effects only.
-///
-/// Per technology-path-spec §9.5: hooks cannot influence auth flow.
-/// TOML is authoritative for all routing decisions.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-pub struct GuardLifecycleHooks {
-    /// Fires when session already exists and is valid.
-    pub on_session_valid: Option<HandlerStageConfig>,
-
-    /// Fires on invalid or expired session.
-    pub on_invalid_session: Option<HandlerStageConfig>,
-
-    /// Fires on credential validation failure.
-    pub on_failed: Option<HandlerStageConfig>,
-}
-
-/// Execute a guard lifecycle hook (fire-and-forget, side effects only).
-///
-/// Returns Ok(()) regardless of handler outcome — hooks cannot influence auth flow.
-pub async fn execute_guard_lifecycle_hook(
-    pool: &ProcessPoolManager,
-    hook: &HandlerStageConfig,
-    session: Option<&serde_json::Value>,
-    request: Option<&ParsedRequest>,
-    trace_id: &str,
-) -> Result<(), GuardError> {
-    let entrypoint = Entrypoint {
-        module: hook.module.clone(),
-        function: hook.entrypoint.clone(),
-        language: "javascript".to_string(),
-    };
-
-    let args = serde_json::json!({
-        "session": session,
-        "request": request.map(|r| serde_json::json!({
-            "method": r.method,
-            "path": r.path,
-        })),
-    });
-
-    let builder = TaskContextBuilder::new()
-        .entrypoint(entrypoint)
-        .args(args)
-        .trace_id(trace_id.to_string());
-    let builder = crate::task_enrichment::enrich(builder, "");
-    let ctx = builder
-        .build()
-        .map_err(|e| GuardError::DispatchError(e))?;
-
-    // Fire and forget — result is ignored per spec
-    let _ = pool.dispatch("default", ctx).await;
-    Ok(())
 }
 
 // ── Tests ────────────────────────────────────────────────────

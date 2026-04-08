@@ -307,6 +307,32 @@ async fn view_dispatch_handler(
                         }
                     }
                 }
+            } else {
+                // Guard handler returned allow=false — credential validation failed.
+                // Fire on_failed lifecycle hook (fire-and-forget).
+                if let Some(ref hooks) = config.guard_config.as_ref().and_then(|gc| gc.lifecycle_hooks.as_ref()) {
+                    if let Some(ref hook) = hooks.on_failed {
+                        let pool = ctx.pool.clone();
+                        let hook = hook.clone();
+                        let trace = trace_id.clone();
+                        tokio::spawn(async move {
+                            let entrypoint = crate::process_pool::Entrypoint {
+                                module: hook.module.clone(),
+                                function: hook.entrypoint.clone(),
+                                language: "javascript".to_string(),
+                            };
+                            let args = serde_json::json!({ "reason": "credential_validation_failed" });
+                            let builder = crate::process_pool::TaskContextBuilder::new()
+                                .entrypoint(entrypoint)
+                                .args(args)
+                                .trace_id(trace);
+                            let builder = crate::task_enrichment::enrich(builder, "");
+                            if let Ok(task_ctx) = builder.build() {
+                                let _ = pool.dispatch("default", task_ctx).await;
+                            }
+                        });
+                    }
+                }
             }
         }
     }
