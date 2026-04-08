@@ -682,42 +682,17 @@ pub(super) extern "C" fn host_ddl_execute(
             return -3;
         }
     };
-    let app_id = input["app_id"].as_str().unwrap_or("unknown").to_string();
+    let entry_point_id = input["app_id"].as_str().unwrap_or("unknown").to_string();
 
-    // Gate 3: Check DDL whitelist
-    if let Some(whitelist) = super::host_context::DDL_WHITELIST.get() {
-        if !whitelist.is_empty() {
-            if !rivers_runtime::rivers_core_config::config::security::is_ddl_permitted(
-                &datasource,
-                &app_id,
-                whitelist,
-            ) {
-                tracing::warn!(
-                    datasource = %datasource,
-                    app_id = %app_id,
-                    "DDL rejected by whitelist (Gate 3)"
-                );
-                // Log rejection to per-app log
-                if let Some(router) = rivers_runtime::rivers_core::app_log_router::global_router() {
-                    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-                    let stmt_preview: String = statement.chars().take(80).collect();
-                    let line = format!(
-                        r#"{{"timestamp":"{ts}","level":"warn","app":"{app_id}","event":"DdlRejected","datasource":"{datasource}","statement":"{stmt_preview}","reason":"whitelist_gate3"}}"#
-                    );
-                    router.write(&app_id, &line);
-                }
-                let err_val = serde_json::json!({"error": format!(
-                    "DDL not permitted for datasource '{}' in app '{}'",
-                    datasource, app_id
-                )});
-                write_output(out_ptr, out_len, &err_val);
-                return -4;
-            }
-        }
-    }
+    // Resolve entry_point name to manifest UUID for whitelist check.
+    // The ProcessPool uses entry_point as app_id, but the whitelist
+    // format is `{database}@{appId}` with the manifest UUID.
+    let app_id = super::host_context::APP_ID_MAP.get()
+        .and_then(|map| map.get(&entry_point_id).cloned())
+        .unwrap_or_else(|| entry_point_id.clone());
 
     // Resolve connection params — try namespaced first (entry_point:datasource),
-    // then bare name
+    // then bare name. Gate 3 whitelist check uses the resolved database name.
     let executor_lock = ctx.dataview_executor.clone();
 
     // Clone for per-app logging after the async block (originals move into spawn)
@@ -727,6 +702,7 @@ pub(super) extern "C" fn host_ddl_execute(
 
     let (ds_tx, ds_rx) = std::sync::mpsc::channel();
     let factory = Arc::clone(factory);
+    let whitelist = super::host_context::DDL_WHITELIST.get().cloned();
     ctx.rt_handle.spawn(async move {
         let result = async {
             // Get datasource params from executor
@@ -750,6 +726,39 @@ pub(super) extern "C" fn host_ddl_execute(
 
                 (params, driver)
             };
+
+            // Gate 3: Check DDL whitelist using the resolved database name
+            // (not the JS-level datasource name). Whitelist format: "database@appId"
+            if let Some(ref whitelist) = whitelist {
+                if !whitelist.is_empty() {
+                    let database = &ds_params.database;
+                    if !rivers_runtime::rivers_core_config::config::security::is_ddl_permitted(
+                        database,
+                        &app_id,
+                        whitelist,
+                    ) {
+                        tracing::warn!(
+                            datasource = %datasource,
+                            database = %database,
+                            app_id = %app_id,
+                            "DDL rejected by whitelist (Gate 3)"
+                        );
+                        // Log rejection to per-app log
+                        if let Some(router) = rivers_runtime::rivers_core::app_log_router::global_router() {
+                            let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                            let stmt_preview: String = statement.chars().take(80).collect();
+                            let line = format!(
+                                r#"{{"timestamp":"{ts}","level":"warn","app":"{app_id}","event":"DdlRejected","datasource":"{datasource}","database":"{database}","statement":"{stmt_preview}","reason":"whitelist_gate3"}}"#
+                            );
+                            router.write(&app_id, &line);
+                        }
+                        return Err(format!(
+                            "DDL not permitted for database '{}' (datasource '{}') in app '{}'",
+                            database, datasource, app_id
+                        ));
+                    }
+                }
+            }
 
             // Connect and execute DDL
             let mut conn = factory.connect(&driver_name, &ds_params).await

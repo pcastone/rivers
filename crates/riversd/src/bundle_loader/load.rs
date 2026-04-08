@@ -364,6 +364,36 @@ pub async fn load_and_wire_bundle(
     *ctx.dataview_executor.write().await = Some(executor.clone());
     ctx.driver_factory = Some(factory.clone());
 
+    // ── Wire HOST_CONTEXT before init handlers ──────────────────────
+    //
+    // Init handlers need HOST_CONTEXT for ctx.ddl() host callbacks.
+    // OnceLock ensures this is safe to call early — subsequent calls
+    // in lifecycle.rs are harmless no-ops.
+    crate::engine_loader::set_host_context(
+        ctx.dataview_executor.clone(),
+        ctx.storage_engine.clone(),
+        ctx.driver_factory.clone(),
+    );
+
+    // Wire DDL whitelist before init handlers so Gate 3 is active
+    let ddl_warnings = rivers_runtime::rivers_core_config::config::security::validate_ddl_whitelist(
+        &config.security.ddl_whitelist,
+    );
+    for w in &ddl_warnings {
+        tracing::warn!(target: "rivers.security", "{}", w);
+    }
+    crate::engine_loader::set_ddl_whitelist(config.security.ddl_whitelist.clone());
+
+    // Build entry_point → manifest app_id (UUID) map for DDL whitelist resolution
+    let mut app_id_map = std::collections::HashMap::new();
+    for app in &bundle.apps {
+        let entry_point = app.manifest.entry_point.as_deref()
+            .unwrap_or(&app.manifest.app_name)
+            .to_string();
+        app_id_map.insert(entry_point, app.manifest.app_id.clone());
+    }
+    crate::engine_loader::set_app_id_map(app_id_map);
+
     // ── Phase 1.5: Run application init handlers (DDL security spec) ──
     for app in &bundle.apps {
         if let Some(ref init_config) = app.manifest.init {

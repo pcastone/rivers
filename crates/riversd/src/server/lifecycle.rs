@@ -241,20 +241,13 @@ pub async fn run_server_no_ssl(
     crate::bundle_loader::load_and_wire_bundle(&mut ctx, &config, shutdown_rx.clone()).await?;
     crate::task_enrichment::sync_from_app_context(&ctx);
 
-    // Wire host callbacks for cdylib engines
+    // Wire host callbacks for cdylib engines (no-op if already set
+    // during bundle load — OnceLock ensures idempotent)
     crate::engine_loader::set_host_context(
         ctx.dataview_executor.clone(),
         ctx.storage_engine.clone(),
         ctx.driver_factory.clone(),
     );
-
-    // Wire DDL whitelist for host callback gating
-    let ddl_warnings = rivers_runtime::rivers_core_config::config::security::validate_ddl_whitelist(
-        &config.security.ddl_whitelist,
-    );
-    for w in &ddl_warnings {
-        tracing::warn!(target: "rivers.security", "{}", w);
-    }
     crate::engine_loader::set_ddl_whitelist(config.security.ddl_whitelist.clone());
 
     // Wire shared keystore resolver for static engines
@@ -415,20 +408,13 @@ pub async fn run_server_with_listener_and_log(
     crate::bundle_loader::load_and_wire_bundle(&mut ctx, &config, shutdown_rx.clone()).await?;
     crate::task_enrichment::sync_from_app_context(&ctx);
 
-    // Wire host callbacks for cdylib engines — needs DataViewExecutor, StorageEngine, DriverFactory
+    // Wire host callbacks for cdylib engines (no-op if already set
+    // during bundle load — OnceLock ensures idempotent)
     crate::engine_loader::set_host_context(
         ctx.dataview_executor.clone(),
         ctx.storage_engine.clone(),
         ctx.driver_factory.clone(),
     );
-
-    // Wire DDL whitelist for host callback gating
-    let ddl_warnings = rivers_runtime::rivers_core_config::config::security::validate_ddl_whitelist(
-        &config.security.ddl_whitelist,
-    );
-    for w in &ddl_warnings {
-        tracing::warn!(target: "rivers.security", "{}", w);
-    }
     crate::engine_loader::set_ddl_whitelist(config.security.ddl_whitelist.clone());
 
     // Wire shared keystore resolver for static engines (V8/WASM) — fallback when
