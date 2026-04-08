@@ -697,6 +697,15 @@ pub(super) extern "C" fn host_ddl_execute(
                     app_id = %app_id,
                     "DDL rejected by whitelist (Gate 3)"
                 );
+                // Log rejection to per-app log
+                if let Some(router) = rivers_runtime::rivers_core::app_log_router::global_router() {
+                    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                    let stmt_preview: String = statement.chars().take(80).collect();
+                    let line = format!(
+                        r#"{{"timestamp":"{ts}","level":"warn","app":"{app_id}","event":"DdlRejected","datasource":"{datasource}","statement":"{stmt_preview}","reason":"whitelist_gate3"}}"#
+                    );
+                    router.write(&app_id, &line);
+                }
                 let err_val = serde_json::json!({"error": format!(
                     "DDL not permitted for datasource '{}' in app '{}'",
                     datasource, app_id
@@ -710,6 +719,11 @@ pub(super) extern "C" fn host_ddl_execute(
     // Resolve connection params — try namespaced first (entry_point:datasource),
     // then bare name
     let executor_lock = ctx.dataview_executor.clone();
+
+    // Clone for per-app logging after the async block (originals move into spawn)
+    let log_datasource = datasource.clone();
+    let log_app_id = app_id.clone();
+    let log_statement = statement.clone();
 
     let (ds_tx, ds_rx) = std::sync::mpsc::channel();
     let factory = Arc::clone(factory);
@@ -756,14 +770,35 @@ pub(super) extern "C" fn host_ddl_execute(
         let _ = ds_tx.send(result);
     });
 
-    match ds_rx.recv() {
+    // Write DDL result to per-app log via AppLogRouter
+    let ddl_result = ds_rx.recv();
+    let stmt_preview: String = log_statement.chars().take(80).collect();
+
+    match ddl_result {
         Ok(Ok(())) => {
+            // Log success to per-app log
+            if let Some(router) = rivers_runtime::rivers_core::app_log_router::global_router() {
+                let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                let line = format!(
+                    r#"{{"timestamp":"{ts}","level":"info","app":"{log_app_id}","event":"DdlExecuted","datasource":"{log_datasource}","statement":"{stmt_preview}","status":"ok"}}"#
+                );
+                router.write(&log_app_id, &line);
+            }
             let result = serde_json::json!({"ok": true});
             write_output(out_ptr, out_len, &result);
             0
         }
         Ok(Err(e)) => {
             tracing::error!(error = %e, "host_ddl_execute failed");
+            // Log failure to per-app log
+            if let Some(router) = rivers_runtime::rivers_core::app_log_router::global_router() {
+                let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                let escaped_err = e.replace('"', r#"\""#);
+                let line = format!(
+                    r#"{{"timestamp":"{ts}","level":"error","app":"{log_app_id}","event":"DdlFailed","datasource":"{log_datasource}","statement":"{stmt_preview}","error":"{escaped_err}"}}"#
+                );
+                router.write(&log_app_id, &line);
+            }
             let err_val = serde_json::json!({"error": e});
             write_output(out_ptr, out_len, &err_val);
             -10
