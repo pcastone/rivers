@@ -28,6 +28,11 @@ pub(super) static HOST_KEYSTORE: OnceLock<Arc<rivers_keystore_engine::AppKeystor
 /// Set once during server startup from `config.security.ddl_whitelist`.
 pub(super) static DDL_WHITELIST: OnceLock<Vec<String>> = OnceLock::new();
 
+/// Maps entry_point names to manifest app_id UUIDs.
+/// Used by DDL whitelist check — the ProcessPool uses entry_point as app_id,
+/// but the whitelist format is `{database}@{appId}` with the manifest UUID.
+pub(super) static APP_ID_MAP: OnceLock<std::collections::HashMap<String, String>> = OnceLock::new();
+
 /// Wire host subsystem references so callbacks can reach DataViewExecutor,
 /// StorageEngine, DriverFactory, and HTTP client. Called once during server
 /// startup after all subsystems are initialized.
@@ -55,6 +60,14 @@ pub fn set_host_keystore(keystore: Arc<rivers_keystore_engine::AppKeystore>) {
 /// Called once during server startup alongside `set_host_context`.
 pub fn set_ddl_whitelist(whitelist: Vec<String>) {
     let _ = DDL_WHITELIST.set(whitelist);
+}
+
+/// Set the entry_point → manifest app_id (UUID) mapping.
+/// Called once during bundle loading so DDL whitelist checks can
+/// resolve the ProcessPool's entry_point-based app_id to the UUID
+/// used in whitelist entries.
+pub fn set_app_id_map(map: std::collections::HashMap<String, String>) {
+    let _ = APP_ID_MAP.set(map);
 }
 
 // ── Host Callback Implementations ───────────────────────────────
