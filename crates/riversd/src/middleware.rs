@@ -279,13 +279,30 @@ pub async fn rate_limit_middleware(
 ///
 /// Per spec §4 step 9: records method, path, status, duration, trace_id.
 pub async fn request_observer_middleware(request: Request<Body>, next: Next) -> Response {
+    #[cfg(feature = "metrics")]
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(feature = "metrics")]
+    static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+
     let method = request.method().to_string();
     let path = request.uri().path().to_string();
     let trace_id = extract_trace_id(&request)
         .unwrap_or_default();
     let start = std::time::Instant::now();
 
+    #[cfg(feature = "metrics")]
+    {
+        let count = ACTIVE_CONNECTIONS.fetch_add(1, Ordering::Relaxed) + 1;
+        crate::server::metrics::set_active_connections(count);
+    }
+
     let response = next.run(request).await;
+
+    #[cfg(feature = "metrics")]
+    {
+        let count = ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::Relaxed) - 1;
+        crate::server::metrics::set_active_connections(count);
+    }
 
     let duration_ms = start.elapsed().as_millis() as u64;
     let status_code = response.status().as_u16();
@@ -298,6 +315,9 @@ pub async fn request_observer_middleware(request: Request<Body>, next: Next) -> 
         trace_id = %trace_id,
         "RequestCompleted"
     );
+
+    #[cfg(feature = "metrics")]
+    crate::server::metrics::record_request(&method, status_code, duration_ms as f64);
 
     response
 }

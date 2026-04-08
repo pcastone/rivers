@@ -521,6 +521,9 @@ pub async fn load_and_wire_bundle(
     // Store bundle for services discovery
     ctx.loaded_bundle = Some(Arc::new(bundle));
 
+    #[cfg(feature = "metrics")]
+    crate::server::metrics::set_loaded_apps(app_count);
+
     tracing::info!(
         path = %bundle_path,
         apps = app_count,

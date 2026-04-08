@@ -201,8 +201,17 @@ async fn view_dispatch_handler(
     // ── Execute the view with the ProcessPool and DataViewExecutor ──
     let dv_guard = ctx.dataview_executor.read().await;
     let dv_ref = dv_guard.as_deref();
+    #[cfg(feature = "metrics")]
+    let exec_start = std::time::Instant::now();
     let view_result = view_engine::execute_rest_view(&mut view_ctx, &config, Some(&ctx.pool), dv_ref).await;
     drop(dv_guard);
+
+    #[cfg(feature = "metrics")]
+    {
+        let exec_duration = exec_start.elapsed().as_secs_f64() * 1000.0;
+        let success = view_result.is_ok();
+        crate::server::metrics::record_engine_execution("v8", exec_duration, success);
+    }
 
     // ── Step 4: Build response with session/CSRF cookies ────
     let mut set_cookies: Vec<String> = Vec::new();
