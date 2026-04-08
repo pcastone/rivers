@@ -210,7 +210,12 @@ async fn view_dispatch_handler(
     {
         let exec_duration = exec_start.elapsed().as_secs_f64() * 1000.0;
         let success = view_result.is_ok();
-        crate::server::metrics::record_engine_execution("v8", exec_duration, success);
+        let engine_label = match &config.handler {
+            rivers_runtime::view::HandlerConfig::Codecomponent { .. } => "v8",
+            rivers_runtime::view::HandlerConfig::Dataview { .. } => "dataview",
+            _ => "none",
+        };
+        crate::server::metrics::record_engine_execution(engine_label, exec_duration, success);
     }
 
     // ── Step 4: Build response with session/CSRF cookies ────

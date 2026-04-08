@@ -300,7 +300,7 @@ pub async fn request_observer_middleware(request: Request<Body>, next: Next) -> 
 
     #[cfg(feature = "metrics")]
     {
-        let count = ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::Relaxed) - 1;
+        let count = ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::Relaxed).saturating_sub(1);
         crate::server::metrics::set_active_connections(count);
     }
 
