@@ -1,6 +1,7 @@
 //! View dispatch — route matching, REST view execution, query parsing.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use axum::extract::{Request, State};
 use axum::response::IntoResponse;
@@ -97,6 +98,43 @@ async fn view_dispatch_handler(
     matched: MatchedRoute,
 ) -> impl IntoResponse {
     let view_type = matched.config.view_type.as_str();
+
+    // ── Per-view rate limiting ──────────────────────────────────────
+    if let Some(rpm) = matched.config.rate_limit_per_minute {
+        if rpm > 0 {
+            use std::sync::LazyLock;
+            use tokio::sync::Mutex;
+
+            static VIEW_LIMITERS: LazyLock<Mutex<HashMap<String, Arc<crate::rate_limit::RateLimiter>>>> =
+                LazyLock::new(|| Mutex::new(HashMap::new()));
+
+            let view_key = format!("{}:{}", request.method(), request.uri().path());
+            let limiter = {
+                let mut map = VIEW_LIMITERS.lock().await;
+                map.entry(view_key.clone()).or_insert_with(|| {
+                    Arc::new(crate::rate_limit::RateLimiter::new(&crate::rate_limit::RateLimitConfig {
+                        requests_per_minute: rpm,
+                        burst_size: matched.config.rate_limit_burst_size.unwrap_or(rpm / 2).max(1),
+                        strategy: crate::rate_limit::RateLimitStrategy::Ip,
+                    }))
+                }).clone()
+            };
+
+            let client_ip = request
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|ci| ci.0.ip().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            if let crate::rate_limit::RateLimitResult::Limited { retry_after_secs } = limiter.check(&client_ip).await {
+                let mut resp = error_response::rate_limited("rate limit exceeded").into_axum_response();
+                if let Ok(val) = axum::http::HeaderValue::from_str(&retry_after_secs.to_string()) {
+                    resp.headers_mut().insert("retry-after", val);
+                }
+                return resp.into_response();
+            }
+        }
+    }
 
     // ── Dispatch switch: branch by view_type before body extraction ──
     match view_type {
