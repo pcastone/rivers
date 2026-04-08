@@ -3,7 +3,9 @@
 **Severity:** Blocker — any app relying on init handler DDL (the only permitted DDL path in 0.53.0) cannot create tables  
 **Rivers version:** 0.53.0 (source at `dist/rivers-0.53.0/`)  
 **Date filed:** 2026-04-07  
-**Status:** Fixed (0.53.5)  
+**Date fixed:** 2026-04-07  
+**Fixed in:** 0.53.5  
+**Status:** Fixed  
 **Reporter:** IPAM team  
 
 ---
@@ -57,16 +59,16 @@ Even if a host callback existed, there's no code path that calls `ddl_execute()`
 
 ## What works vs what doesn't
 
-| Component | Status |
-|-----------|--------|
-| `Connection::execute()` — Gate 1 DDL guard | Working — correctly rejects DDL |
-| `Connection::ddl_execute()` — SQLite impl | Working — code is correct, tests pass (`sqlite.rs:712-853`) |
-| `[init]` manifest parsing | Working — init config parsed, handler dispatched |
-| Init handler JS dispatch via ProcessPool | Working — JS executes, logs emitted |
-| `[security].ddl_whitelist` parsing | Untested — `_ddl_whitelist` param is unused |
-| `ctx.ddl()` JS → host callback → `ddl_execute()` | **NOT IMPLEMENTED** |
-| `ctx.admin()` JS → host callback | **NOT IMPLEMENTED** |
-| `ctx.query()` JS → host callback | **NOT IMPLEMENTED** |
+| Component | Status (0.53.0) | Status (0.53.5) |
+|-----------|-----------------|-----------------|
+| `Connection::execute()` — Gate 1 DDL guard | Working | Working |
+| `Connection::ddl_execute()` — SQLite impl | Working | Working |
+| `[init]` manifest parsing | Working | Working |
+| Init handler JS dispatch via ProcessPool | Working | Working |
+| `[security].ddl_whitelist` parsing | Untested | **Working** |
+| `ctx.ddl()` JS → host callback → `ddl_execute()` | **NOT IMPLEMENTED** | **Working** |
+| `ctx.admin()` JS → host callback | **NOT IMPLEMENTED** | Not yet implemented |
+| `ctx.query()` JS → host callback | **NOT IMPLEMENTED** | Not yet implemented |
 
 ---
 
@@ -138,8 +140,67 @@ Previously `null` was accepted for optional string parameters. We've fixed this 
 
 ## Impact
 
-Any application on 0.53.0 that needs schema initialization at startup is blocked. The old pattern (DDL via view handlers) is now forbidden by Gate 1, and the new pattern (DDL via init handler) is not yet functional. **There is no working DDL path in 0.53.0.**
+Any application on 0.53.0–0.53.4 that needs schema initialization at startup is blocked. The old pattern (DDL via view handlers) is now forbidden by Gate 1, and the new pattern (DDL via init handler) was not yet functional. **There was no working DDL path in 0.53.0–0.53.4.**
 
 ## Workaround
 
-None within Rivers. The only option is to create tables externally via `sqlite3` CLI before starting riversd, bypassing the init handler entirely.
+Upgrade to 0.53.5. No workaround needed — `ctx.ddl()` is fully functional.
+
+Previous workaround (0.53.0–0.53.4): create tables externally via `sqlite3` CLI before starting riversd, bypassing the init handler entirely.
+
+---
+
+## Resolution (0.53.5)
+
+Fixed across versions 0.53.3–0.53.5. The full `ctx.ddl()` path required fixes in three layers:
+
+### Version timeline
+
+| Version | What was done |
+|---------|---------------|
+| 0.53.0 | Gate 1 blocks DDL on `execute()`. `ctx.ddl()` not implemented (no-op) |
+| 0.53.3 | `host_ddl_execute` Rust callback implemented, but not in HostCallbacks ABI struct |
+| 0.53.4 | HostCallbacks ABI wired, `ctx.ddl()` reaches Rust, but HOST_CONTEXT not set at init time |
+| 0.53.5 | **Full fix** — 3 bugs resolved (see below) |
+
+### Fix 1: HOST_CONTEXT initialization order
+
+`set_host_context()` was called in `lifecycle.rs` **after** `load_and_wire_bundle()`, but init handlers run **inside** `load_and_wire_bundle()` (Phase 1.5). Moved `set_host_context()`, `set_ddl_whitelist()`, and `set_app_id_map()` into `load_and_wire_bundle()` right after DataViewExecutor and DriverFactory are created — before the init handler dispatch loop. The `OnceLock` ensures subsequent calls in `lifecycle.rs` are harmless no-ops.
+
+**File:** `crates/riversd/src/bundle_loader/load.rs`
+
+### Fix 2: DDL whitelist checked datasource name instead of database path
+
+The whitelist format is `{database}@{appId}`, but `host_ddl_execute` was passing the JS-level datasource name (e.g. `"test_db"`) to `is_ddl_permitted()`. The resolved `ConnectionParams.database` (e.g. `"ddl-test-service/data/test.db"`) is the correct value. Moved the Gate 3 whitelist check into the async block **after** resolving ConnectionParams from the DataViewExecutor.
+
+**File:** `crates/riversd/src/engine_loader/host_callbacks.rs`
+
+### Fix 3: Whitelist used entry_point name instead of manifest UUID
+
+The ProcessPool sets `TASK_APP_ID` to the entry_point name (e.g. `"service"`), but the whitelist expects the manifest `appId` UUID (e.g. `"deadbeef-0000-0000-0000-000000000001"`). Added an `APP_ID_MAP` OnceLock that maps entry_point names to manifest UUIDs, populated during bundle loading. `host_ddl_execute` resolves the entry_point to UUID before the whitelist check.
+
+**Files:** `crates/riversd/src/engine_loader/host_context.rs`, `crates/riversd/src/engine_loader/mod.rs`, `crates/riversd/src/bundle_loader/load.rs`
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `crates/riversd/src/bundle_loader/load.rs` | Wire HOST_CONTEXT, DDL_WHITELIST, APP_ID_MAP before Phase 1.5 |
+| `crates/riversd/src/engine_loader/host_callbacks.rs` | Resolve database path + UUID before whitelist check |
+| `crates/riversd/src/engine_loader/host_context.rs` | Add APP_ID_MAP OnceLock + setter |
+| `crates/riversd/src/engine_loader/mod.rs` | Export `set_app_id_map` |
+| `crates/riversd/src/server/lifecycle.rs` | Simplify (no-op after bundle load wiring) |
+
+### Verified with
+
+IPAM team's `ddl-test-bundle` (`dist/ddl-test-bundle.tar.gz`):
+- Init handler runs `ctx.ddl("test_db", "CREATE TABLE IF NOT EXISTS items ...")`
+- Gate 3 whitelist passes (`ddl-test-service/data/test.db@deadbeef-...`)
+- SQLite table created on disk
+- POST `/api/items` inserts rows via `ctx.dataview("insert_item", ...)`
+- GET `/api/items` returns rows via `ctx.dataview("list_items", ...)`
+
+### Remaining work
+
+- `ctx.admin()` — not yet implemented
+- `ctx.query()` — not yet implemented
