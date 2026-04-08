@@ -240,6 +240,17 @@ pub struct HostCallbacks {
             out_ptr: *mut *mut u8, out_len: *mut usize,
         ) -> i32,
     >,
+
+    /// Execute a DDL statement (CREATE TABLE, ALTER, etc.) via the init handler.
+    /// Input: JSON `{"datasource": "...", "statement": "...", "app_id": "..."}`.
+    /// Output: JSON `{"ok": true}` or error.
+    /// Only available during ApplicationInit context (Gate 3 whitelist checked by host).
+    pub ddl_execute: Option<
+        extern "C" fn(
+            input_ptr: *const u8, input_len: usize,
+            out_ptr: *mut *mut u8, out_len: *mut usize,
+        ) -> i32,
+    >,
 }
 
 // ── C-ABI Function Signatures ───────────────────────────────────

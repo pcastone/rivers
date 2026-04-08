@@ -69,5 +69,6 @@ pub fn build_host_callbacks() -> HostCallbacks {
         keystore_info: Some(host_callbacks::host_keystore_info),
         crypto_encrypt: Some(host_callbacks::host_crypto_encrypt),
         crypto_decrypt: Some(host_callbacks::host_crypto_decrypt),
+        ddl_execute: Some(host_callbacks::host_ddl_execute),
     }
 }

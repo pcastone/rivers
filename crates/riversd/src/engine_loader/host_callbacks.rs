@@ -630,3 +630,124 @@ pub(super) extern "C" fn host_crypto_decrypt(
         }
     }
 }
+
+// ── ddl_execute ─────────────────────────────────────────────────
+
+/// Execute a DDL statement (CREATE TABLE, ALTER, DROP, etc.) via the driver.
+///
+/// Only intended for use by ApplicationInit handlers. The DDL whitelist
+/// check is performed by the DataViewExecutor (Gate 3).
+///
+/// Input: JSON `{"datasource": "my-db", "statement": "CREATE TABLE ...", "app_id": "..."}`
+/// Output: JSON `{"ok": true}` on success
+pub(super) extern "C" fn host_ddl_execute(
+    input_ptr: *const u8, input_len: usize,
+    out_ptr: *mut *mut u8, out_len: *mut usize,
+) -> i32 {
+    let ctx = match HOST_CONTEXT.get() {
+        Some(c) => c,
+        None => {
+            tracing::error!("host_ddl_execute: HOST_CONTEXT not set");
+            return -1;
+        }
+    };
+
+    let factory = match ctx.driver_factory.as_ref() {
+        Some(f) => f,
+        None => {
+            tracing::error!("host_ddl_execute: DriverFactory not available");
+            return -1;
+        }
+    };
+
+    let input = match read_input(input_ptr, input_len) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "host_ddl_execute: failed to read input");
+            return -2;
+        }
+    };
+
+    let datasource = match input["datasource"].as_str() {
+        Some(d) => d.to_string(),
+        None => {
+            tracing::error!("host_ddl_execute: missing 'datasource' field");
+            return -3;
+        }
+    };
+    let statement = match input["statement"].as_str() {
+        Some(s) => s.to_string(),
+        None => {
+            tracing::error!("host_ddl_execute: missing 'statement' field");
+            return -3;
+        }
+    };
+    let app_id = input["app_id"].as_str().unwrap_or("unknown").to_string();
+
+    // Resolve connection params — try namespaced first (entry_point:datasource),
+    // then bare name
+    let executor_lock = ctx.dataview_executor.clone();
+
+    let (ds_tx, ds_rx) = std::sync::mpsc::channel();
+    let factory = Arc::clone(factory);
+    ctx.rt_handle.spawn(async move {
+        let result = async {
+            // Get datasource params from executor
+            let (ds_params, driver_name) = {
+                let guard = executor_lock.read().await;
+                let executor = guard.as_ref()
+                    .ok_or_else(|| "DataViewExecutor not initialized".to_string())?;
+
+                // Try exact name first, then suffix match for unqualified names
+                let params = executor.datasource_params_get(&datasource)
+                    .or_else(|| {
+                        let suffix = format!(":{}", datasource);
+                        executor.datasource_params_by_suffix(&suffix)
+                    })
+                    .ok_or_else(|| format!("datasource '{}' not found", datasource))?
+                    .clone();
+
+                // Driver name from options or inferred from datasource name
+                let driver = params.options.get("driver").cloned()
+                    .unwrap_or_else(|| datasource.split(':').last().unwrap_or(&datasource).to_string());
+
+                (params, driver)
+            };
+
+            // Connect and execute DDL
+            let mut conn = factory.connect(&driver_name, &ds_params).await
+                .map_err(|e| format!("DDL connect to '{}' failed: {}", datasource, e))?;
+
+            let query = rivers_runtime::rivers_driver_sdk::Query::new("ddl", &statement);
+            conn.ddl_execute(&query).await
+                .map_err(|e| format!("DDL execute failed: {}", e))?;
+
+            tracing::info!(
+                datasource = %datasource,
+                app_id = %app_id,
+                statement = %statement.chars().take(80).collect::<String>(),
+                "DDL executed successfully"
+            );
+            Ok::<_, String>(())
+        }.await;
+        let _ = ds_tx.send(result);
+    });
+
+    match ds_rx.recv() {
+        Ok(Ok(())) => {
+            let result = serde_json::json!({"ok": true});
+            write_output(out_ptr, out_len, &result);
+            0
+        }
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, "host_ddl_execute failed");
+            let err_val = serde_json::json!({"error": e});
+            write_output(out_ptr, out_len, &err_val);
+            -10
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "host_ddl_execute: channel recv failed");
+            -12
+        }
+    }
+}

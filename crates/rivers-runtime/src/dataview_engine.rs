@@ -881,6 +881,33 @@ impl DataViewExecutor {
         &self.datasource_params
     }
 
+    /// Look up connection params for a datasource by exact name.
+    pub fn datasource_params_get(&self, name: &str) -> Option<&ConnectionParams> {
+        self.datasource_params.get(name)
+    }
+
+    /// Look up connection params by suffix match (e.g., `:canary-sqlite`).
+    ///
+    /// Used by host callbacks to resolve unqualified datasource names
+    /// against namespaced entries like `sql:canary-sqlite`.
+    pub fn datasource_params_by_suffix(&self, suffix: &str) -> Option<&ConnectionParams> {
+        self.datasource_params
+            .iter()
+            .find(|(k, _)| k.ends_with(suffix))
+            .map(|(_, v)| v)
+    }
+
+    /// Look up the driver name for a datasource.
+    ///
+    /// Checks the datasource name in the registry to find the associated driver.
+    pub fn driver_for_datasource(&self, datasource_name: &str) -> Option<String> {
+        // The driver is stored in the options map under "driver" key,
+        // or can be inferred from the DataView config's datasource reference.
+        self.datasource_params
+            .get(datasource_name)
+            .and_then(|p| p.options.get("driver").cloned())
+    }
+
     /// List all configured datasource names.
     pub fn datasource_names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self.datasource_params.keys().map(|s| s.as_str()).collect();
