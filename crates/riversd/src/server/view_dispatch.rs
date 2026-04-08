@@ -108,10 +108,10 @@ async fn view_dispatch_handler(
             static VIEW_LIMITERS: LazyLock<Mutex<HashMap<String, Arc<crate::rate_limit::RateLimiter>>>> =
                 LazyLock::new(|| Mutex::new(HashMap::new()));
 
-            let view_key = format!("{}:{}", request.method(), request.uri().path());
+            let view_key = matched.view_id.clone();
             let limiter = {
                 let mut map = VIEW_LIMITERS.lock().await;
-                map.entry(view_key.clone()).or_insert_with(|| {
+                map.entry(view_key).or_insert_with(|| {
                     Arc::new(crate::rate_limit::RateLimiter::new(&crate::rate_limit::RateLimitConfig {
                         requests_per_minute: rpm,
                         burst_size: matched.config.rate_limit_burst_size.unwrap_or(rpm / 2).max(1),
@@ -120,11 +120,16 @@ async fn view_dispatch_handler(
                 }).clone()
             };
 
-            let client_ip = request
+            // Resolve client IP — respects X-Forwarded-For behind trusted proxies
+            let direct_ip = request
                 .extensions()
                 .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
                 .map(|ci| ci.0.ip().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
+            let xff = request.headers().get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok());
+            let trusted_proxies = &ctx.config.security.trusted_proxies;
+            let client_ip = crate::rate_limit::resolve_client_ip(&direct_ip, xff, trusted_proxies);
 
             if let crate::rate_limit::RateLimitResult::Limited { retry_after_secs } = limiter.check(&client_ip).await {
                 let mut resp = error_response::rate_limited("rate limit exceeded").into_axum_response();
