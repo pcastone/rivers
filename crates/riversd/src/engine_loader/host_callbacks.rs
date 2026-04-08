@@ -684,6 +684,29 @@ pub(super) extern "C" fn host_ddl_execute(
     };
     let app_id = input["app_id"].as_str().unwrap_or("unknown").to_string();
 
+    // Gate 3: Check DDL whitelist
+    if let Some(whitelist) = super::host_context::DDL_WHITELIST.get() {
+        if !whitelist.is_empty() {
+            if !rivers_runtime::rivers_core_config::config::security::is_ddl_permitted(
+                &datasource,
+                &app_id,
+                whitelist,
+            ) {
+                tracing::warn!(
+                    datasource = %datasource,
+                    app_id = %app_id,
+                    "DDL rejected by whitelist (Gate 3)"
+                );
+                let err_val = serde_json::json!({"error": format!(
+                    "DDL not permitted for datasource '{}' in app '{}'",
+                    datasource, app_id
+                )});
+                write_output(out_ptr, out_len, &err_val);
+                return -4;
+            }
+        }
+    }
+
     // Resolve connection params — try namespaced first (entry_point:datasource),
     // then bare name
     let executor_lock = ctx.dataview_executor.clone();

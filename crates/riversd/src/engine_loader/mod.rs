@@ -13,4 +13,4 @@ mod host_callbacks;
 pub use loaded_engine::LoadedEngine;
 pub use registry::{get_engine, is_engine_available, execute_on_engine, loaded_engines};
 pub use loader::{EngineLoadResult, load_engines};
-pub use host_context::{set_host_context, set_host_keystore, build_host_callbacks};
+pub use host_context::{set_host_context, set_host_keystore, set_ddl_whitelist, build_host_callbacks};

@@ -24,6 +24,10 @@ pub(super) static HOST_CONTEXT: OnceLock<HostContext> = OnceLock::new();
 /// occur after the main host context is wired.
 pub(super) static HOST_KEYSTORE: OnceLock<Arc<rivers_keystore_engine::AppKeystore>> = OnceLock::new();
 
+/// DDL whitelist — authorizes specific database+app pairs for DDL execution.
+/// Set once during server startup from `config.security.ddl_whitelist`.
+pub(super) static DDL_WHITELIST: OnceLock<Vec<String>> = OnceLock::new();
+
 /// Wire host subsystem references so callbacks can reach DataViewExecutor,
 /// StorageEngine, DriverFactory, and HTTP client. Called once during server
 /// startup after all subsystems are initialized.
@@ -45,6 +49,12 @@ pub fn set_host_context(
 /// Called after `set_host_context` when an app has [[keystores]] declared.
 pub fn set_host_keystore(keystore: Arc<rivers_keystore_engine::AppKeystore>) {
     let _ = HOST_KEYSTORE.set(keystore);
+}
+
+/// Set the DDL whitelist for host callback gating.
+/// Called once during server startup alongside `set_host_context`.
+pub fn set_ddl_whitelist(whitelist: Vec<String>) {
+    let _ = DDL_WHITELIST.set(whitelist);
 }
 
 // ── Host Callback Implementations ───────────────────────────────

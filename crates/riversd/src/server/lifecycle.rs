@@ -248,6 +248,15 @@ pub async fn run_server_no_ssl(
         ctx.driver_factory.clone(),
     );
 
+    // Wire DDL whitelist for host callback gating
+    let ddl_warnings = rivers_runtime::rivers_core_config::config::security::validate_ddl_whitelist(
+        &config.security.ddl_whitelist,
+    );
+    for w in &ddl_warnings {
+        tracing::warn!(target: "rivers.security", "{}", w);
+    }
+    crate::engine_loader::set_ddl_whitelist(config.security.ddl_whitelist.clone());
+
     // Wire shared keystore resolver for static engines
     if let Some(ref resolver) = ctx.keystore_resolver {
         crate::process_pool::set_keystore_resolver(resolver.clone());
@@ -412,6 +421,15 @@ pub async fn run_server_with_listener_and_log(
         ctx.storage_engine.clone(),
         ctx.driver_factory.clone(),
     );
+
+    // Wire DDL whitelist for host callback gating
+    let ddl_warnings = rivers_runtime::rivers_core_config::config::security::validate_ddl_whitelist(
+        &config.security.ddl_whitelist,
+    );
+    for w in &ddl_warnings {
+        tracing::warn!(target: "rivers.security", "{}", w);
+    }
+    crate::engine_loader::set_ddl_whitelist(config.security.ddl_whitelist.clone());
 
     // Wire shared keystore resolver for static engines (V8/WASM) — fallback when
     // TaskContext.keystore is not present for a given dispatch path.
