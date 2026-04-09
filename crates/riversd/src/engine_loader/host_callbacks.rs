@@ -184,7 +184,18 @@ pub(super) extern "C" fn host_store_get(
         None => return -3,
     };
 
-    match ctx.rt_handle.block_on(engine.get(namespace, key)) {
+    let engine = Arc::clone(engine);
+    let ns = namespace.to_string();
+    let k = key.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    ctx.rt_handle.spawn(async move {
+        let _ = tx.send(engine.get(&ns, &k).await);
+    });
+    let store_result = match rx.recv() {
+        Ok(r) => r,
+        Err(_) => return -10, // channel dropped — task panicked
+    };
+    match store_result {
         Ok(Some(bytes)) => {
             // Try to parse as JSON, fall back to string
             let value = serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -235,9 +246,17 @@ pub(super) extern "C" fn host_store_set(
     let value_bytes = serde_json::to_vec(&input["value"]).unwrap_or_default();
     let ttl_ms = input["ttl_ms"].as_u64();
 
-    match ctx.rt_handle.block_on(engine.set(namespace, key, value_bytes, ttl_ms)) {
-        Ok(()) => 0,
-        Err(_) => -10,
+    let engine = Arc::clone(engine);
+    let ns = namespace.to_string();
+    let k = key.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    ctx.rt_handle.spawn(async move {
+        let _ = tx.send(engine.set(&ns, &k, value_bytes, ttl_ms).await);
+    });
+    match rx.recv() {
+        Ok(Ok(())) => 0,
+        Ok(Err(_)) => -10,
+        Err(_) => -10, // channel dropped — task panicked
     }
 }
 
@@ -267,9 +286,17 @@ pub(super) extern "C" fn host_store_del(
         None => return -3,
     };
 
-    match ctx.rt_handle.block_on(engine.delete(namespace, key)) {
-        Ok(_) => 0,
-        Err(_) => -10,
+    let engine = Arc::clone(engine);
+    let ns = namespace.to_string();
+    let k = key.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    ctx.rt_handle.spawn(async move {
+        let _ = tx.send(engine.delete(&ns, &k).await);
+    });
+    match rx.recv() {
+        Ok(Ok(_)) => 0,
+        Ok(Err(_)) => -10,
+        Err(_) => -10, // channel dropped — task panicked
     }
 }
 
