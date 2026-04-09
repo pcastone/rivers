@@ -62,8 +62,19 @@ Compile tokio as a shared library that both the host and plugins link against. E
 
 - `bugreport_2026-04-07_3.md` — Static/dynamic plugin conflict (same tokio reactor root cause, different symptoms). Fixed with `rt_handle.spawn()` in host callbacks. That fix works for the host callback thread context but doesn't help when the DataViewExecutor calls the driver from within a spawned async task.
 
+### Update — 2026-04-09 (attempt 3)
+
+**catch_unwind at DriverFactory::connect() also fails.** The `Runtime::new()` + `spawn_blocking` + `catch_unwind` wrapper in `DriverFactory::connect()` creates a new runtime, but the MongoDB driver spawns internal background threads that don't inherit this runtime's context. The panic originates from those internal threads and results in `abort()` before any catch_unwind can intercept it.
+
+**Confirmed: this is not fixable at the Rust code level.** The fundamental issue is that each cdylib plugin has its own statically-linked tokio. `otool -L` confirms the MongoDB plugin has zero external dependencies on shared tokio or rivers-runtime — it's fully self-contained.
+
+**The real fix is at the build system level:** plugins must link against the shared `librivers_runtime.dylib` (which includes tokio) instead of statically linking their own copy. The `build-dynamic` mode in the Justfile already compiles `rivers-runtime` as a dylib — the plugin build flags just need to be updated to link against it dynamically instead of statically including tokio.
+
 ## Occurrence Log
 
 | Date | Context | Notes |
 |------|---------|-------|
 | 2026-04-09 | Canary NoSQL profile with cdylib plugins loaded | Exit 134 (SIGABRT) on first MongoDB/ES/CouchDB request |
+| 2026-04-09 | Attempt: catch_unwind in host_datasource_build | Wrong callback — crash is through host_dataview_execute |
+| 2026-04-09 | Attempt: catch_unwind in DriverFactory::connect | Runtime::new doesn't help — mongodb spawns internal threads that miss the reactor |
+| 2026-04-09 | Root cause confirmed | Plugins statically link own tokio. Fix requires shared dylib linkage at build time |
