@@ -777,13 +777,33 @@ pub(super) extern "C" fn host_ddl_execute(
                 }
             }
 
-            // Connect and execute DDL
-            let mut conn = factory.connect(&driver_name, &ds_params).await
-                .map_err(|e| format!("DDL connect to '{}' failed: {}", datasource, e))?;
-
-            let query = rivers_runtime::rivers_driver_sdk::Query::new("ddl", &statement);
-            conn.ddl_execute(&query).await
-                .map_err(|e| format!("DDL execute failed: {}", e))?;
+            // Isolate cdylib plugin calls in a dedicated runtime
+            let ds_name = datasource.clone();
+            let stmt = statement.clone();
+            let factory_clone = factory.clone();
+            tokio::task::spawn_blocking(move || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let rt = tokio::runtime::Runtime::new()
+                        .map_err(|e| format!("failed to create plugin runtime: {e}"))?;
+                    rt.block_on(async {
+                        let mut conn = factory_clone.connect(&driver_name, &ds_params).await
+                            .map_err(|e| format!("DDL connect to '{}' failed: {}", ds_name, e))?;
+                        let query = rivers_runtime::rivers_driver_sdk::Query::new("ddl", &stmt);
+                        conn.ddl_execute(&query).await
+                            .map_err(|e| format!("DDL execute failed: {}", e))
+                    })
+                }))
+                .unwrap_or_else(|panic| {
+                    let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = panic.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "driver plugin panicked during DDL connect/execute".to_string()
+                    };
+                    Err(msg)
+                })
+            }).await.unwrap_or_else(|e| Err(format!("DDL task join failed: {e}")))?;
 
             tracing::info!(
                 datasource = %datasource,
