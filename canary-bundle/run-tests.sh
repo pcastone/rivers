@@ -238,6 +238,38 @@ test_ep_v8sec() {
 test_ep_v8sec "v8-timeout" "RT-V8-TIMEOUT" GET  "$BASE/handlers/canary/rt/v8/timeout"
 test_ep_v8sec "v8-heap"    "RT-V8-HEAP"    GET  "$BASE/handlers/canary/rt/v8/heap"
 
+# ── INTEGRATION Profile (auth=none, cross-cutting driver tests) ──
+
+echo ""
+echo "  ── INTEGRATION Profile ──"
+test_ep "int-ddl-verify"       GET  "$BASE/sql/canary/integration/ctx-ddl-verify"
+test_ep "int-ddl-insert-sel"   GET  "$BASE/sql/canary/integration/ctx-ddl-insert-select"
+test_ep "int-driver-error"     GET  "$BASE/sql/canary/integration/driver-error-propagation"
+test_ep "int-ddl-whitelist"    GET  "$BASE/sql/canary/integration/ddl-whitelist-reject"
+test_ep "int-param-binding"    GET  "$BASE/sql/canary/integration/dataview-param-binding"
+test_ep "int-store-namespace"  GET  "$BASE/sql/canary/integration/store-namespace-isolation"
+test_ep "int-recovery"         GET  "$BASE/sql/canary/integration/recovery-after-timeout"
+test_ep "int-sqlite-disk"      GET  "$BASE/sql/canary/integration/sqlite-disk-persistence"
+test_ep "int-init-sequence"    GET  "$BASE/sql/canary/integration/init-handler-sequence"
+test_ep "int-host-callbacks"   GET  "$BASE/sql/canary/integration/host-callback-available"
+
+# Conditional PG/MySQL integration tests — skip if cluster unreachable
+PG_AVAIL=$(curl -sk -m 2 "$BASE/sql/canary/sql/pg/param-order" -X POST -H "Content-Type: application/json" -H "X-CSRF-Token: ${CSRF_TOKEN}" -b "$COOKIES" -c "$COOKIES" -d '{}' 2>/dev/null | python3 -c "import json,sys; print('1' if json.load(sys.stdin).get('test_id') else '0')" 2>/dev/null) || PG_AVAIL="0"
+
+if [ "$PG_AVAIL" = "1" ]; then
+  test_ep "int-pg-ddl"          GET  "$BASE/sql/canary/integration/pg-ddl-create-select"
+else
+  printf "  SKIP %-40s (PG unreachable)\n" "INT-PG-DDL"
+fi
+
+MYSQL_AVAIL=$(curl -sk -m 2 "$BASE/sql/canary/sql/mysql/param-order" -X POST -H "Content-Type: application/json" -H "X-CSRF-Token: ${CSRF_TOKEN}" -b "$COOKIES" -c "$COOKIES" -d '{}' 2>/dev/null | python3 -c "import json,sys; print('1' if json.load(sys.stdin).get('test_id') else '0')" 2>/dev/null) || MYSQL_AVAIL="0"
+
+if [ "$MYSQL_AVAIL" = "1" ]; then
+  test_ep "int-mysql-ddl"       GET  "$BASE/sql/canary/integration/mysql-ddl-create-select"
+else
+  printf "  SKIP %-40s (MySQL unreachable)\n" "INT-MYSQL-DDL"
+fi
+
 # ── Summary ──────────────────────────────────────────────────────
 
 echo ""
