@@ -117,7 +117,7 @@ pub async fn rebuild_views_and_dataviews(
     *ctx.dataview_executor.write().await = Some(Arc::new(executor));
 
     // Rebuild view router
-    let router = view_engine::ViewRouter::from_bundle(&bundle, config.route_prefix.as_deref());
+    let router = view_engine::ViewRouter::from_bundle(&bundle, config.route_prefix.as_deref(), &std::collections::HashSet::new());
     *ctx.view_router.write().await = Some(router);
 
     // Rebuild GraphQL schema if enabled

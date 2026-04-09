@@ -73,11 +73,15 @@ impl ViewRouter {
     pub fn from_bundle(
         bundle: &rivers_runtime::LoadedBundle,
         route_prefix: Option<&str>,
+        skip_apps: &std::collections::HashSet<String>,
     ) -> Self {
         let bundle_name = &bundle.manifest.bundle_name;
         let mut routes = Vec::new();
 
         for app in &bundle.apps {
+            if skip_apps.contains(&app.manifest.app_name) {
+                continue;
+            }
             let entry_point = app
                 .manifest
                 .entry_point

@@ -1,5 +1,6 @@
 //! `LogController` and `AppContext` — shared application state.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use rivers_runtime::rivers_core::ServerConfig;
@@ -146,6 +147,9 @@ pub struct AppContext {
     pub driver_factory: Option<Arc<rivers_runtime::rivers_core::DriverFactory>>,
     /// Shutdown sender — triggers graceful shutdown when sent `true`.
     pub shutdown_tx: Option<Arc<tokio::sync::watch::Sender<bool>>>,
+    /// Apps that failed to load — keyed by entry_point path prefix (e.g., "/canary-fleet/nosql"),
+    /// value is the human-readable error message for the 503 response.
+    pub failed_apps: Arc<std::sync::RwLock<HashMap<String, String>>>,
 }
 
 impl AppContext {
@@ -179,6 +183,7 @@ impl AppContext {
             graphql_schema: Arc::new(tokio::sync::RwLock::new(None)),
             driver_factory: None,
             shutdown_tx: None,
+            failed_apps: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
 }
