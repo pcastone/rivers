@@ -6,6 +6,7 @@
 //!   - DDL whitelist permit/reject logic
 //!   - SQLite parameter binding order                 (Issue #54)
 //!   - Full DDL→INSERT→SELECT→DELETE roundtrip
+//!   - DataView namespace suffix resolution           (2026-04-07)
 //!
 //! Run with: cargo test -p riversd --test dylib_regression_tests
 
@@ -16,6 +17,8 @@ use rivers_runtime::rivers_core::DriverFactory;
 use rivers_runtime::rivers_core::drivers::SqliteDriver;
 use rivers_runtime::rivers_core_config::config::security::is_ddl_permitted;
 use rivers_runtime::rivers_driver_sdk::{ConnectionParams, Query, QueryValue};
+use rivers_runtime::tiered_cache::NoopDataViewCache;
+use rivers_runtime::{DataViewExecutor, DataViewRegistry};
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -257,4 +260,73 @@ async fn sqlite_ddl_then_insert_select_roundtrip() {
     let verify = Query::new("items", "SELECT id FROM items");
     let verify_result = conn.execute(&verify).await.unwrap();
     assert_eq!(verify_result.rows.len(), 0, "Table should be empty after DELETE");
+}
+
+// ── Test 8: DataView namespace suffix resolution (Bug 2026-04-07 #2) ──
+//
+// DataViews are registered as `handlers:list_records` but looked up as
+// `list_records`. The `find_by_suffix(":list_records")` method must find
+// the namespaced entry.
+
+#[test]
+fn dataview_namespace_suffix_resolution() {
+    use rivers_runtime::dataview::DataViewConfig;
+
+    let mut registry = DataViewRegistry::new();
+    registry.register(DataViewConfig {
+        name: "handlers:list_records".to_string(),
+        datasource: "fake-ds".to_string(),
+        query: Some("SELECT * FROM records".to_string()),
+        parameters: Vec::new(),
+        return_schema: None,
+        get_query: None,
+        post_query: None,
+        put_query: None,
+        delete_query: None,
+        get_schema: None,
+        post_schema: None,
+        put_schema: None,
+        delete_schema: None,
+        get_parameters: Vec::new(),
+        post_parameters: Vec::new(),
+        put_parameters: Vec::new(),
+        delete_parameters: Vec::new(),
+        streaming: false,
+        caching: None,
+        invalidates: Vec::new(),
+        validate_result: false,
+        strict_parameters: false,
+        max_rows: 1000,
+    });
+
+    let factory = Arc::new(DriverFactory::new());
+    let params = Arc::new(HashMap::new());
+    let cache = Arc::new(NoopDataViewCache);
+    let executor = DataViewExecutor::new(registry, factory, params, cache);
+
+    // Unqualified suffix lookup must resolve the namespaced entry
+    let found = executor.find_by_suffix(":list_records");
+    assert!(
+        found.is_some(),
+        "find_by_suffix(':list_records') should find 'handlers:list_records'"
+    );
+    assert_eq!(
+        found.unwrap(),
+        "handlers:list_records",
+        "Resolved name should be the full namespaced key"
+    );
+
+    // Exact-name lookup must also work
+    let exact = executor.find_by_suffix("handlers:list_records");
+    assert!(
+        exact.is_some(),
+        "find_by_suffix with the full name should also resolve"
+    );
+
+    // Non-matching suffix must return None
+    let missing = executor.find_by_suffix(":nonexistent");
+    assert!(
+        missing.is_none(),
+        "find_by_suffix with unknown suffix should return None"
+    );
 }
