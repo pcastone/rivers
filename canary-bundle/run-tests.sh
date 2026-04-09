@@ -28,27 +28,51 @@ test_ep() {
   shift 3
   local body="${1:-}"
 
-  local resp
+  # Capture both response body AND HTTP status code to distinguish:
+  #   - curl timeout (exit 28) vs connection refused (exit 7) vs server error
+  #   - empty body (driver silent failure) vs HTTP error (401/500)
+  local raw_resp curl_exit http_status resp
   if [ "$method" = "POST" ] || [ "$method" = "PUT" ] || [ "$method" = "DELETE" ]; then
-    resp=$(curl -sk -m 8 -b "$COOKIES" -c "$COOKIES" \
+    raw_resp=$(curl -sk -m 8 -b "$COOKIES" -c "$COOKIES" \
       -X "$method" -H "Content-Type: application/json" \
       -H "X-CSRF-Token: ${CSRF_TOKEN}" \
-      -d "${body:-{}}" "$url" 2>/dev/null) || true
+      -d "${body:-{}}" -w '\n%{http_code}' "$url" 2>/dev/null) ; curl_exit=$?
   else
-    resp=$(curl -sk -m 8 -b "$COOKIES" -c "$COOKIES" \
-      -X "$method" "$url" 2>/dev/null) || true
+    raw_resp=$(curl -sk -m 8 -b "$COOKIES" -c "$COOKIES" \
+      -X "$method" -w '\n%{http_code}' "$url" 2>/dev/null) ; curl_exit=$?
   fi
 
-  if [ -z "$resp" ]; then
-    printf "  ? %-42s TIMEOUT\n" "$label"
-    ERR=$((ERR+1))
-    return
+  # Split body from HTTP status (last line is the status code from -w)
+  http_status=$(echo "$raw_resp" | tail -1)
+  resp=$(echo "$raw_resp" | sed '$d')
+
+  # Diagnose curl-level failures
+  if [ "$curl_exit" -eq 28 ]; then
+    printf "  TIMEOUT %-38s (curl timeout — no response in 8s)\n" "$label"
+    ERR=$((ERR+1)); return
+  elif [ "$curl_exit" -eq 7 ]; then
+    printf "  CONNREF %-38s (connection refused — server down?)\n" "$label"
+    ERR=$((ERR+1)); return
+  elif [ "$curl_exit" -ne 0 ] && [ -z "$resp" ]; then
+    printf "  CURLERR %-38s (curl exit %d)\n" "$label" "$curl_exit"
+    ERR=$((ERR+1)); return
   fi
 
-  local test_id passed http_code
+  # Empty body with a status code — driver returned nothing
+  if [ -z "$resp" ] && [ -n "$http_status" ] && [ "$http_status" != "000" ]; then
+    printf "  EMPTY  %-5s %-33s (HTTP %s — empty body)\n" "" "$label" "$http_status"
+    ERR=$((ERR+1)); return
+  elif [ -z "$resp" ]; then
+    printf "  DEAD   %-38s (no response, no status)\n" "$label"
+    ERR=$((ERR+1)); return
+  fi
+
+  # Parse JSON response
+  local test_id passed json_code json_msg
   test_id=$(echo "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('test_id',''))" 2>/dev/null) || true
   passed=$(echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print('1' if d.get('passed') else '0')" 2>/dev/null) || true
-  http_code=$(echo "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('code',''))" 2>/dev/null) || true
+  json_code=$(echo "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('code',''))" 2>/dev/null) || true
+  json_msg=$(echo "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('message','')[:60])" 2>/dev/null) || true
 
   if [ "$passed" = "1" ]; then
     printf "  PASS %-40s\n" "${test_id:-$label}"
@@ -56,11 +80,11 @@ test_ep() {
   elif [ -n "$test_id" ] && [ "$test_id" != "" ]; then
     printf "  FAIL %-40s\n" "${test_id:-$label}"
     FAIL=$((FAIL+1))
-  elif [ -n "$http_code" ] && [ "$http_code" != "" ]; then
-    printf "  HTTP %-5s %-34s\n" "$http_code" "$label"
+  elif [ -n "$json_code" ] && [ "$json_code" != "" ]; then
+    printf "  HTTP %-5s %-34s %s\n" "$json_code" "$label" "$json_msg"
     ERR=$((ERR+1))
   else
-    printf "  ?    %-40s\n" "$label"
+    printf "  ?    %-40s (HTTP %s)\n" "$label" "$http_status"
     ERR=$((ERR+1))
   fi
 }
@@ -209,16 +233,22 @@ echo "  ── V8 Security (slow) ──"
 ORIG_TIMEOUT=8
 test_ep_v8sec() {
   local label="$1" test_id="$2" method="$3" url="$4"
-  local resp http_status
+  local raw_resp curl_exit http_status body
   # Get both response body and HTTP status
-  resp=$(curl -sk -m 15 -b "$COOKIES" -c "$COOKIES" -X "$method" -w '\n%{http_code}' "$url" 2>/dev/null) || true
-  if [ -z "$resp" ]; then
-    printf "  ? %-42s TIMEOUT\n" "$label"
+  raw_resp=$(curl -sk -m 15 -b "$COOKIES" -c "$COOKIES" -X "$method" -w '\n%{http_code}' "$url" 2>/dev/null) ; curl_exit=$?
+
+  if [ "$curl_exit" -eq 28 ]; then
+    printf "  TIMEOUT %-38s (curl timeout — 15s)\n" "$label"
+    ERR=$((ERR+1)); return
+  elif [ "$curl_exit" -eq 7 ]; then
+    printf "  CONNREF %-38s (server crashed)\n" "$label"
+    ERR=$((ERR+1)); return
+  elif [ -z "$raw_resp" ]; then
+    printf "  DEAD   %-38s (no response, curl exit %d)\n" "$label" "$curl_exit"
     ERR=$((ERR+1)); return
   fi
-  http_status=$(echo "$resp" | tail -1)
-  local body
-  body=$(echo "$resp" | sed '$d')
+  http_status=$(echo "$raw_resp" | tail -1)
+  body=$(echo "$raw_resp" | sed '$d')
 
   # For V8 security tests, the expected outcome is:
   #   - Server responds (didn't crash) with 500 + timeout/OOM error
