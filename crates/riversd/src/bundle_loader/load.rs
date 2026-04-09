@@ -340,8 +340,10 @@ pub async fn load_and_wire_bundle(
             let mut by_app: HashMap<String, Vec<String>> = HashMap::new();
             for err in &driver_errors {
                 let s = err.to_string();
-                let app_name = s.strip_prefix('[')
-                    .and_then(|rest| rest.split(']').next())
+                // Error format: "config error: [app_name] datasource ..."
+                // Find the bracketed app name anywhere in the string.
+                let app_name = s.find('[')
+                    .and_then(|start| s[start+1..].find(']').map(|end| &s[start+1..start+1+end]))
                     .unwrap_or("unknown")
                     .to_string();
                 by_app.entry(app_name).or_default().push(s);
