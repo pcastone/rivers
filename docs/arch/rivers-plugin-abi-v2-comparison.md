@@ -115,11 +115,48 @@ Date: 2026-04-09
 | Process isolation | Excellent | Low (IPC) | High | Yes | Overkill |
 | abi_stable | Good | Good | Very High | No | Over-engineered |
 
+### 6. Tauri Plugin System — Shared Tokio Singleton
+
+**How it works:** Tauri owns a single `tokio::Runtime`. All plugins run as async commands via `async_runtime::spawn`. Plugins use `tauri::State<T>` for shared channels.
+
+**Trade-offs:**
+- Pro: Simple — one runtime for everything, plugins can use tokio directly
+- Con: Tight coupling to tokio version (all plugins must match)
+- Con: Single runtime for all plugins (contention)
+
+**Fit for Rivers:** Different architecture (desktop app vs server). Rivers separates engines from drivers; Tauri doesn't.
+
+### 7. async_ffi Crate — FFI-Safe Futures
+
+**How it works:** Provides `FfiFuture<T>` — a `repr(C)` wrapper for Rust futures that works across cdylib boundaries. Can be combined with `abi_stable`.
+
+**Trade-offs:**
+- Pro: Async works across FFI without shared runtime
+- Con: Extra allocation per future conversion
+- Con: Panic handling via `catch_unwind` (aborts on cleanup panics)
+- Con: Rust-only, not language-agnostic
+
+**Fit for Rivers:** Possible but adds complexity. The sync C-ABI approach is simpler and already proven.
+
+## Ecosystem Research Sources
+
+- [Tokio Issue #1964](https://github.com/tokio-rs/tokio/issues/1964) — "Failed to spawn tasks in dynamic library"
+- [Tokio Issue #6927](https://github.com/tokio-rs/tokio/issues/6927) — "Support for dynamic linking"
+- [Plugins in Rust: Reducing Pain with Dependencies](https://nullderef.com/blog/plugin-abi-stable/) — abi_stable approach
+- [async_ffi Crate](https://docs.rs/async-ffi/latest/async_ffi/) — FFI-safe futures
+- [Wasmtime Async Host Functions](https://docs.wasmtime.dev/examples-async.html)
+- [How to Build a Plugin System in Rust (Arroyo)](https://www.arroyo.dev/blog/rust-plugin-systems/)
+- [Rust FFI Guide: Dynamic Loading](https://s3.amazonaws.com/temp.michaelfbryan.com/dynamic-loading/index.html)
+- [Extism Async Discussion #525](https://github.com/extism/extism/discussions/525)
+- [Tauri Async Runtime](https://docs.rs/tauri/latest/tauri/async_runtime/index.html)
+- [Tokio Bridging with Sync Code](https://tokio.rs/tokio/topics/bridging)
+
 ## Conclusion
 
 **The synchronous C-ABI approach (Plugin ABI v2) is the right fix.** It's:
 - Already proven in the Rivers codebase (Engine SDK uses the exact same pattern)
 - The standard approach in the broader ecosystem (nginx, postgres, most libloading projects)
+- The approach Tokio maintainers recommend for cdylib (Issues #1964, #6927 confirm the thread-local problem has no runtime fix)
 - Simple to implement (JSON serialization is already used everywhere in Rivers)
 - Future-proof (any language can implement C-ABI plugins)
 - Crash-safe (`catch_unwind` works cleanly at C boundaries within the same compilation unit)
