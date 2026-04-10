@@ -55,7 +55,8 @@ _build-dynamic-crates:
     cargo build --release -p rivers-runtime -p riversd -p riversctl --no-default-features
     echo "==> Building engine cdylibs..."
     cargo build --release -p rivers-engine-v8 -p rivers-engine-wasm
-    echo "==> Building plugin cdylibs..."
+    echo "==> Building plugin cdylibs (shared runtime)..."
+    RUSTFLAGS='-C link-arg=-Wl,-rpath,@loader_path/../lib -C prefer-dynamic' \
     cargo build --release --features plugin-exports \
         -p rivers-plugin-cassandra \
         -p rivers-plugin-couchdb \
@@ -110,9 +111,20 @@ _assemble-dynamic:
     if [ "$(uname)" = "Darwin" ]; then
         DEPS_DYLIB="$(find target/release/deps -name 'librivers_runtime.dylib' -maxdepth 1 | head -1)"
         if [ -n "$DEPS_DYLIB" ]; then
+            # Fix binary rpaths (bin/ → ../lib/)
             for bin in "$RELEASE_DIR"/bin/*; do
                 install_name_tool -change "$DEPS_DYLIB" \
                     @executable_path/../lib/librivers_runtime.dylib "$bin" 2>/dev/null || true
+            done
+            # Fix plugin rpaths (plugins/ → ../lib/)
+            for plugin in "$RELEASE_DIR"/plugins/librivers_plugin_*.dylib; do
+                [ -f "$plugin" ] && install_name_tool -change "$DEPS_DYLIB" \
+                    @loader_path/../lib/librivers_runtime.dylib "$plugin" 2>/dev/null || true
+            done
+            # Fix engine rpaths (lib/ → same dir)
+            for engine in "$RELEASE_DIR"/lib/librivers_engine_*.dylib; do
+                [ -f "$engine" ] && install_name_tool -change "$DEPS_DYLIB" \
+                    @loader_path/librivers_runtime.dylib "$engine" 2>/dev/null || true
             done
         fi
     fi
