@@ -142,6 +142,26 @@ fn cargo_build(args: &[&str]) {
     }
 }
 
+/// Run cargo build --release with RUSTFLAGS set. Exits on failure.
+fn cargo_build_with_rustflags(args: &[&str], rustflags: &str) {
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build").arg("--release");
+    cmd.env("RUSTFLAGS", rustflags);
+    for a in args {
+        cmd.arg(a);
+    }
+
+    let status = cmd.status().unwrap_or_else(|e| {
+        eprintln!("error: failed to run cargo: {e}");
+        std::process::exit(1);
+    });
+
+    if !status.success() {
+        eprintln!("error: cargo build failed");
+        std::process::exit(1);
+    }
+}
+
 // ── Deploy: dynamic mode ────────────────────────────────────────
 
 fn deploy_dynamic(workspace_root: &Path, target_dir: &Path, deploy_path: &Path, version: &str) {
@@ -164,9 +184,15 @@ fn deploy_dynamic(workspace_root: &Path, target_dir: &Path, deploy_path: &Path, 
         "-p", "rivers-engine-wasm",
     ]);
 
-    // Build plugin cdylibs
-    println!("[3/5] Building plugin shared libraries...");
-    cargo_build(&plugin_build_args());
+    // Build plugin cdylibs — with -C prefer-dynamic so they share tokio
+    // via librivers_runtime.dylib (prevents cdylib SIGABRT on connect)
+    println!("[3/5] Building plugin shared libraries (shared runtime)...");
+    let plugin_rustflags = if cfg!(target_os = "macos") {
+        "-C link-arg=-Wl,-rpath,@loader_path/../lib -C prefer-dynamic"
+    } else {
+        "-C link-arg=-Wl,-rpath,$ORIGIN/../lib -C prefer-dynamic"
+    };
+    cargo_build_with_rustflags(&plugin_build_args(), plugin_rustflags);
 
     // Create directory structure
     println!("[4/5] Assembling deploy directory...");
@@ -202,6 +228,56 @@ fn deploy_dynamic(workspace_root: &Path, target_dir: &Path, deploy_path: &Path, 
             copy_file(&src, &plugins_dir.join(&filename));
         } else {
             eprintln!("  warn: {filename} not found, skipping");
+        }
+    }
+
+    // Fix rpaths on macOS so dylibs find librivers_runtime.dylib
+    #[cfg(target_os = "macos")]
+    {
+        let deps_dir = target_dir.join("deps");
+        let deps_dylib = std::fs::read_dir(&deps_dir)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .find(|e| e.file_name().to_string_lossy() == "librivers_runtime.dylib")
+                    .map(|e| e.path().to_string_lossy().to_string())
+            });
+
+        if let Some(ref old_path) = deps_dylib {
+            println!("  fixing rpaths (macOS)...");
+            // Binary rpaths (bin/ → ../lib/)
+            for name in BINARIES {
+                let path = bin_dir.join(name);
+                if path.exists() {
+                    let _ = Command::new("install_name_tool")
+                        .args(["-change", old_path, "@executable_path/../lib/librivers_runtime.dylib"])
+                        .arg(&path)
+                        .status();
+                }
+            }
+            // Plugin rpaths (plugins/ → ../lib/)
+            for plugin_lib in PLUGIN_LIB_NAMES {
+                let filename = format!("lib{plugin_lib}.{DYLIB_EXT}");
+                let path = plugins_dir.join(&filename);
+                if path.exists() {
+                    let _ = Command::new("install_name_tool")
+                        .args(["-change", old_path, "@loader_path/../lib/librivers_runtime.dylib"])
+                        .arg(&path)
+                        .status();
+                }
+            }
+            // Engine rpaths (lib/ → same dir)
+            for engine in &["rivers_engine_v8", "rivers_engine_wasm"] {
+                let filename = format!("lib{engine}.{DYLIB_EXT}");
+                let path = lib_dir.join(&filename);
+                if path.exists() {
+                    let _ = Command::new("install_name_tool")
+                        .args(["-change", old_path, "@loader_path/librivers_runtime.dylib"])
+                        .arg(&path)
+                        .status();
+                }
+            }
         }
     }
 
