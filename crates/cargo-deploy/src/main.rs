@@ -147,6 +147,7 @@ fn cargo_build_with_rustflags(args: &[&str], rustflags: &str) {
     let mut cmd = Command::new("cargo");
     cmd.arg("build").arg("--release");
     cmd.env("RUSTFLAGS", rustflags);
+    cmd.env("CARGO_PROFILE_RELEASE_LTO", "off"); // LTO conflicts with -C prefer-dynamic
     for a in args {
         cmd.arg(a);
     }
