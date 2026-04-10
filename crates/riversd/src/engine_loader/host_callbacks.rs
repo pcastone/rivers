@@ -184,7 +184,18 @@ pub(super) extern "C" fn host_store_get(
         None => return -3,
     };
 
-    match ctx.rt_handle.block_on(engine.get(namespace, key)) {
+    let engine = Arc::clone(engine);
+    let ns = namespace.to_string();
+    let k = key.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    ctx.rt_handle.spawn(async move {
+        let _ = tx.send(engine.get(&ns, &k).await);
+    });
+    let store_result = match rx.recv() {
+        Ok(r) => r,
+        Err(_) => return -10, // channel dropped — task panicked
+    };
+    match store_result {
         Ok(Some(bytes)) => {
             // Try to parse as JSON, fall back to string
             let value = serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -235,9 +246,17 @@ pub(super) extern "C" fn host_store_set(
     let value_bytes = serde_json::to_vec(&input["value"]).unwrap_or_default();
     let ttl_ms = input["ttl_ms"].as_u64();
 
-    match ctx.rt_handle.block_on(engine.set(namespace, key, value_bytes, ttl_ms)) {
-        Ok(()) => 0,
-        Err(_) => -10,
+    let engine = Arc::clone(engine);
+    let ns = namespace.to_string();
+    let k = key.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    ctx.rt_handle.spawn(async move {
+        let _ = tx.send(engine.set(&ns, &k, value_bytes, ttl_ms).await);
+    });
+    match rx.recv() {
+        Ok(Ok(())) => 0,
+        Ok(Err(_)) => -10,
+        Err(_) => -10, // channel dropped — task panicked
     }
 }
 
@@ -267,9 +286,17 @@ pub(super) extern "C" fn host_store_del(
         None => return -3,
     };
 
-    match ctx.rt_handle.block_on(engine.delete(namespace, key)) {
-        Ok(_) => 0,
-        Err(_) => -10,
+    let engine = Arc::clone(engine);
+    let ns = namespace.to_string();
+    let k = key.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    ctx.rt_handle.spawn(async move {
+        let _ = tx.send(engine.delete(&ns, &k).await);
+    });
+    match rx.recv() {
+        Ok(Ok(_)) => 0,
+        Ok(Err(_)) => -10,
+        Err(_) => -10, // channel dropped — task panicked
     }
 }
 
@@ -318,16 +345,33 @@ pub(super) extern "C" fn host_datasource_build(
         query.parameters.insert(k.clone(), QueryValue::Json(v.clone()));
     }
 
-    // Spawn on Tokio runtime (same reason as host_dataview_execute — drivers
-    // need a reactor on the calling thread).
+    // Isolate cdylib plugin calls — plugins have their own tokio, so they need
+    // a dedicated runtime. spawn_blocking + Runtime::new gives them one.
+    // catch_unwind prevents plugin panics from killing the process.
     let (ds_tx, ds_rx) = std::sync::mpsc::channel();
     let factory = Arc::clone(factory);
     ctx.rt_handle.spawn(async move {
-        let result = async {
-            let mut conn = factory.connect(&driver, &conn_params).await
-                .map_err(|e| e.to_string())?;
-            conn.execute(&query).await.map_err(|e| e.to_string())
-        }.await;
+        let result = tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| format!("failed to create plugin runtime: {e}"))?;
+                rt.block_on(async {
+                    let mut conn = factory.connect(&driver, &conn_params).await
+                        .map_err(|e| format!("driver connect failed: {e}"))?;
+                    conn.execute(&query).await.map_err(|e| e.to_string())
+                })
+            }))
+            .unwrap_or_else(|panic| {
+                let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = panic.downcast_ref::<&str>() {
+                    s.to_string()
+                } else {
+                    "driver plugin panicked during connect/execute".to_string()
+                };
+                Err(msg)
+            })
+        }).await.unwrap_or_else(|e| Err(format!("driver task join failed: {e}")));
         let _ = ds_tx.send(result);
     });
     match ds_rx.recv().unwrap_or_else(|_| Err("datasource task panicked".to_string())) {
@@ -760,13 +804,33 @@ pub(super) extern "C" fn host_ddl_execute(
                 }
             }
 
-            // Connect and execute DDL
-            let mut conn = factory.connect(&driver_name, &ds_params).await
-                .map_err(|e| format!("DDL connect to '{}' failed: {}", datasource, e))?;
-
-            let query = rivers_runtime::rivers_driver_sdk::Query::new("ddl", &statement);
-            conn.ddl_execute(&query).await
-                .map_err(|e| format!("DDL execute failed: {}", e))?;
+            // Isolate cdylib plugin calls in a dedicated runtime
+            let ds_name = datasource.clone();
+            let stmt = statement.clone();
+            let factory_clone = factory.clone();
+            tokio::task::spawn_blocking(move || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let rt = tokio::runtime::Runtime::new()
+                        .map_err(|e| format!("failed to create plugin runtime: {e}"))?;
+                    rt.block_on(async {
+                        let mut conn = factory_clone.connect(&driver_name, &ds_params).await
+                            .map_err(|e| format!("DDL connect to '{}' failed: {}", ds_name, e))?;
+                        let query = rivers_runtime::rivers_driver_sdk::Query::new("ddl", &stmt);
+                        conn.ddl_execute(&query).await
+                            .map_err(|e| format!("DDL execute failed: {}", e))
+                    })
+                }))
+                .unwrap_or_else(|panic| {
+                    let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = panic.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "driver plugin panicked during DDL connect/execute".to_string()
+                    };
+                    Err(msg)
+                })
+            }).await.unwrap_or_else(|e| Err(format!("DDL task join failed: {e}")))?;
 
             tracing::info!(
                 datasource = %datasource,

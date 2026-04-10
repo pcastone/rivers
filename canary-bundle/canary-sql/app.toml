@@ -562,3 +562,190 @@ type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/negative-sql.ts"
 entrypoint = "errorSanitized"
+
+# ─────────────────────────────────────────────
+# Integration DataViews (additional)
+# ─────────────────────────────────────────────
+
+[data.dataviews.sqlite_nonexistent_table]
+name       = "sqlite_nonexistent_table"
+datasource = "canary-sqlite"
+query      = "SELECT * FROM this_table_does_not_exist"
+
+[data.dataviews.pg_int_insert]
+name       = "pg_int_insert"
+datasource = "canary-pg"
+query      = "INSERT INTO int_ddl_test (val) VALUES ($val)"
+
+[[data.dataviews.pg_int_insert.parameters]]
+name     = "val"
+type     = "string"
+required = true
+
+[data.dataviews.pg_int_select]
+name       = "pg_int_select"
+datasource = "canary-pg"
+query      = "SELECT id, val FROM int_ddl_test"
+
+[data.dataviews.mysql_int_insert]
+name       = "mysql_int_insert"
+datasource = "canary-mysql"
+query      = "INSERT INTO int_ddl_test (val) VALUES ($val)"
+
+[[data.dataviews.mysql_int_insert.parameters]]
+name     = "val"
+type     = "string"
+required = true
+
+[data.dataviews.mysql_int_select]
+name       = "mysql_int_select"
+datasource = "canary-mysql"
+query      = "SELECT id, val FROM int_ddl_test"
+
+# ─────────────────────────────────────────────
+# Integration Views
+# ─────────────────────────────────────────────
+
+[api.views.int_ddl_verify]
+path      = "/canary/integration/ctx-ddl-verify"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.int_ddl_verify.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/integration-tests.ts"
+entrypoint = "ctxDdlVerify"
+
+[api.views.int_ddl_insert_select]
+path      = "/canary/integration/ctx-ddl-insert-select"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.int_ddl_insert_select.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/integration-tests.ts"
+entrypoint = "ctxDdlInsertSelect"
+
+[api.views.int_driver_error_prop]
+path      = "/canary/integration/driver-error-propagation"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.int_driver_error_prop.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/integration-tests.ts"
+entrypoint = "driverErrorPropagation"
+
+[api.views.int_ddl_whitelist]
+path      = "/canary/integration/ddl-whitelist-reject"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.int_ddl_whitelist.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/integration-tests.ts"
+entrypoint = "ddlWhitelistReject"
+
+[api.views.int_param_binding]
+path      = "/canary/integration/dataview-param-binding"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.int_param_binding.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/integration-tests.ts"
+entrypoint = "dataviewParamBinding"
+
+[api.views.int_store_namespace]
+path      = "/canary/integration/store-namespace-isolation"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.int_store_namespace.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/integration-tests.ts"
+entrypoint = "storeNamespaceIsolation"
+
+[api.views.int_recovery]
+path      = "/canary/integration/recovery-after-timeout"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.int_recovery.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/integration-tests.ts"
+entrypoint = "recoveryAfterTimeout"
+
+[api.views.int_sqlite_disk]
+path      = "/canary/integration/sqlite-disk-persistence"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.int_sqlite_disk.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/integration-tests.ts"
+entrypoint = "sqliteDiskPersistence"
+
+[api.views.int_pg_ddl]
+path      = "/canary/integration/pg-ddl-create-select"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.int_pg_ddl.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/integration-tests.ts"
+entrypoint = "pgDdlCreateSelect"
+
+[api.views.int_mysql_ddl]
+path      = "/canary/integration/mysql-ddl-create-select"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.int_mysql_ddl.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/integration-tests.ts"
+entrypoint = "mysqlDdlCreateSelect"
+
+[api.views.int_init_sequence]
+path      = "/canary/integration/init-handler-sequence"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.int_init_sequence.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/integration-tests.ts"
+entrypoint = "initHandlerSequence"
+
+[api.views.int_host_callbacks]
+path      = "/canary/integration/host-callback-available"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.int_host_callbacks.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/integration-tests.ts"
+entrypoint = "hostCallbackAvailable"

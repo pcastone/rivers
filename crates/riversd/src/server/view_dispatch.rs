@@ -75,6 +75,17 @@ pub(super) async fn combined_fallback_handler(
         return view_dispatch_handler(State(ctx), request, matched).await.into_response();
     }
 
+    // Check if request path matches a failed app — return 503 with driver info
+    if let Ok(failed) = ctx.failed_apps.read() {
+        for (prefix, error_msg) in failed.iter() {
+            if path.starts_with(prefix) {
+                return error_response::service_unavailable(error_msg)
+                    .into_axum_response()
+                    .into_response();
+            }
+        }
+    }
+
     // Phase 2: Check for /services discovery endpoint on app-main
     if path.ends_with("/services") {
         return services_discovery_handler(State(ctx), request).await.into_response();

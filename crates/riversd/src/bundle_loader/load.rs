@@ -295,14 +295,24 @@ pub async fn load_and_wire_bundle(
         }
     }
 
-    // Build DriverFactory with all drivers (built-in + plugins)
+    // Warn if [plugins] dir points to a real directory — cdylib plugins are disabled
+    if !config.plugins.dir.is_empty() && std::path::Path::new(&config.plugins.dir).is_dir() {
+        tracing::warn!(
+            dir = %config.plugins.dir,
+            "[plugins] dir is deprecated — cdylib driver plugins disabled in this version. \
+             All drivers are compiled statically. Plugin ABI v2 will re-enable dynamic loading."
+        );
+    }
+
+    // Build DriverFactory with all drivers (built-in + static-plugins)
     let mut factory = rivers_runtime::rivers_core::DriverFactory::new();
-    register_all_drivers(&mut factory, &config.plugins.ignore, &config.engines.dir, &config.plugins.dir);
+    register_all_drivers(&mut factory, &config.plugins.ignore);
 
     let app_count = bundle.apps.len();
     let dv_count = registry.count();
 
     // ── AT3.4 (D): Validate driver names against registered drivers ──
+    let failed_app_names: std::collections::HashSet<String>;
     {
         let mut known: Vec<&str> = factory.driver_names();
         known.extend(factory.broker_driver_names());
@@ -333,11 +343,78 @@ pub async fn load_and_wire_bundle(
             return Err(ServerError::Config(msg));
         }
 
-        if !driver_errors.is_empty() {
-            let msg = driver_errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ");
-            tracing::warn!("driver validation: {}", msg);
-            // Warn but don't block — unknown drivers may be loaded via plugins later
-        }
+        // Group driver errors by app name and block affected apps (503 at request time)
+        failed_app_names = if !driver_errors.is_empty() {
+            // Parse "[app_name] datasource ..." and "unknown driver 'drv'" from each error
+            let mut by_app: HashMap<String, Vec<String>> = HashMap::new();
+            for err in &driver_errors {
+                let s = err.to_string();
+                // Error format: "config error: [app_name] datasource ..."
+                // Find the bracketed app name anywhere in the string.
+                let app_name = s.find('[')
+                    .and_then(|start| s[start+1..].find(']').map(|end| &s[start+1..start+1+end]))
+                    .unwrap_or("unknown")
+                    .to_string();
+                by_app.entry(app_name).or_default().push(s);
+            }
+
+            let bundle_name = &bundle.manifest.bundle_name;
+            let route_prefix = config.route_prefix.as_deref();
+            let mut failed_prefixes: HashMap<String, String> = HashMap::new();
+            let mut failed_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+            for (app_name, errors) in &by_app {
+                // Collect missing driver names for the message
+                let missing_drivers: Vec<String> = errors.iter().filter_map(|s| {
+                    s.find("unknown driver '").map(|start| {
+                        let rest = &s[start + 16..];
+                        rest.split('\'').next().unwrap_or("?").to_string()
+                    })
+                }).collect();
+                let driver_list = missing_drivers.join(", ");
+
+                let error_msg = format!(
+                    "app '{}' is unavailable — missing driver(s): {}",
+                    app_name, driver_list
+                );
+
+                tracing::error!(app_name = %app_name, drivers = %driver_list, "app blocked — missing drivers");
+
+                // Write structured JSON to per-app log
+                if let Some(router) = rivers_runtime::rivers_core::app_log_router::global_router() {
+                    let json = serde_json::json!({
+                        "event": "app_blocked",
+                        "app_name": app_name,
+                        "missing_drivers": missing_drivers,
+                        "errors": errors,
+                    });
+                    router.write(app_name, &json.to_string());
+                }
+
+                // Build path prefix for 503 matching
+                let entry_point = bundle.apps.iter()
+                    .find(|a| &a.manifest.app_name == app_name)
+                    .and_then(|a| a.manifest.entry_point.as_deref())
+                    .unwrap_or(app_name.as_str());
+
+                let prefix = match route_prefix.filter(|p| !p.is_empty()) {
+                    Some(pfx) => format!("/{}/{}/{}", pfx.trim_matches('/'), bundle_name, entry_point),
+                    None => format!("/{}/{}", bundle_name, entry_point),
+                };
+
+                failed_prefixes.insert(prefix, error_msg);
+                failed_names.insert(app_name.clone());
+            }
+
+            // Store in ctx.failed_apps
+            if let Ok(mut map) = ctx.failed_apps.write() {
+                map.extend(failed_prefixes);
+            }
+
+            failed_names
+        } else {
+            std::collections::HashSet::new()
+        };
     }
 
     let factory = Arc::new(factory);
@@ -396,6 +473,10 @@ pub async fn load_and_wire_bundle(
 
     // ── Phase 1.5: Run application init handlers (DDL security spec) ──
     for app in &bundle.apps {
+        if failed_app_names.contains(&app.manifest.app_name) {
+            tracing::info!(app_name = %app.manifest.app_name, "skipping init handler — app blocked due to missing drivers");
+            continue;
+        }
         if let Some(ref init_config) = app.manifest.init {
             let app_id = &app.manifest.app_id;
             let app_name = &app.manifest.app_name;
@@ -452,6 +533,7 @@ pub async fn load_and_wire_bundle(
     let router = view_engine::ViewRouter::from_bundle(
         &bundle,
         config.route_prefix.as_deref(),
+        &failed_app_names,
     );
     *ctx.view_router.write().await = Some(router);
 

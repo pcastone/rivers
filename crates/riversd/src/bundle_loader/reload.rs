@@ -65,7 +65,7 @@ pub async fn rebuild_views_and_dataviews(
                 drop(guard);
                 // Re-create factory with all drivers
                 let mut factory = rivers_runtime::rivers_core::DriverFactory::new();
-                register_all_drivers(&mut factory, &config.plugins.ignore, &config.engines.dir, &config.plugins.dir);
+                register_all_drivers(&mut factory, &config.plugins.ignore);
                 let factory = Arc::new(factory);
 
                 // Build cache — L1 always active, L2 only when StorageEngine available
@@ -117,7 +117,7 @@ pub async fn rebuild_views_and_dataviews(
     *ctx.dataview_executor.write().await = Some(Arc::new(executor));
 
     // Rebuild view router
-    let router = view_engine::ViewRouter::from_bundle(&bundle, config.route_prefix.as_deref());
+    let router = view_engine::ViewRouter::from_bundle(&bundle, config.route_prefix.as_deref(), &std::collections::HashSet::new());
     *ctx.view_router.write().await = Some(router);
 
     // Rebuild GraphQL schema if enabled

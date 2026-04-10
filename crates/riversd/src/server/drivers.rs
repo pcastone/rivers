@@ -1,17 +1,19 @@
-//! Driver registration — built-in and plugin drivers.
+//! Driver registration — built-in and static-plugin drivers.
+//!
+//! cdylib driver plugins are disabled — they cause SIGABRT when the plugin
+//! creates its own tokio runtime inside the host process. All drivers are
+//! compiled statically via `static-builtin-drivers` and `static-plugins`
+//! features. Engine dylibs (V8, WASM) are unaffected.
 
-/// Register all drivers — built-in and plugin — into a `DriverFactory`.
+/// Register all drivers — built-in and static-plugin — into a `DriverFactory`.
 ///
 /// Centralises the 15+ individual registration calls so that both
 /// bundle-load and future code paths share one inventory.
 ///
 /// Drivers listed in `ignore` are skipped with an INFO log.
-/// `engines_dir` and `plugins_dir` are from config (absolute paths).
 pub fn register_all_drivers(
     factory: &mut rivers_runtime::rivers_core::DriverFactory,
     ignore: &[String],
-    _engines_dir: &str,
-    plugins_dir: &str,
 ) {
     // Built-in drivers — statically linked when feature is enabled
     #[cfg(feature = "static-builtin-drivers")]
@@ -40,33 +42,6 @@ pub fn register_all_drivers(
                 tracing::info!(driver = name, "driver ignored per [plugins].ignore config");
             } else {
                 register_fn(factory);
-            }
-        }
-    }
-
-    // Engine dylibs in engines_dir (lib/) are loaded separately by the engine loader
-    // via _rivers_engine_abi_version — do NOT scan lib/ for driver plugins.
-
-    // Dynamic plugin drivers from plugins directory
-    let plugin_dir = std::path::Path::new(plugins_dir);
-    if plugin_dir.is_dir() {
-        let results = rivers_runtime::rivers_core::driver_factory::load_plugins(plugin_dir, factory);
-        for result in &results {
-            match result {
-                rivers_runtime::rivers_core::driver_factory::PluginLoadResult::Success { path, driver_names } => {
-                    let ignored: Vec<&str> = driver_names.iter()
-                        .filter(|d| ignore.iter().any(|i| i == *d))
-                        .map(|d| d.as_str())
-                        .collect();
-                    if !ignored.is_empty() {
-                        tracing::info!(path = %path, drivers = ?ignored, "plugin loaded but drivers ignored per config");
-                    } else {
-                        tracing::info!(path = %path, drivers = ?driver_names, "loaded driver plugin");
-                    }
-                }
-                rivers_runtime::rivers_core::driver_factory::PluginLoadResult::Failed { path, reason } => {
-                    tracing::warn!(path = %path, reason = %reason, "failed to load driver plugin");
-                }
             }
         }
     }

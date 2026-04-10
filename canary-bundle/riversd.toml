@@ -39,10 +39,10 @@ key_file   = "/Users/pcastone/Projects/rust/rivers.pub/sec/lockbox/identity.key"
 [engines]
 dir = "/Users/pcastone/Projects/rust/rivers.pub/release/canary/lib"
 
-[plugins]
-# Static plugins are compiled into riversd — don't also load cdylib versions
-# (cdylib plugins have their own tokio copy, causing "no reactor" panics)
-dir = "/Users/pcastone/Projects/rust/rivers.pub/canary-bundle/config/empty-plugins"
+# [plugins]
+# cdylib driver plugins disabled — all drivers compiled statically.
+# Plugin ABI v2 (synchronous C-ABI) will re-enable dynamic loading.
+# dir = "/Users/pcastone/Projects/rust/rivers.pub/dist/rivers-0.53.4/plugins"
 
 [static_files]
 enabled      = true

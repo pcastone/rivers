@@ -90,6 +90,14 @@ impl DriverFactory {
     /// Look up a database driver by name and create a connection.
     ///
     /// Per spec §8.1. Returns `DriverError::UnknownDriver` if name is not registered.
+    ///
+    /// Each connect runs in an isolated tokio runtime via `spawn_blocking`.
+    /// This ensures cdylib plugin drivers get a reactor (they have their own
+    /// statically-linked tokio that needs its own runtime). Built-in drivers
+    /// are unaffected — the extra runtime is harmless for rlib drivers.
+    /// `catch_unwind` prevents plugin panics from aborting the process
+    /// (panics from cdylib code are "foreign exceptions" that would SIGABRT
+    /// if they cross the FFI boundary uncaught).
     pub async fn connect(
         &self,
         driver_name: &str,
@@ -98,8 +106,33 @@ impl DriverFactory {
         let driver = self
             .drivers
             .get(driver_name)
-            .ok_or_else(|| DriverError::UnknownDriver(driver_name.to_string()))?;
-        driver.connect(params).await
+            .ok_or_else(|| DriverError::UnknownDriver(driver_name.to_string()))?
+            .clone();
+        let params = params.clone();
+
+        // Isolate driver.connect() in a dedicated runtime + catch_unwind.
+        // This prevents cdylib plugin crashes from killing the host process.
+        let result = tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| DriverError::Connection(format!("runtime: {e}")))?;
+                rt.block_on(async { driver.connect(&params).await })
+            }))
+            .unwrap_or_else(|panic| {
+                let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = panic.downcast_ref::<&str>() {
+                    s.to_string()
+                } else {
+                    "driver panicked during connect".to_string()
+                };
+                Err(DriverError::Connection(msg))
+            })
+        })
+        .await
+        .unwrap_or_else(|e| Err(DriverError::Connection(format!("connect task failed: {e}"))))?;
+
+        Ok(result)
     }
 
     /// Get a reference to a database driver by name.

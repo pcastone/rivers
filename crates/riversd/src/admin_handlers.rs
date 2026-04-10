@@ -51,7 +51,7 @@ pub async fn admin_drivers_handler(State(_ctx): State<AppContext>) -> impl IntoR
     use std::sync::LazyLock;
     static DRIVER_LIST: LazyLock<serde_json::Value> = LazyLock::new(|| {
         let mut factory = rivers_runtime::rivers_core::DriverFactory::new();
-        register_all_drivers(&mut factory, &[], "lib", "plugins");
+        register_all_drivers(&mut factory, &[]);
 
         let mut drivers: Vec<serde_json::Value> = Vec::new();
         for name in factory.driver_names() {
