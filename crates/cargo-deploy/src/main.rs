@@ -162,31 +162,63 @@ fn cargo_build_with_rustflags(args: &[&str], rustflags: &str) {
     }
 }
 
+/// Switch rivers-runtime crate-type between "rlib" and "dylib".
+///
+/// The Justfile does this with `sed`; we do it in Rust for reliability.
+fn set_crate_type(cargo_toml: &Path, target: &str) {
+    let content = std::fs::read_to_string(cargo_toml).unwrap_or_else(|e| {
+        eprintln!("error: cannot read {}: {e}", cargo_toml.display());
+        std::process::exit(1);
+    });
+    let (from, to) = if target == "dylib" {
+        (r#"crate-type = ["rlib"]"#, r#"crate-type = ["dylib"]"#)
+    } else {
+        (r#"crate-type = ["dylib"]"#, r#"crate-type = ["rlib"]"#)
+    };
+    let updated = content.replace(from, to);
+    std::fs::write(cargo_toml, &updated).unwrap_or_else(|e| {
+        eprintln!("error: cannot write {}: {e}", cargo_toml.display());
+        std::process::exit(1);
+    });
+    println!("  rivers-runtime crate-type → [{target}]");
+}
+
 // ── Deploy: dynamic mode ────────────────────────────────────────
 
 fn deploy_dynamic(workspace_root: &Path, target_dir: &Path, deploy_path: &Path, version: &str) {
-    // Build binaries — disable static engines/plugins but keep builtin drivers (sqlite, faker, etc.)
-    println!("[1/5] Building binaries (dynamic)...");
-    cargo_build(&[
+    let runtime_toml = workspace_root.join("crates/rivers-runtime/Cargo.toml");
+
+    // Step 0: Switch rivers-runtime to dylib so plugins can link against it
+    set_crate_type(&runtime_toml, "dylib");
+
+    // Build rivers-runtime as dylib + binaries
+    println!("[1/6] Building rivers-runtime (dylib) + binaries...");
+    let bin_rustflags = if cfg!(target_os = "macos") {
+        "-C link-arg=-Wl,-rpath,@executable_path/../lib -C prefer-dynamic"
+    } else {
+        "-C link-arg=-Wl,-rpath,$ORIGIN/../lib -C prefer-dynamic"
+    };
+    cargo_build_with_rustflags(&[
         "--no-default-features",
         "--features", "static-builtin-drivers",
+        "-p", "rivers-runtime",
         "-p", "riversd",
         "-p", "riversctl",
         "-p", "rivers-lockbox",
         "-p", "rivers-keystore",
         "-p", "riverpackage",
-    ]);
+    ], bin_rustflags);
 
     // Build engine cdylibs
-    println!("[2/5] Building engine shared libraries...");
-    cargo_build(&[
+    println!("[2/6] Building engine shared libraries...");
+    cargo_build_with_rustflags(&[
         "-p", "rivers-engine-v8",
         "-p", "rivers-engine-wasm",
-    ]);
+    ], bin_rustflags);
 
     // Build plugin cdylibs — with -C prefer-dynamic so they share tokio
     // via librivers_runtime.dylib (prevents cdylib SIGABRT on connect)
-    println!("[3/5] Building plugin shared libraries (shared runtime)...");
+    println!("[3/6] Building plugin shared libraries (shared runtime)...");
     let plugin_rustflags = if cfg!(target_os = "macos") {
         "-C link-arg=-Wl,-rpath,@loader_path/../lib -C prefer-dynamic"
     } else {
@@ -194,8 +226,11 @@ fn deploy_dynamic(workspace_root: &Path, target_dir: &Path, deploy_path: &Path, 
     };
     cargo_build_with_rustflags(&plugin_build_args(), plugin_rustflags);
 
+    // Restore rivers-runtime to rlib (so subsequent `cargo build` works normally)
+    set_crate_type(&runtime_toml, "rlib");
+
     // Create directory structure
-    println!("[4/5] Assembling deploy directory...");
+    println!("[4/6] Assembling deploy directory...");
     let bin_dir = deploy_path.join("bin");
     let lib_dir = deploy_path.join("lib");
     let plugins_dir = deploy_path.join("plugins");
@@ -207,6 +242,40 @@ fn deploy_dynamic(workspace_root: &Path, target_dir: &Path, deploy_path: &Path, 
     // Copy binaries
     for name in BINARIES {
         copy_file(&target_dir.join(name), &bin_dir.join(name));
+    }
+
+    // Copy rivers-runtime dylib (shared by plugins and binaries)
+    let runtime_dylib = format!("librivers_runtime.{DYLIB_EXT}");
+    let runtime_src = target_dir.join(&runtime_dylib);
+    if runtime_src.exists() {
+        copy_file(&runtime_src, &lib_dir.join(&runtime_dylib));
+    } else {
+        eprintln!("  warn: {runtime_dylib} not found — plugins may not share tokio");
+    }
+
+    // Copy libstd (needed for -C prefer-dynamic builds)
+    let sysroot = String::from_utf8(
+        Command::new("rustc").arg("--print").arg("sysroot")
+            .output().map(|o| o.stdout).unwrap_or_default()
+    ).unwrap_or_default().trim().to_string();
+    let triple = String::from_utf8(
+        Command::new("rustc").args(["-vV"])
+            .output().map(|o| o.stdout).unwrap_or_default()
+    ).unwrap_or_default().lines()
+        .find(|l| l.starts_with("host:"))
+        .map(|l| l.trim_start_matches("host:").trim().to_string())
+        .unwrap_or_default();
+    if !sysroot.is_empty() && !triple.is_empty() {
+        let std_dir = Path::new(&sysroot).join("lib/rustlib").join(&triple).join("lib");
+        if let Ok(entries) = std::fs::read_dir(&std_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("libstd-") && name.ends_with(DYLIB_EXT) {
+                    copy_file(&entry.path(), &lib_dir.join(&name));
+                    break;
+                }
+            }
+        }
     }
 
     // Copy engine dylibs
@@ -282,7 +351,7 @@ fn deploy_dynamic(workspace_root: &Path, target_dir: &Path, deploy_path: &Path, 
     }
 
     // Runtime scaffolding
-    println!("[5/5] Scaffolding runtime...");
+    println!("[6/6] Scaffolding runtime...");
     scaffold_runtime(deploy_path, version, "dynamic");
 
     print_summary(deploy_path, workspace_root);
