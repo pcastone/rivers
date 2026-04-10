@@ -1,6 +1,8 @@
 # Rivers Installation and Operations Guide
 
-Version 0.1.0
+Version 0.54.0
+
+> **v0.54.0 highlights:** All driver plugins are now compiled statically into `riversd`. The cdylib plugin mechanism is temporarily disabled due to a tokio ABI mismatch across FFI that caused SIGABRT crashes. See [AW1.2 Building from Source](#aw12-building-from-source) and [AW1.13 Missing Driver Handling](#aw113-missing-driver-handling) below.
 
 ---
 
@@ -59,38 +61,68 @@ codegen-units = 1
 strip = "symbols"
 ```
 
-### Deploying with cargo deploy
+### Deploying with cargo deploy and just
 
-`cargo deploy` builds and assembles a complete Rivers instance:
+Rivers ships two deploy entry points:
+
+**`just deploy <path>`** (recommended, v0.54.0+) — static mode by default. Produces a single fat `riversd` binary with all drivers compiled in. No separate plugin dylibs.
+
+```bash
+just deploy /opt/rivers                # static (default)
+just deploy-dynamic /opt/rivers        # thin binary + engine dylibs
+```
+
+**`cargo deploy <path>`** — dynamic mode by default (thin binary + engine dylibs).
 
 ```bash
 # Install the deploy tool (once)
 cargo install --path crates/cargo-deploy
 
-# Dynamic mode — thin binaries + shared engine/plugin libraries
+# Dynamic mode — thin binary + engine dylibs (V8, WASM) in lib/
 cargo deploy /opt/rivers
 
-# Static mode — single fat binary
+# Static mode — single fat binary, all drivers compiled in
 cargo deploy /opt/rivers --static
 ```
 
-Output structure:
+> **v0.54.0 change:** `just deploy` now defaults to **static** builds. Previously it produced dynamic-mode deployments. Use `just deploy-dynamic` for the old behavior. `cargo deploy` still defaults to dynamic mode for backwards compatibility.
+
+Output structure (static, v0.54.0+):
+
 ```
 /opt/rivers/
-├── bin/           (riversd, riversctl, rivers-lockbox, rivers-keystore, riverpackage)
-├── lib/           (librivers_engine_v8.dylib, librivers_engine_wasm.dylib)
-├── plugins/       (12 driver plugin dylibs)
+├── bin/
+│   └── riversd                        (single fat binary — all drivers + engines)
 ├── config/
-│   ├── riversd.toml  (pre-configured with absolute paths)
-│   └── tls/          (auto-generated self-signed cert)
-├── lockbox/       (initialized with identity key)
+│   ├── riversd.toml                    (pre-configured with absolute paths)
+│   └── tls/                            (auto-generated self-signed cert)
+├── docs/
+│   └── guide/                          (NEW in v0.54.0 — user guides shipped with deploy)
+├── lockbox/
 ├── log/
-│   └── apps/      (per-app log files created at runtime)
-├── run/           (PID file written on start)
-├── apphome/       (place bundles here)
+│   └── apps/
+├── run/
+├── apphome/
 ├── data/
 └── VERSION
 ```
+
+Output structure (dynamic):
+
+```
+/opt/rivers/
+├── bin/                                (thin binaries)
+├── lib/                                (librivers_engine_v8.dylib, librivers_engine_wasm.dylib)
+├── config/
+│   └── riversd.toml
+├── docs/
+│   └── guide/                          (NEW in v0.54.0)
+...
+```
+
+> **v0.54.0:** cdylib driver plugins are no longer emitted. The `plugins/` directory is not created. All drivers (sqlite, postgres, mysql, redis, faker, plus mongodb, elasticsearch, couchdb, cassandra, ldap, kafka, rabbitmq, nats, neo4j, influxdb, redis-streams, exec) are compiled into `riversd` via the `static-plugins` feature. See [AW1.13 Missing Driver Handling](#aw113-missing-driver-handling).
+
+> **v0.54.0:** `cargo deploy <path>` now copies `docs/guide/` into `<path>/docs/guide/`. User-facing documentation ships alongside the binaries.
 
 All paths in `riversd.toml` are absolute -- binaries work from any directory.
 
@@ -181,7 +213,7 @@ Checks performed:
 - LockBox keystore permissions (if configured)
 - TLS certificate exists and is not expired
 - Log directories exist and are writable
-- Engine and plugin directories exist (dynamic mode)
+- Engine directory exists (dynamic mode only — static mode has no external dylibs)
 - Bundle path is valid
 
 **`--fix` auto-repairs:**
@@ -593,13 +625,18 @@ port = 9091       # default
 
 Scrape endpoint: `http://localhost:9091/metrics`
 
-Available metrics:
-- `rivers_http_requests_total` -- counter by method and status
-- `rivers_http_request_duration_ms` -- histogram by method
-- `rivers_engine_executions_total` -- counter by engine and success
-- `rivers_engine_execution_duration_ms` -- histogram by engine
-- `rivers_active_connections` -- gauge
-- `rivers_loaded_apps` -- gauge
+Available metrics (v0.54.0 — metrics are now actually wired and emit data when the `metrics` feature is enabled):
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `rivers_http_requests_total` | counter | `method`, `status` |
+| `rivers_http_request_duration_ms` | histogram | `method` |
+| `rivers_active_connections` | gauge | — |
+| `rivers_engine_executions_total` | counter | `engine` (`v8` \| `dataview` \| `none`), `success` |
+| `rivers_engine_execution_duration_ms` | histogram | `engine` |
+| `rivers_loaded_apps` | gauge | — |
+
+Default port: `9091`. Scrape endpoint: `http://localhost:9091/metrics`.
 
 ### Backpressure
 
@@ -958,17 +995,73 @@ max_complexity = 1000
 # pool_size = 20
 ```
 
-### Bundle validation
+### Bundle validation (v0.54.0 — 4-layer pipeline)
 
-Before deploying a bundle, validate it:
+Before deploying a bundle, validate it with the 4-layer validation pipeline:
 
 ```bash
-# Structure and TOML/JSON syntax check
+# Full 4-layer validation (text output)
 riverpackage validate bundles/my-app-bundle
 
-# Full preflight: validate + check schema/parameter orphans
-riverpackage preflight bundles/my-app-bundle
+# Machine-readable JSON output
+riverpackage validate bundles/my-app-bundle --format json
+
+# Pass a riversd.toml so validation can discover engines (for TS/JS compile checks)
+riverpackage validate bundles/my-app-bundle --config /opt/rivers/config/riversd.toml
 
 # Package into a tar.gz archive
 riverpackage pack bundles/my-app-bundle output.tar.gz
 ```
+
+The pipeline runs four layers in order:
+
+1. **Structural** — TOML parse of `manifest.toml`, per-app `manifest.toml`, `resources.toml`, `app.toml`
+2. **Existence** — all referenced files (schemas, handler modules, libraries) exist on disk
+3. **Cross-reference** — DataViews resolve to declared datasources, views resolve to DataViews, services resolve across apps
+4. **Syntax verification** — JSON schemas parse, handler TypeScript/JavaScript modules compile successfully via an embedded V8 check
+
+`riversd` itself runs this same pipeline at startup. Invalid bundles are rejected **before** loading, so you can catch issues in CI with `riverpackage validate` without launching the server.
+
+---
+
+## AW1.13 Missing Driver Handling
+
+**New in v0.54.0.** When an app declares datasources whose drivers cannot be resolved, Rivers now isolates the failure to that app rather than aborting the whole bundle.
+
+### Behavior
+
+- The failing app is **blocked from loading** — its views are **not** registered in the router.
+- Init handlers for the failed app are **skipped**.
+- Requests to endpoints in the failed app return `503 Service Unavailable`:
+
+  ```json
+  {
+    "code": 503,
+    "message": "app 'canary-nosql' is unavailable — missing driver(s): mongodb, elasticsearch"
+  }
+  ```
+
+- Other apps in the same bundle load normally. If `canary-nosql` fails but `canary-sql` is healthy, requests to `canary-sql` succeed.
+- A structured `AppLoadFailed` event is emitted to the per-app log at `log/apps/<app>.log` with the list of missing drivers and the resource that referenced each one.
+- The main `riversd.log` also records a warning.
+
+### Operator checklist
+
+If an app is returning 503 with "unavailable":
+
+1. Check `log/apps/<app>.log` for the `AppLoadFailed` event and the list of missing driver names.
+2. For v0.54.0: most missing-driver errors come from stale configs that still reference drivers by their old cdylib names or from an unknown driver name. Every built-in and plugin driver is compiled into `riversd` — drivers should always resolve.
+3. If you were previously loading a plugin from `[plugins] dir`, remove that config line (see below) — the driver is now built in.
+4. Fix `resources.toml` / `app.toml` to reference a known driver name.
+
+### Deprecated: `[plugins] dir`
+
+The `[plugins] dir` config key is **deprecated** in v0.54.0. Setting it logs a warning and has no effect. cdylib plugin loading is disabled because of a tokio ABI mismatch across FFI that caused SIGABRT crashes. All 12 former plugin drivers (mongodb, elasticsearch, couchdb, cassandra, ldap, kafka, rabbitmq, nats, neo4j, influxdb, redis-streams, exec) are now compiled statically via the `static-plugins` feature.
+
+```toml
+# REMOVE this from riversd.toml — deprecated in v0.54.0
+# [plugins]
+# dir = "/opt/rivers/plugins"
+```
+
+Dynamic plugin loading is planned to return via **Plugin ABI v2**, a synchronous C-ABI that avoids the tokio-across-FFI problem. See `docs/arch/rivers-plugin-abi-v2-spec.md` for the design.

@@ -1,6 +1,10 @@
 # CLI Reference
 
+**Rivers v0.54.0**
+
 Rivers ships five binaries: `riversd`, `riversctl`, `rivers-lockbox`, `rivers-keystore`, and `riverpackage`.
+
+> **v0.54.0:** In static builds (the default for `just deploy`), `riversd` is a single fat binary with all drivers and engines compiled in. Dynamic builds (`just deploy-dynamic` or `cargo deploy`) still produce a thin `riversd` plus engine dylibs in `lib/`. cdylib driver plugins are disabled — see the installation guide.
 
 ---
 
@@ -221,14 +225,36 @@ Key differences from `rivers-lockbox`:
 
 Bundle packaging and validation tool.
 
-| Flag | Description |
-|------|-------------|
-| `--pre-flight <bundle_dir>` | Validate bundle structure without starting the server. |
+### riverpackage validate (v0.54.0 — 4-layer pipeline)
 
-Checks: manifest, app configs, schema files, datasource references, DataView references.
+Runs the 4-layer bundle validation pipeline. This is the same pipeline `riversd` runs at startup, so a bundle that passes `riverpackage validate` will load cleanly on a correctly-configured server.
 
 ```sh
-riverpackage --pre-flight ./address-book-bundle
+riverpackage validate ./address-book-bundle
+riverpackage validate ./address-book-bundle --format json
+riverpackage validate ./address-book-bundle --config /opt/rivers/config/riversd.toml
+```
+
+| Flag | Description |
+|------|-------------|
+| `--format <text\|json>` | Output format. Default `text`. |
+| `--config <path>` | Path to `riversd.toml`. Required when you want the syntax layer to compile TS/JS handlers via the V8 engine located by the config. |
+
+The pipeline:
+
+1. **Structural** — TOML parse of bundle manifest, app manifests, `resources.toml`, `app.toml`
+2. **Existence** — all referenced files (schemas, handler modules, libraries) exist on disk
+3. **Cross-reference** — DataViews resolve to declared datasources, views resolve to DataViews, services resolve
+4. **Syntax** — JSON schemas parse, TS/JS handler modules compile via embedded V8
+
+Exit code is non-zero on any layer failure. JSON output includes per-layer results for scripting.
+
+### riverpackage preflight
+
+Legacy preflight checks (kept for backwards compatibility). New CI pipelines should use `validate` instead.
+
+```sh
+riverpackage preflight ./address-book-bundle
 ```
 
 ### riverpackage init
