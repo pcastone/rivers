@@ -160,7 +160,7 @@ fn deploy_dynamic(workspace_root: &Path, target_dir: &Path, deploy_path: &Path, 
 
     // Step 4: Runtime scaffolding
     println!("[4/4] Scaffolding runtime...");
-    scaffold_runtime(deploy_path, version, "dynamic");
+    scaffold_runtime(deploy_path, version, "dynamic", workspace_root);
 
     print_summary(deploy_path, workspace_root);
 }
@@ -190,15 +190,15 @@ fn deploy_static(_workspace_root: &Path, target_dir: &Path, deploy_path: &Path, 
 
     // Runtime scaffolding
     println!("[3/3] Scaffolding runtime...");
-    scaffold_runtime(deploy_path, version, "static");
+    scaffold_runtime(deploy_path, version, "static", _workspace_root);
 
     print_summary(deploy_path, _workspace_root);
 }
 
 // ── Shared helpers ──────────────────────────────────────────────
 
-/// Create all runtime directories, config, TLS certs, lockbox, and VERSION.
-fn scaffold_runtime(deploy_path: &Path, version: &str, mode: &str) {
+/// Create all runtime directories, config, TLS certs, lockbox, VERSION, and copy guides.
+fn scaffold_runtime(deploy_path: &Path, version: &str, mode: &str, workspace_root: &Path) {
     let tls_dir = deploy_path.join("config/tls");
     let log_dir = deploy_path.join("log");
     let app_log_dir = deploy_path.join("log/apps");
@@ -224,8 +224,44 @@ fn scaffold_runtime(deploy_path: &Path, version: &str, mode: &str) {
     println!("  initializing lockbox...");
     init_lockbox(deploy_path, &lockbox_dir);
 
+    // Copy guide documentation
+    println!("  copying docs/guide...");
+    copy_guides(workspace_root, deploy_path);
+
     // VERSION
     write_version_file(deploy_path, version, mode);
+}
+
+/// Copy the `docs/guide` directory from the workspace into the deploy path.
+fn copy_guides(workspace_root: &Path, deploy_path: &Path) {
+    let src = workspace_root.join("docs/guide");
+    let dst = deploy_path.join("docs/guide");
+    if !src.is_dir() {
+        eprintln!("  warn: docs/guide not found at {}, skipping", src.display());
+        return;
+    }
+    if let Err(e) = copy_dir_recursive(&src, &dst) {
+        eprintln!("  warn: failed to copy guides: {e}");
+    } else {
+        println!("  guides: {}", dst.display());
+    }
+}
+
+/// Recursively copy a directory tree. Used for docs/guide.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
 }
 
 fn generate_tls(tls_dir: &Path) {
