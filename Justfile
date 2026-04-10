@@ -80,13 +80,13 @@ _assemble-dynamic:
 
 # ── Deploy (via cargo deploy) ────────────────────────────────────
 
-# Deploy dynamic dist to a target directory
+# Deploy static dist to a target directory (single binary, all drivers compiled in)
 deploy path:
-    cargo deploy {{path}}
-
-# Deploy static dist to a target directory
-deploy-static path:
     cargo deploy {{path}} --static
+
+# Deploy dynamic dist (thin binary + engine dylibs, static drivers)
+deploy-dynamic path:
+    cargo deploy {{path}}
 
 # ── Distribution ─────────────────────────────────────────────────
 
