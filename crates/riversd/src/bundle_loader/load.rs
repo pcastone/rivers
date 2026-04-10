@@ -295,9 +295,18 @@ pub async fn load_and_wire_bundle(
         }
     }
 
-    // Build DriverFactory with all drivers (built-in + plugins)
+    // Warn if [plugins] dir points to a real directory — cdylib plugins are disabled
+    if !config.plugins.dir.is_empty() && std::path::Path::new(&config.plugins.dir).is_dir() {
+        tracing::warn!(
+            dir = %config.plugins.dir,
+            "[plugins] dir is deprecated — cdylib driver plugins disabled in this version. \
+             All drivers are compiled statically. Plugin ABI v2 will re-enable dynamic loading."
+        );
+    }
+
+    // Build DriverFactory with all drivers (built-in + static-plugins)
     let mut factory = rivers_runtime::rivers_core::DriverFactory::new();
-    register_all_drivers(&mut factory, &config.plugins.ignore, &config.engines.dir, &config.plugins.dir);
+    register_all_drivers(&mut factory, &config.plugins.ignore);
 
     let app_count = bundle.apps.len();
     let dv_count = registry.count();

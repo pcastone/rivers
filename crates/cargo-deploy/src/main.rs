@@ -2,7 +2,7 @@
 //! cargo-deploy — Build and deploy Rivers runtime to a target directory.
 //!
 //! Usage:
-//!   cargo deploy <path>              # Dynamic mode (bin/ + lib/ + plugins/)
+//!   cargo deploy <path>              # Dynamic mode (bin/ + lib/ for engines)
 //!   cargo deploy <path> --static     # Static mode (single fat binary)
 
 use std::path::{Path, PathBuf};
@@ -16,38 +16,6 @@ use rcgen::{CertificateParams, DistinguishedName, DnType, Ia5String, SanType};
 const DYLIB_EXT: &str = "dylib";
 #[cfg(not(target_os = "macos"))]
 const DYLIB_EXT: &str = "so";
-
-/// All plugin crate names.
-const PLUGINS: &[&str] = &[
-    "rivers-plugin-cassandra",
-    "rivers-plugin-couchdb",
-    "rivers-plugin-elasticsearch",
-    "rivers-plugin-exec",
-    "rivers-plugin-influxdb",
-    "rivers-plugin-kafka",
-    "rivers-plugin-ldap",
-    "rivers-plugin-mongodb",
-    "rivers-plugin-nats",
-    "rivers-plugin-neo4j",
-    "rivers-plugin-rabbitmq",
-    "rivers-plugin-redis-streams",
-];
-
-/// Plugin library names (underscores, matching the .dylib/.so output).
-const PLUGIN_LIB_NAMES: &[&str] = &[
-    "rivers_plugin_cassandra",
-    "rivers_plugin_couchdb",
-    "rivers_plugin_elasticsearch",
-    "rivers_plugin_exec",
-    "rivers_plugin_influxdb",
-    "rivers_plugin_kafka",
-    "rivers_plugin_ldap",
-    "rivers_plugin_mongodb",
-    "rivers_plugin_nats",
-    "rivers_plugin_neo4j",
-    "rivers_plugin_rabbitmq",
-    "rivers_plugin_redis_streams",
-];
 
 /// Binary names to deploy.
 const BINARIES: &[&str] = &["riversd", "riversctl", "rivers-lockbox", "rivers-keystore", "riverpackage"];
@@ -142,141 +110,41 @@ fn cargo_build(args: &[&str]) {
     }
 }
 
-/// Run cargo build --release with RUSTFLAGS set. Exits on failure.
-fn cargo_build_with_rustflags(args: &[&str], rustflags: &str) {
-    let mut cmd = Command::new("cargo");
-    cmd.arg("build").arg("--release");
-    cmd.env("RUSTFLAGS", rustflags);
-    cmd.env("CARGO_PROFILE_RELEASE_LTO", "off"); // LTO conflicts with -C prefer-dynamic
-    for a in args {
-        cmd.arg(a);
-    }
-
-    let status = cmd.status().unwrap_or_else(|e| {
-        eprintln!("error: failed to run cargo: {e}");
-        std::process::exit(1);
-    });
-
-    if !status.success() {
-        eprintln!("error: cargo build failed");
-        std::process::exit(1);
-    }
-}
-
-/// Switch rivers-runtime crate-type between "rlib" and "dylib".
-///
-/// The Justfile does this with `sed`; we do it in Rust for reliability.
-fn set_crate_type(cargo_toml: &Path, target: &str) {
-    let content = std::fs::read_to_string(cargo_toml).unwrap_or_else(|e| {
-        eprintln!("error: cannot read {}: {e}", cargo_toml.display());
-        std::process::exit(1);
-    });
-    let (from, to) = if target == "dylib" {
-        (r#"crate-type = ["rlib"]"#, r#"crate-type = ["dylib"]"#)
-    } else {
-        (r#"crate-type = ["dylib"]"#, r#"crate-type = ["rlib"]"#)
-    };
-    let updated = content.replace(from, to);
-    std::fs::write(cargo_toml, &updated).unwrap_or_else(|e| {
-        eprintln!("error: cannot write {}: {e}", cargo_toml.display());
-        std::process::exit(1);
-    });
-    println!("  rivers-runtime crate-type → [{target}]");
-}
-
 // ── Deploy: dynamic mode ────────────────────────────────────────
 
 fn deploy_dynamic(workspace_root: &Path, target_dir: &Path, deploy_path: &Path, version: &str) {
-    let runtime_toml = workspace_root.join("crates/rivers-runtime/Cargo.toml");
+    let _workspace_root = workspace_root; // suppress unused warning
 
-    // Step 0: Switch rivers-runtime to dylib so plugins can link against it
-    set_crate_type(&runtime_toml, "dylib");
-
-    // Build rivers-runtime as dylib + binaries
-    println!("[1/6] Building rivers-runtime (dylib) + binaries...");
-    let bin_rustflags = if cfg!(target_os = "macos") {
-        "-C link-arg=-Wl,-rpath,@executable_path/../lib -C prefer-dynamic"
-    } else {
-        "-C link-arg=-Wl,-rpath,$ORIGIN/../lib -C prefer-dynamic"
-    };
-    cargo_build_with_rustflags(&[
+    // Step 1: Build binaries with static drivers (no cdylib plugins)
+    println!("[1/4] Building binaries (static drivers)...");
+    cargo_build(&[
         "--no-default-features",
         "--features", "static-builtin-drivers",
-        "-p", "rivers-runtime",
         "-p", "riversd",
         "-p", "riversctl",
         "-p", "rivers-lockbox",
         "-p", "rivers-keystore",
         "-p", "riverpackage",
-    ], bin_rustflags);
+    ]);
 
-    // Build engine cdylibs
-    println!("[2/6] Building engine shared libraries...");
-    cargo_build_with_rustflags(&[
+    // Step 2: Build engine cdylibs (V8, WASM — synchronous C-ABI, safe as cdylib)
+    println!("[2/4] Building engine shared libraries...");
+    cargo_build(&[
         "-p", "rivers-engine-v8",
         "-p", "rivers-engine-wasm",
-    ], bin_rustflags);
+    ]);
 
-    // Build plugin cdylibs — with -C prefer-dynamic so they share tokio
-    // via librivers_runtime.dylib (prevents cdylib SIGABRT on connect)
-    println!("[3/6] Building plugin shared libraries (shared runtime)...");
-    let plugin_rustflags = if cfg!(target_os = "macos") {
-        "-C link-arg=-Wl,-rpath,@loader_path/../lib -C prefer-dynamic"
-    } else {
-        "-C link-arg=-Wl,-rpath,$ORIGIN/../lib -C prefer-dynamic"
-    };
-    cargo_build_with_rustflags(&plugin_build_args(), plugin_rustflags);
-
-    // Restore rivers-runtime to rlib (so subsequent `cargo build` works normally)
-    set_crate_type(&runtime_toml, "rlib");
-
-    // Create directory structure
-    println!("[4/6] Assembling deploy directory...");
+    // Step 3: Assemble deploy directory (bin/ + lib/ for engines only)
+    println!("[3/4] Assembling deploy directory...");
     let bin_dir = deploy_path.join("bin");
     let lib_dir = deploy_path.join("lib");
-    let plugins_dir = deploy_path.join("plugins");
 
     create_dir(&bin_dir);
     create_dir(&lib_dir);
-    create_dir(&plugins_dir);
 
     // Copy binaries
     for name in BINARIES {
         copy_file(&target_dir.join(name), &bin_dir.join(name));
-    }
-
-    // Copy rivers-runtime dylib (shared by plugins and binaries)
-    let runtime_dylib = format!("librivers_runtime.{DYLIB_EXT}");
-    let runtime_src = target_dir.join(&runtime_dylib);
-    if runtime_src.exists() {
-        copy_file(&runtime_src, &lib_dir.join(&runtime_dylib));
-    } else {
-        eprintln!("  warn: {runtime_dylib} not found — plugins may not share tokio");
-    }
-
-    // Copy libstd (needed for -C prefer-dynamic builds)
-    let sysroot = String::from_utf8(
-        Command::new("rustc").arg("--print").arg("sysroot")
-            .output().map(|o| o.stdout).unwrap_or_default()
-    ).unwrap_or_default().trim().to_string();
-    let triple = String::from_utf8(
-        Command::new("rustc").args(["-vV"])
-            .output().map(|o| o.stdout).unwrap_or_default()
-    ).unwrap_or_default().lines()
-        .find(|l| l.starts_with("host:"))
-        .map(|l| l.trim_start_matches("host:").trim().to_string())
-        .unwrap_or_default();
-    if !sysroot.is_empty() && !triple.is_empty() {
-        let std_dir = Path::new(&sysroot).join("lib/rustlib").join(&triple).join("lib");
-        if let Ok(entries) = std::fs::read_dir(&std_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("libstd-") && name.ends_with(DYLIB_EXT) {
-                    copy_file(&entry.path(), &lib_dir.join(&name));
-                    break;
-                }
-            }
-        }
     }
 
     // Copy engine dylibs
@@ -290,69 +158,8 @@ fn deploy_dynamic(workspace_root: &Path, target_dir: &Path, deploy_path: &Path, 
         }
     }
 
-    // Copy plugin dylibs
-    for plugin_lib in PLUGIN_LIB_NAMES {
-        let filename = format!("lib{plugin_lib}.{DYLIB_EXT}");
-        let src = target_dir.join(&filename);
-        if src.exists() {
-            copy_file(&src, &plugins_dir.join(&filename));
-        } else {
-            eprintln!("  warn: {filename} not found, skipping");
-        }
-    }
-
-    // Fix rpaths on macOS so dylibs find librivers_runtime.dylib
-    #[cfg(target_os = "macos")]
-    {
-        let deps_dir = target_dir.join("deps");
-        let deps_dylib = std::fs::read_dir(&deps_dir)
-            .ok()
-            .and_then(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .find(|e| e.file_name().to_string_lossy() == "librivers_runtime.dylib")
-                    .map(|e| e.path().to_string_lossy().to_string())
-            });
-
-        if let Some(ref old_path) = deps_dylib {
-            println!("  fixing rpaths (macOS)...");
-            // Binary rpaths (bin/ → ../lib/)
-            for name in BINARIES {
-                let path = bin_dir.join(name);
-                if path.exists() {
-                    let _ = Command::new("install_name_tool")
-                        .args(["-change", old_path, "@executable_path/../lib/librivers_runtime.dylib"])
-                        .arg(&path)
-                        .status();
-                }
-            }
-            // Plugin rpaths (plugins/ → ../lib/)
-            for plugin_lib in PLUGIN_LIB_NAMES {
-                let filename = format!("lib{plugin_lib}.{DYLIB_EXT}");
-                let path = plugins_dir.join(&filename);
-                if path.exists() {
-                    let _ = Command::new("install_name_tool")
-                        .args(["-change", old_path, "@loader_path/../lib/librivers_runtime.dylib"])
-                        .arg(&path)
-                        .status();
-                }
-            }
-            // Engine rpaths (lib/ → same dir)
-            for engine in &["rivers_engine_v8", "rivers_engine_wasm"] {
-                let filename = format!("lib{engine}.{DYLIB_EXT}");
-                let path = lib_dir.join(&filename);
-                if path.exists() {
-                    let _ = Command::new("install_name_tool")
-                        .args(["-change", old_path, "@loader_path/librivers_runtime.dylib"])
-                        .arg(&path)
-                        .status();
-                }
-            }
-        }
-    }
-
-    // Runtime scaffolding
-    println!("[6/6] Scaffolding runtime...");
+    // Step 4: Runtime scaffolding
+    println!("[4/4] Scaffolding runtime...");
     scaffold_runtime(deploy_path, version, "dynamic");
 
     print_summary(deploy_path, workspace_root);
@@ -482,8 +289,10 @@ key_file   = "{r}/lockbox/identity.key"
 [engines]
 dir = "{r}/lib"
 
-[plugins]
-dir = "{r}/plugins"
+# [plugins]
+# cdylib driver plugins disabled — all drivers compiled statically.
+# Plugin ABI v2 (synchronous C-ABI) will re-enable dynamic loading.
+# dir = "{r}/plugins"
 
 # [base.admin_api]
 # enabled = true
@@ -640,12 +449,6 @@ fn print_summary(deploy_path: &Path, _workspace_root: &Path) {
         print_dir_listing(&lib_dir);
     }
 
-    let plugins_dir = deploy_path.join("plugins");
-    if plugins_dir.exists() {
-        println!("Plugin Libraries:");
-        print_dir_listing(&plugins_dir);
-    }
-
     // Runtime structure
     let config_path = deploy_path.join("config/riversd.toml");
     if config_path.exists() {
@@ -735,39 +538,9 @@ fn read_workspace_version(workspace_root: &Path) -> String {
     "unknown".to_string()
 }
 
-/// Build the cargo args for plugin cdylibs. Extracted for testability.
-fn plugin_build_args() -> Vec<&'static str> {
-    let mut args: Vec<&str> = vec!["--features", "plugin-exports"];
-    for p in PLUGINS {
-        args.push("-p");
-        args.push(p);
-    }
-    args
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn plugin_build_args_include_plugin_exports_feature() {
-        let args = plugin_build_args();
-        assert!(
-            args.windows(2).any(|w| w == ["--features", "plugin-exports"]),
-            "plugin build must pass --features plugin-exports to export ABI symbols"
-        );
-    }
-
-    #[test]
-    fn plugin_build_args_include_all_plugins() {
-        let args = plugin_build_args();
-        for plugin in PLUGINS {
-            assert!(
-                args.contains(plugin),
-                "missing plugin in build args: {plugin}"
-            );
-        }
-    }
 
     #[test]
     fn parse_args_basic() {
@@ -789,43 +562,5 @@ mod tests {
     fn parse_args_missing_path() {
         let args = ["cargo-deploy", "deploy"];
         assert!(parse_args(&args).is_err());
-    }
-
-    /// E2E: build a plugin with plugin-exports and verify the dylib exports _rivers_abi_version.
-    /// Run with: cargo test -p cargo-deploy -- --ignored
-    #[test]
-    #[ignore]
-    fn plugin_dylib_exports_abi_version_symbol() {
-        let workspace = find_workspace_root().expect("must run inside workspace");
-        let target_dir = workspace.join("target/release");
-
-        // Build one plugin with the feature flag
-        let status = Command::new("cargo")
-            .args(["build", "--release", "--features", "plugin-exports", "-p", "rivers-plugin-nats"])
-            .status()
-            .expect("cargo build failed to start");
-        assert!(status.success(), "cargo build failed");
-
-        let dylib = target_dir.join(format!("librivers_plugin_nats.{DYLIB_EXT}"));
-        assert!(dylib.exists(), "plugin dylib not found at {}", dylib.display());
-
-        // Check for the ABI symbol using nm
-        let output = Command::new("nm")
-            .args(["-g", dylib.to_str().unwrap()])
-            .output()
-            .expect("nm failed to start");
-        let symbols = String::from_utf8_lossy(&output.stdout);
-
-        assert!(
-            symbols.contains("_rivers_abi_version"),
-            "plugin dylib missing _rivers_abi_version symbol.\n\
-             This means --features plugin-exports was not applied.\n\
-             nm output:\n{symbols}"
-        );
-        assert!(
-            symbols.contains("_rivers_register_driver"),
-            "plugin dylib missing _rivers_register_driver symbol.\n\
-             nm output:\n{symbols}"
-        );
     }
 }
