@@ -1,5 +1,7 @@
 # Quick Start
 
+**Rivers v0.54.0**
+
 Get a Rivers app running in under five minutes. No database required -- the bundled address-book example uses synthetic data.
 
 ---
@@ -24,15 +26,26 @@ cd rivers
 cargo build --release
 ```
 
-This produces three binaries in `target/release/`:
+This produces binaries in `target/release/`:
 
 | Binary | Purpose |
 |--------|---------|
-| `riversd` | Application server |
+| `riversd` | Application server (v0.54.0 — single fat binary, all drivers compiled in) |
 | `riversctl` | CLI management tool |
-| `riverpackage` | Bundle packaging tool |
+| `riverpackage` | Bundle validation and packaging tool |
+| `rivers-lockbox` | Secret keystore CLI |
+| `rivers-keystore` | Per-app encryption key CLI |
 
 For development, use debug builds (`cargo build`) -- faster compilation, slower runtime.
+
+### Deploying a full instance
+
+```bash
+just deploy /opt/rivers               # v0.54.0: static build (default)
+just deploy-dynamic /opt/rivers       # thin binary + engine dylibs in lib/
+```
+
+`just deploy` also copies `docs/guide/` into `/opt/rivers/docs/guide/` (new in v0.54.0).
 
 ---
 
@@ -353,8 +366,9 @@ Required parameters become non-nullable arguments. Parameters with defaults beco
 
 ## Next Steps
 
-- Swap the `faker` driver for `postgres`, `mysql`, or `sqlite` to use a real database
-- Add authentication (`auth = "jwt"` or `auth = "session"`) to views
-- Add a `CodeComponent` handler for custom business logic via WASM
-- Package the bundle with `riverpackage` for deployment
-- See `docs/arch/` for the full specification set
+- Swap the `faker` driver for `postgres`, `mysql`, or `sqlite` to use a real database. In v0.54.0 all 17 drivers (core + former plugins) are compiled into `riversd` and resolve by name — no plugin directory needed.
+- Add authentication (`auth = "session"`) to views and a guard view with `guard = true`
+- Add a `CodeComponent` handler for custom business logic via V8 or WASM
+- Run the 4-layer validation pipeline: `riverpackage validate ./address-book-bundle`
+- Enable Prometheus metrics on port 9091: `[metrics] enabled = true`
+- See `docs/arch/` for the full specification set and `docs/guide/` for the rest of the user guides

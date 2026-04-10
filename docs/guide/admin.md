@@ -1,6 +1,10 @@
 # Admin and Operations Reference
 
+**Rivers v0.54.0**
+
 This document covers administration, security, monitoring, and operational management of a Rivers deployment. All section identifiers follow the AW3 numbering scheme.
+
+> **v0.54.0 operator notes:** (1) cdylib driver plugins are disabled — all drivers are now statically compiled into `riversd`. (2) `[plugins] dir` config is deprecated and logs a warning. (3) Apps with unresolvable drivers no longer crash the whole bundle — they are isolated and return 503. (4) Metrics are now actually emitted (previously the feature scaffolding existed but no data flowed). See AW3.16, AW3.17, AW3.18 below.
 
 ---
 
@@ -430,9 +434,24 @@ rate_limit_custom_header = "X-Api-Key"     # required if strategy = custom_heade
 
 Bucket eviction occurs at 10,000 entries, removing stale or oldest buckets first.
 
-WebSocket connections use per-connection rate limiting. REST and SSE use per-IP rate limiting. Per-view overrides can be configured in individual view definitions.
+WebSocket connections use per-connection rate limiting. REST and SSE use per-IP rate limiting. Per-view overrides can be configured in individual view definitions (see below).
 
-When rate-limited, the response is `429 Too Many Requests` with `Retry-After` header.
+### Per-view rate limiting (v0.54.0)
+
+Individual views can override the global rate limit by declaring `rate_limit_per_minute` and `rate_limit_burst_size` directly on the view in `app.toml`:
+
+```toml
+[api.views.search]
+path                  = "/api/search"
+method                = "GET"
+view_type             = "Rest"
+rate_limit_per_minute = 30     # override global (120)
+rate_limit_burst_size = 10     # override global (60)
+```
+
+Per-view limits use token-bucket algorithm with **proxy-aware** client IP extraction: when the request arrives from an IP in `trusted_proxies`, the left-most entry in `X-Forwarded-For` is used as the client key. Limiters are cached per view_id.
+
+When a per-view limit is exceeded, the response is `429 Too Many Requests` with a `Retry-After` header set to the seconds remaining until the next token is available.
 
 ### CSRF protection
 
@@ -742,13 +761,18 @@ port = 9091       # default
 
 Scrape endpoint: `http://localhost:9091/metrics`
 
-Available metrics:
-- `rivers_http_requests_total` -- counter by method and status
-- `rivers_http_request_duration_ms` -- histogram by method
-- `rivers_engine_executions_total` -- counter by engine and success
-- `rivers_engine_execution_duration_ms` -- histogram by engine
-- `rivers_active_connections` -- gauge
-- `rivers_loaded_apps` -- gauge
+Available metrics (v0.54.0 — now actually wired to emit data):
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `rivers_http_requests_total` | counter | `method`, `status` |
+| `rivers_http_request_duration_ms` | histogram | `method` |
+| `rivers_active_connections` | gauge | — |
+| `rivers_engine_executions_total` | counter | `engine` (`v8` \| `dataview` \| `none`), `success` (`true` \| `false`) |
+| `rivers_engine_execution_duration_ms` | histogram | `engine` |
+| `rivers_loaded_apps` | gauge | — |
+
+All metrics are behind the `metrics` cargo feature. In deployed builds, the feature is enabled by default.
 
 ### Environment overrides
 
@@ -1080,3 +1104,181 @@ Scripts must follow this I/O contract:
 - [ ] `integrity_check = "each_time"` for sensitive commands
 - [ ] JSON Schema validation enabled for all commands that accept user input
 - [ ] `max_concurrent` limits set to prevent resource exhaustion
+
+---
+
+## AW3.16 Missing Driver Handling (v0.54.0)
+
+When an app declares datasources with drivers that cannot be resolved, the failure is isolated to that app rather than aborting the whole bundle.
+
+### Behavior
+
+- The app is **blocked from loading**. Its views are **not** registered in the router.
+- Init handlers for the failed app are **skipped**.
+- Requests to endpoints in the failed app return `503 Service Unavailable`:
+
+  ```json
+  {
+    "code": 503,
+    "message": "app 'canary-nosql' is unavailable — missing driver(s): mongodb, elasticsearch"
+  }
+  ```
+
+- Other apps in the same bundle load and serve traffic normally.
+- A structured `AppLoadFailed` event is written to `log/apps/<app>.log` listing the missing driver names and the resources that referenced them.
+
+### Operator checklist
+
+1. Check `log/apps/<app>.log` for the `AppLoadFailed` event.
+2. If the missing driver comes from a `[plugins] dir` entry, remove that config key — all drivers are now compiled into `riversd` (see AW3.18).
+3. Verify `resources.toml` uses a known driver name (`postgres`, `mysql`, `sqlite`, `redis`, `faker`, `mongodb`, `elasticsearch`, `couchdb`, `cassandra`, `ldap`, `kafka`, `rabbitmq`, `nats`, `neo4j`, `influxdb`, `redis-streams`, `exec`).
+
+### Failed app tracking
+
+`riversd` keeps a `failed_apps` registry in memory. The router middleware consults it before dispatching — any request whose app is in `failed_apps` short-circuits to 503 with the structured error body above. On a successful hot reload that fixes the missing driver, the app is removed from `failed_apps` and its views begin serving normally.
+
+---
+
+## AW3.17 Startup Bundle Validation (v0.54.0)
+
+`riversd` runs the `riverpackage` 4-layer validation pipeline at startup before loading the bundle. Invalid bundles are **rejected** before any driver is initialized.
+
+The pipeline layers:
+
+1. **Structural** — TOML parse of bundle/app manifests, `resources.toml`, `app.toml`
+2. **Existence** — all referenced files (schemas, handler modules, libraries) exist
+3. **Cross-reference** — DataViews resolve to datasources, views resolve to DataViews, services resolve
+4. **Syntax** — JSON schemas parse, TS/JS handler modules compile via V8
+
+Run the same pipeline locally or in CI with:
+
+```bash
+riverpackage validate ./my-bundle
+riverpackage validate ./my-bundle --format json
+riverpackage validate ./my-bundle --config /opt/rivers/config/riversd.toml
+```
+
+A bundle that passes `riverpackage validate` on the same Rivers version will load cleanly on the server.
+
+---
+
+## AW3.18 Static Plugin Mode and the Deprecated `[plugins] dir` (v0.54.0)
+
+### Background
+
+Prior to v0.54.0, driver plugins (`mongodb`, `elasticsearch`, `couchdb`, `cassandra`, `ldap`, `kafka`, `rabbitmq`, `nats`, `neo4j`, `influxdb`, `redis-streams`, `exec`) shipped as cdylib files in `plugins/` and were loaded by `riversd` at startup. In testing, this produced SIGABRT crashes caused by a **tokio ABI mismatch across the FFI boundary** — the tokio runtime inside the plugin and the one inside `riversd` did not agree on type layout.
+
+### Current behavior
+
+- cdylib plugin loading is **disabled**.
+- All 12 former plugin drivers, plus the 5 built-in drivers (`sqlite`, `postgres`, `mysql`, `redis`, `faker`), are compiled into the `riversd` binary via the `static-plugins` cargo feature.
+- The `[plugins] dir` config key is **deprecated**. If set, `riversd` logs a warning at startup and proceeds without loading anything from the directory.
+
+### Config migration
+
+Remove the `[plugins]` section from your `riversd.toml`:
+
+```toml
+# DELETE in v0.54.0 — no longer has any effect
+# [plugins]
+# dir = "/opt/rivers/plugins"
+```
+
+Engine dylibs (`librivers_engine_v8`, `librivers_engine_wasm`) are unaffected — they still ship as dylibs in dynamic-mode deploys under `[engines] dir`.
+
+### Future: Plugin ABI v2
+
+A new plugin ABI is planned to re-enable dynamic driver loading. It uses a **synchronous C-ABI** that avoids the tokio-across-FFI problem entirely: plugins expose blocking functions and `riversd` wraps them in `tokio::task::spawn_blocking` on its side. See `docs/arch/rivers-plugin-abi-v2-spec.md` for the design.
+
+---
+
+## AW3.19 Guard Lifecycle Hooks (v0.54.0)
+
+Guard views (views with `guard = true`, typically login endpoints) can now declare fire-and-forget lifecycle hooks that fire at key points in the session lifetime. Hooks are dispatched via `tokio::spawn` and **cannot influence the auth flow** — they run concurrently with the response and are intended for side-effects only (audit logging, metrics, external event emission).
+
+### Configuration
+
+```toml
+[api.views.login]
+path      = "/api/login"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+guard     = true
+
+[api.views.login.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/auth.ts"
+entrypoint = "login"
+
+[api.views.login.lifecycle_hooks]
+on_session_valid.module      = "libraries/handlers/audit.ts"
+on_session_valid.entrypoint  = "onSessionValid"
+on_invalid_session.module    = "libraries/handlers/audit.ts"
+on_invalid_session.entrypoint = "onInvalidSession"
+on_failed.module             = "libraries/handlers/audit.ts"
+on_failed.entrypoint         = "onLoginFailed"
+```
+
+### Hooks
+
+| Hook | Fires when |
+|------|-----------|
+| `on_session_valid` | A session validation check succeeds (e.g., a protected request arrives with a still-valid session). |
+| `on_invalid_session` | A session validation check fails (expired, revoked, unknown token). |
+| `on_failed` | Guard credentials are rejected (wrong password, unknown user). |
+
+### Contract
+
+- Hooks are **fire-and-forget**. Return values are ignored.
+- Hooks **cannot block** or extend the request. They must not perform long-running work.
+- Hooks run in the ProcessPool on a best-effort basis. A hook failure does not affect the originating request.
+- Hook handlers receive the same `ctx` shape as normal CodeComponent handlers but should treat it as read-only.
+
+---
+
+## AW3.20 DDL in Init Handlers (v0.54.0)
+
+Init handlers (TypeScript / JavaScript modules that run once per app at load time) can now execute DDL statements against a datasource via `ctx.ddl(datasource, statement)`. This is useful for creating tables, indexes, or other schema objects during app startup — for example, a canary app that wants to seed its own test schema.
+
+### Handler usage
+
+```typescript
+// libraries/handlers/init.ts
+export function init(ctx: InitContext): void {
+  ctx.ddl("orders_db", "CREATE TABLE IF NOT EXISTS audit_log (id SERIAL PRIMARY KEY, message TEXT)");
+  ctx.ddl("orders_db", "CREATE INDEX IF NOT EXISTS idx_audit_log_id ON audit_log (id)");
+}
+```
+
+### Gate 3 whitelist
+
+DDL execution is gated by a `ddl_whitelist` in `[security]`. Each entry is `"<datasource>@<app_id>"`:
+
+```toml
+[security]
+ddl_whitelist = [
+  "orders_db@c7a3e1f0-8b2d-4d6e-9f1a-3c5b7d9e2f4a",
+  "audit_db@c7a3e1f0-8b2d-4d6e-9f1a-3c5b7d9e2f4a",
+]
+```
+
+A `ctx.ddl(...)` call from an app that is not on the whitelist for the requested datasource is **rejected** at the gate. The init handler receives an error and the rejection is logged.
+
+### Events
+
+DDL calls emit structured events to the per-app log (`log/apps/<app>.log`):
+
+| Event | Level | When |
+|-------|-------|------|
+| `DdlExecuted` | Info | Statement executed successfully. |
+| `DdlFailed` | Error | Statement reached the datasource but failed (syntax error, permission denied, etc.). |
+| `DdlRejected` | Warn | Statement blocked at Gate 3 — datasource@app_id not in `ddl_whitelist`. |
+
+### Engine support
+
+`ctx.ddl` works in both execution modes:
+
+- **Static builds** — ProcessPool V8 (compiled in)
+- **Dynamic builds** — engine dylib V8 (loaded from `lib/librivers_engine_v8.dylib`)

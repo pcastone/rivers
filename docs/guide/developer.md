@@ -1,6 +1,10 @@
 # Rivers Developer Guide
 
+**Rivers v0.54.0**
+
 Build applications with TOML configuration and JSON schemas. No Rust required.
+
+> **v0.54.0:** All driver plugins are now compiled into `riversd`. There is no longer a distinction between "built-in" and "plugin" drivers from the developer's perspective — any driver name you declare will resolve if it's listed in the driver table below. See [Available Drivers](#available-drivers).
 
 ---
 
@@ -97,27 +101,33 @@ failure_threshold  = 5
 open_timeout_ms    = 30000
 ```
 
-### Available Drivers
+### Available Drivers (v0.54.0)
 
-| Driver | Type | Package |
-|--------|------|---------|
-| `postgres` | Database | Built-in |
-| `mysql` | Database | Built-in |
-| `sqlite` | Database | Built-in |
-| `redis` | Database | Built-in |
-| `memcached` | Database | Built-in |
-| `faker` | Database | Built-in (synthetic test data) |
-| `eventbus` | Database | Built-in (pub/sub) |
-| `mongodb` | Database | Plugin |
-| `elasticsearch` | Database | Plugin |
-| `cassandra` | Database | Plugin |
-| `couchdb` | Database | Plugin |
-| `influxdb` | Database | Plugin |
-| `ldap` | Database | Plugin |
-| `kafka` | Broker | Plugin |
-| `rabbitmq` | Broker | Plugin |
-| `nats` | Broker | Plugin |
-| `redis-streams` | Broker | Plugin |
+All drivers are compiled into `riversd` via the `static-plugins` cargo feature. There are no external plugin dylibs in v0.54.0.
+
+| Driver | Type | Notes |
+|--------|------|-------|
+| `postgres` | Database | Core |
+| `mysql` | Database | Core |
+| `sqlite` | Database | Core |
+| `redis` | Database | Core |
+| `memcached` | Database | Core |
+| `faker` | Database | Synthetic data generator |
+| `eventbus` | Database | Pub/sub |
+| `mongodb` | Database | Formerly cdylib, now static |
+| `elasticsearch` | Database | Formerly cdylib, now static |
+| `cassandra` | Database | Formerly cdylib, now static |
+| `couchdb` | Database | Formerly cdylib, now static |
+| `influxdb` | Database | Formerly cdylib, now static |
+| `neo4j` | Database | Formerly cdylib, now static |
+| `ldap` | Database | Formerly cdylib, now static |
+| `kafka` | Broker | Formerly cdylib, now static |
+| `rabbitmq` | Broker | Formerly cdylib, now static |
+| `nats` | Broker | Formerly cdylib, now static |
+| `redis-streams` | Broker | Formerly cdylib, now static |
+| `exec` | Database | Script runner, formerly cdylib, now static |
+
+If an app declares a datasource whose driver cannot be resolved, the app is isolated: its views are blocked from loading and endpoint requests return `503 Service Unavailable`. Other apps in the bundle load normally. See `admin.md` AW3.16 for operator details.
 
 ### Faker Driver (Testing)
 
@@ -293,6 +303,21 @@ auth = "session"    # Protected — requires valid session
 guard = true        # This view IS the login endpoint
 ```
 
+### Per-view Rate Limiting (v0.54.0)
+
+Views can override the global rate limit with their own token-bucket settings:
+
+```toml
+[api.views.search]
+path                  = "search"
+method                = "GET"
+view_type             = "Rest"
+rate_limit_per_minute = 30
+rate_limit_burst_size = 10
+```
+
+Per-view limiters use proxy-aware client IP extraction (respects `X-Forwarded-For` from `trusted_proxies`). Exceeding the limit returns `429 Too Many Requests` with a `Retry-After` header.
+
 ---
 
 ## CodeComponent Handlers (JavaScript)
@@ -361,6 +386,39 @@ function handler(ctx) {
 ```
 
 Reserved key prefixes (`session:`, `csrf:`, `poll:`, `cache:`, `rivers:`) are blocked.
+
+### Init Handlers and `ctx.ddl` (v0.54.0)
+
+Init handlers run once per app at load time. They can execute DDL statements to create tables, indexes, or other schema objects:
+
+```typescript
+// libraries/handlers/init.ts
+export function init(ctx) {
+  ctx.ddl("orders_db", "CREATE TABLE IF NOT EXISTS audit_log (id SERIAL PRIMARY KEY, message TEXT)");
+  ctx.ddl("orders_db", "CREATE INDEX IF NOT EXISTS idx_audit_log_id ON audit_log (id)");
+}
+```
+
+`ctx.ddl(datasource, statement)` executes the statement against the named datasource. DDL calls are gated by a **Gate 3 whitelist** configured in `riversd.toml`:
+
+```toml
+[security]
+ddl_whitelist = [
+  "orders_db@c7a3e1f0-8b2d-4d6e-9f1a-3c5b7d9e2f4a",
+]
+```
+
+Calls from apps not on the whitelist for the requested datasource are rejected at the gate.
+
+DDL events are logged to the per-app log:
+
+| Event | Level | When |
+|-------|-------|------|
+| `DdlExecuted` | info | Statement executed successfully |
+| `DdlFailed` | error | Statement reached the datasource but failed |
+| `DdlRejected` | warn | Blocked at Gate 3 whitelist |
+
+`ctx.ddl` works in both ProcessPool V8 (static builds) and engine dylib V8 (dynamic builds).
 
 ### `Rivers.log` (Structured Logging)
 
@@ -508,6 +566,28 @@ language   = "javascript"
 module     = "handlers/auth.js"
 entrypoint = "authenticate"
 ```
+
+### Guard Lifecycle Hooks (v0.54.0)
+
+Guard views can declare fire-and-forget lifecycle hooks that fire when session state changes. Hooks run via `tokio::spawn` and **cannot influence the auth flow** — they exist for audit logging, metrics, and external event emission.
+
+```toml
+[api.views.login.lifecycle_hooks]
+on_session_valid.module      = "handlers/audit.js"
+on_session_valid.entrypoint  = "onSessionValid"
+on_invalid_session.module    = "handlers/audit.js"
+on_invalid_session.entrypoint = "onInvalidSession"
+on_failed.module             = "handlers/audit.js"
+on_failed.entrypoint         = "onLoginFailed"
+```
+
+| Hook | Fires when |
+|------|-----------|
+| `on_session_valid` | Session validation check succeeds on a protected request. |
+| `on_invalid_session` | Session validation check fails (expired, revoked, unknown). |
+| `on_failed` | Guard credentials are rejected. |
+
+Hooks are fire-and-forget. Return values are ignored. Hooks must not block or perform long-running work — they run concurrently with the originating request and their failures do not affect it.
 
 ### WASM Handlers
 

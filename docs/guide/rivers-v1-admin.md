@@ -1,6 +1,8 @@
 # Rivers V1 Administration — Operations Spec
 
-**Rivers v0.50.1**
+**Rivers v0.54.0**
+
+> **v0.54.0 operator notes:** cdylib driver plugins are disabled — all drivers are compiled into `riversd`. The `[plugins] dir` config is deprecated. Apps with unresolvable drivers are isolated and return 503 without crashing the bundle. Bundle validation now runs a 4-layer pipeline, both in `riverpackage validate` and at `riversd` startup. Prometheus metrics are now actually emitting data.
 
 ## Environment
 
@@ -167,23 +169,31 @@ rate_limit_per_minute = 300
 
 ---
 
-## Bundle Validation
+## Bundle Validation (v0.54.0)
 
-`riversctl validate <bundle_path>` runs 9 checks against a bundle directory or archive.
+Bundle validation is now performed by `riverpackage validate` using a 4-layer pipeline. `riversd` runs the same pipeline automatically at startup — invalid bundles are rejected before drivers are initialized.
 
-`riversctl validate --schema server|app|bundle` outputs the corresponding JSON Schema.
+```bash
+riverpackage validate <bundle_path>
+riverpackage validate <bundle_path> --format json
+riverpackage validate <bundle_path> --config /opt/rivers/config/riversd.toml
+```
 
-### Validation Checks
+### Pipeline layers
 
-1. View types — validates view type values are recognized
-2. Driver names — validates driver names match registered drivers
-3. Datasource refs — validates all datasource references resolve
-4. DataView refs — validates all DataView references resolve
-5. Invalidates targets — validates invalidation targets exist
-6. Duplicate names — detects duplicate DataView/View/datasource names
-7. Schema file existence — verifies all referenced schema files exist on disk
-8. Cross-app service refs — validates inter-app service references resolve within the bundle
-9. TOML parse error context — provides line/column context for TOML syntax errors
+1. **Structural** — TOML parse of bundle `manifest.toml`, per-app `manifest.toml`, `resources.toml`, `app.toml`. Reports line/column context for syntax errors.
+2. **Existence** — all referenced files (schemas, handler modules, libraries, SPA assets) exist on disk.
+3. **Cross-reference** — DataViews resolve to declared datasources, views resolve to DataViews, `invalidates` targets exist, cross-app service references resolve within the bundle, view types are recognized, driver names match the static driver registry, no duplicate names, no orphan schema files.
+4. **Syntax** — JSON schemas parse, TS/JS handler modules compile via an embedded V8 instance (requires `--config` so the engine can be located in dynamic builds).
+
+### Startup integration
+
+`riversd` runs the 4-layer pipeline on the configured `bundle_path` before loading drivers, opening the router, or binding the listener. A validation failure prints per-layer diagnostics and exits with non-zero status.
+
+### Output formats
+
+- `--format text` (default) — human-readable per-layer output.
+- `--format json` — machine-readable; each layer reports `{ "layer": "...", "passed": bool, "errors": [...] }`.
 
 ---
 
@@ -494,10 +504,35 @@ watch_path = "./app.toml"
 - Restart HTTP server
 - Rebind sockets
 - Re-initialize connection pools
-- Reload plugins
+- Reload drivers (all drivers are statically linked in v0.54.0)
 - Re-resolve LockBox credentials
 
 MUST: Pool changes require full restart.
+
+---
+
+## Prometheus Metrics (v0.54.0)
+
+Enable the built-in Prometheus exporter:
+
+```toml
+[metrics]
+enabled = true
+port    = 9091       # default
+```
+
+Scrape endpoint: `http://localhost:9091/metrics`.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `rivers_http_requests_total` | counter | `method`, `status` |
+| `rivers_http_request_duration_ms` | histogram | `method` |
+| `rivers_active_connections` | gauge | — |
+| `rivers_engine_executions_total` | counter | `engine` (`v8` \| `dataview` \| `none`), `success` |
+| `rivers_engine_execution_duration_ms` | histogram | `engine` |
+| `rivers_loaded_apps` | gauge | — |
+
+Metrics are behind the `metrics` cargo feature, enabled by default in deployed builds. In v0.54.0 the metrics are now actually emitted — previously the feature scaffolding was present but no data flowed.
 
 ---
 
@@ -614,19 +649,42 @@ Resolution:
 2. Implement client-side backoff
 3. Use `rate_limit_strategy = "custom_header"` for API keys
 
-### Plugin Load Failures
+### Missing Driver / App Load Failures (v0.54.0)
 
-Check logs for:
+As of v0.54.0 cdylib driver plugins are disabled and all drivers are compiled into `riversd`. If an app declares a datasource with a driver that cannot be resolved, the app is isolated rather than aborting the whole bundle.
+
+Check the per-app log (`log/apps/<app>.log`) for:
+
+```
+WARN  rivers::app: AppLoadFailed
+  app             = "canary-nosql"
+  missing_drivers = ["mongodb", "elasticsearch"]
+  resources       = ["mongo_primary", "search_cluster"]
+```
+
+Requests to endpoints in the failed app return:
+
+```json
+{"code": 503, "message": "app 'canary-nosql' is unavailable — missing driver(s): mongodb, elasticsearch"}
+```
+
+Resolution:
+1. Check `log/apps/<app>.log` for `AppLoadFailed` details.
+2. If your `riversd.toml` still has `[plugins] dir = "..."`, remove it — the config key is deprecated in v0.54.0 and has no effect.
+3. Verify the driver name in `resources.toml` matches the static driver registry.
+4. Other apps in the same bundle continue serving traffic normally.
+
+### Legacy: Plugin Load Failures
+
+Prior to v0.54.0, dynamic plugin loading could fail with ABI version mismatches:
+
 ```
 ERROR rivers::plugin: PluginLoadFailed
   path   = "/var/rivers/plugins/neo4j.so"
   reason = "ABI version mismatch: expected 3, got 2"
 ```
 
-Resolution:
-1. Rebuild plugin against current Rivers SDK
-2. Verify plugin file permissions
-3. Check plugin path in config
+This path is no longer reachable in v0.54.0 — there are no cdylib plugins. Plugin ABI v2 (synchronous C-ABI) is planned to re-enable dynamic loading. See `docs/arch/rivers-plugin-abi-v2-spec.md`.
 
 ---
 

@@ -1,6 +1,8 @@
 # Rivers Application Development — Build Spec
 
-**Rivers v0.50.1**
+**Rivers v0.54.0**
+
+> **v0.54.0 changes for bundle authors:** (1) All drivers are compiled into `riversd` — no external plugin dylibs. (2) Init handlers can call `ctx.ddl()` to run DDL on app load. (3) Views support `rate_limit_per_minute` / `rate_limit_burst_size` for per-view rate limiting. (4) Guard views support fire-and-forget `lifecycle_hooks`. (5) `riverpackage validate` now runs a 4-layer validation pipeline, and `riversd` runs the same pipeline at startup.
 
 ## What You Are Building
 
@@ -170,7 +172,9 @@ required = true
 
 MUST: `appId` matches the app-service's `manifest.toml` appId exactly.
 
-### Supported Drivers
+### Supported Drivers (v0.54.0)
+
+All drivers are compiled into `riversd` — there are no external plugin dylibs in v0.54.0.
 
 | Driver | x-type | Credentials | Use Case |
 |--------|--------|-------------|----------|
@@ -179,9 +183,21 @@ MUST: `appId` matches the app-service's `manifest.toml` appId exactly.
 | `mysql` | `mysql` | lockbox | Relational data |
 | `sqlite` | `sqlite` | `nopassword = true` | Embedded relational |
 | `redis` | `redis` | lockbox | Cache, sessions, KV, streams |
+| `mongodb` | `mongodb` | lockbox | Document store |
+| `elasticsearch` | `elasticsearch` | optional | Search / analytics |
+| `couchdb` | `couchdb` | lockbox | Document store |
+| `cassandra` | `cassandra` | lockbox | Wide-column |
+| `neo4j` | `neo4j` | lockbox | Graph |
+| `influxdb` | `influxdb` | lockbox | Time-series |
+| `ldap` | `ldap` | lockbox | Directory |
 | `http` | `http` | optional | External API proxy |
 | `kafka` | `kafka` | lockbox | Message streaming |
-| `ldap` | `ldap` | lockbox | Directory |
+| `rabbitmq` | `rabbitmq` | lockbox | Message queue |
+| `nats` | `nats` | optional | Message broker |
+| `redis-streams` | `redis-streams` | lockbox | Stream broker |
+| `rivers-exec` | `exec` | `nopassword = true` | Script execution |
+
+If a declared driver cannot be resolved at startup, the entire app is blocked from loading and its endpoints return `503 Service Unavailable`. Other apps in the bundle load normally.
 
 ---
 
@@ -624,6 +640,76 @@ resources  = ["users_db"]
 |-------|--------|-------|
 | `auth` | `"none"`, `"session"` | `"none"` — no authentication check; `"session"` — requires valid session token |
 | `guard` | `true`, `false` | When `true`, marks this view as a login/auth guard endpoint that creates sessions |
+| `rate_limit_per_minute` | integer | v0.54.0 — per-view token-bucket limit (overrides global) |
+| `rate_limit_burst_size` | integer | v0.54.0 — burst capacity for per-view limit |
+
+### Per-view Rate Limiting (v0.54.0)
+
+Views can declare their own token-bucket rate limits:
+
+```toml
+[api.views.search]
+path                  = "/api/search"
+method                = "GET"
+view_type             = "Rest"
+rate_limit_per_minute = 30
+rate_limit_burst_size = 10
+```
+
+Client IP is proxy-aware: when the request comes from a trusted proxy, the left-most `X-Forwarded-For` entry is used as the key. Per-view limiters are cached by view_id. Exceeding the limit returns `429 Too Many Requests` with a `Retry-After` header.
+
+### Guard Lifecycle Hooks (v0.54.0)
+
+Guard views can declare fire-and-forget hooks that fire on session state changes. Hooks run via `tokio::spawn` and **cannot influence the auth flow** — use them only for audit logging, metrics, or external event emission.
+
+```toml
+[api.views.login]
+path      = "/api/login"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+guard     = true
+
+[api.views.login.lifecycle_hooks]
+on_session_valid.module       = "libraries/handlers/audit.ts"
+on_session_valid.entrypoint   = "onSessionValid"
+on_invalid_session.module     = "libraries/handlers/audit.ts"
+on_invalid_session.entrypoint = "onInvalidSession"
+on_failed.module              = "libraries/handlers/audit.ts"
+on_failed.entrypoint          = "onLoginFailed"
+```
+
+| Hook | Fires when |
+|------|-----------|
+| `on_session_valid` | Session validation succeeds on a protected request. |
+| `on_invalid_session` | Session validation fails (expired, revoked, unknown). |
+| `on_failed` | Guard credentials rejected. |
+
+MUST NOT: Block or perform long-running work in a hook — they run concurrently with the request and their return values are ignored.
+
+### Init Handlers and `ctx.ddl` (v0.54.0)
+
+Apps can declare an init handler that runs once on app load. Init handlers can execute DDL via `ctx.ddl(datasource, statement)` — useful for seeding test schemas in canary apps or creating audit tables at deploy time.
+
+```typescript
+// libraries/handlers/init.ts
+export function init(ctx: InitContext): void {
+  ctx.ddl("orders_db", "CREATE TABLE IF NOT EXISTS audit_log (id SERIAL PRIMARY KEY, message TEXT)");
+}
+```
+
+DDL is gated by a **Gate 3 whitelist** in `riversd.toml` (admin-controlled, not bundle-controlled):
+
+```toml
+[security]
+ddl_whitelist = [
+  "orders_db@c7a3e1f0-8b2d-4d6e-9f1a-3c5b7d9e2f4a",
+]
+```
+
+Calls from apps not on the whitelist for the requested datasource are rejected at the gate. DDL events (`DdlExecuted`, `DdlFailed`, `DdlRejected`) are logged to the per-app log.
+
+Init handlers do **not** run for apps that are blocked by the missing-driver check — the app is isolated before init.
 
 ---
 
@@ -757,6 +843,11 @@ MUST: Append decisions, gaps, and ambiguities — never replace.
 # Build SPA (if applicable)
 cd {app-main}/libraries && npm install && npm run build
 
+# v0.54.0 — run the 4-layer validation pipeline before deploying
+riverpackage validate ./{bundle-name}
+riverpackage validate ./{bundle-name} --format json
+riverpackage validate ./{bundle-name} --config /opt/rivers/config/riversd.toml
+
 # Start services first
 riversd --config {app-service}/app.toml
 
@@ -770,6 +861,15 @@ curl "http://localhost:{port}/api/{endpoint}?limit=10"
 # SPA
 open http://localhost:{port}
 ```
+
+The `riverpackage validate` pipeline runs four layers:
+
+1. **Structural** — TOML parse of bundle/app manifests, `resources.toml`, `app.toml`
+2. **Existence** — all referenced files (schemas, handler modules, libraries) exist
+3. **Cross-reference** — DataViews resolve to datasources, views resolve to DataViews, services resolve
+4. **Syntax** — JSON schemas parse, TS/JS handler modules compile via V8
+
+`riversd` runs the same pipeline at startup. A bundle that passes `riverpackage validate` on the same Rivers version loads cleanly on the server.
 
 ---
 
