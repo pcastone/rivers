@@ -7,6 +7,7 @@ pub mod admin_handlers;
 pub mod tls;
 pub mod cli;
 pub mod backpressure;
+pub mod circuit_breaker;
 pub mod broker_bridge;
 pub mod bundle_diff;
 pub mod bundle_loader;
