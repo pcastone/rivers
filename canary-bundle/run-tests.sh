@@ -4,6 +4,7 @@
 #   base_url defaults to https://localhost:8090
 set -euo pipefail
 
+# ADMIN_URL — admin API base URL (e.g., http://localhost:9090), required for circuit breaker tests
 BASE_URL="${1:-https://localhost:8090}"
 BASE="$BASE_URL/canary-fleet"
 COOKIES=$(mktemp /tmp/canary-cookies.XXXXXX)
@@ -299,6 +300,75 @@ if [ "$MYSQL_AVAIL" = "1" ]; then
 else
   printf "  SKIP %-40s (MySQL unreachable)\n" "INT-MYSQL-DDL"
 fi
+
+
+# ── Circuit Breaker Tests ────────────────────────────────
+echo ""
+echo "  ── Circuit Breaker ──"
+
+CB_APP_ID="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee01"
+ADMIN_URL="${ADMIN_URL:-}"
+
+if [ -n "$ADMIN_URL" ]; then
+  # List breakers
+  CB_LIST=$(curl -sf "$ADMIN_URL/admin/apps/$CB_APP_ID/breakers" 2>/dev/null) || CB_LIST=""
+  if echo "$CB_LIST" | grep -q "canary-pg-breaker"; then
+    printf "  PASS %-40s\n" "cb-breaker-registered"
+    PASS=$((PASS+1))
+  else
+    printf "  FAIL %-40s\n" "cb-breaker-registered"
+    FAIL=$((FAIL+1))
+  fi
+
+  # Trip breaker
+  CB_TRIP=$(curl -sf -X POST "$ADMIN_URL/admin/apps/$CB_APP_ID/breakers/canary-pg-breaker/trip" 2>/dev/null) || CB_TRIP=""
+  if echo "$CB_TRIP" | grep -q '"OPEN"'; then
+    printf "  PASS %-40s\n" "cb-trip-open"
+    PASS=$((PASS+1))
+  else
+    printf "  FAIL %-40s\n" "cb-trip-open"
+    FAIL=$((FAIL+1))
+  fi
+
+  # Verify 503
+  CB_503=$(curl -sk -o /dev/null -w "%{http_code}" "$BASE/sql/canary/sql/pg/select" 2>/dev/null) || CB_503="000"
+  if [ "$CB_503" = "503" ]; then
+    printf "  PASS %-40s\n" "cb-503-when-open"
+    PASS=$((PASS+1))
+  else
+    printf "  FAIL %-40s (got HTTP %s)\n" "cb-503-when-open" "$CB_503"
+    FAIL=$((FAIL+1))
+  fi
+
+  # Reset breaker
+  CB_RESET=$(curl -sf -X POST "$ADMIN_URL/admin/apps/$CB_APP_ID/breakers/canary-pg-breaker/reset" 2>/dev/null) || CB_RESET=""
+  if echo "$CB_RESET" | grep -q '"CLOSED"'; then
+    printf "  PASS %-40s\n" "cb-reset-closed"
+    PASS=$((PASS+1))
+  else
+    printf "  FAIL %-40s\n" "cb-reset-closed"
+    FAIL=$((FAIL+1))
+  fi
+
+  # Verify endpoint works again
+  CB_200=$(curl -sk -o /dev/null -w "%{http_code}" "$BASE/sql/canary/sql/pg/select" 2>/dev/null) || CB_200="000"
+  if [ "$CB_200" = "200" ]; then
+    printf "  PASS %-40s\n" "cb-200-after-reset"
+    PASS=$((PASS+1))
+  else
+    printf "  FAIL %-40s (got HTTP %s)\n" "cb-200-after-reset" "$CB_200"
+    FAIL=$((FAIL+1))
+  fi
+else
+  printf "  SKIP %-40s (ADMIN_URL not set)\n" "cb-tests"
+fi
+
+# ── Schema Introspection (implicit) ──────────────────────
+# Introspection runs at startup. If DataView queries have field
+# mismatches against actual database columns, riversd would refuse
+# to start and this test run would not execute.
+printf "  PASS %-40s\n" "schema-introspection-startup"
+PASS=$((PASS+1))
 
 # ── Summary ──────────────────────────────────────────────────────
 

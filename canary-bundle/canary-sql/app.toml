@@ -10,6 +10,7 @@ port               = 5432
 database           = "rivers"
 username           = "rivers"
 credentials_source = "lockbox://postgres/test"
+introspect         = true
 
 [data.datasources.canary-mysql]
 name               = "canary-mysql"
@@ -69,9 +70,11 @@ type = "integer"
 required = true
 
 [data.dataviews.pg_select_all]
-name       = "pg_select_all"
-datasource = "canary-pg"
-query      = "SELECT id, zname, age FROM canary_records"
+name             = "pg_select_all"
+datasource       = "canary-pg"
+query            = "SELECT id, zname, age FROM canary_records"
+circuitBreakerId = "canary-pg-breaker"
+prepared         = true
 
 [data.dataviews.pg_update]
 name       = "pg_update"
