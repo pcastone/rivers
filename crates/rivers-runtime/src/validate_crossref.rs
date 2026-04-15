@@ -333,7 +333,8 @@ fn check_view_refs(
         match &view.handler {
             HandlerConfig::Dataview { dataview } => {
                 // X008: Dataview handler only valid for view_type=Rest
-                if view_type != "Rest" {
+                // Exception: SSE views with polling use dataview as the poll source
+                if view_type != "Rest" && !(view_type == "ServerSentEvents" && view.polling.is_some()) {
                     results.push(
                         ValidationResult::fail(
                             error_codes::X008,
