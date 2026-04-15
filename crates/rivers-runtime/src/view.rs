@@ -113,6 +113,28 @@ pub struct ApiViewConfig {
 
     /// Event handler for MessageConsumer views.
     pub on_event: Option<OnEventConfig>,
+
+    // ── MCP fields ───────────────────────────────────────────────────
+
+    /// MCP tool declarations — whitelisted DataViews exposed as MCP tools.
+    #[serde(default)]
+    pub tools: HashMap<String, McpToolConfig>,
+
+    /// MCP resource declarations — read-only DataViews exposed as MCP resources.
+    #[serde(default)]
+    pub resources: HashMap<String, McpResourceConfig>,
+
+    /// MCP prompt declarations — markdown templates for AI workflows.
+    #[serde(default)]
+    pub prompts: HashMap<String, McpPromptConfig>,
+
+    /// Path to static instructions markdown file (relative to app root).
+    #[serde(default)]
+    pub instructions: Option<String>,
+
+    /// MCP session configuration.
+    #[serde(default)]
+    pub session: Option<McpSessionConfig>,
 }
 
 /// Guard lifecycle hooks — all optional, all side-effects only.
@@ -307,6 +329,8 @@ fn default_diff_strategy() -> String {
     "hash".to_string()
 }
 
+fn default_true() -> bool { true }
+
 /// `on_change` handler — invoked when polled data changes.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct OnChangeConfig {
@@ -324,3 +348,110 @@ pub struct ChangeDetectConfig {
     /// Function name within the module.
     pub entrypoint: String,
 }
+
+// ── MCP Config Types ─────────────────────────────────────
+
+/// MCP tool declaration — maps a DataView to an MCP tool.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct McpToolConfig {
+    /// Target DataView name.
+    pub dataview: String,
+    /// Human-readable description for the AI model.
+    #[serde(default)]
+    pub description: String,
+    /// HTTP method (GET/POST/PUT/DELETE) when DataView supports multiple.
+    #[serde(default)]
+    pub method: Option<String>,
+    /// Tool behavior hints for the AI model.
+    #[serde(default)]
+    pub hints: McpToolHints,
+}
+
+/// MCP tool behavior hints.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpToolHints {
+    /// Tool does not modify state.
+    #[serde(default)]
+    pub read_only: bool,
+    /// Tool may perform destructive operations.
+    #[serde(default = "default_true")]
+    pub destructive: bool,
+    /// Safe to retry without side effects.
+    #[serde(default)]
+    pub idempotent: bool,
+    /// Tool interacts with external systems.
+    #[serde(default = "default_true")]
+    pub open_world: bool,
+}
+
+impl Default for McpToolHints {
+    fn default() -> Self {
+        Self {
+            read_only: false,
+            destructive: true,
+            idempotent: false,
+            open_world: true,
+        }
+    }
+}
+
+/// MCP resource declaration — read-only DataView exposure.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct McpResourceConfig {
+    /// Target DataView name (GET method only).
+    pub dataview: String,
+    /// Human-readable description.
+    #[serde(default)]
+    pub description: String,
+    /// MIME type for the resource. Default: "application/json".
+    #[serde(default = "default_mime")]
+    pub mime_type: String,
+}
+
+fn default_mime() -> String { "application/json".into() }
+
+/// MCP prompt declaration — markdown template with argument substitution.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct McpPromptConfig {
+    /// Human-readable description.
+    #[serde(default)]
+    pub description: String,
+    /// Path to markdown template file (relative to app bundle root).
+    #[serde(default)]
+    pub template: String,
+    /// Prompt arguments for template substitution.
+    #[serde(default)]
+    pub arguments: Vec<McpPromptArgument>,
+}
+
+/// A single prompt argument.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct McpPromptArgument {
+    /// Argument name (matches {placeholder} in template).
+    pub name: String,
+    /// Human-readable description.
+    #[serde(default)]
+    pub description: String,
+    /// Whether this argument is required.
+    #[serde(default)]
+    pub required: bool,
+    /// Default value when not provided.
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
+/// MCP session configuration.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpSessionConfig {
+    /// Session TTL in seconds. Default: 3600 (1 hour).
+    #[serde(default = "default_mcp_ttl")]
+    pub ttl_seconds: u64,
+}
+
+impl Default for McpSessionConfig {
+    fn default() -> Self {
+        Self { ttl_seconds: 3600 }
+    }
+}
+
+fn default_mcp_ttl() -> u64 { 3600 }

@@ -67,6 +67,11 @@ mod tests {
             ws_hooks: None,
             on_event: None,
             polling: None,
+            tools: HashMap::new(),
+            resources: HashMap::new(),
+            prompts: HashMap::new(),
+            instructions: None,
+            session: None,
         }
     }
 

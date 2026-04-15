@@ -100,6 +100,7 @@ const VIEW_FIELDS: &[&str] = &[
     "sse_trigger_events", "sse_event_buffer_size",
     "session_revalidation_interval_s", "polling", "event_handlers",
     "on_stream", "ws_hooks", "on_event",
+    "tools", "resources", "prompts", "instructions", "session",
 ];
 const VIEW_REQUIRED: &[&str] = &["path", "method", "view_type", "handler"];
 

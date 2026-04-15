@@ -311,6 +311,11 @@ mod tests {
                 on_stream: None,
                 ws_hooks: None,
                 on_event: None,
+                tools: HashMap::new(),
+                resources: HashMap::new(),
+                prompts: HashMap::new(),
+                instructions: None,
+                session: None,
             });
         }
 

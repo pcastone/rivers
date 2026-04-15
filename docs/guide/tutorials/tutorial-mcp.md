@@ -1,0 +1,462 @@
+# Tutorial: MCP (Model Context Protocol)
+
+**Rivers v0.54.0**
+
+## Overview
+
+MCP (Model Context Protocol) exposes your DataViews as AI-consumable tools via JSON-RPC 2.0. By configuring an MCP view, you enable AI models (Claude, ChatGPT, etc.) to discover and call your data operations as first-class tools in their agentic workflows.
+
+MCP in Rivers includes three capabilities:
+
+- **Tools** — Whitelisted DataViews exposed as callable tools with descriptions, parameters, and AI hints
+- **Resources** — Read-only DataViews available as context data (markdown, JSON, etc.)
+- **Prompts** — Markdown templates with argument substitution for AI instruction workflows
+
+This tutorial covers adding an MCP view to your app, testing it with curl, and configuring tools, resources, and prompts.
+
+## Prerequisites
+
+- A running Rivers instance (see the [Getting Started tutorial](tutorial-getting-started.md))
+- A bundle with DataViews configured (or use the address-book bundle)
+- `curl` for testing MCP JSON-RPC calls
+
+---
+
+## Step 1: Add MCP to Your App
+
+Open your app's `app.toml` file and add an MCP view:
+
+```toml
+[api.views.mcp]
+path      = "/mcp"
+view_type = "Mcp"
+method    = "POST"
+auth      = "none"
+```
+
+This creates a JSON-RPC 2.0 endpoint at `POST /mcp` that accepts `initialize`, `tools/list`, `tools/call`, `resources/list`, `prompts/list`, and other MCP methods.
+
+Reload the bundle:
+
+```bash
+/opt/rivers/bin/riversctl doctor --fix
+/opt/rivers/bin/riversctl stop
+/opt/rivers/bin/riversctl start
+```
+
+---
+
+## Step 2: Expose DataViews as Tools
+
+Add a `tools` section to your MCP view to expose DataViews as callable tools:
+
+```toml
+[api.views.mcp.tools.search_contacts]
+dataview    = "search_contacts"
+description = "Search contacts by name or email"
+hints       = { read_only = true }
+
+[api.views.mcp.tools.list_all_contacts]
+dataview    = "list_contacts"
+description = "List all contacts in the system"
+hints       = { read_only = true }
+```
+
+Each tool maps a named DataView and provides:
+
+| Field | Purpose |
+|-------|---------|
+| **dataview** | The DataView name to expose (must exist in `data.dataviews`) |
+| **description** | Human-readable text explaining what the tool does (shown to AI) |
+| **method** | Optional: HTTP method override (GET/POST/PUT/DELETE) |
+| **hints** | Tool behavior hints for the AI model |
+
+### Tool Hints
+
+Tool hints inform the AI about the tool's behavior:
+
+```toml
+[api.views.mcp.tools.update_contact]
+dataview    = "update_contact"
+description = "Update a contact's information"
+hints       = { 
+  read_only     = false,      # True if the tool doesn't modify state
+  destructive   = true,       # True if the tool can delete data
+  idempotent    = true,       # True if safe to retry
+  open_world    = true        # True if tool talks to external systems
+}
+```
+
+---
+
+## Step 3: Test with curl
+
+### Initialize
+
+First, establish an MCP session by calling `initialize`:
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {}
+  }'
+```
+
+Expected response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "protocolVersion": "2024-11-05",
+    "serverInfo": {
+      "name": "rivers-mcp",
+      "version": "0.54.0"
+    },
+    "capabilities": {
+      "tools": { "listChanged": false }
+    }
+  }
+}
+```
+
+### List Tools
+
+Request the list of available tools:
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "tools/list",
+    "params": {}
+  }'
+```
+
+Expected response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "tools": [
+      {
+        "name": "search_contacts",
+        "description": "Search contacts by name or email",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Search term"
+            }
+          },
+          "required": ["query"]
+        }
+      },
+      {
+        "name": "list_all_contacts",
+        "description": "List all contacts in the system",
+        "inputSchema": { "type": "object", "properties": {} }
+      }
+    ]
+  }
+}
+```
+
+### Call a Tool
+
+Ask the MCP server to call a tool on your behalf:
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "tools/call",
+    "params": {
+      "name": "search_contacts",
+      "arguments": {
+        "query": "john"
+      }
+    }
+  }'
+```
+
+Expected response (results depend on your datasource):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "[{\"id\":\"123\",\"name\":\"John Doe\",\"email\":\"john@example.com\"}]"
+      }
+    ]
+  }
+}
+```
+
+### Error Handling
+
+If you call a method that doesn't exist, you receive a standard JSON-RPC error:
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 4,
+    "method": "nonexistent",
+    "params": {}
+  }'
+```
+
+Expected response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "error": {
+    "code": -32601,
+    "message": "Method not found"
+  }
+}
+```
+
+---
+
+## Step 4: Add Resources
+
+MCP resources expose read-only DataViews as context data for AI models:
+
+```toml
+[api.views.mcp.resources.contact_schema]
+dataview    = "get_contact_schema"
+description = "JSON schema for contact objects"
+mime_type   = "application/json"
+```
+
+To list resources:
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 5,
+    "method": "resources/list",
+    "params": {}
+  }'
+```
+
+To read a resource:
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 6,
+    "method": "resources/read",
+    "params": {
+      "uri": "contact_schema"
+    }
+  }'
+```
+
+---
+
+## Step 5: Add Prompts
+
+MCP prompts are markdown templates with argument substitution. You can guide AI workflows with custom instructions:
+
+```toml
+[api.views.mcp.prompts.contact_workflow]
+description = "Workflow for searching and updating contacts"
+template    = "libraries/prompts/contact-workflow.md"
+
+[[api.views.mcp.prompts.contact_workflow.arguments]]
+name        = "task"
+description = "The task to perform: search, list, or update"
+required    = true
+
+[[api.views.mcp.prompts.contact_workflow.arguments]]
+name        = "query"
+description = "Optional search query"
+required    = false
+default     = ""
+```
+
+Create the markdown template at `libraries/prompts/contact-workflow.md`:
+
+```markdown
+# Contact Workflow
+
+## Task: {task}
+
+You are helping with contact management. The available tools are:
+- `search_contacts`: Search for contacts by name or email
+- `list_all_contacts`: Get all contacts
+- `update_contact`: Modify an existing contact
+
+Your goal is to: {task}
+
+{query:
+  Search criteria: {query}
+}
+```
+
+To list prompts:
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 7,
+    "method": "prompts/list",
+    "params": {}
+  }'
+```
+
+To get a prompt with arguments:
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 8,
+    "method": "prompts/get",
+    "params": {
+      "name": "contact_workflow",
+      "arguments": {
+        "task": "search for all customers in New York",
+        "query": "city=New York"
+      }
+    }
+  }'
+```
+
+---
+
+## Step 6: Session Management
+
+MCP sessions are stateful and identified by the `Mcp-Session-Id` header. Sessions persist for a configurable TTL (default: 1 hour).
+
+### Create a Session
+
+The first `initialize` call creates a session. The server returns a session ID in the response:
+
+```bash
+RESPONSE=$(curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {}
+  }')
+
+# Extract the session ID from response headers if provided
+SESSION_ID=$(echo "$RESPONSE" | grep -o "Mcp-Session-Id: [^[:space:]]*" | cut -d' ' -f2) || SESSION_ID="default"
+```
+
+### Use an Existing Session
+
+Include the session ID in subsequent requests:
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -H "Mcp-Session-Id: $SESSION_ID" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "tools/list",
+    "params": {}
+  }'
+```
+
+### Configure Session TTL
+
+In your MCP view, optionally set a custom session TTL:
+
+```toml
+[api.views.mcp.session]
+ttl_seconds = 7200  # 2 hours
+```
+
+---
+
+## Step 7: Validation and Best Practices
+
+### Validation During Bundle Load
+
+When you deploy a bundle, `riverpackage validate` checks MCP configurations:
+
+- All referenced DataViews must exist
+- Tool descriptions are recommended but optional
+- Resources must map to read-only DataViews (no writes)
+- Prompt templates must exist at the specified path
+
+**Example:**
+
+```bash
+riverpackage validate canary-bundle
+```
+
+If validation succeeds:
+
+```
+Bundle:     canary-bundle
+✓ Structure validation
+✓ Existence validation
+✓ Cross-reference validation
+  (mcp tools: search_contacts, list_all_contacts)
+✓ Syntax validation
+```
+
+### Best Practices
+
+1. **Use clear tool descriptions** — AI models use descriptions to decide whether to call a tool. Be specific about what the tool does and what parameters it expects.
+
+2. **Keep tools focused** — Expose one logical operation per tool. Don't bundle unrelated queries into a single tool.
+
+3. **Mark read-only tools** — Set `hints = { read_only = true }` for tools that don't modify state. This helps AI models understand the cost of calling the tool.
+
+4. **Document required parameters** — DataView parameters become tool input schema fields. Document them in your DataView configuration.
+
+5. **Use resources for context** — Instead of expecting the AI to discover schema information, expose it via resources. This ensures the AI has accurate information about your API.
+
+6. **Test with a real AI client** — While curl works for basic testing, test your MCP configuration with an actual AI client (Claude Desktop, ChatGPT, etc.) to verify parameter handling and response format.
+
+---
+
+## Summary
+
+This tutorial covered:
+
+1. **Adding MCP to your app** — Create an `[api.views.mcp]` view with POST method
+2. **Exposing tools** — Map DataViews to tools with `[api.views.mcp.tools.*]` sections
+3. **Testing with curl** — Initialize, list tools, and call tools via JSON-RPC
+4. **Adding resources** — Expose read-only DataViews as context data
+5. **Adding prompts** — Create markdown templates for AI workflows
+6. **Session management** — Understand MCP session lifecycle and TTL
+7. **Validation** — Verify MCP configurations during bundle deployment
+
+MCP makes your Rivers application discoverable and accessible to AI models, enabling powerful AI-assisted workflows without custom code.

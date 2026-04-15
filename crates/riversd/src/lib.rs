@@ -44,3 +44,5 @@ pub mod task_enrichment;
 pub mod transaction;
 pub mod view_engine;
 pub mod websocket;
+/// MCP view type — JSON-RPC dispatcher for AI tool access.
+pub mod mcp;

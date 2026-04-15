@@ -39,6 +39,11 @@ fn rest_view(method: &str, path: &str, dataview: &str) -> ApiViewConfig {
         ws_hooks: None,
         on_event: None,
         polling: None,
+        tools: HashMap::new(),
+        resources: HashMap::new(),
+        prompts: HashMap::new(),
+        instructions: None,
+        session: None,
     }
 }
 
@@ -76,6 +81,11 @@ fn codecomponent_view(method: &str, path: &str) -> ApiViewConfig {
         ws_hooks: None,
         on_event: None,
         polling: None,
+        tools: HashMap::new(),
+        resources: HashMap::new(),
+        prompts: HashMap::new(),
+        instructions: None,
+        session: None,
     }
 }
 

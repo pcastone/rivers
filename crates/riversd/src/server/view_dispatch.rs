@@ -160,6 +160,9 @@ async fn view_dispatch_handler(
         "Websocket" => {
             return execute_ws_view(ctx, request, matched).await;
         }
+        "Mcp" => {
+            return execute_mcp_view(ctx, request, matched).await;
+        }
         _ => {
             // Rest (default) or streaming Rest — falls through to body extraction below
         }
@@ -430,6 +433,154 @@ async fn view_dispatch_handler(
         Err(e) => {
             error_response::map_view_error(&e, Some(&trace_id))
                 .into_axum_response()
+        }
+    }
+}
+
+/// Handle an MCP view — JSON-RPC 2.0 dispatch over HTTP POST.
+async fn execute_mcp_view(
+    ctx: AppContext,
+    request: axum::http::Request<axum::body::Body>,
+    matched: MatchedRoute,
+) -> axum::response::Response {
+    // Extract session header BEFORE consuming body (into_body() moves the request)
+    let session_id = request.headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Read POST body (max 16 MiB)
+    let bytes = match axum::body::to_bytes(request.into_body(), 16 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => {
+            let resp = crate::mcp::jsonrpc::JsonRpcResponse::parse_error();
+            return axum::Json(resp).into_response();
+        }
+    };
+
+    // Parse JSON body
+    let body: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => {
+            let resp = crate::mcp::jsonrpc::JsonRpcResponse::parse_error();
+            return axum::Json(resp).into_response();
+        }
+    };
+
+    let tools = &matched.config.tools;
+    let resources = &matched.config.resources;
+    let prompts = &matched.config.prompts;
+    let instructions = matched.config.instructions.as_deref();
+    let app_id = &matched.app_id;
+    let dv_namespace = &matched.app_entry_point;
+
+    // Resolve app_dir from the loaded bundle using the app entry point slug
+    let app_dir_buf = ctx.loaded_bundle.as_ref()
+        .and_then(|b| b.apps.iter().find(|a| {
+            a.manifest.entry_point.as_deref() == Some(dv_namespace.as_str())
+                || a.manifest.app_entry_point.as_deref() == Some(dv_namespace.as_str())
+        }))
+        .map(|a| a.app_dir.clone())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let app_dir = app_dir_buf.as_path();
+
+    // Session TTL from config (default 3600s)
+    let session_ttl = matched.config.session
+        .as_ref()
+        .map(|s| s.ttl_seconds)
+        .unwrap_or(3600);
+
+    // Handle batch or single request
+    if let Some(batch) = body.as_array() {
+        let mut responses = Vec::new();
+        for item in batch {
+            match serde_json::from_value::<crate::mcp::jsonrpc::JsonRpcRequest>(item.clone()) {
+                Ok(req) => {
+                    if req.id.is_some() {
+                        // Session validation for non-initialize methods in batch
+                        if req.method != "initialize" && req.method != "ping" {
+                            if let Some(ref storage) = ctx.storage_engine {
+                                let valid = match &session_id {
+                                    Some(sid) => crate::mcp::session::validate_session(storage, sid, session_ttl).await,
+                                    None => false,
+                                };
+                                if !valid {
+                                    let resp = crate::mcp::jsonrpc::JsonRpcResponse::session_required(req.id.clone());
+                                    responses.push(serde_json::to_value(&resp).unwrap_or_default());
+                                    continue;
+                                }
+                            }
+                        }
+                        let resp = crate::mcp::dispatch::dispatch(
+                            &ctx, &req, tools, resources, prompts, app_id, dv_namespace, app_dir, instructions,
+                        ).await;
+                        responses.push(serde_json::to_value(&resp).unwrap_or_default());
+                    }
+                    // Notifications (no id) produce no response per JSON-RPC 2.0
+                }
+                Err(_) => {
+                    let resp = crate::mcp::jsonrpc::JsonRpcResponse::invalid_request(None);
+                    responses.push(serde_json::to_value(&resp).unwrap_or_default());
+                }
+            }
+        }
+        axum::Json(serde_json::Value::Array(responses)).into_response()
+    } else {
+        match serde_json::from_value::<crate::mcp::jsonrpc::JsonRpcRequest>(body) {
+            Ok(req) => {
+                if req.id.is_none() {
+                    // Notification — no response per JSON-RPC 2.0 spec
+                    return axum::http::StatusCode::NO_CONTENT.into_response();
+                }
+
+                // For non-initialize methods: validate session
+                if req.method != "initialize" && req.method != "ping" {
+                    if let Some(ref storage) = ctx.storage_engine {
+                        let valid = match &session_id {
+                            Some(sid) => crate::mcp::session::validate_session(storage, sid, session_ttl).await,
+                            None => false,
+                        };
+                        if !valid {
+                            let resp = crate::mcp::jsonrpc::JsonRpcResponse::session_required(req.id.clone());
+                            return axum::Json(resp).into_response();
+                        }
+                    }
+                }
+
+                let resp = crate::mcp::dispatch::dispatch(
+                    &ctx, &req, tools, resources, prompts, app_id, dv_namespace, app_dir, instructions,
+                ).await;
+
+                // For initialize: create session and attach Mcp-Session-Id header
+                if req.method == "initialize" {
+                    if let Some(ref storage) = ctx.storage_engine {
+                        match crate::mcp::session::create_session(storage, session_ttl).await {
+                            Ok(new_sid) => {
+                                let body_str = serde_json::to_string(&resp).unwrap_or_default();
+                                let mut response = axum::response::Response::builder()
+                                    .status(200)
+                                    .header("content-type", "application/json");
+                                if let Ok(hv) = axum::http::HeaderValue::from_str(&new_sid) {
+                                    response = response.header("mcp-session-id", hv);
+                                }
+                                return response
+                                    .body(axum::body::Body::from(body_str))
+                                    .unwrap_or_else(|_| axum::Json(resp).into_response());
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "failed to create MCP session");
+                                // Return response without session header rather than failing
+                            }
+                        }
+                    }
+                }
+
+                axum::Json(resp).into_response()
+            }
+            Err(_) => {
+                let resp = crate::mcp::jsonrpc::JsonRpcResponse::invalid_request(None);
+                axum::Json(resp).into_response()
+            }
         }
     }
 }

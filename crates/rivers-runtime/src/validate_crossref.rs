@@ -117,6 +117,143 @@ pub fn validate_crossref(bundle: &LoadedBundle) -> Vec<ValidationResult> {
 
         // QP: Parameter mapping validation
         check_parameter_mappings(app, &mut results);
+
+        // ── MCP Validation (rivers-mcp-view-spec §12) ──────────────
+        {
+            let mcp_views: Vec<(&str, &crate::view::ApiViewConfig)> = app.config.api.views.iter()
+                .filter(|(_, v)| v.view_type == "Mcp")
+                .map(|(name, v)| (name.as_str(), v))
+                .collect();
+
+            // VAL-7: Only one MCP view per app
+            if mcp_views.len() > 1 {
+                let names: Vec<&str> = mcp_views.iter().map(|(n, _)| *n).collect();
+                results.push(ValidationResult::fail(
+                    "MCP-VAL-7",
+                    &format!("{}/app.toml", app.manifest.app_name),
+                    format!("only one MCP view allowed per app, found {}: {}", names.len(), names.join(", ")),
+                ));
+            }
+
+            for (view_name, view_config) in &mcp_views {
+                // VAL-1: Tool DataView references
+                for (tool_name, tool_config) in &view_config.tools {
+                    if !app.config.data.dataviews.contains_key(&tool_config.dataview) {
+                        results.push(ValidationResult::fail(
+                            "MCP-VAL-1",
+                            &format!("{}/app.toml", app.manifest.app_name),
+                            format!("MCP tool '{}' references undeclared DataView '{}'", tool_name, tool_config.dataview),
+                        ));
+                    }
+                }
+
+                // VAL-2: Resource DataView references
+                for (resource_name, resource_config) in &view_config.resources {
+                    if !app.config.data.dataviews.contains_key(&resource_config.dataview) {
+                        results.push(ValidationResult::fail(
+                            "MCP-VAL-2",
+                            &format!("{}/app.toml", app.manifest.app_name),
+                            format!("MCP resource '{}' references undeclared DataView '{}'", resource_name, resource_config.dataview),
+                        ));
+                    }
+                }
+
+                // VAL-4: Instructions file exists
+                if let Some(ref instructions_path) = view_config.instructions {
+                    let full_path = app.app_dir.join(instructions_path);
+                    if !full_path.exists() {
+                        results.push(ValidationResult::fail(
+                            "MCP-VAL-4",
+                            &format!("{}/app.toml", app.manifest.app_name),
+                            format!("MCP instructions file '{}' not found", instructions_path),
+                        ));
+                    }
+                }
+
+                // VAL-5: Prompt template files exist
+                for (prompt_name, prompt_config) in &view_config.prompts {
+                    if !prompt_config.template.is_empty() {
+                        let full_path = app.app_dir.join(&prompt_config.template);
+                        if !full_path.exists() {
+                            results.push(ValidationResult::fail(
+                                "MCP-VAL-5",
+                                &format!("{}/app.toml", app.manifest.app_name),
+                                format!("MCP prompt '{}' template '{}' not found", prompt_name, prompt_config.template),
+                            ));
+                        }
+                    }
+                }
+
+                // VAL-6: Prompt template placeholders must match argument declarations (MCP-12)
+                // MCP-13: Declared arguments should appear as placeholders (warning)
+                for (prompt_name, prompt_config) in &view_config.prompts {
+                    if prompt_config.template.is_empty() {
+                        continue;
+                    }
+                    let full_path = app.app_dir.join(&prompt_config.template);
+                    if let Ok(content) = std::fs::read_to_string(&full_path) {
+                        // Extract {placeholder} patterns from template
+                        let mut placeholders: Vec<String> = Vec::new();
+                        let mut chars = content.chars().peekable();
+                        while let Some(ch) = chars.next() {
+                            if ch == '{' {
+                                let mut name = String::new();
+                                for inner in chars.by_ref() {
+                                    if inner == '}' {
+                                        break;
+                                    }
+                                    name.push(inner);
+                                }
+                                if !name.is_empty() && !name.contains(' ') {
+                                    placeholders.push(name);
+                                }
+                            }
+                        }
+                        placeholders.dedup();
+
+                        let declared_args: Vec<&str> = prompt_config.arguments
+                            .iter()
+                            .map(|a| a.name.as_str())
+                            .collect();
+
+                        // VAL-6 (MCP-12): Placeholder without matching argument → error
+                        for placeholder in &placeholders {
+                            if !declared_args.contains(&placeholder.as_str()) {
+                                results.push(ValidationResult::fail(
+                                    "MCP-VAL-6",
+                                    &format!("{}/app.toml", app.manifest.app_name),
+                                    format!(
+                                        "MCP prompt '{}' template has placeholder '{{{}}}' with no matching argument declaration",
+                                        prompt_name, placeholder
+                                    ),
+                                ));
+                            }
+                        }
+
+                        // MCP-13: Declared argument without matching placeholder → warning
+                        for arg_name in &declared_args {
+                            if !placeholders.iter().any(|p| p == *arg_name) {
+                                let mut result = ValidationResult::warn(
+                                    "MCP-VAL-13",
+                                    format!(
+                                        "MCP prompt '{}' declares argument '{}' but template has no matching {{{}}} placeholder",
+                                        prompt_name, arg_name, arg_name
+                                    ),
+                                );
+                                result.file = Some(format!("{}/app.toml", app.manifest.app_name));
+                                results.push(result);
+                            }
+                        }
+                    }
+                }
+
+                // VAL-8: Unique tool names (handled by HashMap — keys are unique by definition)
+                // VAL-9: Unique resource names (same)
+                // VAL-10: Unique prompt names (same)
+                // These are enforced by the TOML parsing — duplicate table keys are a parse error.
+                let _ = view_name; // suppress unused warning
+            }
+        }
     }
 
     results
@@ -923,6 +1060,11 @@ mod tests {
             on_stream: None,
             ws_hooks: None,
             on_event: None,
+            tools: HashMap::new(),
+            resources: HashMap::new(),
+            prompts: HashMap::new(),
+            instructions: None,
+            session: None,
         }
     }
 
@@ -960,6 +1102,11 @@ mod tests {
             on_stream: None,
             ws_hooks: None,
             on_event: None,
+            tools: HashMap::new(),
+            resources: HashMap::new(),
+            prompts: HashMap::new(),
+            instructions: None,
+            session: None,
         }
     }
 
@@ -992,6 +1139,11 @@ mod tests {
             on_stream: None,
             ws_hooks: None,
             on_event: None,
+            tools: HashMap::new(),
+            resources: HashMap::new(),
+            prompts: HashMap::new(),
+            instructions: None,
+            session: None,
         }
     }
 

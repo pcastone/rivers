@@ -439,6 +439,7 @@ mod tests {
     use crate::loader::{LoadedApp, LoadedBundle};
     use crate::validate_result::ValidationStatus;
     use crate::view::{ApiViewConfig, HandlerConfig, HandlerStageConfig, OnStreamConfig, ViewEventHandlers, WebSocketHooks};
+    use std::collections::HashMap;
     use std::fs;
     use tempfile::TempDir;
 
@@ -615,6 +616,11 @@ nopassword = true
                 on_stream: None,
                 ws_hooks: None,
                 on_event: None,
+                tools: HashMap::new(),
+                resources: HashMap::new(),
+                prompts: HashMap::new(),
+                instructions: None,
+                session: None,
             },
         );
     }
@@ -1093,6 +1099,11 @@ nopassword = true
             on_stream: None,
             ws_hooks: None,
             on_event: None,
+            tools: HashMap::new(),
+            resources: HashMap::new(),
+            prompts: HashMap::new(),
+            instructions: None,
+            session: None,
         };
         bundle.apps[0]
             .config
@@ -1156,6 +1167,11 @@ nopassword = true
             }),
             ws_hooks: None,
             on_event: None,
+            tools: HashMap::new(),
+            resources: HashMap::new(),
+            prompts: HashMap::new(),
+            instructions: None,
+            session: None,
         };
         bundle.apps[0]
             .config
@@ -1230,6 +1246,11 @@ nopassword = true
                 on_disconnect: None,
             }),
             on_event: None,
+            tools: HashMap::new(),
+            resources: HashMap::new(),
+            prompts: HashMap::new(),
+            instructions: None,
+            session: None,
         };
         bundle.apps[0]
             .config
