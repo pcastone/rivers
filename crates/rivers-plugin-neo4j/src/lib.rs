@@ -64,7 +64,7 @@ impl DatabaseDriver for Neo4jDriver {
         debug!(host = %params.host, port = %port, database = %params.database, scheme = %scheme, "neo4j: connected");
 
         // G2.1: Graph is Clone+Send+Sync — no Arc needed
-        Ok(Box::new(Neo4jConnection { graph }))
+        Ok(Box::new(Neo4jConnection { graph, txn: None }))
     }
 
     fn supports_transactions(&self) -> bool {
@@ -80,6 +80,7 @@ impl DatabaseDriver for Neo4jDriver {
 pub struct Neo4jConnection {
     // G2.1: Graph is already Clone+Send+Sync with internal connection pool
     graph: neo4rs::Graph,
+    txn: Option<neo4rs::Txn>,
 }
 
 #[async_trait]
@@ -172,6 +173,39 @@ impl Connection for Neo4jConnection {
 
     fn driver_name(&self) -> &str {
         "neo4j"
+    }
+
+    async fn begin_transaction(&mut self) -> Result<(), DriverError> {
+        let txn = self.graph
+            .start_txn()
+            .await
+            .map_err(|e| DriverError::Query(format!("neo4j BEGIN: {e}")))?;
+        self.txn = Some(txn);
+        Ok(())
+    }
+
+    async fn commit_transaction(&mut self) -> Result<(), DriverError> {
+        match self.txn.take() {
+            Some(txn) => {
+                txn.commit()
+                    .await
+                    .map_err(|e| DriverError::Query(format!("neo4j COMMIT: {e}")))?;
+                Ok(())
+            }
+            None => Err(DriverError::Query("no active neo4j transaction".into())),
+        }
+    }
+
+    async fn rollback_transaction(&mut self) -> Result<(), DriverError> {
+        match self.txn.take() {
+            Some(txn) => {
+                txn.rollback()
+                    .await
+                    .map_err(|e| DriverError::Query(format!("neo4j ROLLBACK: {e}")))?;
+                Ok(())
+            }
+            None => Err(DriverError::Query("no active neo4j transaction".into())),
+        }
     }
 }
 
@@ -339,6 +373,7 @@ mod tests {
                     .build()
                     .unwrap()
             ).unwrap_or_else(|_| panic!("skip: neo4j not available")),
+            txn: None,
         };
         let ops = conn.admin_operations();
         assert!(ops.contains(&"create_constraint"));
