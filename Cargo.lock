@@ -5619,6 +5619,7 @@ dependencies = [
 name = "rivers-plugin-neo4j"
 version = "0.54.0"
 dependencies = [
+ "age",
  "async-trait",
  "neo4rs",
  "rivers-driver-sdk",
@@ -5626,6 +5627,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

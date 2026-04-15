@@ -20,3 +20,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+age = { workspace = true }
+uuid = { workspace = true }
