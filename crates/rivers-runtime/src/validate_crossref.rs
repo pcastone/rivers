@@ -184,6 +184,69 @@ pub fn validate_crossref(bundle: &LoadedBundle) -> Vec<ValidationResult> {
                     }
                 }
 
+                // VAL-6: Prompt template placeholders must match argument declarations (MCP-12)
+                // MCP-13: Declared arguments should appear as placeholders (warning)
+                for (prompt_name, prompt_config) in &view_config.prompts {
+                    if prompt_config.template.is_empty() {
+                        continue;
+                    }
+                    let full_path = app.app_dir.join(&prompt_config.template);
+                    if let Ok(content) = std::fs::read_to_string(&full_path) {
+                        // Extract {placeholder} patterns from template
+                        let mut placeholders: Vec<String> = Vec::new();
+                        let mut chars = content.chars().peekable();
+                        while let Some(ch) = chars.next() {
+                            if ch == '{' {
+                                let mut name = String::new();
+                                for inner in chars.by_ref() {
+                                    if inner == '}' {
+                                        break;
+                                    }
+                                    name.push(inner);
+                                }
+                                if !name.is_empty() && !name.contains(' ') {
+                                    placeholders.push(name);
+                                }
+                            }
+                        }
+                        placeholders.dedup();
+
+                        let declared_args: Vec<&str> = prompt_config.arguments
+                            .iter()
+                            .map(|a| a.name.as_str())
+                            .collect();
+
+                        // VAL-6 (MCP-12): Placeholder without matching argument → error
+                        for placeholder in &placeholders {
+                            if !declared_args.contains(&placeholder.as_str()) {
+                                results.push(ValidationResult::fail(
+                                    "MCP-VAL-6",
+                                    &format!("{}/app.toml", app.manifest.app_name),
+                                    format!(
+                                        "MCP prompt '{}' template has placeholder '{{{}}}' with no matching argument declaration",
+                                        prompt_name, placeholder
+                                    ),
+                                ));
+                            }
+                        }
+
+                        // MCP-13: Declared argument without matching placeholder → warning
+                        for arg_name in &declared_args {
+                            if !placeholders.iter().any(|p| p == *arg_name) {
+                                let mut result = ValidationResult::warn(
+                                    "MCP-VAL-13",
+                                    format!(
+                                        "MCP prompt '{}' declares argument '{}' but template has no matching {{{}}} placeholder",
+                                        prompt_name, arg_name, arg_name
+                                    ),
+                                );
+                                result.file = Some(format!("{}/app.toml", app.manifest.app_name));
+                                results.push(result);
+                            }
+                        }
+                    }
+                }
+
                 // VAL-8: Unique tool names (handled by HashMap — keys are unique by definition)
                 // VAL-9: Unique resource names (same)
                 // VAL-10: Unique prompt names (same)
