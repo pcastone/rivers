@@ -261,6 +261,53 @@ pub async fn load_and_wire_bundle(
             registry.register(namespaced_dv);
         }
 
+        // ── Build circuit breaker registry from DataView config (circuit-breaker-spec §3) ──
+        let app_id = &app.manifest.app_id;
+        for (dv_name, dv_config) in &app.config.data.dataviews {
+            if let Some(ref breaker_id) = dv_config.circuit_breaker_id {
+                ctx.circuit_breaker_registry
+                    .register(app_id, breaker_id.clone(), dv_name.clone())
+                    .await;
+            }
+        }
+
+        // Restore persisted breaker state from StorageEngine (circuit-breaker-spec §3, REG-3)
+        if let Some(ref storage) = ctx.storage_engine {
+            for entry in ctx.circuit_breaker_registry.list_for_app(app_id).await {
+                let key = format!("breaker:{}:{}", app_id, entry.breaker_id);
+                match storage.get("rivers", &key).await {
+                    Ok(Some(bytes)) => {
+                        if let Ok(state_str) = String::from_utf8(bytes) {
+                            if state_str.trim() == "open" {
+                                ctx.circuit_breaker_registry
+                                    .set_state(app_id, &entry.breaker_id, crate::circuit_breaker::BreakerState::Open)
+                                    .await;
+                                tracing::info!(breaker = %entry.breaker_id, "restored breaker state: OPEN");
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            breaker = %entry.breaker_id,
+                            error = %e,
+                            "failed to read persisted breaker state, starting CLOSED"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Log breaker summary for this app
+        for entry in ctx.circuit_breaker_registry.list_for_app(app_id).await {
+            tracing::info!(
+                breaker = %entry.breaker_id,
+                state = ?entry.state,
+                dataviews = entry.dataviews.len(),
+                "breaker loaded"
+            );
+        }
+
         // Build ConnectionParams — namespaced: "postgres:pg"
         for ds in app.config.data.datasources.values() {
             let mut params = rivers_runtime::rivers_driver_sdk::ConnectionParams {

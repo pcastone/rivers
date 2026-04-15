@@ -150,6 +150,8 @@ pub struct AppContext {
     /// Apps that failed to load — keyed by entry_point path prefix (e.g., "/canary-fleet/nosql"),
     /// value is the human-readable error message for the 503 response.
     pub failed_apps: Arc<std::sync::RwLock<HashMap<String, String>>>,
+    /// Circuit breaker registry — app-level manual DataView traffic control.
+    pub circuit_breaker_registry: Arc<crate::circuit_breaker::BreakerRegistry>,
 }
 
 impl AppContext {
@@ -184,6 +186,7 @@ impl AppContext {
             driver_factory: None,
             shutdown_tx: None,
             failed_apps: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            circuit_breaker_registry: Arc::new(crate::circuit_breaker::BreakerRegistry::new()),
         }
     }
 }

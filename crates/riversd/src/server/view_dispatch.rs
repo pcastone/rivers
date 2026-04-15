@@ -264,7 +264,7 @@ async fn view_dispatch_handler(
                 .and_then(|dv_config| dv_config.circuit_breaker_id.clone())
         };
         if let Some(breaker_id) = breaker_id_opt {
-            if ctx.circuit_breaker_registry.is_open(&breaker_id).await {
+            if ctx.circuit_breaker_registry.is_open(&manifest_app_id, &breaker_id).await {
                 let body = serde_json::json!({
                     "error": format!("circuit breaker '{}' is open", breaker_id),
                     "breakerId": breaker_id,

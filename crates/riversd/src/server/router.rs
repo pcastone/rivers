@@ -24,6 +24,8 @@ use crate::admin_handlers::{
     admin_deploy_promote_handler, admin_deployments_handler,
     admin_log_levels_handler, admin_log_set_handler, admin_log_reset_handler,
     admin_shutdown_handler,
+    admin_list_breakers_handler, admin_get_breaker_handler,
+    admin_trip_breaker_handler, admin_reset_breaker_handler,
 };
 
 /// Build the main server router.
@@ -166,6 +168,11 @@ pub fn build_admin_router(ctx: AppContext) -> Router {
         .route("/admin/log/reset", axum::routing::post(admin_log_reset_handler))
         // Shutdown endpoint
         .route("/admin/shutdown", axum::routing::post(admin_shutdown_handler))
+        // Circuit breaker management endpoints (app-scoped)
+        .route("/admin/apps/:app_id/breakers", get(admin_list_breakers_handler))
+        .route("/admin/apps/:app_id/breakers/:breaker_id", get(admin_get_breaker_handler))
+        .route("/admin/apps/:app_id/breakers/:breaker_id/trip", axum::routing::post(admin_trip_breaker_handler))
+        .route("/admin/apps/:app_id/breakers/:breaker_id/reset", axum::routing::post(admin_reset_breaker_handler))
         .with_state(ctx);
 
     // Admin middleware: admin_auth → timeout → security_headers → trace_id → body_limit
