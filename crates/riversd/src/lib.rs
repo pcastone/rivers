@@ -39,5 +39,7 @@ pub mod shutdown;
 pub mod streaming;
 pub mod static_files;
 pub mod task_enrichment;
+/// Per-request transaction state management.
+pub mod transaction;
 pub mod view_engine;
 pub mod websocket;
