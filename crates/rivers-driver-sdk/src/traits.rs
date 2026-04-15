@@ -587,4 +587,9 @@ pub trait DatabaseDriver: Send + Sync {
     fn param_style(&self) -> ParamStyle {
         ParamStyle::None
     }
+
+    /// Whether this driver supports schema introspection at startup.
+    fn supports_introspection(&self) -> bool {
+        false
+    }
 }
