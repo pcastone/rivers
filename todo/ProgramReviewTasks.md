@@ -80,7 +80,7 @@ Add `///` doc comments to every `#[test]` / `#[tokio::test]` function explaining
 
 ## Gap: Batch Operations Depends on Transactions
 
-- [ ] Plan Transactions + Prepared Statements + Batch as one coordinated implementation — they share PoolGuard connection-hold changes and Connection trait modifications
+- [x] Implemented as one coordinated effort — Connection trait, PoolGuard, and host callbacks built together
 
 ## Gap: Schema Validation Plugin Coverage
 
@@ -94,7 +94,7 @@ Add `///` doc comments to every `#[test]` / `#[tokio::test]` function explaining
 
 ## Gap: ProcessPool Host Callback API Design
 
-- [ ] Design the JS/WASM API for `Rivers.db.begin()`, `Rivers.db.commit()`, `Rivers.db.rollback()`, `Rivers.db.prepare()`, `Rivers.db.batch()` — what does begin() return? How does a handler reference a specific datasource's transaction? Document in the connection-features spec.
+- [x] Implemented: `Rivers.db.begin(datasource)`, `Rivers.db.commit(datasource)`, `Rivers.db.rollback(datasource)`, `Rivers.db.batch(dataview, params)` — implicit per-datasource transactions, no tokens. Host callbacks in riversd + V8 bindings in rivers-engine-v8. No `Rivers.db.prepare()` — prepared statements are config-driven.
 
 ## Gap: Integration/Canary Tests for New Features
 
