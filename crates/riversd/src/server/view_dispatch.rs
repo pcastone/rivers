@@ -168,10 +168,10 @@ async fn view_dispatch_handler(
     // ── REST path: extract method, headers, body ──
     let method = request.method().to_string();
     let path = request.uri().path().to_string();
-    let query: HashMap<String, String> = request
+    let (query, query_all): (HashMap<String, String>, HashMap<String, Vec<String>>) = request
         .uri()
         .query()
-        .map(|q| parse_query_string(q))
+        .map(|q| parse_query_string_multi(q))
         .unwrap_or_default();
     let headers: HashMap<String, String> = request
         .headers()
@@ -212,6 +212,7 @@ async fn view_dispatch_handler(
         method: method.clone(),
         path: path.clone(),
         query_params: query,
+        query_all,
         headers,
         body,
         path_params,
@@ -441,4 +442,73 @@ pub(super) fn parse_query_string(query: &str) -> HashMap<String, String> {
             Some((key, value))
         })
         .collect()
+}
+
+/// Parse query string preserving all values per key (for duplicate keys).
+pub(super) fn parse_query_string_multi(query: &str) -> (HashMap<String, String>, HashMap<String, Vec<String>>) {
+    let mut first: HashMap<String, String> = HashMap::new();
+    let mut all: HashMap<String, Vec<String>> = HashMap::new();
+
+    for pair in query.split('&').filter(|s| !s.is_empty()) {
+        let mut parts = pair.splitn(2, '=');
+        let key = match parts.next() {
+            Some(k) => percent_encoding::percent_decode_str(k)
+                .decode_utf8_lossy()
+                .into_owned(),
+            None => continue,
+        };
+        let value = parts.next()
+            .map(|v| percent_encoding::percent_decode_str(v)
+                .decode_utf8_lossy()
+                .into_owned())
+            .unwrap_or_default();
+
+        first.entry(key.clone()).or_insert_with(|| value.clone());
+        all.entry(key).or_default().push(value);
+    }
+
+    (first, all)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multi_preserves_duplicates() {
+        let (first, all) = parse_query_string_multi("tag=a&tag=b&tag=c");
+        assert_eq!(first.get("tag"), Some(&"a".to_string()));
+        assert_eq!(all.get("tag").unwrap(), &vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn multi_single_value_is_array_of_one() {
+        let (_, all) = parse_query_string_multi("limit=10");
+        assert_eq!(all.get("limit").unwrap(), &vec!["10".to_string()]);
+    }
+
+    #[test]
+    fn multi_empty_value() {
+        let (first, _) = parse_query_string_multi("key=");
+        assert_eq!(first.get("key"), Some(&"".to_string()));
+    }
+
+    #[test]
+    fn multi_bare_key() {
+        let (first, _) = parse_query_string_multi("key");
+        assert_eq!(first.get("key"), Some(&"".to_string()));
+    }
+
+    #[test]
+    fn multi_percent_encoded() {
+        let (first, _) = parse_query_string_multi("name=John%20Doe");
+        assert_eq!(first.get("name"), Some(&"John Doe".to_string()));
+    }
+
+    #[test]
+    fn multi_empty_string() {
+        let (first, all) = parse_query_string_multi("");
+        assert!(first.is_empty());
+        assert!(all.is_empty());
+    }
 }

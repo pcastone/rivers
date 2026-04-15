@@ -21,12 +21,14 @@ fn test_config() -> DataViewConfig {
                 param_type: "integer".into(),
                 required: false,
                 default: None,
+                location: None,
             },
             DataViewParameterConfig {
                 name: "name".into(),
                 param_type: "string".into(),
                 required: true,
                 default: None,
+                location: None,
             },
         ],
         caching: None,
@@ -421,6 +423,7 @@ fn parameters_for_method_get_prefers_explicit() {
         param_type: "string".into(),
         required: true,
         default: None,
+        location: None,
     }];
     let params = config.parameters_for_method("GET");
     assert_eq!(params.len(), 1);
@@ -435,6 +438,7 @@ fn parameters_for_method_post() {
         param_type: "string".into(),
         required: true,
         default: None,
+        location: None,
     }];
     let params = config.parameters_for_method("POST");
     assert_eq!(params.len(), 1);
@@ -454,6 +458,7 @@ fn parameter_default_value() {
         param_type: "string".into(),
         required: false,
         default: Some(serde_json::json!("pending")),
+        location: None,
     };
     assert_eq!(param.default, Some(serde_json::json!("pending")));
 }

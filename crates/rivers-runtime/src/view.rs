@@ -204,6 +204,10 @@ pub struct ParameterMappingConfig {
     /// Body parameter mapping for write operations (POST/PUT/PATCH).
     #[serde(default)]
     pub body: HashMap<String, String>,
+
+    /// Header parameter mappings (X-Tenant-Id -> DataView param).
+    #[serde(default)]
+    pub header: HashMap<String, String>,
 }
 
 /// Pipeline event handlers for a view.

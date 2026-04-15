@@ -266,6 +266,7 @@ fn parameter_mapping_query_params() {
         },
         path: HashMap::new(),
         body: HashMap::new(),
+        header: HashMap::new(),
     });
 
     let params = apply_parameter_mapping(&req, &config);
@@ -287,6 +288,7 @@ fn parameter_mapping_path_params() {
             m
         },
         body: HashMap::new(),
+        header: HashMap::new(),
     });
 
     let params = apply_parameter_mapping(&req, &config);
@@ -306,6 +308,7 @@ fn parameter_mapping_missing_params_skipped() {
         },
         path: HashMap::new(),
         body: HashMap::new(),
+        header: HashMap::new(),
     });
 
     let params = apply_parameter_mapping(&req, &config);

@@ -19,6 +19,10 @@ pub struct ParsedRequest {
     /// Serialized as "query" per spec — `ctx.request.query` in handlers.
     #[serde(rename = "query")]
     pub query_params: HashMap<String, String>,
+    /// All query string values per key (preserves duplicates).
+    /// Serialized as "queryAll" — `ctx.request.queryAll` in handlers.
+    #[serde(rename = "queryAll")]
+    pub query_all: HashMap<String, Vec<String>>,
     /// HTTP headers.
     pub headers: HashMap<String, String>,
     /// Deserialized request body.
@@ -34,6 +38,7 @@ impl ParsedRequest {
             method: method.to_string(),
             path: path.to_string(),
             query_params: HashMap::new(),
+            query_all: HashMap::new(),
             headers: HashMap::new(),
             body: serde_json::Value::Null,
             path_params: HashMap::new(),
