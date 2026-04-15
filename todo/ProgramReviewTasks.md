@@ -68,7 +68,7 @@ Add `///` doc comments to every `#[test]` / `#[tokio::test]` function explaining
 - [x] rivers-plugin-couchdb
 - [x] rivers-plugin-influxdb
 - [x] rivers-plugin-ldap
-- [ ] rivers-plugin-neo4j (no tests exist yet)
+- [x] rivers-plugin-neo4j (2 tests: connect_and_ping, create_query_delete_roundtrip)
 - [x] rivers-plugin-exec
 
 ## Gap: Specs Needed Before Implementation
@@ -103,19 +103,19 @@ Add `///` doc comments to every `#[test]` / `#[tokio::test]` function explaining
 
 ## Gap: neo4j Plugin
 
-- [ ] Write live integration tests for rivers-plugin-neo4j (connect_and_ping, create_node_query_delete_roundtrip)
-- [ ] Add neo4j container to test infrastructure (192.168.2.x subnet) or document that existing neo4j node is available
-- [ ] Add test documentation once tests exist
+- [x] Write live integration tests for rivers-plugin-neo4j (connect_and_ping, create_query_delete_roundtrip)
+- [x] Neo4j container deployed: `192.168.2.240:7687` (Bolt), auth `neo4j/rivers_test`, lockbox entry at `sec/lockbox/entries/neo4j/`
+- [x] Test documentation included in test file
 
 ## Gap: Circuit Breaker v1 — Implementation Fixes
 
-- [ ] Per-app breaker scoping: registry is currently global on AppContext — two apps defining a breaker called `"cache"` would collide. Namespace breaker IDs by app (e.g., `appId:breakerId` as key) and restore `{appId}` path parameter in admin API routes
+- [x] Per-app breaker scoping: registry namespaced by `appId:breakerId`, admin API routes updated to `/admin/apps/:app_id/breakers/...`
 - [ ] Persistence integration test: trip a breaker, restart riversd, verify breaker is still open via admin API (spec §8)
 - [ ] Canary test profile: add circuit breaker to a canary DataView, test trip/reset/status via admin API during canary run
 
 ## Gap: riversd.toml Foreign Attribute Protection
 
-- [ ] `ServerConfig` and nested structs silently ignore unknown keys (no `deny_unknown_fields`). A typo like `hostt` in `riversd.toml` is silently dropped with no warning. Either add `deny_unknown_fields` to config structs or implement a structural validation pass at startup (matching the bundle validation pattern)
+- [x] Unknown key warnings at startup — `check_unknown_config_keys()` walks top-level and `[base]` section, logs warnings with Levenshtein suggestions. Wired into `load_server_config()` in rivers-runtime
 
 ## Riverbed HTTPD — Future Consideration
 
