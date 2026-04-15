@@ -34,25 +34,25 @@
 
 ## Transactions — Request-Scoped, Handler-Driven
 
-- [ ] Add `begin()`, `commit()`, `rollback()` to `Connection` trait in `rivers-driver-sdk`
-- [ ] Implement for postgres, mysql, sqlite drivers — non-transactional drivers (faker, memcached, http) reject with clear error
-- [ ] Connection hold: `PoolGuard` must hold connection for full handler lifetime when transaction is active, not release after single query
-- [ ] Auto-rollback on request timeout or handler panic (PoolGuard drop when transaction is open)
-- [ ] Expose `Rivers.db.begin()`, `Rivers.db.commit()`, `Rivers.db.rollback()` in ProcessPool host callbacks for JS/WASM handlers
-- [ ] Multi-datasource: each datasource gets its own transaction, handler coordinates commit/rollback order
+- [x] Add `begin()`, `commit()`, `rollback()` to `Connection` trait in `rivers-driver-sdk`
+- [x] Implement for postgres, mysql, sqlite, mongodb, neo4j drivers — non-transactional drivers inherit default `Unsupported`
+- [x] PoolGuard returns connections to idle on drop (preserves prepared statement caches)
+- [x] TransactionMap for per-request transaction state with auto-rollback
+- [x] Expose `Rivers.db.begin()`, `Rivers.db.commit()`, `Rivers.db.rollback()` in ProcessPool host callbacks + V8 bindings
+- [x] Transaction-aware DataView engine — uses transaction connection when active
 
 ## Prepared Statements
 
-- [ ] Add `prepare()` / `execute_prepared()` to `Connection` trait
-- [ ] Implement for postgres, mysql, sqlite — lazy prepare on first use per connection
-- [ ] Pool behavior: prefer returning connections to idle (reuse) over dropping, to preserve prepared statement cache
-- [ ] Expose `Rivers.db.prepare()` in ProcessPool host callbacks
+- [x] Add `prepare()` / `execute_prepared()` / `has_prepared()` to `Connection` trait
+- [x] `prepared = true` config-driven on DataView — transparent to handlers
+- [x] Pool behavior: PoolGuard returns connections to idle on drop (reuse)
+- [x] No handler API needed — config-driven, no `Rivers.db.prepare()` callback
 
 ## Batch Operations
 
-- [ ] Add `execute_batch()` to `Connection` trait returning `Vec<QueryResult>`
-- [ ] Implement for postgres, mysql, sqlite
-- [ ] Expose `Rivers.db.batch()` in ProcessPool host callbacks
+- [x] `Rivers.db.batch()` host callback + V8 binding
+- [x] Single-DataView bulk execution with multiple parameter sets
+- [x] Inherits transaction state — uses active connection if transaction open
 
 ## Test Documentation — Plugin Crates
 
