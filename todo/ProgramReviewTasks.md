@@ -25,12 +25,13 @@
 
 ## Schema-to-Database Validation at Startup
 
-- [ ] After pool creation, introspect actual table/collection columns from the database (e.g., `information_schema.columns` for postgres/mysql, collection sample for mongodb)
-- [ ] Compare DataView schema field names against actual database columns — flag mismatches with "did you mean?" suggestions (Levenshtein, like bundle validation)
-- [ ] Compare DataView schema field types against actual column types — warn on type mismatches (e.g., schema says `integer` but column is `varchar`)
-- [ ] Validate per-method query references — ensure `SELECT` / `INSERT` / `UPDATE` column names exist in the target table
-- [ ] Hard fail on mismatch — refuse to start with detailed error messages that clearly explain the problem (e.g., "DataView 'search_orders' field 'orderDate2' not found in table 'orders' — available columns: id, warehouseId, orderDate, locCode, qty")
-- [ ] Skip introspection for drivers that don't support it (faker, exec, http) — gate behind a `Driver` trait method like `supports_schema_introspection()`
+- [x] `supports_introspection()` on DatabaseDriver trait — SQL drivers return true, others false
+- [x] `column_names: Option<Vec<String>>` added to QueryResult — populated by SQL drivers on empty results
+- [x] Postgres/MySQL/SQLite implement introspection via LIMIT 0 + column metadata
+- [x] `introspect = false` opt-out on datasource config (defaults to true)
+- [x] Hard fail at startup — queries validated via LIMIT 0, errors collected with Levenshtein suggestions
+- [x] `schema_introspection` module with `check_fields_against_columns()` and error formatting
+- [ ] Schema field-to-column comparison (pending schema file loading integration)
 
 ## Transactions — Request-Scoped, Handler-Driven
 
