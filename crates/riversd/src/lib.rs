@@ -30,6 +30,7 @@ pub mod pool;
 pub mod process_pool;
 pub mod rate_limit;
 pub mod runtime;
+pub mod schema_introspection;
 pub mod security_pipeline;
 pub mod server;
 pub mod service_discovery;
