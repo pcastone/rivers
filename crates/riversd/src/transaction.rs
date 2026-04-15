@@ -123,7 +123,7 @@ mod tests {
     #[async_trait]
     impl Connection for MockConnection {
         async fn execute(&mut self, _query: &Query) -> Result<QueryResult, DriverError> {
-            Ok(QueryResult { rows: vec![], affected_rows: 0, last_insert_id: None })
+            Ok(QueryResult { rows: vec![], affected_rows: 0, last_insert_id: None, column_names: None })
         }
         async fn ping(&mut self) -> Result<(), DriverError> { Ok(()) }
         fn driver_name(&self) -> &str { self.name }

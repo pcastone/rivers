@@ -542,6 +542,7 @@ async fn executor_invalidates_cache_after_write() {
         rows: vec![[("id".to_string(), QueryValue::Integer(1))].into_iter().collect()],
         affected_rows: 1,
         last_insert_id: None,
+        column_names: None,
     };
     cache.set("list_contacts", &read_params, &cached_result, None).await.unwrap();
 

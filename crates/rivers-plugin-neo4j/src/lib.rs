@@ -116,7 +116,7 @@ impl Connection for Neo4jConnection {
                     self.graph.run(cypher)
                         .await
                         .map_err(|e| DriverError::Query(format!("neo4j create: {e}")))?;
-                    Ok(QueryResult { rows: Vec::new(), affected_rows: 1, last_insert_id: None })
+                    Ok(QueryResult { rows: Vec::new(), affected_rows: 1, last_insert_id: None, column_names: None })
                 }
             }
 
@@ -236,6 +236,7 @@ async fn execute_returning(
         rows,
         affected_rows: count,
         last_insert_id: None,
+        column_names: None,
     })
 }
 

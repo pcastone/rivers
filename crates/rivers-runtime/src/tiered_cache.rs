@@ -517,6 +517,7 @@ impl SerializableQueryResult {
             rows: self.rows,
             affected_rows: self.affected_rows,
             last_insert_id: self.last_insert_id,
+            column_names: None,
         }
     }
 }

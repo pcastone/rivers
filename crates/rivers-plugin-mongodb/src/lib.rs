@@ -222,6 +222,7 @@ impl MongoConnection {
             rows,
             affected_rows: count,
             last_insert_id: None,
+            column_names: None,
         })
     }
 
@@ -242,6 +243,7 @@ impl MongoConnection {
             rows: Vec::new(),
             affected_rows: 1,
             last_insert_id: Some(insert_id),
+            column_names: None,
         })
     }
 
@@ -264,6 +266,7 @@ impl MongoConnection {
             rows: Vec::new(),
             affected_rows: result.modified_count,
             last_insert_id: None,
+            column_names: None,
         })
     }
 
@@ -282,6 +285,7 @@ impl MongoConnection {
             rows: Vec::new(),
             affected_rows: result.deleted_count,
             last_insert_id: None,
+            column_names: None,
         })
     }
 

@@ -240,6 +240,7 @@ impl CouchDBConnection {
             rows,
             affected_rows: count,
             last_insert_id: None,
+            column_names: None,
         })
     }
 
@@ -271,6 +272,7 @@ impl CouchDBConnection {
                 rows: Vec::new(),
                 affected_rows: 0,
                 last_insert_id: None,
+                column_names: None,
             });
         }
 
@@ -284,6 +286,7 @@ impl CouchDBConnection {
             rows: vec![row],
             affected_rows: 1,
             last_insert_id: None,
+            column_names: None,
         })
     }
 
@@ -320,6 +323,7 @@ impl CouchDBConnection {
             rows: Vec::new(),
             affected_rows: 1,
             last_insert_id: id,
+            column_names: None,
         })
     }
 
@@ -388,6 +392,7 @@ impl CouchDBConnection {
             rows: Vec::new(),
             affected_rows: 1,
             last_insert_id: None,
+            column_names: None,
         })
     }
 
@@ -409,6 +414,7 @@ impl CouchDBConnection {
                 rows: Vec::new(),
                 affected_rows: 0,
                 last_insert_id: None,
+                column_names: None,
             });
         }
 
@@ -438,6 +444,7 @@ impl CouchDBConnection {
             rows: Vec::new(),
             affected_rows: 1,
             last_insert_id: None,
+            column_names: None,
         })
     }
 
@@ -512,6 +519,7 @@ impl CouchDBConnection {
             rows,
             affected_rows: count,
             last_insert_id: None,
+            column_names: None,
         })
     }
 
@@ -521,6 +529,7 @@ impl CouchDBConnection {
             rows: Vec::new(),
             affected_rows: 0,
             last_insert_id: None,
+            column_names: None,
         })
     }
 }

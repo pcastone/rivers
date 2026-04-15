@@ -27,6 +27,7 @@ impl Connection for MockConnection {
             rows: vec![],
             affected_rows: 0,
             last_insert_id: None,
+            column_names: None,
         })
     }
 

@@ -865,6 +865,7 @@ impl DataViewExecutor {
             rows: Vec::new(),
             affected_rows: 1,
             last_insert_id: None,
+            column_names: None,
         };
 
         Ok(build_response(Arc::new(query_result), start, false, trace_id.to_string()))

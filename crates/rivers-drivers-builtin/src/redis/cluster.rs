@@ -45,6 +45,7 @@ impl Connection for RedisClusterConnection {
                         rows: vec![single_value_row(v)],
                         affected_rows: 1,
                         last_insert_id: None,
+                        column_names: None,
                     }),
                     None => Ok(QueryResult::empty()),
                 }
@@ -78,6 +79,7 @@ impl Connection for RedisClusterConnection {
                     rows,
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -94,6 +96,7 @@ impl Connection for RedisClusterConnection {
                         rows: vec![single_value_row(v)],
                         affected_rows: 1,
                         last_insert_id: None,
+                        column_names: None,
                     }),
                     None => Ok(QueryResult::empty()),
                 }
@@ -120,6 +123,7 @@ impl Connection for RedisClusterConnection {
                     rows,
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -139,6 +143,7 @@ impl Connection for RedisClusterConnection {
                     rows,
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -156,6 +161,7 @@ impl Connection for RedisClusterConnection {
                     rows,
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -175,6 +181,7 @@ impl Connection for RedisClusterConnection {
                     rows: vec![row],
                     affected_rows: 1,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -198,6 +205,7 @@ impl Connection for RedisClusterConnection {
                     rows,
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -225,6 +233,7 @@ impl Connection for RedisClusterConnection {
                     rows: Vec::new(),
                     affected_rows: 1,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -241,6 +250,7 @@ impl Connection for RedisClusterConnection {
                     rows: Vec::new(),
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -256,6 +266,7 @@ impl Connection for RedisClusterConnection {
                     rows: Vec::new(),
                     affected_rows: len,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -271,6 +282,7 @@ impl Connection for RedisClusterConnection {
                     rows: Vec::new(),
                     affected_rows: len,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -286,6 +298,7 @@ impl Connection for RedisClusterConnection {
                     rows: Vec::new(),
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -301,6 +314,7 @@ impl Connection for RedisClusterConnection {
                     rows: Vec::new(),
                     affected_rows: if ok { 1 } else { 0 },
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -317,6 +331,7 @@ impl Connection for RedisClusterConnection {
                     rows: vec![row],
                     affected_rows: 1,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -334,6 +349,7 @@ impl Connection for RedisClusterConnection {
                     rows: vec![row],
                     affected_rows: 1,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -351,6 +367,7 @@ impl Connection for RedisClusterConnection {
                     rows: Vec::new(),
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -366,6 +383,7 @@ impl Connection for RedisClusterConnection {
                     rows: Vec::new(),
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 

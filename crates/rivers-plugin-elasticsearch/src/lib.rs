@@ -248,6 +248,7 @@ impl ElasticConnection {
             rows,
             affected_rows: count,
             last_insert_id: None,
+            column_names: None,
         })
     }
 
@@ -280,6 +281,7 @@ impl ElasticConnection {
             rows: Vec::new(),
             affected_rows: 1,
             last_insert_id: Some(index_resp._id),
+            column_names: None,
         })
     }
 
@@ -317,6 +319,7 @@ impl ElasticConnection {
             rows: Vec::new(),
             affected_rows: 1,
             last_insert_id: None,
+            column_names: None,
         })
     }
 
@@ -343,6 +346,7 @@ impl ElasticConnection {
             rows: Vec::new(),
             affected_rows: 1,
             last_insert_id: None,
+            column_names: None,
         })
     }
 

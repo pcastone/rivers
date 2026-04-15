@@ -70,6 +70,10 @@ impl DatabaseDriver for MysqlDriver {
     fn param_style(&self) -> rivers_driver_sdk::ParamStyle {
         rivers_driver_sdk::ParamStyle::QuestionPositional
     }
+
+    fn supports_introspection(&self) -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -199,10 +203,16 @@ impl Connection for MysqlConnection {
                     .map_err(|e| DriverError::Query(format!("mysql fetch rows: {e}")))?;
 
                 let count = rows.len() as u64;
+                let column_names = if rows.is_empty() {
+                    Some(columns.iter().map(|c| c.name_str().to_string()).collect())
+                } else {
+                    None
+                };
                 Ok(QueryResult {
                     rows,
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names,
                 })
             }
 
@@ -248,6 +258,7 @@ impl Connection for MysqlConnection {
                         rows,
                         affected_rows: count,
                         last_insert_id: last_id,
+                        column_names: None,
                     })
                 } else {
                     let result = self
@@ -266,6 +277,7 @@ impl Connection for MysqlConnection {
                         rows: Vec::new(),
                         affected_rows: affected,
                         last_insert_id: last_id.map(|id| id.to_string()),
+                        column_names: None,
                     })
                 }
             }
@@ -287,6 +299,7 @@ impl Connection for MysqlConnection {
                     rows: Vec::new(),
                     affected_rows: affected,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -307,6 +320,7 @@ impl Connection for MysqlConnection {
                     rows: Vec::new(),
                     affected_rows: affected,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 

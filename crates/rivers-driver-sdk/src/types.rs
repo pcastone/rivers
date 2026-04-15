@@ -179,6 +179,10 @@ pub struct QueryResult {
     pub affected_rows: u64,
     /// Auto-generated ID from an INSERT, if the driver provides one.
     pub last_insert_id: Option<String>,
+    /// Column names from the query result metadata. Populated by SQL drivers.
+    /// Present when rows are empty (e.g. LIMIT 0 introspection queries) so
+    /// callers can discover schema without any row data.
+    pub column_names: Option<Vec<String>>,
 }
 
 impl QueryResult {
@@ -188,6 +192,7 @@ impl QueryResult {
             rows: Vec::new(),
             affected_rows: 0,
             last_insert_id: None,
+            column_names: None,
         }
     }
 

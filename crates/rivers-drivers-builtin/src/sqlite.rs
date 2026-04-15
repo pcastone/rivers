@@ -115,6 +115,10 @@ impl DatabaseDriver for SqliteDriver {
     fn param_style(&self) -> rivers_driver_sdk::ParamStyle {
         rivers_driver_sdk::ParamStyle::DollarNamed
     }
+
+    fn supports_introspection(&self) -> bool {
+        true
+    }
 }
 
 /// A live SQLite connection wrapping `rusqlite::Connection` behind `Arc<Mutex>`.
@@ -317,10 +321,16 @@ fn execute_query(
     }
 
     let affected = rows.len() as u64;
+    let result_column_names = if rows.is_empty() {
+        Some(column_names)
+    } else {
+        None
+    };
     Ok(QueryResult {
         rows,
         affected_rows: affected,
         last_insert_id: None,
+        column_names: result_column_names,
     })
 }
 
@@ -350,6 +360,7 @@ fn execute_insert(
         rows: Vec::new(),
         affected_rows: affected as u64,
         last_insert_id: Some(last_id.to_string()),
+        column_names: None,
     })
 }
 
@@ -377,6 +388,7 @@ fn execute_write(
         rows: Vec::new(),
         affected_rows: affected as u64,
         last_insert_id: None,
+        column_names: None,
     })
 }
 
