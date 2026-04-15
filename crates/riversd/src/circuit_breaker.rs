@@ -2,32 +2,42 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+/// State of a circuit breaker (Open or Closed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum BreakerState {
+    /// Circuit is open, blocking traffic.
     Open,
+    /// Circuit is closed, allowing traffic.
     Closed,
 }
 
+/// Entry describing a circuit breaker and its associated DataViews.
 #[derive(Debug, Clone, Serialize)]
 pub struct BreakerEntry {
+    /// Unique identifier for the circuit breaker.
     #[serde(rename = "breakerId")]
     pub breaker_id: String,
+    /// Current state of the circuit breaker.
     pub state: BreakerState,
+    /// List of DataView names controlled by this breaker.
     pub dataviews: Vec<String>,
 }
 
+/// App-level circuit breaker registry for manual DataView traffic control.
 pub struct BreakerRegistry {
     breakers: RwLock<HashMap<String, BreakerEntry>>,
 }
 
 impl BreakerRegistry {
+    /// Create a new circuit breaker registry.
     pub fn new() -> Self {
         Self {
             breakers: RwLock::new(HashMap::new()),
         }
     }
 
+    /// Register a DataView with a circuit breaker.
     pub async fn register(&self, breaker_id: String, dataview_name: String) {
         let mut map = self.breakers.write().await;
         let entry = map.entry(breaker_id.clone()).or_insert_with(|| BreakerEntry {
@@ -40,6 +50,7 @@ impl BreakerRegistry {
         }
     }
 
+    /// Check if a circuit breaker is open.
     pub async fn is_open(&self, breaker_id: &str) -> bool {
         let map = self.breakers.read().await;
         map.get(breaker_id)
@@ -47,6 +58,7 @@ impl BreakerRegistry {
             .unwrap_or(false)
     }
 
+    /// Open a circuit breaker, blocking traffic.
     pub async fn trip(&self, breaker_id: &str) -> Option<BreakerEntry> {
         let mut map = self.breakers.write().await;
         if let Some(entry) = map.get_mut(breaker_id) {
@@ -57,6 +69,7 @@ impl BreakerRegistry {
         }
     }
 
+    /// Close a circuit breaker, allowing traffic.
     pub async fn reset(&self, breaker_id: &str) -> Option<BreakerEntry> {
         let mut map = self.breakers.write().await;
         if let Some(entry) = map.get_mut(breaker_id) {
@@ -67,11 +80,13 @@ impl BreakerRegistry {
         }
     }
 
+    /// Get a circuit breaker by ID.
     pub async fn get(&self, breaker_id: &str) -> Option<BreakerEntry> {
         let map = self.breakers.read().await;
         map.get(breaker_id).cloned()
     }
 
+    /// List all circuit breakers sorted by ID.
     pub async fn list(&self) -> Vec<BreakerEntry> {
         let map = self.breakers.read().await;
         let mut entries: Vec<BreakerEntry> = map.values().cloned().collect();
@@ -79,6 +94,7 @@ impl BreakerRegistry {
         entries
     }
 
+    /// Set the state of a circuit breaker.
     pub async fn set_state(&self, breaker_id: &str, state: BreakerState) {
         let mut map = self.breakers.write().await;
         if let Some(entry) = map.get_mut(breaker_id) {
