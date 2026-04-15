@@ -512,6 +512,45 @@ pub trait Connection: Send + Sync {
 
     /// The name of the driver that created this connection.
     fn driver_name(&self) -> &str;
+
+    /// Begin a transaction on this connection.
+    async fn begin_transaction(&mut self) -> Result<(), DriverError> {
+        Err(DriverError::Unsupported(format!(
+            "{} does not support transactions",
+            self.driver_name()
+        )))
+    }
+
+    /// Commit the active transaction.
+    async fn commit_transaction(&mut self) -> Result<(), DriverError> {
+        Err(DriverError::Unsupported(format!(
+            "{} does not support transactions",
+            self.driver_name()
+        )))
+    }
+
+    /// Rollback the active transaction.
+    async fn rollback_transaction(&mut self) -> Result<(), DriverError> {
+        Err(DriverError::Unsupported(format!(
+            "{} does not support transactions",
+            self.driver_name()
+        )))
+    }
+
+    /// Prepare a query for repeated execution. No-op by default.
+    async fn prepare(&mut self, _query: &str) -> Result<(), DriverError> {
+        Ok(())
+    }
+
+    /// Execute a previously prepared query. Falls through to execute() by default.
+    async fn execute_prepared(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
+        self.execute(query).await
+    }
+
+    /// Check if a query has been prepared on this connection.
+    fn has_prepared(&self, _query: &str) -> bool {
+        false
+    }
 }
 
 /// A named, stateless factory that creates `Connection` instances.
