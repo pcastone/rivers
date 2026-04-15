@@ -47,6 +47,7 @@ impl Connection for RedisConnection {
                         rows: vec![single_value_row(v)],
                         affected_rows: 1,
                         last_insert_id: None,
+                        column_names: None,
                     }),
                     None => Ok(QueryResult::empty()),
                 }
@@ -80,6 +81,7 @@ impl Connection for RedisConnection {
                     rows,
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -96,6 +98,7 @@ impl Connection for RedisConnection {
                         rows: vec![single_value_row(v)],
                         affected_rows: 1,
                         last_insert_id: None,
+                        column_names: None,
                     }),
                     None => Ok(QueryResult::empty()),
                 }
@@ -122,6 +125,7 @@ impl Connection for RedisConnection {
                     rows,
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -141,6 +145,7 @@ impl Connection for RedisConnection {
                     rows,
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -158,6 +163,7 @@ impl Connection for RedisConnection {
                     rows,
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -177,6 +183,7 @@ impl Connection for RedisConnection {
                     rows: vec![row],
                     affected_rows: 1,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -200,6 +207,7 @@ impl Connection for RedisConnection {
                     rows,
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -227,6 +235,7 @@ impl Connection for RedisConnection {
                     rows: Vec::new(),
                     affected_rows: 1,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -243,6 +252,7 @@ impl Connection for RedisConnection {
                     rows: Vec::new(),
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -258,6 +268,7 @@ impl Connection for RedisConnection {
                     rows: Vec::new(),
                     affected_rows: len,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -273,6 +284,7 @@ impl Connection for RedisConnection {
                     rows: Vec::new(),
                     affected_rows: len,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -288,6 +300,7 @@ impl Connection for RedisConnection {
                     rows: Vec::new(),
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -303,6 +316,7 @@ impl Connection for RedisConnection {
                     rows: Vec::new(),
                     affected_rows: if ok { 1 } else { 0 },
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -319,6 +333,7 @@ impl Connection for RedisConnection {
                     rows: vec![row],
                     affected_rows: 1,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -336,6 +351,7 @@ impl Connection for RedisConnection {
                     rows: vec![row],
                     affected_rows: 1,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -353,6 +369,7 @@ impl Connection for RedisConnection {
                     rows: Vec::new(),
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -368,6 +385,7 @@ impl Connection for RedisConnection {
                     rows: Vec::new(),
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 

@@ -1,0 +1,96 @@
+<h2>Canary Fleet Test Dashboard — Layout Direction</h2>
+<p class="subtitle">Which layout feels right for the test runner?</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Card Grid (current style)</h3>
+      <p>Each test is a card in a responsive grid. Click a card to run that single test. "Run All" button at top. Cards flip between pending → running → pass/fail with color. Grouped by profile (AUTH, HANDLERS, SQL, NoSQL, STREAMS, V8).</p>
+      <div style="margin-top:12px; padding:12px; background:#0f1117; border-radius:6px; font-family:monospace; font-size:11px;">
+        <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:6px;">
+          <div style="background:#0d2818; border:1px solid #166534; border-radius:4px; padding:6px; text-align:center;">
+            <div style="color:#4ade80; font-size:10px;">PASS</div>
+            <div style="color:#ccc; font-size:9px;">RT-CTX-REQUEST</div>
+          </div>
+          <div style="background:#0d2818; border:1px solid #166534; border-radius:4px; padding:6px; text-align:center;">
+            <div style="color:#4ade80; font-size:10px;">PASS</div>
+            <div style="color:#ccc; font-size:9px;">RT-CTX-DATA</div>
+          </div>
+          <div style="background:#1a1a2a; border:1px solid #2a2a3a; border-radius:4px; padding:6px; text-align:center;">
+            <div style="color:#888; font-size:10px;">···</div>
+            <div style="color:#888; font-size:9px;">RT-V8-CONSOLE</div>
+          </div>
+          <div style="background:#2a0f0f; border:1px solid #991b1b; border-radius:4px; padding:6px; text-align:center;">
+            <div style="color:#f87171; font-size:10px;">FAIL</div>
+            <div style="color:#ccc; font-size:9px;">RT-ERROR-SANITIZE</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Compact Table Rows</h3>
+      <p>Each test is a single row in a table. Status icon + test name + duration + run button. Very dense — all 70 tests visible at once. Profile sections are collapsible headers.</p>
+      <div style="margin-top:12px; padding:12px; background:#0f1117; border-radius:6px; font-family:monospace; font-size:11px;">
+        <div style="border-bottom:1px solid #2a2a3a; padding:4px 0; display:flex; align-items:center; gap:8px;">
+          <span style="color:#4ade80;">●</span>
+          <span style="color:#ccc; flex:1;">RT-CTX-REQUEST</span>
+          <span style="color:#666; font-size:9px;">42ms</span>
+          <span style="color:#2563eb; font-size:9px; cursor:pointer;">▶</span>
+        </div>
+        <div style="border-bottom:1px solid #2a2a3a; padding:4px 0; display:flex; align-items:center; gap:8px;">
+          <span style="color:#4ade80;">●</span>
+          <span style="color:#ccc; flex:1;">RT-CTX-DATA</span>
+          <span style="color:#666; font-size:9px;">38ms</span>
+          <span style="color:#2563eb; font-size:9px; cursor:pointer;">▶</span>
+        </div>
+        <div style="border-bottom:1px solid #2a2a3a; padding:4px 0; display:flex; align-items:center; gap:8px;">
+          <span style="color:#888;">○</span>
+          <span style="color:#888; flex:1;">RT-V8-CONSOLE</span>
+          <span style="color:#666; font-size:9px;">—</span>
+          <span style="color:#2563eb; font-size:9px; cursor:pointer;">▶</span>
+        </div>
+        <div style="border-bottom:1px solid #2a2a3a; padding:4px 0; display:flex; align-items:center; gap:8px;">
+          <span style="color:#f87171;">●</span>
+          <span style="color:#ccc; flex:1;">RT-ERROR-SANITIZE</span>
+          <span style="color:#666; font-size:9px;">51ms</span>
+          <span style="color:#2563eb; font-size:9px; cursor:pointer;">▶</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Hybrid — Summary Bar + Collapsible Profiles</h3>
+      <p>Top summary bar with pass/fail/total counts and "Run All" button. Below: profile sections (AUTH, HANDLERS, SQL, etc.) that expand to show test cards. Each profile header shows its own pass count and has a "Run Profile" button. Click any card to run individually.</p>
+      <div style="margin-top:12px; padding:12px; background:#0f1117; border-radius:6px; font-family:monospace; font-size:11px;">
+        <div style="background:#0d3320; padding:8px; border-radius:4px; text-align:center; color:#4ade80; margin-bottom:8px;">
+          <strong>48 / 70</strong> &nbsp; Pass: 48 &nbsp; Fail: 3 &nbsp; Error: 19 &nbsp;&nbsp; [Run All]
+        </div>
+        <div style="border:1px solid #2a2a3a; border-radius:4px; margin-bottom:4px;">
+          <div style="padding:6px 8px; display:flex; justify-content:space-between; cursor:pointer;">
+            <span style="color:#ccc;">▼ HANDLERS (25/25)</span>
+            <span style="color:#2563eb; font-size:10px;">[Run Profile]</span>
+          </div>
+          <div style="padding:4px 8px 8px; display:grid; grid-template-columns:repeat(3,1fr); gap:4px;">
+            <div style="background:#0d2818; border-radius:3px; padding:3px; text-align:center; font-size:9px; color:#4ade80;">CTX-REQUEST</div>
+            <div style="background:#0d2818; border-radius:3px; padding:3px; text-align:center; font-size:9px; color:#4ade80;">CTX-DATA</div>
+            <div style="background:#0d2818; border-radius:3px; padding:3px; text-align:center; font-size:9px; color:#4ade80;">V8-CONSOLE</div>
+          </div>
+        </div>
+        <div style="border:1px solid #2a2a3a; border-radius:4px;">
+          <div style="padding:6px 8px; display:flex; justify-content:space-between; cursor:pointer;">
+            <span style="color:#ccc;">▶ NoSQL (0/19) <span style="color:#f87171; font-size:9px;">19 errors</span></span>
+            <span style="color:#2563eb; font-size:10px;">[Run Profile]</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

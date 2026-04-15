@@ -96,6 +96,7 @@ fn unique_collection() -> String {
     )
 }
 
+/// Validates that the MongoDB driver can establish a connection and respond to a ping health check.
 #[tokio::test]
 async fn mongodb_connect_and_ping() {
     let Some(mut conn) = try_connect().await else { return };
@@ -109,6 +110,7 @@ async fn mongodb_connect_and_ping() {
     assert_eq!(result.affected_rows, 0);
 }
 
+/// Validates full CRUD lifecycle: insert a document, find it by query, delete it, and confirm removal.
 #[tokio::test]
 async fn mongodb_insert_find_delete_roundtrip() {
     let Some(mut conn) = try_connect().await else { return };

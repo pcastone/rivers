@@ -144,6 +144,7 @@ impl ExecConnection {
                     rows: vec![row],
                     affected_rows: 1,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
             Err(e) => {

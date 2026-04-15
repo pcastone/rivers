@@ -103,6 +103,7 @@ async fn try_connect() -> Option<Box<dyn rivers_driver_sdk::Connection>> {
     }
 }
 
+/// Validates that the CouchDB driver can establish a connection and respond to a ping health check.
 #[tokio::test]
 async fn couchdb_connect_and_ping() {
     let Some(mut conn) = try_connect().await else { return };
@@ -115,6 +116,7 @@ async fn couchdb_connect_and_ping() {
     }
 }
 
+/// Validates full document lifecycle: insert a document, find it by ID, delete it, and confirm removal.
 #[tokio::test]
 async fn couchdb_insert_find_delete_roundtrip() {
     // Ensure database exists first.

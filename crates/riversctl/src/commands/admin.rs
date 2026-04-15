@@ -262,6 +262,68 @@ fn kill_pid(pid: &str, sig: &Signal) -> Result<(), String> {
     Ok(())
 }
 
+/// List all circuit breakers for a specific app.
+#[cfg(feature = "admin-api")]
+pub async fn cmd_breaker_list(url: &str, app: &str) -> Result<(), String> {
+    let path = format!("/admin/apps/{}/breakers", app);
+    let data = admin_get(url, &path).await?;
+    let empty = vec![];
+    let breakers = data.as_array().unwrap_or(&empty);
+    if breakers.is_empty() {
+        println!("No circuit breakers configured for app '{}'.", app);
+        return Ok(());
+    }
+    for b in breakers {
+        let id = b["breakerId"].as_str().unwrap_or("?");
+        let state = b["state"].as_str().unwrap_or("?");
+        let dvs = b["dataviews"].as_array().map(|a| a.len()).unwrap_or(0);
+        println!("  {:<30} {:<8} ({} dataview{})", id, state, dvs, if dvs == 1 { "" } else { "s" });
+    }
+    Ok(())
+}
+
+/// Get status of a specific circuit breaker.
+#[cfg(feature = "admin-api")]
+pub async fn cmd_breaker_status(url: &str, app: &str, name: &str) -> Result<(), String> {
+    let path = format!("/admin/apps/{}/breakers/{}", app, name);
+    let data = admin_get(url, &path).await?;
+    let state = data["state"].as_str().unwrap_or("?");
+    println!("  {} {}", name, state);
+    if let Some(dvs) = data["dataviews"].as_array() {
+        let names: Vec<&str> = dvs.iter().filter_map(|v| v.as_str()).collect();
+        println!("  DataViews: {}", names.join(", "));
+    }
+    Ok(())
+}
+
+/// Trip (open) a circuit breaker.
+#[cfg(feature = "admin-api")]
+pub async fn cmd_breaker_trip(url: &str, app: &str, name: &str) -> Result<(), String> {
+    let path = format!("/admin/apps/{}/breakers/{}/trip", app, name);
+    let data = admin_post(url, &path, &serde_json::json!({})).await?;
+    let state = data["state"].as_str().unwrap_or("?");
+    println!("  {} {}", name, state);
+    if let Some(dvs) = data["dataviews"].as_array() {
+        let names: Vec<&str> = dvs.iter().filter_map(|v| v.as_str()).collect();
+        println!("  DataViews: {}", names.join(", "));
+    }
+    Ok(())
+}
+
+/// Reset (close) a circuit breaker.
+#[cfg(feature = "admin-api")]
+pub async fn cmd_breaker_reset(url: &str, app: &str, name: &str) -> Result<(), String> {
+    let path = format!("/admin/apps/{}/breakers/{}/reset", app, name);
+    let data = admin_post(url, &path, &serde_json::json!({})).await?;
+    let state = data["state"].as_str().unwrap_or("?");
+    println!("  {} {}", name, state);
+    if let Some(dvs) = data["dataviews"].as_array() {
+        let names: Vec<&str> = dvs.iter().filter_map(|v| v.as_str()).collect();
+        println!("  DataViews: {}", names.join(", "));
+    }
+    Ok(())
+}
+
 #[cfg(feature = "admin-api")]
 pub async fn cmd_log(url: &str, args: &[String]) -> Result<(), String> {
     match args.first().map(|s| s.as_str()) {

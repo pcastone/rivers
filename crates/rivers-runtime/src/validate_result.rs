@@ -585,6 +585,11 @@ pub mod error_codes {
     /// Required service not running.
     pub const L005: &str = "L005";
 
+    // ── CB: Circuit breaker warnings ────────────────────────────────
+
+    /// Circuit breaker ID referenced by only one DataView (likely a typo).
+    pub const CB001: &str = "CB001";
+
     // ── W: Warnings (do not affect exit code) ───────────────────────
 
     /// Unknown driver — cannot verify at build time.

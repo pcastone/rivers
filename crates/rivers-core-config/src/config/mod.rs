@@ -13,6 +13,8 @@ pub mod server;
 pub mod storage;
 /// TLS, admin API, cluster, and session store configuration.
 pub mod tls;
+/// Unknown-key detection for riversd.toml at startup.
+pub mod validate_config;
 
 pub use runtime::*;
 pub use security::*;

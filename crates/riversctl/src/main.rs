@@ -50,6 +50,32 @@ async fn main() {
             if args.len() < 3 { eprintln!("Usage: riversctl log <levels|set|reset>"); std::process::exit(1); }
             admin::cmd_log(&admin_url, &args[2..]).await
         }
+        #[cfg(feature = "admin-api")]
+        "breaker" => {
+            let app_arg = args.iter().find(|a| a.starts_with("--app=")).map(|a| &a[6..]);
+            if args.iter().any(|a| a == "--list") {
+                match app_arg {
+                    Some(app) => admin::cmd_breaker_list(&admin_url, app).await,
+                    None => Err("usage: riversctl breaker --list --app=<appId>".into()),
+                }
+            } else if let Some(name_arg) = args.iter().find(|a| a.starts_with("--name=")) {
+                let name = &name_arg[7..];
+                match app_arg {
+                    Some(app) => {
+                        if args.iter().any(|a| a == "--trip") {
+                            admin::cmd_breaker_trip(&admin_url, app, name).await
+                        } else if args.iter().any(|a| a == "--reset") {
+                            admin::cmd_breaker_reset(&admin_url, app, name).await
+                        } else {
+                            admin::cmd_breaker_status(&admin_url, app, name).await
+                        }
+                    }
+                    None => Err("usage: riversctl breaker --app=<appId> --name=<breakerId> [--trip|--reset]".into()),
+                }
+            } else {
+                Err("usage: riversctl breaker --app=<appId> --list | --name=<breakerId> [--trip|--reset]".into())
+            }
+        }
         #[cfg(feature = "tls")]
         "tls" => {
             if args.len() < 3 {
@@ -127,6 +153,10 @@ fn print_usage() {
     eprintln!("  log levels      View current log levels");
     eprintln!("  log set <e> <l> Change log level");
     eprintln!("  log reset       Reset to defaults");
+    eprintln!("  breaker --app=<appId> --list                    List all circuit breakers for an app");
+    eprintln!("  breaker --app=<appId> --name=<id>              Show circuit breaker status");
+    eprintln!("  breaker --app=<appId> --name=<id> --trip       Trip (open) a circuit breaker");
+    eprintln!("  breaker --app=<appId> --name=<id> --reset      Reset (close) a circuit breaker");
     eprintln!();
     eprintln!("Environment:");
     eprintln!("  RIVERS_ADMIN_URL     Admin API base URL (default: http://127.0.0.1:9090)");

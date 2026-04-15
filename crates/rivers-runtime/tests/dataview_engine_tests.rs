@@ -47,6 +47,8 @@ fn test_config() -> DataViewConfig {
         put_parameters: Vec::new(),
         delete_parameters: Vec::new(),
         streaming: false,
+        circuit_breaker_id: None,
+        prepared: false,
         max_rows: 1000,
     }
 }
@@ -540,6 +542,7 @@ async fn executor_invalidates_cache_after_write() {
         rows: vec![[("id".to_string(), QueryValue::Integer(1))].into_iter().collect()],
         affected_rows: 1,
         last_insert_id: None,
+        column_names: None,
     };
     cache.set("list_contacts", &read_params, &cached_result, None).await.unwrap();
 
@@ -571,6 +574,8 @@ async fn executor_invalidates_cache_after_write() {
         put_parameters: Vec::new(),
         delete_parameters: Vec::new(),
         streaming: false,
+        circuit_breaker_id: None,
+        prepared: false,
         max_rows: 1000,
     };
     registry.register(write_config);
@@ -600,7 +605,7 @@ async fn executor_invalidates_cache_after_write() {
     );
 
     // Execute the write DataView
-    let result = executor.execute("create_contact", HashMap::new(), "POST", "trace-1").await;
+    let result = executor.execute("create_contact", HashMap::new(), "POST", "trace-1", None).await;
     assert!(result.is_ok(), "execute should succeed: {:?}", result.err());
 
     // Verify "list_contacts" cache was invalidated

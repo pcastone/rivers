@@ -234,6 +234,7 @@ impl LdapConnection {
             rows,
             affected_rows: count,
             last_insert_id: None,
+            column_names: None,
         })
     }
 
@@ -285,6 +286,7 @@ impl LdapConnection {
             rows: Vec::new(),
             affected_rows: 1,
             last_insert_id: None,
+            column_names: None,
         })
     }
 
@@ -336,6 +338,7 @@ impl LdapConnection {
             rows: Vec::new(),
             affected_rows: 1,
             last_insert_id: None,
+            column_names: None,
         })
     }
 
@@ -354,6 +357,7 @@ impl LdapConnection {
             rows: Vec::new(),
             affected_rows: 1,
             last_insert_id: None,
+            column_names: None,
         })
     }
 
@@ -364,6 +368,7 @@ impl LdapConnection {
             rows: Vec::new(),
             affected_rows: 0,
             last_insert_id: None,
+            column_names: None,
         })
     }
 }

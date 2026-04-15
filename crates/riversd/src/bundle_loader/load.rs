@@ -53,6 +53,29 @@ pub async fn load_and_wire_bundle(
         }
     };
 
+    // ── Gate 2, Layer 1: Structural TOML validation ──
+    let structural_results = rivers_runtime::validate_structural(path);
+    let structural_errors: Vec<_> = structural_results
+        .iter()
+        .filter(|r| r.status == rivers_runtime::ValidationStatus::Fail)
+        .collect();
+    if !structural_errors.is_empty() {
+        let msg = structural_errors
+            .iter()
+            .map(|r| r.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        tracing::error!(path = %bundle_path, "structural validation failed: {}", msg);
+        return Err(ServerError::Config(format!(
+            "structural validation failed: {}", msg
+        )));
+    }
+    for r in &structural_results {
+        if r.status == rivers_runtime::ValidationStatus::Warn {
+            tracing::warn!(path = %bundle_path, "{}", r.message);
+        }
+    }
+
     // ── AT3.2 (A): Validate bundle before wiring ──
     if let Err(errors) = rivers_runtime::validate_bundle(&bundle) {
         let msg = errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ");
@@ -236,6 +259,53 @@ pub async fn load_and_wire_bundle(
             namespaced_dv.name = format!("{}:{}", entry_point, dv.name);
             namespaced_dv.datasource = format!("{}:{}", entry_point, dv.datasource);
             registry.register(namespaced_dv);
+        }
+
+        // ── Build circuit breaker registry from DataView config (circuit-breaker-spec §3) ──
+        let app_id = &app.manifest.app_id;
+        for (dv_name, dv_config) in &app.config.data.dataviews {
+            if let Some(ref breaker_id) = dv_config.circuit_breaker_id {
+                ctx.circuit_breaker_registry
+                    .register(app_id, breaker_id.clone(), dv_name.clone())
+                    .await;
+            }
+        }
+
+        // Restore persisted breaker state from StorageEngine (circuit-breaker-spec §3, REG-3)
+        if let Some(ref storage) = ctx.storage_engine {
+            for entry in ctx.circuit_breaker_registry.list_for_app(app_id).await {
+                let key = format!("breaker:{}:{}", app_id, entry.breaker_id);
+                match storage.get("rivers", &key).await {
+                    Ok(Some(bytes)) => {
+                        if let Ok(state_str) = String::from_utf8(bytes) {
+                            if state_str.trim() == "open" {
+                                ctx.circuit_breaker_registry
+                                    .set_state(app_id, &entry.breaker_id, crate::circuit_breaker::BreakerState::Open)
+                                    .await;
+                                tracing::info!(breaker = %entry.breaker_id, "restored breaker state: OPEN");
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            breaker = %entry.breaker_id,
+                            error = %e,
+                            "failed to read persisted breaker state, starting CLOSED"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Log breaker summary for this app
+        for entry in ctx.circuit_breaker_registry.list_for_app(app_id).await {
+            tracing::info!(
+                breaker = %entry.breaker_id,
+                state = ?entry.state,
+                dataviews = entry.dataviews.len(),
+                "breaker loaded"
+            );
         }
 
         // Build ConnectionParams — namespaced: "postgres:pg"
@@ -432,6 +502,175 @@ pub async fn load_and_wire_bundle(
         tracing::info!("DataView cache: L1 + L2 enabled (L1 max: {} MB)", cache_policy.l1_max_bytes / (1024 * 1024));
     } else if cache_policy.l1_enabled {
         tracing::info!("DataView cache: L1 enabled (max: {} MB)", cache_policy.l1_max_bytes / (1024 * 1024));
+    }
+
+    // ── Schema introspection (schema-introspection-spec §4) ──────────
+    // For each SQL datasource with `introspect = true`, acquire a connection
+    // and execute a LIMIT 0 wrapper query per DataView to validate query
+    // syntax at startup rather than at first request.
+    {
+        let mut all_mismatches: Vec<crate::schema_introspection::SchemaMismatch> = Vec::new();
+
+        for app in &bundle.apps {
+            let entry_point = app
+                .manifest
+                .entry_point
+                .as_deref()
+                .unwrap_or(&app.manifest.app_name);
+
+            for (ds_name, ds_config) in &app.config.data.datasources {
+                // Skip if introspection disabled on this datasource
+                if !ds_config.introspect {
+                    tracing::debug!(
+                        datasource = %ds_name,
+                        app = %entry_point,
+                        "schema introspection skipped (introspect = false)"
+                    );
+                    continue;
+                }
+
+                // Check if driver supports introspection
+                let driver = match factory.get_driver(&ds_config.driver) {
+                    Some(d) => d,
+                    None => continue,
+                };
+                if !driver.supports_introspection() {
+                    tracing::debug!(
+                        datasource = %ds_name,
+                        driver = %ds_config.driver,
+                        "schema introspection skipped — driver does not support introspection"
+                    );
+                    continue;
+                }
+
+                // Retrieve the already-built ConnectionParams for this datasource
+                let namespaced_ds = format!("{}:{}", entry_point, ds_name);
+                let params = match ds_params.get(&namespaced_ds) {
+                    Some(p) => p,
+                    None => {
+                        tracing::warn!(
+                            datasource = %ds_name,
+                            app = %entry_point,
+                            "schema introspection skipped — no connection params found"
+                        );
+                        continue;
+                    }
+                };
+
+                // Try to connect for introspection
+                let mut conn = match driver.connect(params).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(
+                            datasource = %ds_name,
+                            app = %entry_point,
+                            error = %e,
+                            "schema introspection skipped — cannot connect"
+                        );
+                        continue;
+                    }
+                };
+
+                // Introspect each DataView on this datasource
+                for (dv_name, dv_config) in &app.config.data.dataviews {
+                    if dv_config.datasource != *ds_name {
+                        continue;
+                    }
+
+                    // Use the GET query for introspection (primary read query)
+                    let query_str = match dv_config.query_for_method("GET") {
+                        Some(q) if !q.is_empty() => q.to_string(),
+                        _ => continue,
+                    };
+
+                    // Wrap in LIMIT 0 to get column metadata without returning rows
+                    let limit_query = rivers_runtime::rivers_driver_sdk::Query {
+                        operation: "select".to_string(),
+                        target: String::new(),
+                        statement: format!(
+                            "SELECT * FROM ({}) AS _introspect LIMIT 0",
+                            query_str
+                        ),
+                        parameters: std::collections::HashMap::new(),
+                    };
+
+                    match conn.execute(&limit_query).await {
+                        Ok(result) => {
+                            if let Some(ref columns) = result.column_names {
+                                tracing::debug!(
+                                    dataview = %dv_name,
+                                    app = %entry_point,
+                                    columns = ?columns,
+                                    "introspected {} column(s)",
+                                    columns.len()
+                                );
+
+                                // Load schema and compare field names against actual columns
+                                let schema_ref = dv_config.get_schema.as_deref()
+                                    .or(dv_config.return_schema.as_deref());
+                                if let Some(schema_path) = schema_ref {
+                                    let full_path = app.app_dir.join(schema_path);
+                                    match std::fs::read_to_string(&full_path) {
+                                        Ok(content) => {
+                                            match rivers_runtime::schema::parse_schema(&content, schema_path) {
+                                                Ok(schema) => {
+                                                    let field_names: Vec<String> = schema.fields
+                                                        .iter()
+                                                        .map(|f| f.name.clone())
+                                                        .collect();
+                                                    let mismatches = crate::schema_introspection::check_fields_against_columns(
+                                                        &format!("{}:{}", entry_point, dv_name),
+                                                        &field_names,
+                                                        columns,
+                                                    );
+                                                    all_mismatches.extend(mismatches);
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        dataview = %dv_name,
+                                                        schema = %schema_path,
+                                                        error = %e,
+                                                        "schema parse failed, skipping field comparison"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!(
+                                                dataview = %dv_name,
+                                                schema = %schema_path,
+                                                error = %e,
+                                                "schema file not found, skipping field comparison"
+                                            );
+                                        }
+                                    }
+                                }
+                            } else {
+                                tracing::debug!(
+                                    dataview = %dv_name,
+                                    app = %entry_point,
+                                    "introspection query succeeded (no column metadata returned)"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            all_mismatches.push(crate::schema_introspection::SchemaMismatch {
+                                dataview_name: format!("{}:{}", entry_point, dv_name),
+                                field_name: "(query)".to_string(),
+                                available_columns: vec![],
+                                suggestion: Some(format!("query error at startup: {}", e)),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        if !all_mismatches.is_empty() {
+            let msg = crate::schema_introspection::format_introspection_errors(&all_mismatches);
+            tracing::error!("{}", msg);
+            return Err(ServerError::Config(msg));
+        }
     }
 
     let ds_params = Arc::new(ds_params);

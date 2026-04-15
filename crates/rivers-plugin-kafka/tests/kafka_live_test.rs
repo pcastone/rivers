@@ -78,6 +78,7 @@ fn broker_config(topic: &str) -> BrokerConsumerConfig {
     }
 }
 
+/// Validates that the Kafka driver can produce a message to a topic and consume it back with correct payload.
 #[tokio::test]
 async fn kafka_produce_and_consume() {
     let driver = KafkaDriver;

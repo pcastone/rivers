@@ -32,11 +32,7 @@ The Rust runtime is implemented across a workspace of crates under `crates/`.
 
 ## GOAL
 
-Current sprint goals:
-- Production readiness — deploy, doctor, lifecycle (stop/status/PID)
-- Per-app logging, metrics, TLS cert renewal
-- Fix test compilation across workspace
-- Documentation parity with code
+understand the codebase
 
 ## Architecture
 

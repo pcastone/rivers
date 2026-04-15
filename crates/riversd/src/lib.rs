@@ -7,6 +7,8 @@ pub mod admin_handlers;
 pub mod tls;
 pub mod cli;
 pub mod backpressure;
+/// App-level circuit breaker registry for manual DataView traffic control.
+pub mod circuit_breaker;
 pub mod broker_bridge;
 pub mod bundle_diff;
 pub mod bundle_loader;
@@ -28,6 +30,7 @@ pub mod pool;
 pub mod process_pool;
 pub mod rate_limit;
 pub mod runtime;
+pub mod schema_introspection;
 pub mod security_pipeline;
 pub mod server;
 pub mod service_discovery;
@@ -37,5 +40,7 @@ pub mod shutdown;
 pub mod streaming;
 pub mod static_files;
 pub mod task_enrichment;
+/// Per-request transaction state management.
+pub mod transaction;
 pub mod view_engine;
 pub mod websocket;

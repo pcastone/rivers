@@ -15,7 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use mongodb::bson::{self, doc, Bson, Document};
 use mongodb::options::{ClientOptions, Credential};
-use mongodb::{Client, Database};
+use mongodb::{Client, ClientSession, Database};
 use tracing::debug;
 
 use rivers_driver_sdk::{
@@ -79,7 +79,7 @@ impl DatabaseDriver for MongoDriver {
             "mongodb: connected"
         );
 
-        Ok(Box::new(MongoConnection { db }))
+        Ok(Box::new(MongoConnection { db, session: None }))
     }
 }
 
@@ -88,6 +88,7 @@ impl DatabaseDriver for MongoDriver {
 /// Active MongoDB connection wrapping a database handle.
 pub struct MongoConnection {
     db: Database,
+    session: Option<ClientSession>,
 }
 
 #[async_trait]
@@ -124,6 +125,48 @@ impl Connection for MongoConnection {
 
     fn driver_name(&self) -> &str {
         "mongodb"
+    }
+
+    async fn begin_transaction(&mut self) -> Result<(), DriverError> {
+        let mut session = self.db
+            .client()
+            .start_session()
+            .await
+            .map_err(|e| DriverError::Query(format!("mongodb start session: {e}")))?;
+        session
+            .start_transaction()
+            .await
+            .map_err(|e| DriverError::Query(format!("mongodb BEGIN: {e}")))?;
+        self.session = Some(session);
+        Ok(())
+    }
+
+    async fn commit_transaction(&mut self) -> Result<(), DriverError> {
+        match self.session.as_mut() {
+            Some(session) => {
+                session
+                    .commit_transaction()
+                    .await
+                    .map_err(|e| DriverError::Query(format!("mongodb COMMIT: {e}")))?;
+                self.session = None;
+                Ok(())
+            }
+            None => Err(DriverError::Query("no active mongodb transaction".into())),
+        }
+    }
+
+    async fn rollback_transaction(&mut self) -> Result<(), DriverError> {
+        match self.session.as_mut() {
+            Some(session) => {
+                session
+                    .abort_transaction()
+                    .await
+                    .map_err(|e| DriverError::Query(format!("mongodb ROLLBACK: {e}")))?;
+                self.session = None;
+                Ok(())
+            }
+            None => Err(DriverError::Query("no active mongodb transaction".into())),
+        }
     }
 }
 
@@ -179,6 +222,7 @@ impl MongoConnection {
             rows,
             affected_rows: count,
             last_insert_id: None,
+            column_names: None,
         })
     }
 
@@ -199,6 +243,7 @@ impl MongoConnection {
             rows: Vec::new(),
             affected_rows: 1,
             last_insert_id: Some(insert_id),
+            column_names: None,
         })
     }
 
@@ -221,6 +266,7 @@ impl MongoConnection {
             rows: Vec::new(),
             affected_rows: result.modified_count,
             last_insert_id: None,
+            column_names: None,
         })
     }
 
@@ -239,6 +285,7 @@ impl MongoConnection {
             rows: Vec::new(),
             affected_rows: result.deleted_count,
             last_insert_id: None,
+            column_names: None,
         })
     }
 

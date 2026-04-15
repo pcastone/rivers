@@ -85,7 +85,7 @@ impl Connection for CassandraConnection {
             }
             "ping" => {
                 self.ping().await?;
-                Ok(QueryResult { rows: Vec::new(), affected_rows: 0, last_insert_id: None })
+                Ok(QueryResult { rows: Vec::new(), affected_rows: 0, last_insert_id: None, column_names: None })
             }
             other => Err(DriverError::Unsupported(format!(
                 "cassandra: unsupported operation '{other}'"
@@ -139,7 +139,7 @@ impl CassandraConnection {
         }
 
         let count = rows.len() as u64;
-        Ok(QueryResult { rows, affected_rows: count, last_insert_id: None })
+        Ok(QueryResult { rows, affected_rows: count, last_insert_id: None, column_names: None })
     }
 
     async fn exec_write(&self, query: &Query) -> Result<QueryResult, DriverError> {
@@ -156,7 +156,7 @@ impl CassandraConnection {
             .await
             .map_err(|e| DriverError::Query(format!("cassandra write: {e}")))?;
 
-        Ok(QueryResult { rows: Vec::new(), affected_rows: 1, last_insert_id: None })
+        Ok(QueryResult { rows: Vec::new(), affected_rows: 1, last_insert_id: None, column_names: None })
     }
 }
 

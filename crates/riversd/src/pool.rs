@@ -9,7 +9,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Notify, RwLock};
@@ -60,35 +60,51 @@ pub enum PoolError {
 
 /// RAII guard for pool connections.
 ///
-/// Automatically decrements `active_count` when dropped, preventing
-/// connection leaks on panics or early returns. The connection is
-/// dropped (not returned to idle) — callers who want to reuse should
-/// call `pool.release()` explicitly and `std::mem::forget` the guard.
+/// Automatically returns the connection to the pool's idle queue when dropped,
+/// preserving prepared statement caches across checkouts. If the pool is
+/// draining, the connection is discarded instead.
 pub struct PoolGuard {
     active_count: Arc<AtomicU64>,
-    /// Held connection — dropped when guard is dropped.
-    _conn: Option<Box<dyn Connection>>,
+    draining: Arc<AtomicBool>,
+    idle_return: Arc<StdMutex<VecDeque<PooledConnection>>>,
+    notify: Arc<Notify>,
+    /// Held connection — returned to idle on drop.
+    conn: Option<Box<dyn Connection>>,
 }
 
 impl PoolGuard {
     /// Create a guard for a checked-out connection.
-    pub fn new(conn: Box<dyn Connection>, active_count: Arc<AtomicU64>) -> Self {
+    fn new(
+        conn: Box<dyn Connection>,
+        active_count: Arc<AtomicU64>,
+        draining: Arc<AtomicBool>,
+        idle_return: Arc<StdMutex<VecDeque<PooledConnection>>>,
+        notify: Arc<Notify>,
+    ) -> Self {
         Self {
             active_count,
-            _conn: Some(conn),
+            draining,
+            idle_return,
+            notify,
+            conn: Some(conn),
         }
     }
 
     /// Get a mutable reference to the underlying connection.
     pub fn conn_mut(&mut self) -> &mut Box<dyn Connection> {
-        self._conn.as_mut().expect("connection already taken")
+        self.conn.as_mut().expect("connection already taken")
     }
 
-    /// Take the connection out of the guard (for explicit release to pool).
-    /// Caller is responsible for calling pool.release() and active_count management.
+    /// Take the connection out of the guard (transfers ownership to the caller).
+    ///
+    /// The connection is NOT returned to idle — the caller takes full
+    /// ownership and is responsible for its lifecycle. `active_count` is
+    /// decremented here since Drop will not run.
     pub fn take(mut self) -> Box<dyn Connection> {
-        // Prevent Drop from decrementing active_count
-        let conn = self._conn.take().expect("connection already taken");
+        let conn = self.conn.take().expect("connection already taken");
+        // Decrement active count before forgetting self so the pool stays consistent.
+        self.active_count.fetch_sub(1, Ordering::Relaxed);
+        self.notify.notify_one();
         std::mem::forget(self);
         conn
     }
@@ -96,9 +112,26 @@ impl PoolGuard {
 
 impl Drop for PoolGuard {
     fn drop(&mut self) {
-        if self._conn.is_some() {
-            // Connection dropped without explicit release — decrement active count
+        if let Some(conn) = self.conn.take() {
             self.active_count.fetch_sub(1, Ordering::Relaxed);
+
+            if self.draining.load(Ordering::Relaxed) {
+                // Pool is draining — discard the connection.
+                self.notify.notify_waiters();
+                return;
+            }
+
+            // Return to the idle_return queue (std::sync::Mutex — safe in Drop).
+            let pooled = PooledConnection {
+                conn,
+                created_at: Instant::now(),
+                last_used: Instant::now(),
+            };
+            if let Ok(mut queue) = self.idle_return.lock() {
+                queue.push_back(pooled);
+            }
+            // Notify any waiters that a connection is available.
+            self.notify.notify_one();
         }
     }
 }
@@ -403,13 +436,16 @@ pub struct ConnectionPool {
     driver: Arc<dyn DatabaseDriver>,
     params: ConnectionParams,
     idle: Mutex<VecDeque<PooledConnection>>,
-    active_count: AtomicU64,
+    /// Sync queue for connections returned via `PoolGuard::drop()`.
+    /// Drained into `idle` on the next `try_get_idle()` call.
+    idle_return: Arc<StdMutex<VecDeque<PooledConnection>>>,
+    active_count: Arc<AtomicU64>,
     checkout_count: AtomicU64,
     total_wait_ms: AtomicU64,
     circuit_breaker: Mutex<CircuitBreaker>,
     event_bus: Arc<EventBus>,
-    draining: AtomicBool,
-    notify: Notify,
+    draining: Arc<AtomicBool>,
+    notify: Arc<Notify>,
 }
 
 impl ConnectionPool {
@@ -428,13 +464,14 @@ impl ConnectionPool {
             driver,
             params,
             idle: Mutex::new(VecDeque::new()),
-            active_count: AtomicU64::new(0),
+            idle_return: Arc::new(StdMutex::new(VecDeque::new())),
+            active_count: Arc::new(AtomicU64::new(0)),
             checkout_count: AtomicU64::new(0),
             total_wait_ms: AtomicU64::new(0),
             circuit_breaker: Mutex::new(CircuitBreaker::new(cb_config)),
             event_bus,
-            draining: AtomicBool::new(false),
-            notify: Notify::new(),
+            draining: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(Notify::new()),
         }
     }
 
@@ -560,8 +597,19 @@ impl ConnectionPool {
     }
 
     /// Try to get a valid idle connection, evicting expired ones.
+    ///
+    /// Drains any connections returned via `PoolGuard::drop()` (the sync
+    /// `idle_return` queue) into the main idle queue first.
     async fn try_get_idle(&self) -> Option<Box<dyn Connection>> {
         let mut idle = self.idle.lock().await;
+
+        // Drain connections returned synchronously by PoolGuard::drop().
+        if let Ok(mut returned) = self.idle_return.try_lock() {
+            while let Some(conn) = returned.pop_front() {
+                idle.push_back(conn);
+            }
+        }
+
         let now = Instant::now();
 
         while let Some(pooled) = idle.pop_front() {
@@ -672,6 +720,20 @@ impl ConnectionPool {
         self.start_drain();
         let mut idle = self.idle.lock().await;
         idle.clear();
+    }
+
+    /// Wrap a checked-out connection in a `PoolGuard`.
+    ///
+    /// The guard will return the connection to the idle queue on drop,
+    /// preserving prepared statement caches.
+    pub fn guard(&self, conn: Box<dyn Connection>) -> PoolGuard {
+        PoolGuard::new(
+            conn,
+            Arc::clone(&self.active_count),
+            Arc::clone(&self.draining),
+            Arc::clone(&self.idle_return),
+            Arc::clone(&self.notify),
+        )
     }
 
     /// Get the datasource ID.

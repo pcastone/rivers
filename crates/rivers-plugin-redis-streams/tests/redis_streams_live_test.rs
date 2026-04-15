@@ -124,6 +124,7 @@ async fn try_create_producer(
     }
 }
 
+/// Validates that the Redis Streams driver can produce a message to a stream and consume it back via consumer group with correct payload.
 #[tokio::test]
 async fn redis_streams_produce_consume_roundtrip() {
     let stream = unique_stream();

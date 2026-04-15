@@ -81,6 +81,7 @@ async fn try_connect() -> Option<Box<dyn rivers_driver_sdk::Connection>> {
     }
 }
 
+/// Validates that the Cassandra driver can establish a connection and respond to a ping health check.
 #[tokio::test]
 async fn cassandra_connect_and_ping() {
     let Some(mut conn) = try_connect().await else { return };
@@ -93,6 +94,7 @@ async fn cassandra_connect_and_ping() {
     }
 }
 
+/// Validates that a CQL query against system.local returns a valid result, proving query execution works.
 #[tokio::test]
 async fn cassandra_select_system_local() {
     let Some(mut conn) = try_connect().await else { return };

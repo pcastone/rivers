@@ -440,7 +440,7 @@ fn cmd_import_exec(name: &str, script_path: &str, input_mode: &str) -> Result<()
     // Compute SHA-256
     let bytes = std::fs::read(&abs_path)
         .map_err(|e| format!("cannot read '{}': {e}", abs_path.display()))?;
-    let hash = hex::encode(Sha256::digest(&bytes));
+    let hash = format!("{:x}", Sha256::digest(&bytes));
 
     // Print resources.toml snippet
     println!("# --- Add to resources.toml ---");

@@ -71,6 +71,10 @@ impl DatabaseDriver for PostgresDriver {
     fn param_style(&self) -> rivers_driver_sdk::ParamStyle {
         rivers_driver_sdk::ParamStyle::DollarPositional
     }
+
+    fn supports_introspection(&self) -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -184,10 +188,19 @@ impl Connection for PostgresConnection {
 
                 let converted = rows_to_maps(&rows);
                 let count = converted.len() as u64;
+                let column_names = if converted.is_empty() {
+                    match self.client.prepare(&query.statement as &str).await {
+                        Ok(stmt) => Some(stmt.columns().iter().map(|c| c.name().to_string()).collect()),
+                        Err(_) => None,
+                    }
+                } else {
+                    None
+                };
                 Ok(QueryResult {
                     rows: converted,
                     affected_rows: count,
                     last_insert_id: None,
+                    column_names,
                 })
             }
 
@@ -215,6 +228,7 @@ impl Connection for PostgresConnection {
                         rows: converted,
                         affected_rows: count,
                         last_insert_id: last_id,
+                        column_names: None,
                     })
                 } else {
                     let affected = self
@@ -227,6 +241,7 @@ impl Connection for PostgresConnection {
                         rows: Vec::new(),
                         affected_rows: affected,
                         last_insert_id: None,
+                        column_names: None,
                     })
                 }
             }
@@ -249,6 +264,7 @@ impl Connection for PostgresConnection {
                     rows: Vec::new(),
                     affected_rows: affected,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -270,6 +286,7 @@ impl Connection for PostgresConnection {
                     rows: Vec::new(),
                     affected_rows: affected,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -298,6 +315,27 @@ impl Connection for PostgresConnection {
         Ok(())
     }
 
+    async fn begin_transaction(&mut self) -> Result<(), DriverError> {
+        self.client
+            .batch_execute("BEGIN")
+            .await
+            .map_err(|e| DriverError::Query(format!("postgres BEGIN: {e}")))
+    }
+
+    async fn commit_transaction(&mut self) -> Result<(), DriverError> {
+        self.client
+            .batch_execute("COMMIT")
+            .await
+            .map_err(|e| DriverError::Query(format!("postgres COMMIT: {e}")))
+    }
+
+    async fn rollback_transaction(&mut self) -> Result<(), DriverError> {
+        self.client
+            .batch_execute("ROLLBACK")
+            .await
+            .map_err(|e| DriverError::Query(format!("postgres ROLLBACK: {e}")))
+    }
+
     async fn ddl_execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
         let params = build_params(&query.parameters);
         let param_refs: Vec<&(dyn ToSql + Sync)> =
@@ -313,6 +351,7 @@ impl Connection for PostgresConnection {
             rows: Vec::new(),
             affected_rows: affected,
             last_insert_id: None,
+            column_names: None,
         })
     }
 

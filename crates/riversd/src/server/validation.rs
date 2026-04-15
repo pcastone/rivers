@@ -29,16 +29,16 @@ pub fn validate_admin_access_control(
 /// Validate TLS configuration at startup.
 ///
 /// Per spec §2: `[base.tls]` is required unless `--no-ssl` is active.
-/// When `no_ssl = true`, skips all TLS validation.
-/// SHAPE-25: admin TLS is always validated when admin_api is enabled (no --no-ssl bypass).
+/// When `no_ssl = true`, skips all TLS validation (including admin TLS —
+/// admin server runs plain HTTP in --no-ssl mode).
 pub fn validate_server_tls(config: &ServerConfig, no_ssl: bool) -> Result<(), String> {
-    // SHAPE-25: admin TLS is always required regardless of --no-ssl
-    if config.base.admin_api.enabled {
-        crate::tls::validate_admin_tls_config(&config.base.admin_api.tls)?;
-    }
-
     if no_ssl {
         return Ok(());
+    }
+
+    // SHAPE-25: admin TLS is required in normal (TLS) mode
+    if config.base.admin_api.enabled {
+        crate::tls::validate_admin_tls_config(&config.base.admin_api.tls)?;
     }
 
     // Main server TLS checks (skipped when --no-ssl)

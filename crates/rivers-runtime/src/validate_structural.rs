@@ -46,7 +46,7 @@ const RESOURCES_FIELDS: &[&str] = &["datasources", "services", "keystores"];
 /// Datasource entry in `[[datasources]]`.
 const DATASOURCE_DECL_FIELDS: &[&str] = &[
     "name", "driver", "x-type", "lockbox", "nopassword", "required",
-    "host", "port", "database", "username", "password", "service",
+    "host", "port", "database", "username", "password", "service", "introspect",
 ];
 const DATASOURCE_DECL_REQUIRED: &[&str] = &["name", "driver", "x-type", "required"];
 
@@ -71,6 +71,7 @@ const DATAVIEW_FIELDS: &[&str] = &[
     "get_query", "post_query", "put_query", "delete_query",
     "return_schema", "get_parameters", "post_parameters", "put_parameters",
     "delete_parameters", "streaming", "validate_result", "strict_parameters",
+    "circuitBreakerId", "prepared",
 ];
 const DATAVIEW_REQUIRED: &[&str] = &["name", "datasource"];
 
@@ -742,13 +743,14 @@ fn check_unknown_keys(
 ) {
     for key in table.keys() {
         if !known.contains(&key.as_str()) {
-            let mut result = ValidationResult::fail(
+            let mut result = ValidationResult::warn(
                 error_codes::S002,
-                file,
                 format!("unknown key '{}' in [{}]", key, if table_path.is_empty() { "root" } else { table_path }),
             )
             .with_table_path(if table_path.is_empty() { "root" } else { table_path })
             .with_field(key.clone());
+
+            result.file = Some(file.to_string());
 
             if let Some(suggestion) = suggest_key(key, known) {
                 result = result.with_suggestion(suggestion);
@@ -1530,8 +1532,14 @@ foo        = "bar"
             .filter_map(|r| r.error_code.as_deref())
             .collect();
 
-        // S002 (unknown key 'foo'), S003 (missing 'version'), S008 (bad UUID), S009 (bad type)
-        assert!(error_codes.contains(&"S002"), "missing S002: {:?}", error_codes);
+        let warn_codes: Vec<&str> = results
+            .iter()
+            .filter(|r| r.status == ValidationStatus::Warn)
+            .filter_map(|r| r.error_code.as_deref())
+            .collect();
+
+        // S002 (unknown key 'foo') is now a warning, S003/S008/S009 remain errors
+        assert!(warn_codes.contains(&"S002"), "missing S002 warning: {:?}", warn_codes);
         assert!(error_codes.contains(&"S003"), "missing S003: {:?}", error_codes);
         assert!(error_codes.contains(&"S008"), "missing S008: {:?}", error_codes);
         assert!(error_codes.contains(&"S009"), "missing S009: {:?}", error_codes);

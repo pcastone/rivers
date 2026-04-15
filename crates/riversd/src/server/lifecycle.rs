@@ -255,12 +255,78 @@ pub async fn run_server_no_ssl(
         crate::process_pool::set_keystore_resolver(resolver.clone());
     }
 
+    // Spawn plain HTTP admin server (--no-ssl mode)
+    let admin_handle = if config.base.admin_api.enabled {
+        if config.base.admin_api.no_auth != Some(true) {
+            validate_admin_access_control(&config.base.admin_api)
+                .map_err(|e| ServerError::Config(e))?;
+        }
+
+        let admin_port = config.base.admin_api.port.unwrap_or(9090);
+        let admin_addr: SocketAddr = format!("{}:{}", config.base.admin_api.host, admin_port)
+            .parse()
+            .map_err(|e| ServerError::Config(format!("invalid admin address: {}", e)))?;
+
+        let admin_listener = TcpListener::bind(admin_addr)
+            .await
+            .map_err(|e| ServerError::Bind(format!("admin server bind failed: {}", e)))?;
+
+        tracing::info!(addr = %admin_addr, "admin server listening (plain HTTP — no-ssl mode)");
+
+        let admin_ctx = ctx.clone();
+        let admin_shutdown_rx = shutdown_rx.clone();
+        Some(tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    result = admin_listener.accept() => {
+                        match result {
+                            Ok((stream, _addr)) => {
+                                let app = build_admin_router(admin_ctx.clone());
+                                tokio::spawn(async move {
+                                    let io = hyper_util::rt::TokioIo::new(stream);
+                                    let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                                        let app = app.clone();
+                                        async move {
+                                            use tower::ServiceExt;
+                                            app.oneshot(req).await
+                                        }
+                                    });
+                                    if let Err(e) = hyper_util::server::conn::auto::Builder::new(
+                                        hyper_util::rt::TokioExecutor::new(),
+                                    )
+                                    .serve_connection(io, service)
+                                    .await
+                                    {
+                                        tracing::debug!(error = %e, "admin connection error");
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "admin accept error");
+                            }
+                        }
+                    }
+                    _ = shutdown_signal(admin_shutdown_rx.clone()) => break,
+                }
+            }
+        }))
+    } else {
+        None
+    };
+
     let router = build_main_router(ctx);
 
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal(shutdown_rx))
         .await
-        .map_err(|e| ServerError::Serve(format!("server error: {e}")))
+        .map_err(|e| ServerError::Serve(format!("server error: {e}")))?;
+
+    // Abort admin server if running
+    if let Some(handle) = admin_handle {
+        handle.abort();
+    }
+
+    Ok(())
 }
 
 /// Primary server entry point.

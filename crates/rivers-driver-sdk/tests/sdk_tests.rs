@@ -152,6 +152,7 @@ fn query_result_with_rows() {
         rows: vec![row],
         affected_rows: 1,
         last_insert_id: None,
+        column_names: None,
     };
     assert_eq!(r.rows.len(), 1);
     assert_eq!(r.affected_rows, 1);
@@ -163,6 +164,7 @@ fn query_result_write_operation() {
         rows: Vec::new(),
         affected_rows: 5,
         last_insert_id: Some("42".to_string()),
+        column_names: None,
     };
     assert!(r.rows.is_empty());
     assert_eq!(r.affected_rows, 5);

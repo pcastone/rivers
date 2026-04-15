@@ -78,6 +78,7 @@ fn broker_config(subject: &str) -> BrokerConsumerConfig {
     }
 }
 
+/// Validates that the NATS driver can publish a message to a subject and consume it back with correct payload.
 #[tokio::test]
 async fn nats_produce_and_consume() {
     let driver = NatsDriver;

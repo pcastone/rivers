@@ -209,6 +209,7 @@ impl Connection for FakerConnection {
                     rows,
                     affected_rows: affected,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
             "insert" | "set" | "create" => {
@@ -217,6 +218,7 @@ impl Connection for FakerConnection {
                     rows: Vec::new(),
                     affected_rows: count as u64,
                     last_insert_id: Some("1".to_string()),
+                    column_names: None,
                 })
             }
             "update" => {
@@ -225,6 +227,7 @@ impl Connection for FakerConnection {
                     rows: Vec::new(),
                     affected_rows: count as u64,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
             "delete" | "del" | "remove" => {
@@ -233,6 +236,7 @@ impl Connection for FakerConnection {
                     rows: Vec::new(),
                     affected_rows: count as u64,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
             "ping" => Ok(QueryResult::empty()),

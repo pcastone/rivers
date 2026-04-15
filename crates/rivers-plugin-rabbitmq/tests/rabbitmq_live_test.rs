@@ -78,6 +78,7 @@ fn broker_config(queue: &str) -> BrokerConsumerConfig {
     }
 }
 
+/// Validates that the RabbitMQ driver can publish a message to a queue and consume it back with correct payload.
 #[tokio::test]
 async fn rabbitmq_produce_and_consume() {
     let driver = RabbitMqDriver;

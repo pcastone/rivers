@@ -115,6 +115,10 @@ impl DatabaseDriver for SqliteDriver {
     fn param_style(&self) -> rivers_driver_sdk::ParamStyle {
         rivers_driver_sdk::ParamStyle::DollarNamed
     }
+
+    fn supports_introspection(&self) -> bool {
+        true
+    }
 }
 
 /// A live SQLite connection wrapping `rusqlite::Connection` behind `Arc<Mutex>`.
@@ -183,6 +187,39 @@ impl Connection for SqliteConnection {
         })
         .await
         .map_err(|e| DriverError::Internal(format!("spawn_blocking join: {}", e)))?
+    }
+
+    async fn begin_transaction(&mut self) -> Result<(), DriverError> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|e| DriverError::Internal(format!("sqlite mutex: {e}")))?;
+            conn.execute_batch("BEGIN")
+                .map_err(|e| DriverError::Query(format!("sqlite BEGIN: {e}")))
+        })
+        .await
+        .map_err(|e| DriverError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    async fn commit_transaction(&mut self) -> Result<(), DriverError> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|e| DriverError::Internal(format!("sqlite mutex: {e}")))?;
+            conn.execute_batch("COMMIT")
+                .map_err(|e| DriverError::Query(format!("sqlite COMMIT: {e}")))
+        })
+        .await
+        .map_err(|e| DriverError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    async fn rollback_transaction(&mut self) -> Result<(), DriverError> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|e| DriverError::Internal(format!("sqlite mutex: {e}")))?;
+            conn.execute_batch("ROLLBACK")
+                .map_err(|e| DriverError::Query(format!("sqlite ROLLBACK: {e}")))
+        })
+        .await
+        .map_err(|e| DriverError::Internal(format!("spawn_blocking: {e}")))?
     }
 
     async fn ddl_execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
@@ -284,10 +321,16 @@ fn execute_query(
     }
 
     let affected = rows.len() as u64;
+    let result_column_names = if rows.is_empty() {
+        Some(column_names)
+    } else {
+        None
+    };
     Ok(QueryResult {
         rows,
         affected_rows: affected,
         last_insert_id: None,
+        column_names: result_column_names,
     })
 }
 
@@ -317,6 +360,7 @@ fn execute_insert(
         rows: Vec::new(),
         affected_rows: affected as u64,
         last_insert_id: Some(last_id.to_string()),
+        column_names: None,
     })
 }
 
@@ -344,6 +388,7 @@ fn execute_write(
         rows: Vec::new(),
         affected_rows: affected as u64,
         last_insert_id: None,
+        column_names: None,
     })
 }
 

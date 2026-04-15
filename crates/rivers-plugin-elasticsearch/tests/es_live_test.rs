@@ -81,6 +81,7 @@ async fn try_connect() -> Option<Box<dyn rivers_driver_sdk::Connection>> {
     }
 }
 
+/// Validates that the Elasticsearch driver can establish a connection and respond to a ping health check.
 #[tokio::test]
 async fn es_connect_and_ping() {
     let Some(mut conn) = try_connect().await else { return };
@@ -94,6 +95,7 @@ async fn es_connect_and_ping() {
     assert_eq!(result.affected_rows, 0);
 }
 
+/// Validates full document lifecycle: index a document, search for it, delete it, and confirm removal.
 #[tokio::test]
 async fn es_index_search_delete_roundtrip() {
     let Some(mut conn) = try_connect().await else { return };

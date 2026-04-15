@@ -104,19 +104,19 @@ pub(super) extern "C" fn host_dataview_execute(
                     guard.clone().ok_or_else(|| "DataViewExecutor not initialized".to_string())?
                 };
                 // Try the bare name first
-                match executor.execute(&name, params.clone(), "GET", &trace_id).await {
+                match executor.execute(&name, params.clone(), "GET", &trace_id, None).await {
                     Ok(r) => Ok(r),
                     Err(rivers_runtime::DataViewError::NotFound { .. }) => {
                         // DataViews are registered as "{entry_point}:{name}" — try with prefix
                         if let Some(prefix) = &app_prefix {
                             let namespaced = format!("{}:{}", prefix, name);
-                            executor.execute(&namespaced, params, "GET", &trace_id).await
+                            executor.execute(&namespaced, params, "GET", &trace_id, None).await
                                 .map_err(|e| format!("{e:?}"))
                         } else {
                             // No prefix hint — scan for any match ending in ":{name}"
                             let suffix = format!(":{}", name);
                             if let Some(full_name) = executor.find_by_suffix(&suffix) {
-                                executor.execute(&full_name, params, "GET", &trace_id).await
+                                executor.execute(&full_name, params, "GET", &trace_id, None).await
                                     .map_err(|e| format!("{e:?}"))
                             } else {
                                 Err(format!("DataView '{}' not found (tried bare and namespaced)", name))
@@ -881,4 +881,194 @@ pub(super) extern "C" fn host_ddl_execute(
             -12
         }
     }
+}
+
+// ── db_begin ────────────────────────────────────────────────────
+
+/// Rivers.db.begin("datasource") — begin a transaction on a datasource.
+///
+/// Input: JSON `{"datasource": "..."}`
+/// Output: JSON `{"ok": true, "datasource": "..."}` on success
+///
+/// TODO: Wire to TransactionMap in Task 8 when DataView engine integration is complete.
+pub(super) extern "C" fn host_db_begin(
+    input_ptr: *const u8, input_len: usize,
+    out_ptr: *mut *mut u8, out_len: *mut usize,
+) -> i32 {
+    let _ctx = match HOST_CONTEXT.get() {
+        Some(c) => c,
+        None => {
+            tracing::error!("host_db_begin: HOST_CONTEXT not set");
+            return -1;
+        }
+    };
+
+    let input = match read_input(input_ptr, input_len) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "host_db_begin: failed to read input");
+            return -2;
+        }
+    };
+
+    let datasource = match input["datasource"].as_str() {
+        Some(s) => s.to_string(),
+        None => {
+            tracing::error!("host_db_begin: missing 'datasource' field");
+            let err = serde_json::json!({"error": "missing 'datasource' field"});
+            write_output(out_ptr, out_len, &err);
+            return -3;
+        }
+    };
+
+    // TODO: Wire to TransactionMap in Task 8
+    tracing::debug!(datasource = %datasource, "Rivers.db.begin (stub)");
+    let result = serde_json::json!({"ok": true, "datasource": datasource});
+    write_output(out_ptr, out_len, &result);
+    0
+}
+
+// ── db_commit ───────────────────────────────────────────────────
+
+/// Rivers.db.commit("datasource") — commit an active transaction.
+///
+/// Input: JSON `{"datasource": "..."}`
+/// Output: JSON `{"ok": true, "datasource": "..."}` on success
+///
+/// TODO: Wire to TransactionMap in Task 8 when DataView engine integration is complete.
+pub(super) extern "C" fn host_db_commit(
+    input_ptr: *const u8, input_len: usize,
+    out_ptr: *mut *mut u8, out_len: *mut usize,
+) -> i32 {
+    let _ctx = match HOST_CONTEXT.get() {
+        Some(c) => c,
+        None => {
+            tracing::error!("host_db_commit: HOST_CONTEXT not set");
+            return -1;
+        }
+    };
+
+    let input = match read_input(input_ptr, input_len) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "host_db_commit: failed to read input");
+            return -2;
+        }
+    };
+
+    let datasource = match input["datasource"].as_str() {
+        Some(s) => s.to_string(),
+        None => {
+            tracing::error!("host_db_commit: missing 'datasource' field");
+            let err = serde_json::json!({"error": "missing 'datasource' field"});
+            write_output(out_ptr, out_len, &err);
+            return -3;
+        }
+    };
+
+    // TODO: Wire to TransactionMap in Task 8
+    tracing::debug!(datasource = %datasource, "Rivers.db.commit (stub)");
+    let result = serde_json::json!({"ok": true, "datasource": datasource});
+    write_output(out_ptr, out_len, &result);
+    0
+}
+
+// ── db_rollback ─────────────────────────────────────────────────
+
+/// Rivers.db.rollback("datasource") — rollback an active transaction.
+///
+/// Input: JSON `{"datasource": "..."}`
+/// Output: JSON `{"ok": true, "datasource": "..."}` on success
+///
+/// TODO: Wire to TransactionMap in Task 8 when DataView engine integration is complete.
+pub(super) extern "C" fn host_db_rollback(
+    input_ptr: *const u8, input_len: usize,
+    out_ptr: *mut *mut u8, out_len: *mut usize,
+) -> i32 {
+    let _ctx = match HOST_CONTEXT.get() {
+        Some(c) => c,
+        None => {
+            tracing::error!("host_db_rollback: HOST_CONTEXT not set");
+            return -1;
+        }
+    };
+
+    let input = match read_input(input_ptr, input_len) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "host_db_rollback: failed to read input");
+            return -2;
+        }
+    };
+
+    let datasource = match input["datasource"].as_str() {
+        Some(s) => s.to_string(),
+        None => {
+            tracing::error!("host_db_rollback: missing 'datasource' field");
+            let err = serde_json::json!({"error": "missing 'datasource' field"});
+            write_output(out_ptr, out_len, &err);
+            return -3;
+        }
+    };
+
+    // TODO: Wire to TransactionMap in Task 8
+    tracing::debug!(datasource = %datasource, "Rivers.db.rollback (stub)");
+    let result = serde_json::json!({"ok": true, "datasource": datasource});
+    write_output(out_ptr, out_len, &result);
+    0
+}
+
+// ── db_batch ────────────────────────────────────────────────────
+
+/// Rivers.db.batch("dataview", [...params]) — execute a DataView with multiple parameter sets.
+///
+/// Input: JSON `{"dataview": "...", "params": [{...}, {...}]}`
+/// Output: JSON array of results or error
+///
+/// TODO: Wire to full batch execution in Task 8 when DataView engine integration is complete.
+pub(super) extern "C" fn host_db_batch(
+    input_ptr: *const u8, input_len: usize,
+    out_ptr: *mut *mut u8, out_len: *mut usize,
+) -> i32 {
+    let _ctx = match HOST_CONTEXT.get() {
+        Some(c) => c,
+        None => {
+            tracing::error!("host_db_batch: HOST_CONTEXT not set");
+            return -1;
+        }
+    };
+
+    let input = match read_input(input_ptr, input_len) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "host_db_batch: failed to read input");
+            return -2;
+        }
+    };
+
+    let dataview = match input["dataview"].as_str() {
+        Some(s) => s.to_string(),
+        None => {
+            tracing::error!("host_db_batch: missing 'dataview' field");
+            let err = serde_json::json!({"error": "missing 'dataview' field"});
+            write_output(out_ptr, out_len, &err);
+            return -3;
+        }
+    };
+
+    let params = match input["params"].as_array() {
+        Some(p) => p.clone(),
+        None => {
+            tracing::error!("host_db_batch: missing or non-array 'params' field");
+            let err = serde_json::json!({"error": "missing or non-array 'params' field"});
+            write_output(out_ptr, out_len, &err);
+            return -3;
+        }
+    };
+
+    // TODO: Wire to full batch execution in Task 8
+    tracing::debug!(dataview = %dataview, count = params.len(), "Rivers.db.batch (stub)");
+    let result = serde_json::json!({"ok": true, "dataview": dataview, "count": params.len()});
+    write_output(out_ptr, out_len, &result);
+    0
 }

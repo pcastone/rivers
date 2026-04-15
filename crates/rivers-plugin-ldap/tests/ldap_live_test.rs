@@ -60,6 +60,7 @@ fn find_lockbox_dir() -> Option<std::path::PathBuf> {
     None
 }
 
+/// Validates that the LDAP driver can establish a connection and respond to a ping health check.
 #[tokio::test]
 async fn ldap_connect_and_ping() {
     let driver = LdapDriver;
@@ -72,6 +73,7 @@ async fn ldap_connect_and_ping() {
     println!("LDAP ping test PASSED");
 }
 
+/// Validates that a base-scope LDAP search against the root DN returns a valid result.
 #[tokio::test]
 async fn ldap_search_root() {
     let driver = LdapDriver;
@@ -87,6 +89,7 @@ async fn ldap_search_root() {
     println!("LDAP search dispatch test PASSED (ping via execute)");
 }
 
+/// Validates that a subtree-scope LDAP search returns entries from nested organizational units.
 #[tokio::test]
 async fn ldap_search_subtree() {
     let driver = LdapDriver;
@@ -117,6 +120,7 @@ async fn ldap_search_subtree() {
     }
 }
 
+/// Validates full LDAP entry lifecycle: add an entry, search for it, delete it, and confirm removal.
 #[tokio::test]
 async fn ldap_add_search_delete_roundtrip() {
     let driver = LdapDriver;

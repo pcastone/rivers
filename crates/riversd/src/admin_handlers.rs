@@ -310,6 +310,81 @@ pub async fn admin_log_reset_handler(State(ctx): State<AppContext>) -> Response 
     }
 }
 
+// ── Circuit Breaker Endpoints ────────────────────────────────────
+
+/// List all circuit breakers for a specific app.
+/// GET /admin/apps/:app_id/breakers
+pub async fn admin_list_breakers_handler(
+    State(ctx): State<AppContext>,
+    axum::extract::Path(app_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let entries = ctx.circuit_breaker_registry.list_for_app(&app_id).await;
+    Json(serde_json::json!(entries))
+}
+
+/// Get a single circuit breaker's status.
+/// GET /admin/apps/:app_id/breakers/:breaker_id
+pub async fn admin_get_breaker_handler(
+    State(ctx): State<AppContext>,
+    axum::extract::Path((app_id, breaker_id)): axum::extract::Path<(String, String)>,
+) -> impl IntoResponse {
+    match ctx.circuit_breaker_registry.get(&app_id, &breaker_id).await {
+        Some(entry) => Json(serde_json::json!(entry)).into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("breaker '{}' not found for app '{}'", breaker_id, app_id)})),
+        ).into_response(),
+    }
+}
+
+/// Trip (open) a circuit breaker.
+/// POST /admin/apps/:app_id/breakers/:breaker_id/trip
+pub async fn admin_trip_breaker_handler(
+    State(ctx): State<AppContext>,
+    axum::extract::Path((app_id, breaker_id)): axum::extract::Path<(String, String)>,
+) -> impl IntoResponse {
+    match ctx.circuit_breaker_registry.trip(&app_id, &breaker_id).await {
+        Some(entry) => {
+            if let Some(ref storage) = ctx.storage_engine {
+                let key = format!("breaker:{}:{}", app_id, breaker_id);
+                if let Err(e) = storage.set("rivers", &key, b"open".to_vec(), None).await {
+                    tracing::error!(app_id = %app_id, breaker = %breaker_id, error = %e, "failed to persist breaker state");
+                }
+            }
+            tracing::info!(app_id = %app_id, breaker = %breaker_id, "circuit breaker TRIPPED");
+            Json(serde_json::json!(entry)).into_response()
+        }
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("breaker '{}' not found for app '{}'", breaker_id, app_id)})),
+        ).into_response(),
+    }
+}
+
+/// Reset (close) a circuit breaker.
+/// POST /admin/apps/:app_id/breakers/:breaker_id/reset
+pub async fn admin_reset_breaker_handler(
+    State(ctx): State<AppContext>,
+    axum::extract::Path((app_id, breaker_id)): axum::extract::Path<(String, String)>,
+) -> impl IntoResponse {
+    match ctx.circuit_breaker_registry.reset(&app_id, &breaker_id).await {
+        Some(entry) => {
+            if let Some(ref storage) = ctx.storage_engine {
+                let key = format!("breaker:{}:{}", app_id, breaker_id);
+                if let Err(e) = storage.set("rivers", &key, b"closed".to_vec(), None).await {
+                    tracing::error!(app_id = %app_id, breaker = %breaker_id, error = %e, "failed to persist breaker state");
+                }
+            }
+            tracing::info!(app_id = %app_id, breaker = %breaker_id, "circuit breaker RESET");
+            Json(serde_json::json!(entry)).into_response()
+        }
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("breaker '{}' not found for app '{}'", breaker_id, app_id)})),
+        ).into_response(),
+    }
+}
+
 // ── Shutdown Endpoint ────────────────────────────────────────────
 
 /// POST /admin/shutdown

@@ -615,6 +615,7 @@ pub fn response_to_query_result(body: &serde_json::Value) -> QueryResult {
                 rows: vec![row],
                 affected_rows: affected,
                 last_insert_id: None,
+                column_names: None,
             }
         }
         serde_json::Value::Array(arr) => {
@@ -636,6 +637,7 @@ pub fn response_to_query_result(body: &serde_json::Value) -> QueryResult {
                 rows,
                 affected_rows: affected,
                 last_insert_id: None,
+                column_names: None,
             }
         }
         serde_json::Value::Null => QueryResult::empty(),
@@ -647,6 +649,7 @@ pub fn response_to_query_result(body: &serde_json::Value) -> QueryResult {
                 rows: vec![row],
                 affected_rows: 1,
                 last_insert_id: None,
+                column_names: None,
             }
         }
     }

@@ -169,6 +169,7 @@ impl Connection for MemcachedConnection {
                             rows: vec![row],
                             affected_rows: 1,
                             last_insert_id: None,
+                            column_names: None,
                         })
                     }
                     None => Ok(QueryResult::empty()),
@@ -192,6 +193,7 @@ impl Connection for MemcachedConnection {
                     rows: Vec::new(),
                     affected_rows: 1,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 
@@ -210,6 +212,7 @@ impl Connection for MemcachedConnection {
                     rows: Vec::new(),
                     affected_rows: 1,
                     last_insert_id: None,
+                    column_names: None,
                 })
             }
 

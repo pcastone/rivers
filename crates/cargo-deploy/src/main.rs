@@ -228,6 +228,10 @@ fn scaffold_runtime(deploy_path: &Path, version: &str, mode: &str, workspace_roo
     println!("  copying docs/guide...");
     copy_guides(workspace_root, deploy_path);
 
+    // Copy arch specs
+    println!("  copying docs/arch...");
+    copy_arch_specs(workspace_root, deploy_path);
+
     // VERSION
     write_version_file(deploy_path, version, mode);
 }
@@ -244,6 +248,21 @@ fn copy_guides(workspace_root: &Path, deploy_path: &Path) {
         eprintln!("  warn: failed to copy guides: {e}");
     } else {
         println!("  guides: {}", dst.display());
+    }
+}
+
+/// Copy the `docs/arch` directory from the workspace into the deploy path.
+fn copy_arch_specs(workspace_root: &Path, deploy_path: &Path) {
+    let src = workspace_root.join("docs/arch");
+    let dst = deploy_path.join("docs/arch");
+    if !src.exists() {
+        eprintln!("  warn: docs/arch not found at {}, skipping", src.display());
+        return;
+    }
+    if let Err(e) = copy_dir_recursive(&src, &dst) {
+        eprintln!("  warn: failed to copy arch specs: {e}");
+    } else {
+        println!("  arch specs: {}", dst.display());
     }
 }
 

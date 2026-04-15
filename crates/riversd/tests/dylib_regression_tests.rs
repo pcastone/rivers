@@ -293,6 +293,8 @@ fn dataview_namespace_suffix_resolution() {
         delete_parameters: Vec::new(),
         streaming: false,
         caching: None,
+        circuit_breaker_id: None,
+        prepared: false,
         invalidates: Vec::new(),
         validate_result: false,
         strict_parameters: false,

@@ -17,6 +17,7 @@
 //! - Init handler completeness (X012)
 //! - x-type / driver consistency (X013)
 //! - No views warning (W004)
+//! - Solo circuit breaker ID warning (CB001)
 
 use std::collections::{HashMap, HashSet};
 
@@ -110,6 +111,9 @@ pub fn validate_crossref(bundle: &LoadedBundle) -> Vec<ValidationResult> {
 
         // S006/X012 adjacent: nopassword + credentials_source
         check_nopassword_credentials(app, &mut results);
+
+        // CB001: Circuit breaker ID referenced by only one DataView
+        check_solo_circuit_breaker_ids(app, &mut results);
     }
 
     results
@@ -636,6 +640,48 @@ fn check_nopassword_credentials(app: &LoadedApp, results: &mut Vec<ValidationRes
     }
 }
 
+/// CB001: Warn when a circuitBreakerId is referenced by only one DataView.
+///
+/// A solo breaker ID is likely a typo — circuit breakers are only useful
+/// when shared across multiple DataViews for coordinated fault isolation.
+/// Includes a "did you mean?" suggestion when another breaker ID is close.
+fn check_solo_circuit_breaker_ids(app: &LoadedApp, results: &mut Vec<ValidationResult>) {
+    let mut breaker_usage: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+
+    for (dv_name, dv_config) in &app.config.data.dataviews {
+        if let Some(ref breaker_id) = dv_config.circuit_breaker_id {
+            breaker_usage
+                .entry(breaker_id.clone())
+                .or_default()
+                .push(dv_name.clone());
+        }
+    }
+
+    let all_breaker_ids: Vec<&str> = breaker_usage.keys().map(|s| s.as_str()).collect();
+    for (breaker_id, dataviews) in &breaker_usage {
+        if dataviews.len() == 1 {
+            let mut msg = format!(
+                "circuitBreakerId '{}' is referenced by only one DataView ('{}')",
+                breaker_id, dataviews[0]
+            );
+            if all_breaker_ids.len() > 1 {
+                let others: Vec<&str> = all_breaker_ids
+                    .iter()
+                    .filter(|id| **id != breaker_id.as_str())
+                    .copied()
+                    .collect();
+                if let Some(suggestion) = crate::validate_format::suggest_key(breaker_id, &others) {
+                    msg = format!("{} \u{2014} {}", msg, suggestion);
+                }
+            }
+            let mut result = ValidationResult::warn(error_codes::CB001, msg);
+            result.file = Some(format!("{}/app.toml", app.manifest.app_name));
+            results.push(result);
+        }
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -694,6 +740,7 @@ mod tests {
             event_handlers: None,
             extra: HashMap::new(),
             write_batch: None,
+            introspect: true,
         }
     }
 
@@ -717,6 +764,8 @@ mod tests {
             put_parameters: vec![],
             delete_parameters: vec![],
             streaming: false,
+            circuit_breaker_id: None,
+            prepared: false,
             caching: None,
             invalidates: vec![],
             validate_result: false,
@@ -1897,5 +1946,159 @@ mod tests {
 
         assert!(pass_count > 0, "should have pass results");
         assert_eq!(fail_count, 0, "should have no failures");
+    }
+
+    // ── CB001: Solo circuit breaker ID ──────────────────────────────
+
+    #[test]
+    fn cb001_solo_breaker_id_produces_warning() {
+        let mut datasources = HashMap::new();
+        datasources.insert("db".into(), make_ds_config("db", "faker"));
+
+        // Two DataViews: one with a shared breaker ID (used twice), one solo.
+        let mut dv_shared_a = make_dv_config("list_orders", "db");
+        dv_shared_a.circuit_breaker_id = Some("orders_cb".into());
+
+        let mut dv_shared_b = make_dv_config("get_order", "db");
+        dv_shared_b.circuit_breaker_id = Some("orders_cb".into());
+
+        let mut dv_solo = make_dv_config("get_summary", "db");
+        dv_solo.circuit_breaker_id = Some("summry_cb".into()); // typo: summry vs summary
+
+        let mut dataviews = HashMap::new();
+        dataviews.insert("list_orders".into(), dv_shared_a);
+        dataviews.insert("get_order".into(), dv_shared_b);
+        dataviews.insert("get_summary".into(), dv_solo);
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("db", "faker")],
+            vec![],
+            datasources,
+            dataviews,
+            HashMap::new(),
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        // CB001 warning should be emitted for the solo breaker ID only.
+        assert!(has_warn(&results, error_codes::CB001), "expected CB001 warning");
+
+        let cb001 = results
+            .iter()
+            .find(|r| r.error_code.as_deref() == Some(error_codes::CB001))
+            .unwrap();
+        assert!(
+            cb001.message.contains("summry_cb"),
+            "warning should name the solo breaker ID, got: {}",
+            cb001.message,
+        );
+        // The shared breaker ID must NOT trigger a warning.
+        let cb001_count = results
+            .iter()
+            .filter(|r| r.error_code.as_deref() == Some(error_codes::CB001))
+            .count();
+        assert_eq!(cb001_count, 1, "only one CB001 warning expected");
+    }
+
+    #[test]
+    fn cb001_no_warning_when_breaker_shared() {
+        let mut datasources = HashMap::new();
+        datasources.insert("db".into(), make_ds_config("db", "faker"));
+
+        let mut dv_a = make_dv_config("list_orders", "db");
+        dv_a.circuit_breaker_id = Some("orders_cb".into());
+
+        let mut dv_b = make_dv_config("get_order", "db");
+        dv_b.circuit_breaker_id = Some("orders_cb".into());
+
+        let mut dataviews = HashMap::new();
+        dataviews.insert("list_orders".into(), dv_a);
+        dataviews.insert("get_order".into(), dv_b);
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("db", "faker")],
+            vec![],
+            datasources,
+            dataviews,
+            HashMap::new(),
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(!has_warn(&results, error_codes::CB001), "no CB001 when breaker is shared");
+    }
+
+    #[test]
+    fn cb001_solo_breaker_includes_did_you_mean_suggestion() {
+        let mut datasources = HashMap::new();
+        datasources.insert("db".into(), make_ds_config("db", "faker"));
+
+        // "orders_cb" (shared) and "ordes_cb" (solo typo — 1 edit from "orders_cb").
+        let mut dv_a = make_dv_config("list_orders", "db");
+        dv_a.circuit_breaker_id = Some("orders_cb".into());
+
+        let mut dv_b = make_dv_config("get_order", "db");
+        dv_b.circuit_breaker_id = Some("orders_cb".into());
+
+        let mut dv_solo = make_dv_config("get_summary", "db");
+        dv_solo.circuit_breaker_id = Some("ordes_cb".into()); // 1-char typo
+
+        let mut dataviews = HashMap::new();
+        dataviews.insert("list_orders".into(), dv_a);
+        dataviews.insert("get_order".into(), dv_b);
+        dataviews.insert("get_summary".into(), dv_solo);
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("db", "faker")],
+            vec![],
+            datasources,
+            dataviews,
+            HashMap::new(),
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        let cb001 = results
+            .iter()
+            .find(|r| r.error_code.as_deref() == Some(error_codes::CB001))
+            .unwrap();
+        assert!(
+            cb001.message.contains("did you mean 'orders_cb'?"),
+            "expected Levenshtein suggestion in message, got: {}",
+            cb001.message,
+        );
+    }
+
+    #[test]
+    fn cb001_no_warning_when_no_breaker_ids() {
+        let mut datasources = HashMap::new();
+        datasources.insert("db".into(), make_ds_config("db", "faker"));
+
+        let mut dataviews = HashMap::new();
+        dataviews.insert("list_orders".into(), make_dv_config("list_orders", "db"));
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("db", "faker")],
+            vec![],
+            datasources,
+            dataviews,
+            HashMap::new(),
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(!has_warn(&results, error_codes::CB001));
     }
 }
