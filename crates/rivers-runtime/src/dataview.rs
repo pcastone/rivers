@@ -3,6 +3,8 @@
 //! Per `rivers-data-layer-spec.md` §6, §7, §12.3.
 //! CRUD per-method fields per technology path spec §5, §7.2, §13.3.
 
+use std::collections::HashMap;
+
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -15,7 +17,7 @@ pub struct DataViewParameterConfig {
     /// Parameter name (used in query template substitution).
     pub name: String,
 
-    /// Type name: "string", "integer", "float", "boolean", "array". Default: "string".
+    /// Type name: "string", "integer", "float", "decimal", "boolean", "array", "uuid", "date". Default: "string".
     #[serde(rename = "type", default = "default_param_type")]
     pub param_type: String,
 
@@ -26,6 +28,11 @@ pub struct DataViewParameterConfig {
     /// Default value for this parameter when not supplied by the caller.
     #[serde(default)]
     pub default: Option<serde_json::Value>,
+
+    /// Source location: "path", "query", "body", "header".
+    /// Used by HTTP driver for outbound parameter placement.
+    #[serde(default)]
+    pub location: Option<String>,
 }
 
 fn default_param_type() -> String {
@@ -182,6 +189,10 @@ pub struct DataViewConfig {
     /// Enable prepared statement caching for this DataView's queries.
     #[serde(default)]
     pub prepared: bool,
+
+    /// Static query parameters appended to every outbound HTTP driver request.
+    #[serde(default)]
+    pub query_params: HashMap<String, String>,
 
     // ── Existing flags ───────────────────────────────────────────────
 

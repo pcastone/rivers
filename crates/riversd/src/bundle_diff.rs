@@ -271,6 +271,7 @@ mod tests {
                 caching: None,
                 circuit_breaker_id: None,
                 prepared: false,
+                query_params: HashMap::new(),
                 get_query: None, post_query: None, put_query: None, delete_query: None,
                 get_schema: None, post_schema: None, put_schema: None, delete_schema: None,
                 get_parameters: vec![], post_parameters: vec![],

@@ -801,3 +801,52 @@ type       = "codecomponent"
 language   = "javascript"
 module     = "libraries/handlers/transaction-tests.ts"
 entrypoint = "txnBatch"
+
+# ── Query Parameter Tests ─────────────────────────────────
+[api.views.qp_query_access]
+path      = "canary/sql/qp/query-access"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.qp_query_access.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/query-param-tests.ts"
+entrypoint = "qpQueryAccess"
+
+[api.views.qp_query_all]
+path      = "canary/sql/qp/query-all"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.qp_query_all.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/query-param-tests.ts"
+entrypoint = "qpQueryAll"
+
+[api.views.qp_percent_decode]
+path      = "canary/sql/qp/percent-decode"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.qp_percent_decode.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/query-param-tests.ts"
+entrypoint = "qpPercentDecode"
+
+[api.views.qp_empty_value]
+path      = "canary/sql/qp/empty-value"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.qp_empty_value.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/query-param-tests.ts"
+entrypoint = "qpEmptyValue"

@@ -21,8 +21,20 @@ pub fn apply_parameter_mapping(
     let mut params = HashMap::new();
 
     if let Some(ref mapping) = config.parameter_mapping {
-        // Map query parameters
+        // Map query parameters — handle multi-value for array types (spec §5.2)
         for (http_param, dv_param) in &mapping.query {
+            // Check queryAll for multi-value (Pattern 1: repeated key)
+            if let Some(values) = request.query_all.get(http_param) {
+                if values.len() > 1 {
+                    // Multiple values — pass as JSON array
+                    let arr: Vec<serde_json::Value> = values.iter()
+                        .map(|v| serde_json::Value::String(v.clone()))
+                        .collect();
+                    params.insert(dv_param.clone(), serde_json::Value::Array(arr));
+                    continue;
+                }
+            }
+            // Single value
             if let Some(value) = request.query_params.get(http_param) {
                 params.insert(dv_param.clone(), serde_json::Value::String(value.clone()));
             }
@@ -39,6 +51,13 @@ pub fn apply_parameter_mapping(
         for (body_field, dv_param) in &mapping.body {
             if let Some(value) = request.body.get(body_field) {
                 params.insert(dv_param.clone(), value.clone());
+            }
+        }
+
+        // Map header parameters (spec §4.1)
+        for (header_name, dv_param) in &mapping.header {
+            if let Some(value) = request.headers.get(header_name) {
+                params.insert(dv_param.clone(), serde_json::Value::String(value.clone()));
             }
         }
     }

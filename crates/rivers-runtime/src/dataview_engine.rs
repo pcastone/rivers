@@ -339,14 +339,28 @@ impl DataViewRequestBuilder {
 /// Per spec §6.5: "" for String, 0 for Integer, 0.0 for Float,
 /// false for Boolean, [] for Array.
 /// Convert a `serde_json::Value` default into a `QueryValue` for the given type.
-fn json_value_to_query_value(val: &serde_json::Value, param_type: &str) -> Option<QueryValue> {
-    match param_type.to_lowercase().as_str() {
-        "string" => val.as_str().map(|s| QueryValue::String(s.to_string())),
-        "integer" => val.as_i64().map(QueryValue::Integer),
-        "float" => val.as_f64().map(QueryValue::Float),
-        "boolean" => val.as_bool().map(QueryValue::Boolean),
-        _ => Some(QueryValue::String(val.to_string())),
+///
+/// String defaults are coerced to the target type so that e.g. `default = "25"`
+/// on an integer parameter yields `QueryValue::Integer(25)`.
+fn json_value_to_query_value(val: &serde_json::Value, target_type: &str) -> Option<QueryValue> {
+    let qv = match val {
+        serde_json::Value::String(s) => QueryValue::String(s.clone()),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() { QueryValue::Integer(i) }
+            else if let Some(f) = n.as_f64() { QueryValue::Float(f) }
+            else { return None; }
+        }
+        serde_json::Value::Bool(b) => QueryValue::Boolean(*b),
+        serde_json::Value::Null => QueryValue::Null,
+        _ => return None,
+    };
+    // Coerce if type differs (e.g., default "25" for integer → Integer(25))
+    if let QueryValue::String(_) = &qv {
+        if target_type != "string" {
+            return coerce_param_type(&qv, target_type);
+        }
     }
+    Some(qv)
 }
 
 /// Return the zero-value default for a parameter type.
@@ -355,9 +369,9 @@ fn json_value_to_query_value(val: &serde_json::Value, param_type: &str) -> Optio
 /// `false` for Boolean, `[]` for Array.
 pub fn zero_value_for_type(param_type: &str) -> QueryValue {
     match param_type.to_lowercase().as_str() {
-        "string" => QueryValue::String(String::new()),
+        "string" | "uuid" | "date" => QueryValue::String(String::new()),
         "integer" => QueryValue::Integer(0),
-        "float" => QueryValue::Float(0.0),
+        "float" | "decimal" => QueryValue::Float(0.0),
         "boolean" => QueryValue::Boolean(false),
         "array" => QueryValue::Array(Vec::new()),
         _ => QueryValue::Null,
@@ -367,9 +381,9 @@ pub fn zero_value_for_type(param_type: &str) -> QueryValue {
 /// Check if a QueryValue matches an expected parameter type.
 pub fn matches_param_type(value: &QueryValue, param_type: &str) -> bool {
     match param_type.to_lowercase().as_str() {
-        "string" => matches!(value, QueryValue::String(_)),
+        "string" | "uuid" | "date" => matches!(value, QueryValue::String(_)),
         "integer" => matches!(value, QueryValue::Integer(_)),
-        "float" => matches!(value, QueryValue::Float(_)),
+        "float" | "decimal" => matches!(value, QueryValue::Float(_)),
         "boolean" => matches!(value, QueryValue::Boolean(_)),
         "array" => matches!(value, QueryValue::Array(_)),
         _ => true, // unknown types pass through
@@ -383,19 +397,51 @@ pub fn coerce_param_type(value: &QueryValue, target_type: &str) -> Option<QueryV
     match (value, target_type.to_lowercase().as_str()) {
         // String → target type (path params arrive as strings)
         (QueryValue::String(s), "integer") => s.parse::<i64>().ok().map(QueryValue::Integer),
-        (QueryValue::String(s), "float") => s.parse::<f64>().ok().map(QueryValue::Float),
+        (QueryValue::String(s), "float" | "decimal") => s.parse::<f64>().ok().map(QueryValue::Float),
         (QueryValue::String(s), "boolean") => match s.as_str() {
             "true" | "1" => Some(QueryValue::Boolean(true)),
             "false" | "0" => Some(QueryValue::Boolean(false)),
             _ => None,
+        },
+        // UUID validation — keep as string, validate format
+        (QueryValue::String(s), "uuid") => {
+            if s.len() == 36
+                && s.chars().nth(8) == Some('-')
+                && s.chars().nth(13) == Some('-')
+                && s.chars().nth(18) == Some('-')
+                && s.chars().nth(23) == Some('-')
+                && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+            {
+                Some(QueryValue::String(s.clone()))
+            } else {
+                None
+            }
+        },
+        // Date validation — YYYY-MM-DD format
+        (QueryValue::String(s), "date") => {
+            if s.len() == 10
+                && s.chars().nth(4) == Some('-')
+                && s.chars().nth(7) == Some('-')
+            {
+                Some(QueryValue::String(s.clone()))
+            } else {
+                None
+            }
+        },
+        // Array from comma-separated string
+        (QueryValue::String(s), "array") => {
+            let parts: Vec<QueryValue> = s.split(',')
+                .map(|v| QueryValue::String(v.trim().to_string()))
+                .collect();
+            Some(QueryValue::Array(parts))
         },
         // Float → Integer (truncate if lossless)
         (QueryValue::Float(f), "integer") => {
             let i = *f as i64;
             if (i as f64 - f).abs() < f64::EPSILON { Some(QueryValue::Integer(i)) } else { None }
         }
-        // Integer → Float (always lossless for reasonable values)
-        (QueryValue::Integer(i), "float") => Some(QueryValue::Float(*i as f64)),
+        // Integer → Float/Decimal (always lossless for reasonable values)
+        (QueryValue::Integer(i), "float" | "decimal") => Some(QueryValue::Float(*i as f64)),
         _ => None,
     }
 }
@@ -945,6 +991,50 @@ impl DataViewExecutor {
         let mut names: Vec<&str> = self.datasource_params.keys().map(|s| s.as_str()).collect();
         names.sort();
         names
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coerce_uuid_valid() {
+        let v = QueryValue::String("550e8400-e29b-41d4-a716-446655440000".into());
+        assert!(coerce_param_type(&v, "uuid").is_some());
+    }
+
+    #[test]
+    fn coerce_uuid_invalid() {
+        let v = QueryValue::String("not-a-uuid".into());
+        assert!(coerce_param_type(&v, "uuid").is_none());
+    }
+
+    #[test]
+    fn coerce_date_valid() {
+        let v = QueryValue::String("2026-04-15".into());
+        assert!(coerce_param_type(&v, "date").is_some());
+    }
+
+    #[test]
+    fn coerce_date_invalid() {
+        let v = QueryValue::String("04/15/2026".into());
+        assert!(coerce_param_type(&v, "date").is_none());
+    }
+
+    #[test]
+    fn coerce_array_from_csv() {
+        let v = QueryValue::String("a,b,c".into());
+        match coerce_param_type(&v, "array") {
+            Some(QueryValue::Array(arr)) => assert_eq!(arr.len(), 3),
+            other => panic!("expected array, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn coerce_decimal_as_float() {
+        let v = QueryValue::String("19.99".into());
+        assert!(matches!(coerce_param_type(&v, "decimal"), Some(QueryValue::Float(_))));
     }
 }
 

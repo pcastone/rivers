@@ -114,6 +114,9 @@ pub fn validate_crossref(bundle: &LoadedBundle) -> Vec<ValidationResult> {
 
         // CB001: Circuit breaker ID referenced by only one DataView
         check_solo_circuit_breaker_ids(app, &mut results);
+
+        // QP: Parameter mapping validation
+        check_parameter_mappings(app, &mut results);
     }
 
     results
@@ -330,7 +333,8 @@ fn check_view_refs(
         match &view.handler {
             HandlerConfig::Dataview { dataview } => {
                 // X008: Dataview handler only valid for view_type=Rest
-                if view_type != "Rest" {
+                // Exception: SSE views with polling use dataview as the poll source
+                if view_type != "Rest" && !(view_type == "ServerSentEvents" && view.polling.is_some()) {
                     results.push(
                         ValidationResult::fail(
                             error_codes::X008,
@@ -682,6 +686,119 @@ fn check_solo_circuit_breaker_ids(app: &LoadedApp, results: &mut Vec<ValidationR
     }
 }
 
+/// QP-1..QP-5: Parameter mapping validation.
+///
+/// - QP-1: Query/body mapping values must reference declared DataView parameters.
+/// - QP-2: Path mapping keys must match `{name}` segments in the view path.
+/// - QP-3: Warning when a required DataView param has no default and no mapping.
+/// - QP-5: No duplicate DataView param names within a single mapping section.
+fn check_parameter_mappings(app: &LoadedApp, results: &mut Vec<ValidationResult>) {
+    let app_name = &app.manifest.app_name;
+
+    // ── QP-1, QP-2, QP-5: per-view mapping checks ────────────────────
+    for (view_name, view_config) in &app.config.api.views {
+        let Some(ref mapping) = view_config.parameter_mapping else {
+            continue;
+        };
+
+        // Resolve declared DataView parameters (only for Dataview-typed handlers).
+        let dv_params: Option<Vec<&str>> = match &view_config.handler {
+            HandlerConfig::Dataview { dataview } => {
+                app.config.data.dataviews.get(dataview).map(|dv| {
+                    dv.parameters.iter().map(|p| p.name.as_str()).collect()
+                })
+            }
+            _ => None,
+        };
+
+        // VAL-QP-1: Query and body mapping values must be declared DataView parameters.
+        if let Some(ref declared) = dv_params {
+            for (_http_param, dv_param) in &mapping.query {
+                if !declared.contains(&dv_param.as_str()) {
+                    results.push(ValidationResult::fail(
+                        "QP-1",
+                        format!("{}/app.toml", app_name),
+                        format!(
+                            "view '{}' parameter_mapping.query maps to undeclared DataView parameter '{}'",
+                            view_name, dv_param
+                        ),
+                    ));
+                }
+            }
+            for (_http_param, dv_param) in &mapping.body {
+                if !declared.contains(&dv_param.as_str()) {
+                    results.push(ValidationResult::fail(
+                        "QP-1",
+                        format!("{}/app.toml", app_name),
+                        format!(
+                            "view '{}' parameter_mapping.body maps to undeclared DataView parameter '{}'",
+                            view_name, dv_param
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // VAL-QP-2: Path mapping keys must have a matching `{key}` segment in the view path.
+        let view_path = view_config.path.as_deref().unwrap_or("");
+        for (http_param, _dv_param) in &mapping.path {
+            let segment = format!("{{{}}}", http_param);
+            if !view_path.contains(segment.as_str()) {
+                results.push(ValidationResult::fail(
+                    "QP-2",
+                    format!("{}/app.toml", app_name),
+                    format!(
+                        "view '{}' parameter_mapping.path key '{}' has no matching {{{}}} in path '{}'",
+                        view_name, http_param, http_param, view_path
+                    ),
+                ));
+            }
+        }
+
+        // VAL-QP-5: No duplicate DataView param names in query mapping section.
+        let mut seen_query: HashSet<&str> = HashSet::new();
+        for (_http_param, dv_param) in &mapping.query {
+            if !seen_query.insert(dv_param.as_str()) {
+                results.push(ValidationResult::fail(
+                    "QP-5",
+                    format!("{}/app.toml", app_name),
+                    format!(
+                        "view '{}' parameter_mapping.query has duplicate DataView param '{}'",
+                        view_name, dv_param
+                    ),
+                ));
+            }
+        }
+    }
+
+    // ── QP-3: Required params with no mapping and no default ──────────
+    for (dv_name, dv_config) in &app.config.data.dataviews {
+        for param in &dv_config.parameters {
+            if param.required && param.default.is_none() {
+                let has_mapping = app.config.api.views.values().any(|v| {
+                    v.parameter_mapping.as_ref().map_or(false, |m| {
+                        m.query.values().any(|p| p == &param.name)
+                            || m.path.values().any(|p| p == &param.name)
+                            || m.body.values().any(|p| p == &param.name)
+                            || m.header.values().any(|p| p == &param.name)
+                    })
+                });
+                if !has_mapping {
+                    let mut result = ValidationResult::warn(
+                        "QP-3",
+                        format!(
+                            "DataView '{}' parameter '{}' is required with no default and no mapping \u{2014} will always fail at runtime",
+                            dv_name, param.name
+                        ),
+                    );
+                    result.file = Some(format!("{}/app.toml", app_name));
+                    results.push(result);
+                }
+            }
+        }
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -766,6 +883,7 @@ mod tests {
             streaming: false,
             circuit_breaker_id: None,
             prepared: false,
+            query_params: HashMap::new(),
             caching: None,
             invalidates: vec![],
             validate_result: false,

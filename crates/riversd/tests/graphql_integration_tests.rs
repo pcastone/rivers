@@ -68,6 +68,7 @@ async fn schema_with_real_executor_resolves_query() {
         caching: None,
         circuit_breaker_id: None,
         prepared: false,
+        query_params: std::collections::HashMap::new(),
         get_query: None, post_query: None, put_query: None, delete_query: None,
         get_schema: None, post_schema: None, put_schema: None, delete_schema: None,
         get_parameters: Vec::new(), post_parameters: Vec::new(),
