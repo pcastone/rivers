@@ -511,7 +511,7 @@ fn ctx_dataview_callback(
 
         match get_rt_handle() {
             Ok(rt) => {
-                match rt.block_on(exec.execute(&namespaced_name, query_params, "GET", &trace_id)) {
+                match rt.block_on(exec.execute(&namespaced_name, query_params, "GET", &trace_id, None)) {
                     Ok(response) => {
                         // Convert QueryResult rows to JSON
                         let json = serde_json::json!({

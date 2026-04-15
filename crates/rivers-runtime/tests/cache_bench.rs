@@ -204,7 +204,7 @@ async fn bench_2_faker_cached_vs_uncached() {
     );
     let start = Instant::now();
     for i in 0..iterations {
-        let _ = executor.execute("list_contacts", HashMap::new(), "GET", &format!("t-{}", i)).await;
+        let _ = executor.execute("list_contacts", HashMap::new(), "GET", &format!("t-{}", i), None).await;
     }
     let uncached = start.elapsed();
 
@@ -220,10 +220,10 @@ async fn bench_2_faker_cached_vs_uncached() {
     let executor = rivers_runtime::DataViewExecutor::new(
         registry, factory.clone(), ds_params.clone(), cache,
     );
-    let _ = executor.execute("list_contacts", HashMap::new(), "GET", "warm").await;
+    let _ = executor.execute("list_contacts", HashMap::new(), "GET", "warm", None).await;
     let start = Instant::now();
     for i in 0..iterations {
-        let _ = executor.execute("list_contacts", HashMap::new(), "GET", &format!("t-{}", i)).await;
+        let _ = executor.execute("list_contacts", HashMap::new(), "GET", &format!("t-{}", i), None).await;
     }
     let cached = start.elapsed();
 
@@ -300,7 +300,7 @@ async fn bench_3_sqlite_cached_vs_uncached() {
     );
     let start = Instant::now();
     for i in 0..iterations {
-        let _ = executor.execute("list_contacts", HashMap::new(), "GET", &format!("t-{}", i)).await;
+        let _ = executor.execute("list_contacts", HashMap::new(), "GET", &format!("t-{}", i), None).await;
     }
     let uncached = start.elapsed();
 
@@ -316,10 +316,10 @@ async fn bench_3_sqlite_cached_vs_uncached() {
     let executor = rivers_runtime::DataViewExecutor::new(
         registry, factory.clone(), ds_params.clone(), cache,
     );
-    let _ = executor.execute("list_contacts", HashMap::new(), "GET", "warm").await;
+    let _ = executor.execute("list_contacts", HashMap::new(), "GET", "warm", None).await;
     let start = Instant::now();
     for i in 0..iterations {
-        let _ = executor.execute("list_contacts", HashMap::new(), "GET", &format!("t-{}", i)).await;
+        let _ = executor.execute("list_contacts", HashMap::new(), "GET", &format!("t-{}", i), None).await;
     }
     let cached = start.elapsed();
 
@@ -510,7 +510,7 @@ async fn bench_5_postgres_cached_vs_uncached() {
     );
     let start = Instant::now();
     for i in 0..iterations {
-        let _ = executor.execute("pg_select", HashMap::new(), "GET", &format!("t-{}", i)).await;
+        let _ = executor.execute("pg_select", HashMap::new(), "GET", &format!("t-{}", i), None).await;
     }
     let uncached = start.elapsed();
 
@@ -526,10 +526,10 @@ async fn bench_5_postgres_cached_vs_uncached() {
     let executor = rivers_runtime::DataViewExecutor::new(
         registry, factory.clone(), ds_params.clone(), cache,
     );
-    let _ = executor.execute("pg_select", HashMap::new(), "GET", "warm").await;
+    let _ = executor.execute("pg_select", HashMap::new(), "GET", "warm", None).await;
     let start = Instant::now();
     for i in 0..iterations {
-        let _ = executor.execute("pg_select", HashMap::new(), "GET", &format!("t-{}", i)).await;
+        let _ = executor.execute("pg_select", HashMap::new(), "GET", &format!("t-{}", i), None).await;
     }
     let cached = start.elapsed();
 

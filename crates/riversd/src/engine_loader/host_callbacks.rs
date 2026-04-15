@@ -104,19 +104,19 @@ pub(super) extern "C" fn host_dataview_execute(
                     guard.clone().ok_or_else(|| "DataViewExecutor not initialized".to_string())?
                 };
                 // Try the bare name first
-                match executor.execute(&name, params.clone(), "GET", &trace_id).await {
+                match executor.execute(&name, params.clone(), "GET", &trace_id, None).await {
                     Ok(r) => Ok(r),
                     Err(rivers_runtime::DataViewError::NotFound { .. }) => {
                         // DataViews are registered as "{entry_point}:{name}" — try with prefix
                         if let Some(prefix) = &app_prefix {
                             let namespaced = format!("{}:{}", prefix, name);
-                            executor.execute(&namespaced, params, "GET", &trace_id).await
+                            executor.execute(&namespaced, params, "GET", &trace_id, None).await
                                 .map_err(|e| format!("{e:?}"))
                         } else {
                             // No prefix hint — scan for any match ending in ":{name}"
                             let suffix = format!(":{}", name);
                             if let Some(full_name) = executor.find_by_suffix(&suffix) {
-                                executor.execute(&full_name, params, "GET", &trace_id).await
+                                executor.execute(&full_name, params, "GET", &trace_id, None).await
                                     .map_err(|e| format!("{e:?}"))
                             } else {
                                 Err(format!("DataView '{}' not found (tried bare and namespaced)", name))

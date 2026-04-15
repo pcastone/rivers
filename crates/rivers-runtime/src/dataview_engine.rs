@@ -556,14 +556,19 @@ impl DataViewExecutor {
     ///
     /// Flow: registry lookup → param validation → build query →
     /// factory.connect() → conn.execute() → return QueryResult.
+    ///
+    /// If `txn_conn` is `Some`, the provided connection is used directly
+    /// (transaction path) and cache population is skipped.
     pub async fn execute(
         &self,
         name: &str,
         params: HashMap<String, QueryValue>,
         method: &str,
         trace_id: &str,
+        txn_conn: Option<&mut Box<dyn rivers_driver_sdk::Connection>>,
     ) -> Result<DataViewResponse, DataViewError> {
         let start = Instant::now();
+        let is_transaction = txn_conn.is_some();
 
         // 1. Registry lookup
         let config = self
@@ -642,56 +647,77 @@ impl DataViewExecutor {
             }
         }
 
-        // Try database driver first; if unknown, fall back to broker driver
-        match self.factory.connect(driver_name, ds_params).await {
-            Ok(mut conn) => {
-                // 7. Execute query via database connection
-                let mut query_result = conn
-                    .execute(&query)
-                    .await
-                    .map_err(|e| DataViewError::Driver(e.to_string()))?;
-
-                // 6a. Enforce max_rows limit
-                if config.max_rows > 0 && query_result.rows.len() > config.max_rows {
-                    tracing::warn!(
-                        dataview = %name,
-                        returned = query_result.rows.len(),
-                        max_rows = config.max_rows,
-                        "result truncated to max_rows"
-                    );
-                    query_result.rows.truncate(config.max_rows);
-                    query_result.affected_rows = config.max_rows as u64;
-                }
-
-                // 6b. Validate result against schema if configured
-                if config.validate_result {
-                    if let Some(ref schema_path) = config.return_schema {
-                        validate_query_result(&query_result, schema_path)?;
+        // Use transaction connection if provided, otherwise connect from pool
+        let execute_result = if let Some(conn) = txn_conn {
+            // Transaction path — use provided connection, skip caching
+            if config.prepared && conn.has_prepared(&query.statement) {
+                conn.execute_prepared(&query).await
+            } else if config.prepared {
+                conn.prepare(&query.statement).await
+                    .map_err(|e| DataViewError::Driver(format!("prepare: {e}")))?;
+                conn.execute_prepared(&query).await
+            } else {
+                conn.execute(&query).await
+            }
+        } else {
+            // Normal path — connect from factory
+            match self.factory.connect(driver_name, ds_params).await {
+                Ok(mut conn) => {
+                    if config.prepared && conn.has_prepared(&query.statement) {
+                        conn.execute_prepared(&query).await
+                    } else if config.prepared {
+                        conn.prepare(&query.statement).await
+                            .map_err(|e| DataViewError::Driver(format!("prepare: {e}")))?;
+                        conn.execute_prepared(&query).await
+                    } else {
+                        conn.execute(&query).await
                     }
                 }
-
-                // 7. Cache populate on success (unless bypass or no caching config)
-                if !request.cache_bypass && view_caching.is_some() {
-                    let ttl_override = view_caching.map(|c| c.ttl_seconds);
-                    if let Err(e) = self.cache.set(name, &request.parameters, &query_result, ttl_override).await {
-                        tracing::warn!(dataview = %name, error = %e, "cache set failed");
-                    }
+                Err(DriverError::UnknownDriver(_)) => {
+                    // Broker produce path — transactions don't apply to message brokers
+                    let invalidates = config.invalidates.clone();
+                    let response = self.execute_broker_produce(driver_name, ds_params, &query, start, trace_id).await?;
+                    self.run_cache_invalidation(name, &invalidates, trace_id).await;
+                    return Ok(response);
                 }
-
-                // 8. Cache invalidation — invalidate listed DataViews on success
-                self.run_cache_invalidation(name, &config.invalidates, trace_id).await;
-
-                Ok(build_response(Arc::new(query_result), start, false, trace_id.to_string()))
+                Err(e) => return Err(DataViewError::Pool(format!("connection failed: {e}"))),
             }
-            Err(DriverError::UnknownDriver(_)) => {
-                // 6b. Try broker driver → produce path
-                let invalidates = config.invalidates.clone();
-                let response = self.execute_broker_produce(driver_name, ds_params, &query, start, trace_id).await?;
-                self.run_cache_invalidation(name, &invalidates, trace_id).await;
-                Ok(response)
-            }
-            Err(e) => Err(DataViewError::Pool(format!("connection failed: {e}"))),
+        };
+
+        let mut query_result = execute_result
+            .map_err(|e| DataViewError::Driver(e.to_string()))?;
+
+        // Enforce max_rows limit
+        if config.max_rows > 0 && query_result.rows.len() > config.max_rows {
+            tracing::warn!(
+                dataview = %name,
+                returned = query_result.rows.len(),
+                max_rows = config.max_rows,
+                "result truncated to max_rows"
+            );
+            query_result.rows.truncate(config.max_rows);
+            query_result.affected_rows = config.max_rows as u64;
         }
+
+        // Validate result against schema if configured
+        if config.validate_result {
+            if let Some(ref schema_path) = config.return_schema {
+                validate_query_result(&query_result, schema_path)?;
+            }
+        }
+
+        // Cache populate on success — skip for transaction queries
+        if !is_transaction && !request.cache_bypass && view_caching.is_some() {
+            let ttl_override = view_caching.map(|c| c.ttl_seconds);
+            if let Err(e) = self.cache.set(name, &request.parameters, &query_result, ttl_override).await {
+                tracing::warn!(dataview = %name, error = %e, "cache set failed");
+            }
+        }
+
+        // Cache invalidation — invalidate listed DataViews on success
+        self.run_cache_invalidation(name, &config.invalidates, trace_id).await;
+
+        Ok(build_response(Arc::new(query_result), start, false, trace_id.to_string()))
     }
 
     /// Execute a DDL statement or admin operation (ApplicationInit context only).
