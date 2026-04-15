@@ -302,6 +302,15 @@ else
 fi
 
 
+
+# ── Transaction Tests ────────────────────────────────────
+echo ""
+echo "  ── Transactions ──"
+test_ep "txn-commit"       POST "$BASE/sql/canary/sql/txn/commit" '{}'
+test_ep "txn-rollback"     POST "$BASE/sql/canary/sql/txn/rollback" '{}'
+test_ep "txn-double-begin" POST "$BASE/sql/canary/sql/txn/double-begin" '{}'
+test_ep "txn-batch"        POST "$BASE/sql/canary/sql/txn/batch" '{}'
+
 # ── Circuit Breaker Tests ────────────────────────────────
 echo ""
 echo "  ── Circuit Breaker ──"

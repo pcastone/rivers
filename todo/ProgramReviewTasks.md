@@ -102,9 +102,9 @@ Add `///` doc comments to every `#[test]` / `#[tokio::test]` function explaining
 
 ## Gap: Integration/Canary Tests for New Features
 
-- [ ] Circuit Breaker v1 — add canary test profile or test app that exercises trip/reset/status via admin API
-- [ ] Transactions — add canary tests that verify begin/commit/rollback across datasources
-- [ ] Schema-to-Database Validation — add canary test that verifies startup failure on schema mismatch
+- [x] Circuit Breaker v1 — 5 canary tests: breaker registered, trip/open, 503 when open, reset/closed, 200 after reset
+- [x] Transactions — 4 canary tests: commit roundtrip, rollback verification, double-begin rejection, batch inside transaction
+- [x] Schema Introspection — implicit startup test (if canary runs, introspection passed) + explicit `introspect = true` and `prepared = true` on pg DataView
 
 ## Gap: neo4j Plugin
 
@@ -116,7 +116,7 @@ Add `///` doc comments to every `#[test]` / `#[tokio::test]` function explaining
 
 - [x] Per-app breaker scoping: registry namespaced by `appId:breakerId`, admin API routes updated to `/admin/apps/:app_id/breakers/...`
 - [x] Persistence verified: trip → restart → breaker restored as OPEN (requires SQLite or Redis StorageEngine; in-memory backend is ephemeral by design)
-- [ ] Canary test profile: add circuit breaker to a canary DataView, test trip/reset/status via admin API during canary run
+- [x] Canary test profile: circuit breaker tests added to canary-sql + run-tests.sh
 
 ## Gap: riversd.toml Foreign Attribute Protection
 

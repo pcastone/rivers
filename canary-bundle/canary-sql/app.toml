@@ -752,3 +752,52 @@ type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/integration-tests.ts"
 entrypoint = "hostCallbackAvailable"
+
+# ── Transaction Tests ─────────────────────────────────────
+[api.views.txn_commit]
+path      = "canary/sql/txn/commit"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_commit.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/transaction-tests.ts"
+entrypoint = "txnCommit"
+
+[api.views.txn_rollback]
+path      = "canary/sql/txn/rollback"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_rollback.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/transaction-tests.ts"
+entrypoint = "txnRollback"
+
+[api.views.txn_double_begin]
+path      = "canary/sql/txn/double-begin"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_double_begin.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/transaction-tests.ts"
+entrypoint = "txnDoubleBegin"
+
+[api.views.txn_batch]
+path      = "canary/sql/txn/batch"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_batch.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/transaction-tests.ts"
+entrypoint = "txnBatch"
