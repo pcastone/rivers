@@ -93,5 +93,9 @@ pub fn build_host_callbacks() -> HostCallbacks {
         crypto_encrypt: Some(host_callbacks::host_crypto_encrypt),
         crypto_decrypt: Some(host_callbacks::host_crypto_decrypt),
         ddl_execute: Some(host_callbacks::host_ddl_execute),
+        db_begin: Some(host_callbacks::host_db_begin),
+        db_commit: Some(host_callbacks::host_db_commit),
+        db_rollback: Some(host_callbacks::host_db_rollback),
+        db_batch: Some(host_callbacks::host_db_batch),
     }
 }

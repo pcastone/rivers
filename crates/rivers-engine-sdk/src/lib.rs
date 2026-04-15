@@ -251,6 +251,38 @@ pub struct HostCallbacks {
             out_ptr: *mut *mut u8, out_len: *mut usize,
         ) -> i32,
     >,
+
+    /// Begin a transaction on a datasource.
+    /// Input: JSON `{"datasource": "..."}`.
+    /// Output: JSON `{"ok": true, "datasource": "..."}` or error.
+    pub db_begin: Option<extern "C" fn(
+        input_ptr: *const u8, input_len: usize,
+        out_ptr: *mut *mut u8, out_len: *mut usize,
+    ) -> i32>,
+
+    /// Commit a transaction on a datasource.
+    /// Input: JSON `{"datasource": "..."}`.
+    /// Output: JSON `{"ok": true, "datasource": "..."}` or error.
+    pub db_commit: Option<extern "C" fn(
+        input_ptr: *const u8, input_len: usize,
+        out_ptr: *mut *mut u8, out_len: *mut usize,
+    ) -> i32>,
+
+    /// Rollback a transaction on a datasource.
+    /// Input: JSON `{"datasource": "..."}`.
+    /// Output: JSON `{"ok": true, "datasource": "..."}` or error.
+    pub db_rollback: Option<extern "C" fn(
+        input_ptr: *const u8, input_len: usize,
+        out_ptr: *mut *mut u8, out_len: *mut usize,
+    ) -> i32>,
+
+    /// Batch execute a DataView with multiple parameter sets.
+    /// Input: JSON `{"dataview": "...", "params": [{...}, {...}]}`.
+    /// Output: JSON array of results or error.
+    pub db_batch: Option<extern "C" fn(
+        input_ptr: *const u8, input_len: usize,
+        out_ptr: *mut *mut u8, out_len: *mut usize,
+    ) -> i32>,
 }
 
 // ── C-ABI Function Signatures ───────────────────────────────────

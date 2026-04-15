@@ -551,6 +551,179 @@ fn ddl_callback(
     scope.throw_exception(exception);
 }
 
+// ── Rivers.db Callbacks ─────────────────────────────────────────
+
+/// Helper: invoke a host callback that takes `{"datasource": "..."}` as input and
+/// returns a parsed JSON value. Throws a JS exception on any failure.
+fn invoke_db_datasource_callback(
+    scope: &mut v8::HandleScope,
+    mut rv: v8::ReturnValue,
+    datasource: &str,
+    cb: extern "C" fn(*const u8, usize, *mut *mut u8, *mut usize) -> i32,
+    cb_name: &str,
+) {
+    let input = serde_json::json!({"datasource": datasource}).to_string();
+    let mut out_ptr: *mut u8 = std::ptr::null_mut();
+    let mut out_len: usize = 0;
+
+    let result = cb(input.as_ptr(), input.len(), &mut out_ptr, &mut out_len);
+
+    if !out_ptr.is_null() && out_len > 0 {
+        let bytes = unsafe { std::slice::from_raw_parts(out_ptr, out_len) };
+        let json_str = String::from_utf8_lossy(bytes);
+        if result == 0 {
+            let v8_val = v8_str(scope, &json_str);
+            if let Some(parsed) = v8::json::parse(scope, v8_val) {
+                rv.set(parsed);
+            }
+            unsafe { rivers_engine_sdk::free_json_buffer(out_ptr, out_len) };
+            return;
+        } else {
+            let err_msg = if let Ok(err_obj) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                err_obj["error"].as_str().unwrap_or(&json_str).to_string()
+            } else {
+                json_str.to_string()
+            };
+            unsafe { rivers_engine_sdk::free_json_buffer(out_ptr, out_len) };
+            let msg = v8_str(scope, &err_msg);
+            let exception = v8::Exception::error(scope, msg);
+            scope.throw_exception(exception);
+            return;
+        }
+    } else if result < 0 {
+        let msg = v8_str(scope, &format!(
+            "{}('{}') failed (host error code {})", cb_name, datasource, result
+        ));
+        let exception = v8::Exception::error(scope, msg);
+        scope.throw_exception(exception);
+        return;
+    }
+}
+
+/// `Rivers.db.begin(datasource)` — begin a transaction on a datasource.
+fn db_begin_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    let datasource = args.get(0).to_rust_string_lossy(scope);
+
+    if let Some(callbacks) = HOST_CALLBACKS.get() {
+        if let Some(cb) = callbacks.db_begin {
+            invoke_db_datasource_callback(scope, rv, &datasource, cb, "Rivers.db.begin");
+            return;
+        }
+    }
+
+    let err = v8_str(scope, "Rivers.db.begin: host callback not available");
+    let exception = v8::Exception::error(scope, err);
+    scope.throw_exception(exception);
+}
+
+/// `Rivers.db.commit(datasource)` — commit an active transaction.
+fn db_commit_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    let datasource = args.get(0).to_rust_string_lossy(scope);
+
+    if let Some(callbacks) = HOST_CALLBACKS.get() {
+        if let Some(cb) = callbacks.db_commit {
+            invoke_db_datasource_callback(scope, rv, &datasource, cb, "Rivers.db.commit");
+            return;
+        }
+    }
+
+    let err = v8_str(scope, "Rivers.db.commit: host callback not available");
+    let exception = v8::Exception::error(scope, err);
+    scope.throw_exception(exception);
+}
+
+/// `Rivers.db.rollback(datasource)` — rollback an active transaction.
+fn db_rollback_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    let datasource = args.get(0).to_rust_string_lossy(scope);
+
+    if let Some(callbacks) = HOST_CALLBACKS.get() {
+        if let Some(cb) = callbacks.db_rollback {
+            invoke_db_datasource_callback(scope, rv, &datasource, cb, "Rivers.db.rollback");
+            return;
+        }
+    }
+
+    let err = v8_str(scope, "Rivers.db.rollback: host callback not available");
+    let exception = v8::Exception::error(scope, err);
+    scope.throw_exception(exception);
+}
+
+/// `Rivers.db.batch(dataview, params)` — execute a DataView with multiple parameter sets.
+///
+/// `dataview` is a string name; `params` is a JS array of parameter objects.
+fn db_batch_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let dataview = args.get(0).to_rust_string_lossy(scope);
+
+    // Serialize the params array from V8 to JSON
+    let params_val = args.get(1);
+    let params_json = if params_val.is_array() {
+        v8_to_json_value(scope, params_val)
+    } else {
+        serde_json::Value::Array(vec![])
+    };
+
+    if let Some(callbacks) = HOST_CALLBACKS.get() {
+        if let Some(cb) = callbacks.db_batch {
+            let input = serde_json::json!({"dataview": dataview, "params": params_json}).to_string();
+            let mut out_ptr: *mut u8 = std::ptr::null_mut();
+            let mut out_len: usize = 0;
+
+            let result = cb(input.as_ptr(), input.len(), &mut out_ptr, &mut out_len);
+
+            if !out_ptr.is_null() && out_len > 0 {
+                let bytes = unsafe { std::slice::from_raw_parts(out_ptr, out_len) };
+                let json_str = String::from_utf8_lossy(bytes);
+                if result == 0 {
+                    let v8_val = v8_str(scope, &json_str);
+                    if let Some(parsed) = v8::json::parse(scope, v8_val) {
+                        rv.set(parsed);
+                    }
+                    unsafe { rivers_engine_sdk::free_json_buffer(out_ptr, out_len) };
+                    return;
+                } else {
+                    let err_msg = if let Ok(err_obj) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                        err_obj["error"].as_str().unwrap_or(&json_str).to_string()
+                    } else {
+                        json_str.to_string()
+                    };
+                    unsafe { rivers_engine_sdk::free_json_buffer(out_ptr, out_len) };
+                    let msg = v8_str(scope, &err_msg);
+                    let exception = v8::Exception::error(scope, msg);
+                    scope.throw_exception(exception);
+                    return;
+                }
+            } else if result < 0 {
+                let msg = v8_str(scope, &format!(
+                    "Rivers.db.batch('{}') failed (host error code {})", dataview, result
+                ));
+                let exception = v8::Exception::error(scope, msg);
+                scope.throw_exception(exception);
+                return;
+            }
+        }
+    }
+
+    let err = v8_str(scope, "Rivers.db.batch: host callback not available");
+    let exception = v8::Exception::error(scope, err);
+    scope.throw_exception(exception);
+}
+
 // ── Rivers Global (log, crypto) ─────────────────────────────────
 
 fn inject_rivers_global(scope: &mut v8::HandleScope) {
@@ -599,6 +772,28 @@ fn inject_rivers_global(scope: &mut v8::HandleScope) {
 
     let crypto_key = v8_str(scope, "crypto");
     rivers_obj.set(scope, crypto_key.into(), crypto_obj.into());
+
+    // Rivers.db
+    let db_obj = v8::Object::new(scope);
+
+    let begin_fn = v8::Function::new(scope, db_begin_callback).unwrap();
+    let k = v8_str(scope, "begin");
+    db_obj.set(scope, k.into(), begin_fn.into());
+
+    let commit_fn = v8::Function::new(scope, db_commit_callback).unwrap();
+    let k = v8_str(scope, "commit");
+    db_obj.set(scope, k.into(), commit_fn.into());
+
+    let rollback_fn = v8::Function::new(scope, db_rollback_callback).unwrap();
+    let k = v8_str(scope, "rollback");
+    db_obj.set(scope, k.into(), rollback_fn.into());
+
+    let batch_fn = v8::Function::new(scope, db_batch_callback).unwrap();
+    let k = v8_str(scope, "batch");
+    db_obj.set(scope, k.into(), batch_fn.into());
+
+    let db_key = v8_str(scope, "db");
+    rivers_obj.set(scope, db_key.into(), db_obj.into());
 
     let rivers_key = v8_str(scope, "Rivers");
     global.set(scope, rivers_key.into(), rivers_obj.into());
