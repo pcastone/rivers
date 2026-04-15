@@ -53,6 +53,29 @@ pub async fn load_and_wire_bundle(
         }
     };
 
+    // ── Gate 2, Layer 1: Structural TOML validation ──
+    let structural_results = rivers_runtime::validate_structural(path);
+    let structural_errors: Vec<_> = structural_results
+        .iter()
+        .filter(|r| r.status == rivers_runtime::ValidationStatus::Fail)
+        .collect();
+    if !structural_errors.is_empty() {
+        let msg = structural_errors
+            .iter()
+            .map(|r| r.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        tracing::error!(path = %bundle_path, "structural validation failed: {}", msg);
+        return Err(ServerError::Config(format!(
+            "structural validation failed: {}", msg
+        )));
+    }
+    for r in &structural_results {
+        if r.status == rivers_runtime::ValidationStatus::Warn {
+            tracing::warn!(path = %bundle_path, "{}", r.message);
+        }
+    }
+
     // ── AT3.2 (A): Validate bundle before wiring ──
     if let Err(errors) = rivers_runtime::validate_bundle(&bundle) {
         let msg = errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ");
