@@ -303,6 +303,14 @@ fi
 
 
 
+# ── Query Parameter Tests ────────────────────────────────────
+echo ""
+echo "  ── Query Parameters ──"
+test_ep "qp-query-access"   GET  "$BASE/sql/canary/sql/qp/query-access?status=active&limit=20"
+test_ep "qp-query-all"      GET  "$BASE/sql/canary/sql/qp/query-all?tag=a&tag=b&tag=c&single=one"
+test_ep "qp-percent-decode"  GET  "$BASE/sql/canary/sql/qp/percent-decode?name=John%20Doe&city=S%C3%A3o%20Paulo"
+test_ep "qp-empty-value"    GET  "$BASE/sql/canary/sql/qp/empty-value?key=&bare"
+
 # ── Transaction Tests ────────────────────────────────────
 echo ""
 echo "  ── Transactions ──"
