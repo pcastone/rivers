@@ -168,6 +168,16 @@ async fn view_dispatch_handler(
     // ── REST path: extract method, headers, body ──
     let method = request.method().to_string();
     let path = request.uri().path().to_string();
+
+    // QP-3: Max query string length (default 8192 bytes)
+    if let Some(query_str) = request.uri().query() {
+        if query_str.len() > 8192 {
+            return error_response::uri_too_long(
+                format!("query string exceeds maximum length ({} > 8192 bytes)", query_str.len())
+            ).into_response();
+        }
+    }
+
     let (query, query_all): (HashMap<String, String>, HashMap<String, Vec<String>>) = request
         .uri()
         .query()

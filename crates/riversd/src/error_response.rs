@@ -206,6 +206,11 @@ pub fn service_unavailable(message: impl Into<String>) -> ErrorResponse {
     ErrorResponse::new(503, message)
 }
 
+/// 414 URI Too Long
+pub fn uri_too_long(message: impl Into<String>) -> ErrorResponse {
+    ErrorResponse::new(414, message)
+}
+
 // ── Runtime Error Mapping ───────────────────────────────────────
 
 /// Map a view error to an error response, optionally including trace_id.
