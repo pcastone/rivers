@@ -117,6 +117,80 @@ pub fn validate_crossref(bundle: &LoadedBundle) -> Vec<ValidationResult> {
 
         // QP: Parameter mapping validation
         check_parameter_mappings(app, &mut results);
+
+        // ── MCP Validation (rivers-mcp-view-spec §12) ──────────────
+        {
+            let mcp_views: Vec<(&str, &crate::view::ApiViewConfig)> = app.config.api.views.iter()
+                .filter(|(_, v)| v.view_type == "Mcp")
+                .map(|(name, v)| (name.as_str(), v))
+                .collect();
+
+            // VAL-7: Only one MCP view per app
+            if mcp_views.len() > 1 {
+                let names: Vec<&str> = mcp_views.iter().map(|(n, _)| *n).collect();
+                results.push(ValidationResult::fail(
+                    "MCP-VAL-7",
+                    &format!("{}/app.toml", app.manifest.app_name),
+                    format!("only one MCP view allowed per app, found {}: {}", names.len(), names.join(", ")),
+                ));
+            }
+
+            for (view_name, view_config) in &mcp_views {
+                // VAL-1: Tool DataView references
+                for (tool_name, tool_config) in &view_config.tools {
+                    if !app.config.data.dataviews.contains_key(&tool_config.dataview) {
+                        results.push(ValidationResult::fail(
+                            "MCP-VAL-1",
+                            &format!("{}/app.toml", app.manifest.app_name),
+                            format!("MCP tool '{}' references undeclared DataView '{}'", tool_name, tool_config.dataview),
+                        ));
+                    }
+                }
+
+                // VAL-2: Resource DataView references
+                for (resource_name, resource_config) in &view_config.resources {
+                    if !app.config.data.dataviews.contains_key(&resource_config.dataview) {
+                        results.push(ValidationResult::fail(
+                            "MCP-VAL-2",
+                            &format!("{}/app.toml", app.manifest.app_name),
+                            format!("MCP resource '{}' references undeclared DataView '{}'", resource_name, resource_config.dataview),
+                        ));
+                    }
+                }
+
+                // VAL-4: Instructions file exists
+                if let Some(ref instructions_path) = view_config.instructions {
+                    let full_path = app.app_dir.join(instructions_path);
+                    if !full_path.exists() {
+                        results.push(ValidationResult::fail(
+                            "MCP-VAL-4",
+                            &format!("{}/app.toml", app.manifest.app_name),
+                            format!("MCP instructions file '{}' not found", instructions_path),
+                        ));
+                    }
+                }
+
+                // VAL-5: Prompt template files exist
+                for (prompt_name, prompt_config) in &view_config.prompts {
+                    if !prompt_config.template.is_empty() {
+                        let full_path = app.app_dir.join(&prompt_config.template);
+                        if !full_path.exists() {
+                            results.push(ValidationResult::fail(
+                                "MCP-VAL-5",
+                                &format!("{}/app.toml", app.manifest.app_name),
+                                format!("MCP prompt '{}' template '{}' not found", prompt_name, prompt_config.template),
+                            ));
+                        }
+                    }
+                }
+
+                // VAL-8: Unique tool names (handled by HashMap — keys are unique by definition)
+                // VAL-9: Unique resource names (same)
+                // VAL-10: Unique prompt names (same)
+                // These are enforced by the TOML parsing — duplicate table keys are a parse error.
+                let _ = view_name; // suppress unused warning
+            }
+        }
     }
 
     results
@@ -923,6 +997,11 @@ mod tests {
             on_stream: None,
             ws_hooks: None,
             on_event: None,
+            tools: HashMap::new(),
+            resources: HashMap::new(),
+            prompts: HashMap::new(),
+            instructions: None,
+            session: None,
         }
     }
 
@@ -960,6 +1039,11 @@ mod tests {
             on_stream: None,
             ws_hooks: None,
             on_event: None,
+            tools: HashMap::new(),
+            resources: HashMap::new(),
+            prompts: HashMap::new(),
+            instructions: None,
+            session: None,
         }
     }
 
@@ -992,6 +1076,11 @@ mod tests {
             on_stream: None,
             ws_hooks: None,
             on_event: None,
+            tools: HashMap::new(),
+            resources: HashMap::new(),
+            prompts: HashMap::new(),
+            instructions: None,
+            session: None,
         }
     }
 
