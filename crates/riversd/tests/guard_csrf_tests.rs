@@ -45,6 +45,11 @@ fn make_view(view_type: &str, guard: bool, auth: Option<&str>) -> ApiViewConfig 
         ws_hooks: None,
         on_event: None,
         polling: None,
+        tools: HashMap::new(),
+        resources: HashMap::new(),
+        prompts: HashMap::new(),
+        instructions: None,
+        session: None,
     }
 }
 
@@ -79,6 +84,11 @@ fn make_dataview_view() -> ApiViewConfig {
         ws_hooks: None,
         on_event: None,
         polling: None,
+        tools: HashMap::new(),
+        resources: HashMap::new(),
+        prompts: HashMap::new(),
+        instructions: None,
+        session: None,
     }
 }
 

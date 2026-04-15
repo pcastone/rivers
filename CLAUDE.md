@@ -29,10 +29,10 @@ The Rust runtime is implemented across a workspace of crates under `crates/`.
 - Build so things are reusable
 - Collapse complex things down to simple
 - Keep it simple
-
+- always make sure canary is working no failures it is our production. 
 ## GOAL
 
-understand the codebase
+pushing out feature
 
 ## Architecture
 

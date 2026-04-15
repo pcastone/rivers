@@ -850,3 +850,19 @@ type       = "codecomponent"
 language   = "javascript"
 module     = "libraries/handlers/query-param-tests.ts"
 entrypoint = "qpEmptyValue"
+
+# ── MCP View ──────────────────────────────────────────────
+
+[api.views.mcp]
+path      = "canary/sql/mcp"
+view_type = "Mcp"
+method    = "POST"
+auth      = "none"
+
+[api.views.mcp.handler]
+type = "none"
+
+[api.views.mcp.tools.pg_select]
+dataview    = "pg_select_all"
+description = "Select all contacts from PostgreSQL"
+hints       = { read_only = true }

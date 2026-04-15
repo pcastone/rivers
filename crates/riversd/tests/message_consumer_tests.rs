@@ -45,6 +45,11 @@ fn consumer_view(topic: &str, handler: &str) -> ApiViewConfig {
             handler_mode: None,
         }),
         polling: None,
+        tools: HashMap::new(),
+        resources: HashMap::new(),
+        prompts: HashMap::new(),
+        instructions: None,
+        session: None,
     }
 }
 

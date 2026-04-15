@@ -301,7 +301,45 @@ else
   printf "  SKIP %-40s (MySQL unreachable)\n" "INT-MYSQL-DDL"
 fi
 
+# ── MCP Tests ────────────────────────────────────────────────
+echo ""
+echo "  ── MCP ──"
 
+# Initialize
+MCP_INIT=$(curl -sf -X POST "$BASE/sql/canary/sql/mcp" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' 2>/dev/null) || MCP_INIT=""
+if echo "$MCP_INIT" | grep -q "rivers-mcp"; then
+  printf "  PASS %-40s\n" "mcp-initialize"
+  PASS=$((PASS+1))
+else
+  printf "  FAIL %-40s\n" "mcp-initialize"
+  FAIL=$((FAIL+1))
+fi
+
+# Tools list
+MCP_TOOLS=$(curl -sf -X POST "$BASE/sql/canary/sql/mcp" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' 2>/dev/null) || MCP_TOOLS=""
+if echo "$MCP_TOOLS" | grep -q "pg_select"; then
+  printf "  PASS %-40s\n" "mcp-tools-list"
+  PASS=$((PASS+1))
+else
+  printf "  FAIL %-40s\n" "mcp-tools-list"
+  FAIL=$((FAIL+1))
+fi
+
+# Method not found
+MCP_404=$(curl -sf -X POST "$BASE/sql/canary/sql/mcp" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"nonexistent","params":{}}' 2>/dev/null) || MCP_404=""
+if echo "$MCP_404" | grep -q "Method not found"; then
+  printf "  PASS %-40s\n" "mcp-method-not-found"
+  PASS=$((PASS+1))
+else
+  printf "  FAIL %-40s\n" "mcp-method-not-found"
+  FAIL=$((FAIL+1))
+fi
 
 # ── Query Parameter Tests ────────────────────────────────────
 echo ""
