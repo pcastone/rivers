@@ -30,9 +30,21 @@ fn load_and_parse<T: serde::de::DeserializeOwned>(path: &Path, app_name: &str) -
 }
 
 /// Load `riversd.conf` (ServerConfig) from the given path.
+///
+/// After successful deserialization, re-parses the TOML as `toml::Value` and
+/// emits `tracing::warn!` for any unrecognised keys (top-level and `[base]`).
 pub fn load_server_config(path: &Path) -> Result<ServerConfig, RiversError> {
     let content = read_file(path)?;
-    parse_toml(&content, "riversd.conf")
+    let config: ServerConfig = parse_toml(&content, "riversd.conf")?;
+
+    // Best-effort unknown-key detection: log warnings, never hard-fail.
+    if let Ok(raw_value) = toml::from_str::<toml::Value>(&content) {
+        for warning in rivers_core_config::config::validate_config::check_unknown_config_keys(&raw_value) {
+            tracing::warn!("config: {}", warning);
+        }
+    }
+
+    Ok(config)
 }
 
 /// Load a bundle-level `manifest.toml`.
