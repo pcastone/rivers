@@ -717,6 +717,7 @@ mod tests {
             put_parameters: vec![],
             delete_parameters: vec![],
             streaming: false,
+            circuit_breaker_id: None,
             caching: None,
             invalidates: vec![],
             validate_result: false,

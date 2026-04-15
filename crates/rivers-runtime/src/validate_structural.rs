@@ -71,6 +71,7 @@ const DATAVIEW_FIELDS: &[&str] = &[
     "get_query", "post_query", "put_query", "delete_query",
     "return_schema", "get_parameters", "post_parameters", "put_parameters",
     "delete_parameters", "streaming", "validate_result", "strict_parameters",
+    "circuitBreakerId",
 ];
 const DATAVIEW_REQUIRED: &[&str] = &["name", "datasource"];
 

@@ -175,6 +175,10 @@ pub struct DataViewConfig {
     #[serde(default)]
     pub streaming: bool,
 
+    /// Optional circuit breaker ID. DataViews sharing the same ID are tripped/reset together.
+    #[serde(default, rename = "circuitBreakerId")]
+    pub circuit_breaker_id: Option<String>,
+
     // ── Existing flags ───────────────────────────────────────────────
 
     /// Per-view caching policy (L1/L2 tiered cache).
@@ -295,5 +299,31 @@ impl DataViewEngine {
 impl Default for DataViewEngine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dataview_config_parses_circuit_breaker_id() {
+        let toml_str = r#"
+            name = "test"
+            datasource = "ds"
+            circuitBreakerId = "Warehouse_Transaction"
+        "#;
+        let cfg: DataViewConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.circuit_breaker_id.as_deref(), Some("Warehouse_Transaction"));
+    }
+
+    #[test]
+    fn dataview_config_circuit_breaker_id_optional() {
+        let toml_str = r#"
+            name = "test"
+            datasource = "ds"
+        "#;
+        let cfg: DataViewConfig = toml::from_str(toml_str).unwrap();
+        assert!(cfg.circuit_breaker_id.is_none());
     }
 }
