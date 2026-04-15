@@ -341,6 +341,18 @@ else
   FAIL=$((FAIL+1))
 fi
 
+# Tools call
+MCP_CALL=$(curl -sf -X POST "$BASE/sql/canary/sql/mcp" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"pg_select","arguments":{}}}' 2>/dev/null) || MCP_CALL=""
+if echo "$MCP_CALL" | grep -q '"content"'; then
+  printf "  PASS %-40s\n" "mcp-tools-call"
+  PASS=$((PASS+1))
+else
+  printf "  FAIL %-40s\n" "mcp-tools-call"
+  FAIL=$((FAIL+1))
+fi
+
 # ── Query Parameter Tests ────────────────────────────────────
 echo ""
 echo "  ── Query Parameters ──"
