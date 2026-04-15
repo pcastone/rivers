@@ -115,7 +115,7 @@ Add `///` doc comments to every `#[test]` / `#[tokio::test]` function explaining
 ## Gap: Circuit Breaker v1 — Implementation Fixes
 
 - [x] Per-app breaker scoping: registry namespaced by `appId:breakerId`, admin API routes updated to `/admin/apps/:app_id/breakers/...`
-- [ ] Persistence integration test: trip a breaker, restart riversd, verify breaker is still open via admin API (spec §8)
+- [x] Persistence verified: trip → restart → breaker restored as OPEN (requires SQLite or Redis StorageEngine; in-memory backend is ephemeral by design)
 - [ ] Canary test profile: add circuit breaker to a canary DataView, test trip/reset/status via admin API during canary run
 
 ## Gap: riversd.toml Foreign Attribute Protection
