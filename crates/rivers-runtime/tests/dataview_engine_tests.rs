@@ -48,6 +48,7 @@ fn test_config() -> DataViewConfig {
         delete_parameters: Vec::new(),
         streaming: false,
         circuit_breaker_id: None,
+        prepared: false,
         max_rows: 1000,
     }
 }
@@ -573,6 +574,7 @@ async fn executor_invalidates_cache_after_write() {
         delete_parameters: Vec::new(),
         streaming: false,
         circuit_breaker_id: None,
+        prepared: false,
         max_rows: 1000,
     };
     registry.register(write_config);

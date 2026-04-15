@@ -335,6 +335,27 @@ impl Connection for MysqlConnection {
         Ok(())
     }
 
+    async fn begin_transaction(&mut self) -> Result<(), DriverError> {
+        self.conn
+            .query_drop("BEGIN")
+            .await
+            .map_err(|e| DriverError::Query(format!("mysql BEGIN: {e}")))
+    }
+
+    async fn commit_transaction(&mut self) -> Result<(), DriverError> {
+        self.conn
+            .query_drop("COMMIT")
+            .await
+            .map_err(|e| DriverError::Query(format!("mysql COMMIT: {e}")))
+    }
+
+    async fn rollback_transaction(&mut self) -> Result<(), DriverError> {
+        self.conn
+            .query_drop("ROLLBACK")
+            .await
+            .map_err(|e| DriverError::Query(format!("mysql ROLLBACK: {e}")))
+    }
+
     async fn ddl_execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
         self.conn
             .query_drop(&query.statement)

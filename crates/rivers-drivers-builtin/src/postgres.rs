@@ -298,6 +298,27 @@ impl Connection for PostgresConnection {
         Ok(())
     }
 
+    async fn begin_transaction(&mut self) -> Result<(), DriverError> {
+        self.client
+            .batch_execute("BEGIN")
+            .await
+            .map_err(|e| DriverError::Query(format!("postgres BEGIN: {e}")))
+    }
+
+    async fn commit_transaction(&mut self) -> Result<(), DriverError> {
+        self.client
+            .batch_execute("COMMIT")
+            .await
+            .map_err(|e| DriverError::Query(format!("postgres COMMIT: {e}")))
+    }
+
+    async fn rollback_transaction(&mut self) -> Result<(), DriverError> {
+        self.client
+            .batch_execute("ROLLBACK")
+            .await
+            .map_err(|e| DriverError::Query(format!("postgres ROLLBACK: {e}")))
+    }
+
     async fn ddl_execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
         let params = build_params(&query.parameters);
         let param_refs: Vec<&(dyn ToSql + Sync)> =

@@ -179,6 +179,10 @@ pub struct DataViewConfig {
     #[serde(default, rename = "circuitBreakerId")]
     pub circuit_breaker_id: Option<String>,
 
+    /// Enable prepared statement caching for this DataView's queries.
+    #[serde(default)]
+    pub prepared: bool,
+
     // ── Existing flags ───────────────────────────────────────────────
 
     /// Per-view caching policy (L1/L2 tiered cache).
@@ -325,5 +329,26 @@ mod tests {
         "#;
         let cfg: DataViewConfig = toml::from_str(toml_str).unwrap();
         assert!(cfg.circuit_breaker_id.is_none());
+    }
+
+    #[test]
+    fn dataview_config_parses_prepared() {
+        let toml_str = r#"
+            name = "test"
+            datasource = "ds"
+            prepared = true
+        "#;
+        let cfg: DataViewConfig = toml::from_str(toml_str).unwrap();
+        assert!(cfg.prepared);
+    }
+
+    #[test]
+    fn dataview_config_prepared_defaults_false() {
+        let toml_str = r#"
+            name = "test"
+            datasource = "ds"
+        "#;
+        let cfg: DataViewConfig = toml::from_str(toml_str).unwrap();
+        assert!(!cfg.prepared);
     }
 }

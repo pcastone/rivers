@@ -185,6 +185,39 @@ impl Connection for SqliteConnection {
         .map_err(|e| DriverError::Internal(format!("spawn_blocking join: {}", e)))?
     }
 
+    async fn begin_transaction(&mut self) -> Result<(), DriverError> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|e| DriverError::Internal(format!("sqlite mutex: {e}")))?;
+            conn.execute_batch("BEGIN")
+                .map_err(|e| DriverError::Query(format!("sqlite BEGIN: {e}")))
+        })
+        .await
+        .map_err(|e| DriverError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    async fn commit_transaction(&mut self) -> Result<(), DriverError> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|e| DriverError::Internal(format!("sqlite mutex: {e}")))?;
+            conn.execute_batch("COMMIT")
+                .map_err(|e| DriverError::Query(format!("sqlite COMMIT: {e}")))
+        })
+        .await
+        .map_err(|e| DriverError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    async fn rollback_transaction(&mut self) -> Result<(), DriverError> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|e| DriverError::Internal(format!("sqlite mutex: {e}")))?;
+            conn.execute_batch("ROLLBACK")
+                .map_err(|e| DriverError::Query(format!("sqlite ROLLBACK: {e}")))
+        })
+        .await
+        .map_err(|e| DriverError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
     async fn ddl_execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
         let conn = Arc::clone(&self.conn);
         let statement = query.statement.clone();
