@@ -849,6 +849,11 @@ impl DataViewExecutor {
         &self.registry
     }
 
+    /// Get the DataViewConfig for a named DataView (used for circuit breaker checks).
+    pub fn get_dataview_config(&self, name: &str) -> Option<&DataViewConfig> {
+        self.registry.get(name)
+    }
+
     /// List configured datasource names and their driver type.
     ///
     /// Returns one entry per configured datasource, with the datasource name

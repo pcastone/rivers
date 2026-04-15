@@ -252,6 +252,34 @@ async fn view_dispatch_handler(
         Err(resp) => return resp,
     };
 
+    // ── Circuit breaker check (circuit-breaker-spec §4) ──────────────
+    if let rivers_runtime::view::HandlerConfig::Dataview { ref dataview } = config.handler {
+        // Resolve the circuit_breaker_id (if any) while holding the read lock,
+        // then drop the lock before the async is_open call.
+        let breaker_id_opt: Option<String> = {
+            let dv_guard_cb = ctx.dataview_executor.read().await;
+            dv_guard_cb
+                .as_ref()
+                .and_then(|executor| executor.get_dataview_config(dataview))
+                .and_then(|dv_config| dv_config.circuit_breaker_id.clone())
+        };
+        if let Some(breaker_id) = breaker_id_opt {
+            if ctx.circuit_breaker_registry.is_open(&breaker_id).await {
+                let body = serde_json::json!({
+                    "error": format!("circuit breaker '{}' is open", breaker_id),
+                    "breakerId": breaker_id,
+                    "retryable": true
+                });
+                return axum::response::Response::builder()
+                    .status(503)
+                    .header("content-type", "application/json")
+                    .header("retry-after", "30")
+                    .body(axum::body::Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap();
+            }
+        }
+    }
+
     // ── Execute the view with the ProcessPool and DataViewExecutor ──
     let dv_guard = ctx.dataview_executor.read().await;
     let dv_ref = dv_guard.as_deref();
