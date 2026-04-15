@@ -31,11 +31,11 @@
 - [x] `introspect = false` opt-out on datasource config (defaults to true)
 - [x] Hard fail at startup — queries validated via LIMIT 0, errors collected with Levenshtein suggestions
 - [x] `schema_introspection` module with `check_fields_against_columns()` and error formatting
-- [ ] Schema field-to-column comparison: in `bundle_loader/load.rs` introspection block, load schema file via `parse_schema()` from `rivers_runtime::schema`, extract `SchemaField.name` values, compare against `QueryResult.column_names` using `schema_introspection::check_fields_against_columns()`. Schema paths resolved via `dv_config.get_schema` relative to `app.app_dir`.
+- [x] Schema field-to-column comparison: loads schema file via `parse_schema()`, extracts field names, compares against `column_names` using `check_fields_against_columns()` with Levenshtein suggestions. Graceful degradation for missing/unparseable schemas.
 
 ## Gap: Admin API No-SSL Bug
 
-- [ ] Admin API crashes/stops listening when `[base.admin_api.tls] enabled = false` — investigate and fix. Observed: admin responds to first request then port closes. May be a TLS requirement leak in the admin server lifecycle.
+- [x] Admin API fixed for --no-ssl mode: plain HTTP admin server in `run_server_no_ssl()`, skip TLS/auth validation when flags active, fix Axum route params from `:param` to `{param}`
 
 ## Transactions — Request-Scoped, Handler-Driven
 

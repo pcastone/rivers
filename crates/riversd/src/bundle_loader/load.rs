@@ -604,6 +604,47 @@ pub async fn load_and_wire_bundle(
                                     "introspected {} column(s)",
                                     columns.len()
                                 );
+
+                                // Load schema and compare field names against actual columns
+                                let schema_ref = dv_config.get_schema.as_deref()
+                                    .or(dv_config.return_schema.as_deref());
+                                if let Some(schema_path) = schema_ref {
+                                    let full_path = app.app_dir.join(schema_path);
+                                    match std::fs::read_to_string(&full_path) {
+                                        Ok(content) => {
+                                            match rivers_runtime::schema::parse_schema(&content, schema_path) {
+                                                Ok(schema) => {
+                                                    let field_names: Vec<String> = schema.fields
+                                                        .iter()
+                                                        .map(|f| f.name.clone())
+                                                        .collect();
+                                                    let mismatches = crate::schema_introspection::check_fields_against_columns(
+                                                        &format!("{}:{}", entry_point, dv_name),
+                                                        &field_names,
+                                                        columns,
+                                                    );
+                                                    all_mismatches.extend(mismatches);
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        dataview = %dv_name,
+                                                        schema = %schema_path,
+                                                        error = %e,
+                                                        "schema parse failed, skipping field comparison"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!(
+                                                dataview = %dv_name,
+                                                schema = %schema_path,
+                                                error = %e,
+                                                "schema file not found, skipping field comparison"
+                                            );
+                                        }
+                                    }
+                                }
                             } else {
                                 tracing::debug!(
                                     dataview = %dv_name,
@@ -611,8 +652,6 @@ pub async fn load_and_wire_bundle(
                                     "introspection query succeeded (no column metadata returned)"
                                 );
                             }
-                            // Schema field comparison against column_names will be
-                            // added when schema file loading is integrated.
                         }
                         Err(e) => {
                             all_mismatches.push(crate::schema_introspection::SchemaMismatch {
