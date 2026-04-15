@@ -69,6 +69,7 @@ fn make_params(
 
 // ── T10.1-T10.2: Stdin mode round-trip ───────────────────────────────────────
 
+/// Validates that the exec driver passes JSON input via stdin and receives structured output from the script.
 #[tokio::test]
 async fn stdin_mode_round_trip() {
     let dir = tempfile::tempdir().unwrap();
@@ -103,6 +104,7 @@ async fn stdin_mode_round_trip() {
 
 // ── T10.3: Args mode ─────────────────────────────────────────────────────────
 
+/// Validates that the exec driver interpolates query parameters into command-line argument templates.
 #[tokio::test]
 async fn args_mode_template_interpolation() {
     let dir = tempfile::tempdir().unwrap();
@@ -149,6 +151,7 @@ printf '{"args": ["%s", "%s", "%s"]}' "$1" "$2" "$3"
 
 // ── T10.5: Integrity check — correct hash passes, tampered file fails ────────
 
+/// Validates that a script with a correct SHA-256 hash passes the integrity check and executes.
 #[tokio::test]
 async fn integrity_check_correct_hash_passes() {
     let dir = tempfile::tempdir().unwrap();
@@ -172,6 +175,7 @@ async fn integrity_check_correct_hash_passes() {
     assert!(result.is_ok(), "integrity check should pass with correct hash");
 }
 
+/// Validates that a script with a mismatched SHA-256 hash is rejected before execution.
 #[tokio::test]
 async fn integrity_check_tampered_file_fails() {
     let dir = tempfile::tempdir().unwrap();
@@ -206,6 +210,7 @@ async fn integrity_check_tampered_file_fails() {
 
 // ── T10.7: Timeout ───────────────────────────────────────────────────────────
 
+/// Validates that a long-running script is killed when the configured timeout expires.
 #[tokio::test]
 async fn timeout_kills_slow_command() {
     let dir = tempfile::tempdir().unwrap();
@@ -242,6 +247,7 @@ async fn timeout_kills_slow_command() {
 
 // ── T10.9: Non-zero exit ─────────────────────────────────────────────────────
 
+/// Validates that a script exiting with non-zero status returns a DriverError containing stderr output.
 #[tokio::test]
 async fn non_zero_exit_returns_error_with_stderr() {
     let dir = tempfile::tempdir().unwrap();
@@ -276,6 +282,7 @@ async fn non_zero_exit_returns_error_with_stderr() {
 
 // ── T10.10: Unknown command ──────────────────────────────────────────────────
 
+/// Validates that an unrecognized operation name returns a DriverError::Unsupported error.
 #[tokio::test]
 async fn unknown_command_returns_unsupported() {
     let dir = tempfile::tempdir().unwrap();
@@ -308,6 +315,7 @@ async fn unknown_command_returns_unsupported() {
 
 // ── T10.11: Concurrency limit ────────────────────────────────────────────────
 
+/// Validates that concurrent exec invocations beyond the configured limit are rejected immediately.
 #[tokio::test]
 async fn concurrency_limit_rejects_excess() {
     let dir = tempfile::tempdir().unwrap();

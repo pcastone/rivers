@@ -85,6 +85,7 @@ async fn try_connect() -> Option<Box<dyn rivers_driver_sdk::Connection>> {
     }
 }
 
+/// Validates that the InfluxDB driver can establish a connection and respond to a ping health check.
 #[tokio::test]
 async fn influxdb_connect_and_ping() {
     let Some(mut conn) = try_connect().await else { return };
@@ -100,6 +101,7 @@ async fn influxdb_connect_and_ping() {
     }
 }
 
+/// Validates that the InfluxDB driver can write a data point and query it back with correct values.
 #[tokio::test]
 async fn influxdb_write_and_query() {
     let Some(mut conn) = try_connect().await else { return };
