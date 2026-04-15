@@ -766,6 +766,7 @@ mod tests {
             streaming: false,
             circuit_breaker_id: None,
             prepared: false,
+            query_params: HashMap::new(),
             caching: None,
             invalidates: vec![],
             validate_result: false,

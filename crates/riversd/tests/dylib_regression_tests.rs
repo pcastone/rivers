@@ -295,6 +295,7 @@ fn dataview_namespace_suffix_resolution() {
         caching: None,
         circuit_breaker_id: None,
         prepared: false,
+        query_params: std::collections::HashMap::new(),
         invalidates: Vec::new(),
         validate_result: false,
         strict_parameters: false,

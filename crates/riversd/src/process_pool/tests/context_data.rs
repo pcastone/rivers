@@ -614,6 +614,7 @@ async fn x4_dataview_executor_end_to_end() {
         caching: None,
         circuit_breaker_id: None,
         prepared: false,
+        query_params: HashMap::new(),
         invalidates: Vec::new(),
         validate_result: false,
         strict_parameters: false,
@@ -788,6 +789,7 @@ async fn au13_ctx_dataview_dynamic_with_executor() {
         get_parameters: Vec::new(), post_parameters: Vec::new(),
         put_parameters: Vec::new(), delete_parameters: Vec::new(),
         streaming: false,
+        query_params: HashMap::new(),
         max_rows: 1000,
     });
 

@@ -51,6 +51,7 @@ fn test_config() -> DataViewConfig {
         streaming: false,
         circuit_breaker_id: None,
         prepared: false,
+        query_params: std::collections::HashMap::new(),
         max_rows: 1000,
     }
 }
@@ -581,6 +582,7 @@ async fn executor_invalidates_cache_after_write() {
         streaming: false,
         circuit_breaker_id: None,
         prepared: false,
+        query_params: std::collections::HashMap::new(),
         max_rows: 1000,
     };
     registry.register(write_config);

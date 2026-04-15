@@ -3,6 +3,8 @@
 //! Per `rivers-data-layer-spec.md` §6, §7, §12.3.
 //! CRUD per-method fields per technology path spec §5, §7.2, §13.3.
 
+use std::collections::HashMap;
+
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -187,6 +189,10 @@ pub struct DataViewConfig {
     /// Enable prepared statement caching for this DataView's queries.
     #[serde(default)]
     pub prepared: bool,
+
+    /// Static query parameters appended to every outbound HTTP driver request.
+    #[serde(default)]
+    pub query_params: HashMap<String, String>,
 
     // ── Existing flags ───────────────────────────────────────────────
 
