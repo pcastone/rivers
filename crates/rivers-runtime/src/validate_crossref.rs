@@ -740,6 +740,7 @@ mod tests {
             event_handlers: None,
             extra: HashMap::new(),
             write_batch: None,
+            introspect: true,
         }
     }
 

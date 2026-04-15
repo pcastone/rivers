@@ -58,6 +58,10 @@ pub struct DatasourceConfig {
     /// Write batching configuration (e.g. InfluxDB bulk writes).
     #[serde(default)]
     pub write_batch: Option<WriteBatchConfig>,
+
+    /// Whether to run schema introspection at startup. Defaults to true.
+    #[serde(default = "default_introspect")]
+    pub introspect: bool,
 }
 
 /// Connection pool configuration.
@@ -273,4 +277,8 @@ fn default_batch_max() -> usize {
 }
 fn default_flush_interval() -> u64 {
     1000
+}
+
+fn default_introspect() -> bool {
+    true
 }

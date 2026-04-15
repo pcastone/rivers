@@ -46,7 +46,7 @@ const RESOURCES_FIELDS: &[&str] = &["datasources", "services", "keystores"];
 /// Datasource entry in `[[datasources]]`.
 const DATASOURCE_DECL_FIELDS: &[&str] = &[
     "name", "driver", "x-type", "lockbox", "nopassword", "required",
-    "host", "port", "database", "username", "password", "service",
+    "host", "port", "database", "username", "password", "service", "introspect",
 ];
 const DATASOURCE_DECL_REQUIRED: &[&str] = &["name", "driver", "x-type", "required"];
 
