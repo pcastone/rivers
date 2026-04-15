@@ -169,10 +169,10 @@ pub fn build_admin_router(ctx: AppContext) -> Router {
         // Shutdown endpoint
         .route("/admin/shutdown", axum::routing::post(admin_shutdown_handler))
         // Circuit breaker management endpoints (app-scoped)
-        .route("/admin/apps/:app_id/breakers", get(admin_list_breakers_handler))
-        .route("/admin/apps/:app_id/breakers/:breaker_id", get(admin_get_breaker_handler))
-        .route("/admin/apps/:app_id/breakers/:breaker_id/trip", axum::routing::post(admin_trip_breaker_handler))
-        .route("/admin/apps/:app_id/breakers/:breaker_id/reset", axum::routing::post(admin_reset_breaker_handler))
+        .route("/admin/apps/{app_id}/breakers", get(admin_list_breakers_handler))
+        .route("/admin/apps/{app_id}/breakers/{breaker_id}", get(admin_get_breaker_handler))
+        .route("/admin/apps/{app_id}/breakers/{breaker_id}/trip", axum::routing::post(admin_trip_breaker_handler))
+        .route("/admin/apps/{app_id}/breakers/{breaker_id}/reset", axum::routing::post(admin_reset_breaker_handler))
         .with_state(ctx);
 
     // Admin middleware: admin_auth → timeout → security_headers → trace_id → body_limit
