@@ -147,7 +147,7 @@ impl Connection for FilesystemConnection {
             // Reads (Tasks 14–19)
             "readFile" => ops::read_file(self, q).await,
             "readDir" => ops::read_dir(self, q).await,
-            "stat" => Err(DriverError::NotImplemented("stat — Task 16".into())),
+            "stat" => ops::stat(self, q).await,
             "exists" => Err(DriverError::NotImplemented("exists — Task 17".into())),
             "find" => Err(DriverError::NotImplemented("find — Task 18".into())),
             "grep" => Err(DriverError::NotImplemented("grep — Task 19".into())),
@@ -348,6 +348,72 @@ mod ops {
             affected_rows,
             last_insert_id: None,
             column_names: Some(vec!["name".to_string()]),
+        })
+    }
+
+    pub async fn stat(
+        conn: &FilesystemConnection,
+        q: &Query,
+    ) -> Result<QueryResult, DriverError> {
+        let rel = get_string(q, "path").ok_or_else(|| {
+            DriverError::Query("stat: required parameter 'path' missing".into())
+        })?;
+        let path = conn.resolve_path(rel)?;
+        let md = tokio::task::spawn_blocking({
+            let p = path.clone();
+            move || std::fs::metadata(&p)
+        })
+        .await
+        .map_err(|e| DriverError::Internal(format!("join: {e}")))?
+        .map_err(map_io_error)?;
+
+        fn epoch_secs(t: std::time::SystemTime) -> String {
+            let secs = t
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            secs.to_string()
+        }
+
+        #[cfg(unix)]
+        let mode_val = {
+            use std::os::unix::fs::PermissionsExt;
+            md.permissions().mode() as i64
+        };
+        #[cfg(not(unix))]
+        let mode_val: i64 = 0;
+
+        let mut row = HashMap::new();
+        row.insert("size".into(), QueryValue::Integer(md.len() as i64));
+        row.insert(
+            "mtime".into(),
+            QueryValue::String(epoch_secs(md.modified().unwrap_or(std::time::UNIX_EPOCH))),
+        );
+        row.insert(
+            "atime".into(),
+            QueryValue::String(epoch_secs(md.accessed().unwrap_or(std::time::UNIX_EPOCH))),
+        );
+        row.insert(
+            "ctime".into(),
+            QueryValue::String(epoch_secs(md.created().unwrap_or(std::time::UNIX_EPOCH))),
+        );
+        row.insert("isFile".into(), QueryValue::Boolean(md.is_file()));
+        row.insert("isDirectory".into(), QueryValue::Boolean(md.is_dir()));
+        row.insert("mode".into(), QueryValue::Integer(mode_val));
+
+        Ok(QueryResult {
+            rows: vec![row],
+            affected_rows: 1,
+            last_insert_id: None,
+            column_names: Some(vec![
+                "size".into(),
+                "mtime".into(),
+                "atime".into(),
+                "ctime".into(),
+                "isFile".into(),
+                "isDirectory".into(),
+                "mode".into(),
+            ]),
         })
     }
 
@@ -648,6 +714,23 @@ mod tests {
         );
         let err = conn.execute(&q).await.unwrap_err();
         assert!(format!("{err}").contains("unsupported encoding"));
+    }
+
+    #[tokio::test]
+    async fn stat_file_returns_metadata() {
+        let (dir, mut conn) = test_connection();
+        std::fs::write(dir.path().join("f.txt"), b"hello").unwrap();
+        let q = mkq("stat", &[("path", QueryValue::String("f.txt".into()))]);
+        let result = conn.execute(&q).await.unwrap();
+        assert_eq!(result.rows.len(), 1);
+        let cols = result.column_names.as_ref().expect("column_names set");
+        for expected in ["size", "mtime", "atime", "ctime", "isFile", "isDirectory", "mode"] {
+            assert!(cols.iter().any(|c| c == expected), "missing col: {expected}");
+        }
+        let row = &result.rows[0];
+        assert!(matches!(row.get("size"), Some(QueryValue::Integer(5))));
+        assert!(matches!(row.get("isFile"), Some(QueryValue::Boolean(true))));
+        assert!(matches!(row.get("isDirectory"), Some(QueryValue::Boolean(false))));
     }
 
     #[tokio::test]
