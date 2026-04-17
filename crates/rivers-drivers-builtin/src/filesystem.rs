@@ -155,8 +155,8 @@ impl Connection for FilesystemConnection {
             "writeFile" => ops::write_file(self, q).await,
             "mkdir" => ops::mkdir(self, q).await,
             "delete" => ops::delete(self, q).await,
-            "rename" => Err(DriverError::NotImplemented("rename — Task 23".into())),
-            "copy" => Err(DriverError::NotImplemented("copy — Task 24".into())),
+            "rename" => ops::rename(self, q).await,
+            "copy" => ops::copy(self, q).await,
             other => Err(DriverError::Unsupported(format!(
                 "unknown filesystem operation: {other}"
             ))),
@@ -691,6 +691,81 @@ mod ops {
         })
     }
 
+    pub async fn rename(
+        conn: &FilesystemConnection,
+        q: &Query,
+    ) -> Result<QueryResult, DriverError> {
+        let old_rel = get_string(q, "oldPath").ok_or_else(|| {
+            DriverError::Query("rename: required parameter 'oldPath' missing".into())
+        })?;
+        let new_rel = get_string(q, "newPath").ok_or_else(|| {
+            DriverError::Query("rename: required parameter 'newPath' missing".into())
+        })?;
+        let old_p = conn.resolve_path(old_rel)?;
+        let new_p = conn.resolve_path(new_rel)?;
+        tokio::task::spawn_blocking(move || std::fs::rename(&old_p, &new_p))
+            .await
+            .map_err(|e| DriverError::Internal(format!("join: {e}")))?
+            .map_err(map_io_error)?;
+        Ok(QueryResult {
+            rows: vec![],
+            affected_rows: 1,
+            last_insert_id: None,
+            column_names: None,
+        })
+    }
+
+    pub async fn copy(
+        conn: &FilesystemConnection,
+        q: &Query,
+    ) -> Result<QueryResult, DriverError> {
+        let src_rel = get_string(q, "src").ok_or_else(|| {
+            DriverError::Query("copy: required parameter 'src' missing".into())
+        })?;
+        let dest_rel = get_string(q, "dest").ok_or_else(|| {
+            DriverError::Query("copy: required parameter 'dest' missing".into())
+        })?;
+        let src = conn.resolve_path(src_rel)?;
+        let dest = conn.resolve_path(dest_rel)?;
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            if src.is_dir() {
+                copy_dir_recursive(&src, &dest)
+            } else {
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(&src, &dest).map(|_| ())
+            }
+        })
+        .await
+        .map_err(|e| DriverError::Internal(format!("join: {e}")))?
+        .map_err(map_io_error)?;
+        Ok(QueryResult {
+            rows: vec![],
+            affected_rows: 1,
+            last_insert_id: None,
+            column_names: None,
+        })
+    }
+
+    fn copy_dir_recursive(
+        src: &std::path::Path,
+        dst: &std::path::Path,
+    ) -> std::io::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let from = entry.path();
+            let to = dst.join(entry.file_name());
+            if from.is_dir() {
+                copy_dir_recursive(&from, &to)?;
+            } else {
+                std::fs::copy(&from, &to)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn map_io_error(e: std::io::Error) -> DriverError {
         use std::io::ErrorKind::*;
         match e.kind() {
@@ -988,6 +1063,53 @@ mod tests {
         );
         let err = conn.execute(&q).await.unwrap_err();
         assert!(format!("{err}").contains("unsupported encoding"));
+    }
+
+    #[tokio::test]
+    async fn rename_moves_file_within_root() {
+        let (dir, mut conn) = test_connection();
+        std::fs::write(dir.path().join("old.txt"), "x").unwrap();
+        let q = mkq(
+            "rename",
+            &[
+                ("oldPath", QueryValue::String("old.txt".into())),
+                ("newPath", QueryValue::String("new.txt".into())),
+            ],
+        );
+        conn.execute(&q).await.unwrap();
+        assert!(!dir.path().join("old.txt").exists());
+        assert!(dir.path().join("new.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn copy_file_byte_level() {
+        let (dir, mut conn) = test_connection();
+        std::fs::write(dir.path().join("a.txt"), "data").unwrap();
+        let q = mkq(
+            "copy",
+            &[
+                ("src", QueryValue::String("a.txt".into())),
+                ("dest", QueryValue::String("b.txt".into())),
+            ],
+        );
+        conn.execute(&q).await.unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("b.txt")).unwrap(), "data");
+    }
+
+    #[tokio::test]
+    async fn copy_directory_recursively() {
+        let (dir, mut conn) = test_connection();
+        std::fs::create_dir_all(dir.path().join("src/sub")).unwrap();
+        std::fs::write(dir.path().join("src/sub/f.txt"), "x").unwrap();
+        let q = mkq(
+            "copy",
+            &[
+                ("src", QueryValue::String("src".into())),
+                ("dest", QueryValue::String("dst".into())),
+            ],
+        );
+        conn.execute(&q).await.unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("dst/sub/f.txt")).unwrap(), "x");
     }
 
     #[tokio::test]
