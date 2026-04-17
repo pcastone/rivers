@@ -11,8 +11,13 @@ use std::path::PathBuf;
 
 pub struct FilesystemDriver;
 
+pub const DEFAULT_MAX_FILE_SIZE: u64 = 50 * 1024 * 1024;
+pub const DEFAULT_MAX_DEPTH: usize = 100;
+
 pub struct FilesystemConnection {
     pub root: PathBuf,
+    pub max_file_size: u64,
+    pub max_depth: usize,
 }
 
 impl FilesystemDriver {
@@ -136,7 +141,11 @@ impl DatabaseDriver for FilesystemDriver {
         params: &ConnectionParams,
     ) -> Result<Box<dyn Connection>, DriverError> {
         let root = Self::resolve_root(&params.database)?;
-        Ok(Box::new(FilesystemConnection { root }))
+        Ok(Box::new(FilesystemConnection {
+            root,
+            max_file_size: DEFAULT_MAX_FILE_SIZE,
+            max_depth: DEFAULT_MAX_DEPTH,
+        }))
     }
 }
 
@@ -287,6 +296,13 @@ mod ops {
         .await
         .map_err(|e| DriverError::Internal(format!("join: {e}")))?
         .map_err(map_io_error)?;
+
+        if (bytes.len() as u64) > conn.max_file_size {
+            return Err(DriverError::Query(format!(
+                "readFile: file exceeds max_file_size: {} bytes",
+                bytes.len()
+            )));
+        }
 
         let content = match encoding {
             "utf-8" => String::from_utf8(bytes).map_err(|e| {
@@ -504,12 +520,13 @@ mod ops {
         let re = regex::Regex::new(pattern)
             .map_err(|e| DriverError::Query(format!("grep: invalid regex: {e}")))?;
 
+        let max_depth = conn.max_depth;
         let (hits, truncated) = tokio::task::spawn_blocking({
             let root = conn.root.clone();
             move || {
                 let mut hits: Vec<(String, usize, String)> = Vec::new();
                 let mut truncated = false;
-                walk_files(&base, &root, &mut |rel_path, contents| {
+                walk_files(&base, &root, max_depth, &mut |rel_path, contents| {
                     for (i, line) in contents.lines().enumerate() {
                         if re.is_match(line) {
                             if hits.len() >= max {
@@ -552,15 +569,19 @@ mod ops {
     fn walk_files(
         start: &std::path::Path,
         root: &std::path::Path,
+        max_depth: usize,
         visit: &mut impl FnMut(String, String) -> bool,
     ) {
-        let mut stack = vec![start.to_path_buf()];
-        while let Some(p) = stack.pop() {
+        let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(start.to_path_buf(), 0)];
+        while let Some((p, depth)) = stack.pop() {
+            if depth > max_depth {
+                continue;
+            }
             let Ok(entries) = std::fs::read_dir(&p) else { continue };
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    stack.push(path);
+                    stack.push((path, depth + 1));
                 } else if let Ok(bytes) = std::fs::read(&path) {
                     let head_len = bytes.len().min(8192);
                     if bytes[..head_len].contains(&0) {
@@ -604,6 +625,13 @@ mod ops {
                 )));
             }
         };
+
+        if (bytes.len() as u64) > conn.max_file_size {
+            return Err(DriverError::Query(format!(
+                "writeFile: content exceeds max_file_size: {} bytes",
+                bytes.len()
+            )));
+        }
 
         tokio::task::spawn_blocking({
             let path = path.clone();
@@ -784,7 +812,14 @@ mod tests {
     fn test_connection() -> (TempDir, FilesystemConnection) {
         let dir = TempDir::new().unwrap();
         let root = FilesystemDriver::resolve_root(dir.path().to_str().unwrap()).unwrap();
-        (dir, FilesystemConnection { root })
+        (
+            dir,
+            FilesystemConnection {
+                root,
+                max_file_size: DEFAULT_MAX_FILE_SIZE,
+                max_depth: DEFAULT_MAX_DEPTH,
+            },
+        )
     }
 
     #[test]
@@ -1063,6 +1098,78 @@ mod tests {
         );
         let err = conn.execute(&q).await.unwrap_err();
         assert!(format!("{err}").contains("unsupported encoding"));
+    }
+
+    #[tokio::test]
+    async fn write_file_enforces_max_file_size() {
+        let dir = TempDir::new().unwrap();
+        let mut conn = FilesystemConnection {
+            root: FilesystemDriver::resolve_root(dir.path().to_str().unwrap()).unwrap(),
+            max_file_size: 10,
+            max_depth: 100,
+        };
+        let big = "a".repeat(100);
+        let q = mkq(
+            "writeFile",
+            &[
+                ("path", QueryValue::String("big.txt".into())),
+                ("content", QueryValue::String(big)),
+            ],
+        );
+        let err = conn.execute(&q).await.unwrap_err();
+        assert!(format!("{err}").contains("exceeds max_file_size"));
+    }
+
+    #[tokio::test]
+    async fn read_file_enforces_max_file_size() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("big.txt"), "a".repeat(100)).unwrap();
+        let mut conn = FilesystemConnection {
+            root: FilesystemDriver::resolve_root(dir.path().to_str().unwrap()).unwrap(),
+            max_file_size: 10,
+            max_depth: 100,
+        };
+        let q = mkq("readFile", &[("path", QueryValue::String("big.txt".into()))]);
+        let err = conn.execute(&q).await.unwrap_err();
+        assert!(format!("{err}").contains("exceeds max_file_size"));
+    }
+
+    #[tokio::test]
+    async fn grep_respects_max_depth() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b/c")).unwrap();
+        std::fs::write(dir.path().join("a/b/c/deep.txt"), "needle here").unwrap();
+        std::fs::write(dir.path().join("shallow.txt"), "needle here").unwrap();
+
+        let mut conn = FilesystemConnection {
+            root: FilesystemDriver::resolve_root(dir.path().to_str().unwrap()).unwrap(),
+            max_file_size: DEFAULT_MAX_FILE_SIZE,
+            max_depth: 1,
+        };
+        let q = mkq(
+            "grep",
+            &[
+                ("pattern", QueryValue::String("needle".into())),
+                ("path", QueryValue::String(".".into())),
+            ],
+        );
+        let r = conn.execute(&q).await.unwrap();
+        let row = &r.rows[0];
+        match row.get("results") {
+            Some(QueryValue::Array(v)) => {
+                let files: Vec<String> = v
+                    .iter()
+                    .filter_map(|x| match x {
+                        QueryValue::Json(j) => j["file"].as_str().map(String::from),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(files.iter().any(|f| f == "shallow.txt"));
+                assert!(!files.iter().any(|f| f.contains("deep.txt")),
+                    "deep file should be beyond max_depth=1: files={files:?}");
+            }
+            other => panic!("expected Array, got {other:?}"),
+        }
     }
 
     #[tokio::test]
