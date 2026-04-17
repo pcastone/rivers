@@ -149,7 +149,7 @@ impl Connection for FilesystemConnection {
             "readDir" => ops::read_dir(self, q).await,
             "stat" => ops::stat(self, q).await,
             "exists" => ops::exists(self, q).await,
-            "find" => Err(DriverError::NotImplemented("find — Task 18".into())),
+            "find" => ops::find(self, q).await,
             "grep" => Err(DriverError::NotImplemented("grep — Task 19".into())),
             // Writes (Tasks 20–24)
             "writeFile" => Err(DriverError::NotImplemented("writeFile — Task 20".into())),
@@ -438,6 +438,53 @@ mod ops {
             affected_rows: 1,
             last_insert_id: None,
             column_names: Some(vec!["exists".to_string()]),
+        })
+    }
+
+    pub async fn find(
+        conn: &FilesystemConnection,
+        q: &Query,
+    ) -> Result<QueryResult, DriverError> {
+        let pattern = get_string(q, "pattern").ok_or_else(|| {
+            DriverError::Query("find: required parameter 'pattern' missing".into())
+        })?;
+        let max = match q.parameters.get("max_results") {
+            Some(QueryValue::Integer(n)) => (*n).max(0) as usize,
+            _ => 1000,
+        };
+        let root = conn.root.clone();
+        let pattern_owned = pattern.to_string();
+        let (results, truncated) = tokio::task::spawn_blocking(move || {
+            let full_pattern = format!("{}/**/{}", root.display(), pattern_owned);
+            let mut out: Vec<String> = Vec::new();
+            let mut truncated = false;
+            if let Ok(paths) = glob::glob(&full_pattern) {
+                for entry in paths.flatten() {
+                    if let Ok(rel) = entry.strip_prefix(&root) {
+                        if out.len() >= max {
+                            truncated = true;
+                            break;
+                        }
+                        out.push(rel.to_string_lossy().to_string());
+                    }
+                }
+            }
+            (out, truncated)
+        })
+        .await
+        .map_err(|e| DriverError::Internal(format!("join: {e}")))?;
+
+        let mut row = HashMap::new();
+        row.insert(
+            "results".to_string(),
+            QueryValue::Array(results.into_iter().map(QueryValue::String).collect()),
+        );
+        row.insert("truncated".to_string(), QueryValue::Boolean(truncated));
+        Ok(QueryResult {
+            rows: vec![row],
+            affected_rows: 1,
+            last_insert_id: None,
+            column_names: Some(vec!["results".to_string(), "truncated".to_string()]),
         })
     }
 
@@ -738,6 +785,48 @@ mod tests {
         );
         let err = conn.execute(&q).await.unwrap_err();
         assert!(format!("{err}").contains("unsupported encoding"));
+    }
+
+    #[tokio::test]
+    async fn find_returns_relative_paths_and_truncation() {
+        let (dir, mut conn) = test_connection();
+        for i in 0..5 {
+            std::fs::write(dir.path().join(format!("f{i}.txt")), "").unwrap();
+        }
+        let q = mkq(
+            "find",
+            &[
+                ("pattern", QueryValue::String("*.txt".into())),
+                ("max_results", QueryValue::Integer(3)),
+            ],
+        );
+        let r = conn.execute(&q).await.unwrap();
+        assert_eq!(
+            r.column_names.as_ref().unwrap(),
+            &vec!["results".to_string(), "truncated".to_string()]
+        );
+        let row = &r.rows[0];
+        match row.get("results") {
+            Some(QueryValue::Array(v)) => assert!(v.len() <= 3, "len={}", v.len()),
+            other => panic!("expected Array, got {other:?}"),
+        }
+        assert!(matches!(row.get("truncated"), Some(QueryValue::Boolean(true))));
+    }
+
+    #[tokio::test]
+    async fn find_no_truncation_when_under_limit() {
+        let (dir, mut conn) = test_connection();
+        std::fs::write(dir.path().join("only.txt"), "").unwrap();
+        let q = mkq(
+            "find",
+            &[
+                ("pattern", QueryValue::String("*.txt".into())),
+                ("max_results", QueryValue::Integer(10)),
+            ],
+        );
+        let r = conn.execute(&q).await.unwrap();
+        let row = &r.rows[0];
+        assert!(matches!(row.get("truncated"), Some(QueryValue::Boolean(false))));
     }
 
     #[tokio::test]
