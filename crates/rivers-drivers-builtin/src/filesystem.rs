@@ -146,7 +146,7 @@ impl Connection for FilesystemConnection {
         match q.operation.as_str() {
             // Reads (Tasks 14–19)
             "readFile" => ops::read_file(self, q).await,
-            "readDir" => Err(DriverError::NotImplemented("readDir — Task 15".into())),
+            "readDir" => ops::read_dir(self, q).await,
             "stat" => Err(DriverError::NotImplemented("stat — Task 16".into())),
             "exists" => Err(DriverError::NotImplemented("exists — Task 17".into())),
             "find" => Err(DriverError::NotImplemented("find — Task 18".into())),
@@ -308,6 +308,46 @@ mod ops {
             affected_rows: 1,
             last_insert_id: None,
             column_names: Some(vec!["content".to_string()]),
+        })
+    }
+
+    pub async fn read_dir(
+        conn: &FilesystemConnection,
+        q: &Query,
+    ) -> Result<QueryResult, DriverError> {
+        let rel = get_string(q, "path").ok_or_else(|| {
+            DriverError::Query("readDir: required parameter 'path' missing".into())
+        })?;
+        let path = conn.resolve_path(rel)?;
+        let entries: Vec<String> = tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || -> Result<Vec<String>, std::io::Error> {
+                let mut out = Vec::new();
+                for entry in std::fs::read_dir(&path)? {
+                    out.push(entry?.file_name().to_string_lossy().to_string());
+                }
+                Ok(out)
+            }
+        })
+        .await
+        .map_err(|e| DriverError::Internal(format!("join: {e}")))?
+        .map_err(map_io_error)?;
+
+        let rows = entries
+            .into_iter()
+            .map(|name| {
+                let mut row = HashMap::new();
+                row.insert("name".to_string(), QueryValue::String(name));
+                row
+            })
+            .collect::<Vec<_>>();
+        let affected_rows = rows.len() as u64;
+
+        Ok(QueryResult {
+            rows,
+            affected_rows,
+            last_insert_id: None,
+            column_names: Some(vec!["name".to_string()]),
         })
     }
 
@@ -608,5 +648,24 @@ mod tests {
         );
         let err = conn.execute(&q).await.unwrap_err();
         assert!(format!("{err}").contains("unsupported encoding"));
+    }
+
+    #[tokio::test]
+    async fn read_dir_returns_entry_names() {
+        let (dir, mut conn) = test_connection();
+        std::fs::write(dir.path().join("a.txt"), "").unwrap();
+        std::fs::create_dir(dir.path().join("b")).unwrap();
+        let q = mkq("readDir", &[("path", QueryValue::String(".".into()))]);
+        let result = conn.execute(&q).await.unwrap();
+        let mut names: Vec<String> = result
+            .rows
+            .iter()
+            .map(|row| match row.get("name") {
+                Some(QueryValue::String(s)) => s.clone(),
+                other => panic!("expected String name, got {other:?}"),
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["a.txt".to_string(), "b".to_string()]);
     }
 }
