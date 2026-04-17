@@ -55,6 +55,8 @@ impl FilesystemConnection {
         }
 
         let joined = self.root.join(&normalized);
+        reject_symlinks_within(&self.root, &joined)?;
+
         let canonical = canonicalize_for_op(&joined)?;
 
         if !canonical.starts_with(&self.root) {
@@ -63,7 +65,6 @@ impl FilesystemConnection {
             ));
         }
 
-        reject_symlinks_within(&self.root, &canonical)?;
         Ok(canonical)
     }
 }
@@ -263,24 +264,11 @@ mod tests {
         std::fs::create_dir(&target).unwrap();
         symlink(&target, dir.path().join("link")).unwrap();
 
-        // On macOS, canonicalize follows symlinks before reject_symlinks_within can detect them.
-        // Since the symlink points inside root, the canonical path also stays inside root,
-        // so no error is raised. This test documents that behavior.
-        let result = conn.resolve_path("link");
-        match result {
-            Ok(path) => {
-                // Symlink was followed by canonicalize; the target path is inside root, so it resolved.
-                assert!(path.starts_with(&conn.root));
-            }
-            Err(err) => {
-                // If an error was raised, it should be about symlink or escaping.
-                let msg = format!("{err}");
-                assert!(
-                    msg.contains("symlink detected") || msg.contains("escapes"),
-                    "unexpected error: {msg}"
-                );
-            }
-        }
+        let err = conn.resolve_path("link").unwrap_err();
+        assert!(
+            format!("{err}").contains("symlink detected"),
+            "expected 'symlink detected' in error, got: {err}"
+        );
     }
 
     #[cfg(unix)]
