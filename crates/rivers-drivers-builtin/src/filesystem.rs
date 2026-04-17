@@ -14,6 +14,33 @@ pub struct FilesystemConnection {
     pub root: PathBuf,
 }
 
+impl FilesystemDriver {
+    pub fn resolve_root(database: &str) -> Result<PathBuf, DriverError> {
+        let path = PathBuf::from(database);
+
+        if !path.is_absolute() {
+            return Err(DriverError::Connection(format!(
+                "filesystem root must be absolute path, got: {database}"
+            )));
+        }
+
+        let canonical = std::fs::canonicalize(&path).map_err(|e| {
+            DriverError::Connection(format!(
+                "filesystem root does not exist or is not accessible: {database} — {e}"
+            ))
+        })?;
+
+        if !canonical.is_dir() {
+            return Err(DriverError::Connection(format!(
+                "filesystem root is not a directory: {}",
+                canonical.display()
+            )));
+        }
+
+        Ok(canonical)
+    }
+}
+
 #[async_trait]
 impl DatabaseDriver for FilesystemDriver {
     fn name(&self) -> &str {
@@ -52,6 +79,7 @@ impl Connection for FilesystemConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn driver_name_is_filesystem() {
@@ -62,5 +90,46 @@ mod tests {
     fn operations_default_empty_for_now() {
         // Until Task 14 wires the catalog, operations() returns empty via default.
         assert!(FilesystemDriver.operations().is_empty());
+    }
+
+    #[test]
+    fn resolve_root_rejects_relative_path() {
+        let err = FilesystemDriver::resolve_root("./relative").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("absolute"),
+            "expected 'absolute' in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_root_rejects_nonexistent_path() {
+        let err = FilesystemDriver::resolve_root("/does/not/exist/for/real").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("does not exist") || msg.contains("not accessible"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_root_rejects_file_path() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("not_a_dir.txt");
+        std::fs::write(&file_path, b"hi").unwrap();
+        let err = FilesystemDriver::resolve_root(file_path.to_str().unwrap()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("not a directory"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_root_canonicalizes_valid_directory() {
+        let dir = TempDir::new().unwrap();
+        let resolved = FilesystemDriver::resolve_root(dir.path().to_str().unwrap()).unwrap();
+        assert!(resolved.is_absolute());
+        assert!(resolved.is_dir());
     }
 }
