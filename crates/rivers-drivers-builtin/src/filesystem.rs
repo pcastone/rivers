@@ -4,7 +4,8 @@
 
 use async_trait::async_trait;
 use rivers_driver_sdk::{
-    Connection, ConnectionParams, DatabaseDriver, DriverError, Query, QueryResult,
+    Connection, ConnectionParams, DatabaseDriver, DriverError, OpKind, OperationDescriptor,
+    Param, ParamType, Query, QueryResult,
 };
 use std::path::PathBuf;
 
@@ -126,6 +127,10 @@ impl DatabaseDriver for FilesystemDriver {
         "filesystem"
     }
 
+    fn operations(&self) -> &[OperationDescriptor] {
+        FILESYSTEM_OPERATIONS
+    }
+
     async fn connect(
         &self,
         params: &ConnectionParams,
@@ -156,6 +161,86 @@ impl Connection for FilesystemConnection {
     }
 }
 
+static FILESYSTEM_OPERATIONS: &[OperationDescriptor] = &[
+    // Reads
+    OperationDescriptor::read(
+        "readFile",
+        &[
+            Param::required("path", ParamType::String),
+            Param::optional("encoding", ParamType::String, "utf-8"),
+        ],
+        "Read file contents — utf-8 returns string, base64 returns base64-encoded string",
+    ),
+    OperationDescriptor::read(
+        "readDir",
+        &[Param::required("path", ParamType::String)],
+        "List directory entries — filenames only",
+    ),
+    OperationDescriptor::read(
+        "stat",
+        &[Param::required("path", ParamType::String)],
+        "File/directory metadata",
+    ),
+    OperationDescriptor::read(
+        "exists",
+        &[Param::required("path", ParamType::String)],
+        "Returns boolean existence",
+    ),
+    OperationDescriptor::read(
+        "find",
+        &[
+            Param::required("pattern", ParamType::String),
+            Param::optional("max_results", ParamType::Integer, "1000"),
+        ],
+        "Recursive glob search",
+    ),
+    OperationDescriptor::read(
+        "grep",
+        &[
+            Param::required("pattern", ParamType::String),
+            Param::optional("path", ParamType::String, "."),
+            Param::optional("max_results", ParamType::Integer, "1000"),
+        ],
+        "Regex search across files",
+    ),
+    // Writes
+    OperationDescriptor::write(
+        "writeFile",
+        &[
+            Param::required("path", ParamType::String),
+            Param::required("content", ParamType::String),
+            Param::optional("encoding", ParamType::String, "utf-8"),
+        ],
+        "Write file — creates parent dirs, overwrites if exists",
+    ),
+    OperationDescriptor::write(
+        "mkdir",
+        &[Param::required("path", ParamType::String)],
+        "Create directory recursively",
+    ),
+    OperationDescriptor::write(
+        "delete",
+        &[Param::required("path", ParamType::String)],
+        "Delete file or recursively delete directory",
+    ),
+    OperationDescriptor::write(
+        "rename",
+        &[
+            Param::required("oldPath", ParamType::String),
+            Param::required("newPath", ParamType::String),
+        ],
+        "Rename/move within root",
+    ),
+    OperationDescriptor::write(
+        "copy",
+        &[
+            Param::required("src", ParamType::String),
+            Param::required("dest", ParamType::String),
+        ],
+        "Copy file or recursively copy directory",
+    ),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,9 +258,45 @@ mod tests {
     }
 
     #[test]
-    fn operations_default_empty_for_now() {
-        // Until Task 14 wires the catalog, operations() returns empty via default.
-        assert!(FilesystemDriver.operations().is_empty());
+    fn catalog_has_eleven_operations() {
+        assert_eq!(FilesystemDriver.operations().len(), 11);
+    }
+
+    #[test]
+    fn catalog_contains_all_expected_names() {
+        let names: Vec<&str> = FilesystemDriver
+            .operations()
+            .iter()
+            .map(|o| o.name)
+            .collect();
+        for expected in [
+            "readFile", "readDir", "stat", "exists", "find", "grep", "writeFile", "mkdir",
+            "delete", "rename", "copy",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "missing op: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_ops_have_opkind_read() {
+        for op in FilesystemDriver.operations() {
+            let is_read = matches!(
+                op.name,
+                "readFile" | "readDir" | "stat" | "exists" | "find" | "grep"
+            );
+            let is_write = matches!(
+                op.name,
+                "writeFile" | "mkdir" | "delete" | "rename" | "copy"
+            );
+            match (is_read, is_write) {
+                (true, false) => assert_eq!(op.kind, OpKind::Read, "{}", op.name),
+                (false, true) => assert_eq!(op.kind, OpKind::Write, "{}", op.name),
+                _ => panic!("unclassified op: {}", op.name),
+            }
+        }
     }
 
     #[test]
