@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use rivers_driver_sdk::{
     Connection, ConnectionParams, DatabaseDriver, DriverError, OpKind, OperationDescriptor,
-    Param, ParamType, Query, QueryResult,
+    Param, ParamType, Query, QueryResult, QueryValue,
 };
 use std::path::PathBuf;
 
@@ -145,7 +145,7 @@ impl Connection for FilesystemConnection {
     async fn execute(&mut self, q: &Query) -> Result<QueryResult, DriverError> {
         match q.operation.as_str() {
             // Reads (Tasks 14–19)
-            "readFile" => Err(DriverError::NotImplemented("readFile — Task 14".into())),
+            "readFile" => ops::read_file(self, q).await,
             "readDir" => Err(DriverError::NotImplemented("readDir — Task 15".into())),
             "stat" => Err(DriverError::NotImplemented("stat — Task 16".into())),
             "exists" => Err(DriverError::NotImplemented("exists — Task 17".into())),
@@ -257,6 +257,69 @@ static FILESYSTEM_OPERATIONS: &[OperationDescriptor] = &[
         "Copy file or recursively copy directory",
     ),
 ];
+
+mod ops {
+    use super::*;
+    use base64::Engine;
+    use rivers_driver_sdk::{Query, QueryResult, QueryValue};
+    use std::collections::HashMap;
+
+    fn get_string<'a>(q: &'a Query, key: &str) -> Option<&'a str> {
+        match q.parameters.get(key) {
+            Some(QueryValue::String(s)) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    pub async fn read_file(
+        conn: &FilesystemConnection,
+        q: &Query,
+    ) -> Result<QueryResult, DriverError> {
+        let rel = get_string(q, "path").ok_or_else(|| {
+            DriverError::Query("readFile: required parameter 'path' missing".into())
+        })?;
+        let encoding = get_string(q, "encoding").unwrap_or("utf-8");
+        let path = conn.resolve_path(rel)?;
+        let bytes = tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || std::fs::read(&path)
+        })
+        .await
+        .map_err(|e| DriverError::Internal(format!("join: {e}")))?
+        .map_err(map_io_error)?;
+
+        let content = match encoding {
+            "utf-8" => String::from_utf8(bytes).map_err(|e| {
+                DriverError::Query(format!("file is not valid utf-8: {e}"))
+            })?,
+            "base64" => base64::engine::general_purpose::STANDARD.encode(&bytes),
+            other => {
+                return Err(DriverError::Query(format!(
+                    "unsupported encoding: {other}"
+                )));
+            }
+        };
+
+        let mut row = HashMap::new();
+        row.insert("content".to_string(), QueryValue::String(content));
+
+        Ok(QueryResult {
+            rows: vec![row],
+            affected_rows: 1,
+            last_insert_id: None,
+            column_names: Some(vec!["content".to_string()]),
+        })
+    }
+
+    pub fn map_io_error(e: std::io::Error) -> DriverError {
+        use std::io::ErrorKind::*;
+        match e.kind() {
+            NotFound => DriverError::Query(format!("not found: {e}")),
+            PermissionDenied => DriverError::Query(format!("permission denied: {e}")),
+            _ => DriverError::Internal(format!("I/O error: {e}")),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -480,5 +543,70 @@ mod tests {
             matches!(err, DriverError::NotImplemented(_) | DriverError::Unsupported(_)),
             "unexpected variant: {err:?}"
         );
+    }
+
+    fn mkq(op: &str, params: &[(&str, QueryValue)]) -> Query {
+        let mut parameters = std::collections::HashMap::new();
+        for (k, v) in params {
+            parameters.insert(k.to_string(), v.clone());
+        }
+        Query {
+            operation: op.into(),
+            target: String::new(),
+            parameters,
+            statement: String::new(),
+        }
+    }
+
+    fn extract_scalar_string(r: &QueryResult) -> String {
+        let row = r.rows.first().expect("expected one row");
+        let val = row
+            .get("content")
+            .expect("expected 'content' column");
+        match val {
+            QueryValue::String(s) => s.clone(),
+            other => panic!("expected String, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_file_utf8_returns_string() {
+        let (dir, mut conn) = test_connection();
+        std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+        let q = mkq("readFile", &[("path", QueryValue::String("a.txt".into()))]);
+        let result = conn.execute(&q).await.unwrap();
+        let content = extract_scalar_string(&result);
+        assert_eq!(content, "hello");
+    }
+
+    #[tokio::test]
+    async fn read_file_base64_returns_b64_string() {
+        let (dir, mut conn) = test_connection();
+        std::fs::write(dir.path().join("b.bin"), &[0xff, 0x00, 0xfe]).unwrap();
+        let q = mkq(
+            "readFile",
+            &[
+                ("path", QueryValue::String("b.bin".into())),
+                ("encoding", QueryValue::String("base64".into())),
+            ],
+        );
+        let result = conn.execute(&q).await.unwrap();
+        let content = extract_scalar_string(&result);
+        assert_eq!(content, "/wD+"); // base64 of 0xff 0x00 0xfe
+    }
+
+    #[tokio::test]
+    async fn read_file_unknown_encoding_errors() {
+        let (dir, mut conn) = test_connection();
+        std::fs::write(dir.path().join("a.txt"), "hi").unwrap();
+        let q = mkq(
+            "readFile",
+            &[
+                ("path", QueryValue::String("a.txt".into())),
+                ("encoding", QueryValue::String("ebcdic".into())),
+            ],
+        );
+        let err = conn.execute(&q).await.unwrap_err();
+        assert!(format!("{err}").contains("unsupported encoding"));
     }
 }
