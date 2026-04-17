@@ -65,6 +65,21 @@ pub struct ResolvedDatasource {
     pub params: crate::rivers_driver_sdk::ConnectionParams,
 }
 
+/// Emit the `DatasourceToken` variant appropriate for a resolved datasource.
+///
+/// Self-contained drivers (today just `filesystem`) dispatch directly from the
+/// worker and require `Direct` tokens carrying the resource root; every other
+/// driver receives a `Pooled` token that routes through the host pool manager.
+pub fn resolve_token_for_dispatch(rd: &ResolvedDatasource) -> DatasourceToken {
+    if rd.driver_name == "filesystem" {
+        return DatasourceToken::direct(
+            rd.driver_name.clone(),
+            std::path::PathBuf::from(&rd.params.database),
+        );
+    }
+    DatasourceToken::pooled(format!("{}:{}", rd.driver_name, rd.params.database))
+}
+
 // ── Entrypoint ───────────────────────────────────────────────────
 
 /// Which module and function to call in the isolate.
@@ -279,5 +294,46 @@ mod direct_token_tests {
             }
             _ => panic!("expected Direct variant"),
         }
+    }
+
+    fn mk_resolved(driver: &str, database: &str) -> ResolvedDatasource {
+        ResolvedDatasource {
+            driver_name: driver.into(),
+            params: crate::rivers_driver_sdk::ConnectionParams {
+                host: String::new(),
+                port: 0,
+                database: database.into(),
+                username: String::new(),
+                password: String::new(),
+                options: std::collections::HashMap::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn filesystem_driver_yields_direct_token() {
+        let rd = mk_resolved("filesystem", "/tmp");
+        let tok = resolve_token_for_dispatch(&rd);
+        match tok {
+            DatasourceToken::Direct { driver, root } => {
+                assert_eq!(driver, "filesystem");
+                assert_eq!(root, PathBuf::from("/tmp"));
+            }
+            _ => panic!("expected Direct variant for filesystem driver"),
+        }
+    }
+
+    #[test]
+    fn postgres_driver_yields_pooled_token() {
+        let rd = mk_resolved("postgres", "db");
+        let tok = resolve_token_for_dispatch(&rd);
+        assert!(matches!(tok, DatasourceToken::Pooled { .. }));
+    }
+
+    #[test]
+    fn faker_driver_yields_pooled_token() {
+        let rd = mk_resolved("faker", "noop");
+        let tok = resolve_token_for_dispatch(&rd);
+        assert!(matches!(tok, DatasourceToken::Pooled { .. }));
     }
 }
