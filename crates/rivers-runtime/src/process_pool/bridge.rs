@@ -14,7 +14,12 @@ impl From<&TaskContext> for crate::rivers_engine_sdk::SerializedTaskContext {
     fn from(ctx: &TaskContext) -> Self {
         Self {
             datasource_tokens: ctx.datasources.iter()
-                .map(|(k, v)| (k.clone(), v.0.clone()))
+                .map(|(k, v)| (k.clone(), match v {
+                    DatasourceToken::Pooled { pool_id } => pool_id.clone(),
+                    DatasourceToken::Direct { driver, root } => {
+                        format!("direct://{}?root={}", driver, root.display())
+                    }
+                }))
                 .collect(),
             dataview_tokens: ctx.dataviews.iter()
                 .map(|(k, v)| (k.clone(), v.0.clone()))

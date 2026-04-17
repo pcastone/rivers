@@ -11,8 +11,41 @@ use crate::DataViewExecutor;
 // ── Opaque Tokens ────────────────────────────────────────────────
 
 /// Opaque handle to a datasource — the isolate never holds a real connection.
+///
+/// Two dispatch modes:
+/// - `Pooled` — resolves to a host-side connection pool by id (default for all
+///   request/response drivers: postgres, mysql, redis, etc.).
+/// - `Direct` — worker performs I/O directly against the given resource root.
+///   Reserved for self-contained drivers like `filesystem` (spec §7.3).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DatasourceToken(pub String);
+pub enum DatasourceToken {
+    /// Pool-backed — isolate dispatches to host pool by id.
+    Pooled { pool_id: String },
+    /// Self-contained — worker performs I/O directly with the given resource handle.
+    Direct {
+        /// Driver name (e.g. "filesystem").
+        driver: String,
+        /// Canonical root path the worker is allowed to operate within.
+        root: std::path::PathBuf,
+    },
+}
+
+impl DatasourceToken {
+    /// Construct a `Pooled` token from a pool id.
+    pub fn pooled(pool_id: impl Into<String>) -> Self {
+        DatasourceToken::Pooled {
+            pool_id: pool_id.into(),
+        }
+    }
+
+    /// Construct a `Direct` token for a self-contained driver bound to `root`.
+    pub fn direct(driver: impl Into<String>, root: std::path::PathBuf) -> Self {
+        DatasourceToken::Direct {
+            driver: driver.into(),
+            root,
+        }
+    }
+}
 
 /// Opaque handle to a DataView.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -223,4 +256,28 @@ pub fn validate_capabilities(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod direct_token_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn pooled_token_constructs() {
+        let t = DatasourceToken::pooled("pool-42");
+        assert!(matches!(t, DatasourceToken::Pooled { .. }));
+    }
+
+    #[test]
+    fn direct_token_carries_driver_and_root() {
+        let t = DatasourceToken::direct("filesystem", PathBuf::from("/tmp/x"));
+        match t {
+            DatasourceToken::Direct { driver, root } => {
+                assert_eq!(driver, "filesystem");
+                assert_eq!(root, PathBuf::from("/tmp/x"));
+            }
+            _ => panic!("expected Direct variant"),
+        }
+    }
 }
