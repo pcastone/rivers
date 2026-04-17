@@ -845,8 +845,23 @@ Add to §6.6:
 
 ---
 
+## Deferred Follow-ups
+
+Items captured during v1 implementation (2026-04-17) that were intentionally
+left out of the initial PR and tracked here for a follow-up cycle.
+
+| ID | Area | Description | Trigger for action |
+|---|---|---|---|
+| FUP-1 | §6.5 stat | Emit `mtime`/`atime`/`ctime` as ISO-8601 strings. Today they are epoch-seconds decimal strings (decision D1). Requires adding `chrono` or `time` to `rivers-drivers-builtin`. | Handler author reports the raw epoch string is awkward, or another op wants structured timestamps. |
+| FUP-2 | §5.3 cross-platform | Windows NTFS junction and reparse-point rejection tests. Only reachable on a Windows CI runner. Current impl uses `symlink_metadata().file_type().is_symlink()` which handles junctions correctly on Windows per `std::fs` docs — needs confirmation test. | Windows runner added to CI. |
+| FUP-3 | §8.4 extra config | Plumb `max_file_size` and `max_depth` through `ConnectionParams.extra` (currently both are connection-level constants set by `connect()` at their default values). The spec shape is already documented; only the reader is missing. | A canary or prod bundle needs non-default limits. |
+| FUP-4 | §7.3 direct token | Structured serialization of `DatasourceToken::Direct` through the engine SDK. Today the bridge encodes it as `"direct://{driver}?root={path}"` into the existing `datasource_tokens: HashMap<String,String>` field (decision D6). Works because static V8 reads the token from a Rust-side thread-local, not from the serialized form. | A cdylib engine path (WASM or a future V8 dylib) needs direct tokens. |
+| FUP-5 | §12.5 canary | Concurrent-write stress test across multiple handlers against the same filesystem datasource. Validates TOCTOU behavior (§5.4) under real contention. | Filesystem driver used in production-like canary traffic. |
+| FUP-6 | §12.5 canary | Live-fleet run of `canary-filesystem` (Task 32 in the plan). The app is scaffolded and `riverpackage validate` is clean; a `cargo deploy` + `run-tests.sh` pass completes Phase 5. | Next deploy cycle. |
+
 ## Revision History
 
 | Version | Date | Changes |
 |---|---|---|
 | 1.0 | 2026-04-16 | Initial specification — OperationDescriptor framework + filesystem driver |
+| 1.1 | 2026-04-17 | Add Deferred Follow-ups section (FUP-1..6) capturing items held out of the v1 PR. No normative changes. |
