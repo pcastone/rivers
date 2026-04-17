@@ -153,7 +153,7 @@ impl Connection for FilesystemConnection {
             "grep" => ops::grep(self, q).await,
             // Writes (Tasks 20–24)
             "writeFile" => ops::write_file(self, q).await,
-            "mkdir" => Err(DriverError::NotImplemented("mkdir — Task 21".into())),
+            "mkdir" => ops::mkdir(self, q).await,
             "delete" => Err(DriverError::NotImplemented("delete — Task 22".into())),
             "rename" => Err(DriverError::NotImplemented("rename — Task 23".into())),
             "copy" => Err(DriverError::NotImplemented("copy — Task 24".into())),
@@ -626,6 +626,26 @@ mod ops {
         })
     }
 
+    pub async fn mkdir(
+        conn: &FilesystemConnection,
+        q: &Query,
+    ) -> Result<QueryResult, DriverError> {
+        let rel = get_string(q, "path").ok_or_else(|| {
+            DriverError::Query("mkdir: required parameter 'path' missing".into())
+        })?;
+        let path = conn.resolve_path(rel)?;
+        tokio::task::spawn_blocking(move || std::fs::create_dir_all(&path))
+            .await
+            .map_err(|e| DriverError::Internal(format!("join: {e}")))?
+            .map_err(map_io_error)?;
+        Ok(QueryResult {
+            rows: vec![],
+            affected_rows: 1,
+            last_insert_id: None,
+            column_names: None,
+        })
+    }
+
     pub fn map_io_error(e: std::io::Error) -> DriverError {
         use std::io::ErrorKind::*;
         match e.kind() {
@@ -923,6 +943,16 @@ mod tests {
         );
         let err = conn.execute(&q).await.unwrap_err();
         assert!(format!("{err}").contains("unsupported encoding"));
+    }
+
+    #[tokio::test]
+    async fn mkdir_is_recursive_and_idempotent() {
+        let (dir, mut conn) = test_connection();
+        let q = mkq("mkdir", &[("path", QueryValue::String("a/b/c".into()))]);
+        conn.execute(&q).await.unwrap();
+        assert!(dir.path().join("a/b/c").is_dir());
+        conn.execute(&q).await.unwrap();
+        assert!(dir.path().join("a/b/c").is_dir());
     }
 
     #[tokio::test]
