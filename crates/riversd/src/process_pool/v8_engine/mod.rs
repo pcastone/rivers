@@ -4,6 +4,7 @@
 //! Gated behind #[cfg(feature = "static-engines")].
 
 mod catalog;
+mod direct_dispatch;
 mod task_locals;
 mod init;
 mod execution;
