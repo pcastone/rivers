@@ -148,7 +148,7 @@ impl Connection for FilesystemConnection {
             "readFile" => ops::read_file(self, q).await,
             "readDir" => ops::read_dir(self, q).await,
             "stat" => ops::stat(self, q).await,
-            "exists" => Err(DriverError::NotImplemented("exists — Task 17".into())),
+            "exists" => ops::exists(self, q).await,
             "find" => Err(DriverError::NotImplemented("find — Task 18".into())),
             "grep" => Err(DriverError::NotImplemented("grep — Task 19".into())),
             // Writes (Tasks 20–24)
@@ -414,6 +414,30 @@ mod ops {
                 "isDirectory".into(),
                 "mode".into(),
             ]),
+        })
+    }
+
+    pub async fn exists(
+        conn: &FilesystemConnection,
+        q: &Query,
+    ) -> Result<QueryResult, DriverError> {
+        let rel = get_string(q, "path").ok_or_else(|| {
+            DriverError::Query("exists: required parameter 'path' missing".into())
+        })?;
+        let ok = match conn.resolve_path(rel) {
+            Ok(p) => tokio::task::spawn_blocking(move || p.exists())
+                .await
+                .unwrap_or(false),
+            Err(DriverError::Forbidden(_)) => false,
+            Err(e) => return Err(e),
+        };
+        let mut row = HashMap::new();
+        row.insert("exists".to_string(), QueryValue::Boolean(ok));
+        Ok(QueryResult {
+            rows: vec![row],
+            affected_rows: 1,
+            last_insert_id: None,
+            column_names: Some(vec!["exists".to_string()]),
         })
     }
 
@@ -714,6 +738,26 @@ mod tests {
         );
         let err = conn.execute(&q).await.unwrap_err();
         assert!(format!("{err}").contains("unsupported encoding"));
+    }
+
+    #[tokio::test]
+    async fn exists_returns_true_for_present_false_for_absent() {
+        let (dir, mut conn) = test_connection();
+        std::fs::write(dir.path().join("yes.txt"), "").unwrap();
+        let q = mkq("exists", &[("path", QueryValue::String("yes.txt".into()))]);
+        let r = conn.execute(&q).await.unwrap();
+        assert!(matches!(r.rows[0].get("exists"), Some(QueryValue::Boolean(true))));
+        let q2 = mkq("exists", &[("path", QueryValue::String("nope.txt".into()))]);
+        let r2 = conn.execute(&q2).await.unwrap();
+        assert!(matches!(r2.rows[0].get("exists"), Some(QueryValue::Boolean(false))));
+    }
+
+    #[tokio::test]
+    async fn exists_returns_false_for_chroot_escape() {
+        let (_dir, mut conn) = test_connection();
+        let q = mkq("exists", &[("path", QueryValue::String("../../etc/passwd".into()))]);
+        let r = conn.execute(&q).await.unwrap();
+        assert!(matches!(r.rows[0].get("exists"), Some(QueryValue::Boolean(false))));
     }
 
     #[tokio::test]
