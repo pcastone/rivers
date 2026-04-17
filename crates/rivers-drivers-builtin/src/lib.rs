@@ -9,6 +9,7 @@
 
 mod eventbus;
 mod faker;
+pub mod filesystem;
 #[cfg(unix)]
 mod memcached;
 mod mysql;
@@ -19,6 +20,7 @@ mod sqlite;
 
 pub use self::eventbus::{EventBusConnection, EventBusDriver, EventBusPublisher};
 pub use self::faker::{FakerConnection, FakerDriver};
+pub use self::filesystem::{FilesystemConnection, FilesystemDriver};
 #[cfg(unix)]
 pub use self::memcached::{MemcachedConnection, MemcachedDriver};
 pub use self::mysql::{MysqlConnection, MysqlDriver};
