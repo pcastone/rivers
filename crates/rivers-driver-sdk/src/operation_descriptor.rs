@@ -48,6 +48,48 @@ impl Param {
     }
 }
 
+/// Classifies an operation as read or write for DDL security alignment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpKind {
+    /// Read operation (non-mutating).
+    Read,
+    /// Write operation (mutating).
+    Write,
+}
+
+/// Describes a single typed operation a driver exposes to handlers.
+#[derive(Clone, Debug)]
+pub struct OperationDescriptor {
+    /// Operation name as exposed to handlers.
+    pub name: &'static str,
+    /// Read or write classification.
+    pub kind: OpKind,
+    /// Parameter slice.
+    pub params: &'static [Param],
+    /// Description for documentation.
+    pub description: &'static str,
+}
+
+impl OperationDescriptor {
+    /// Create a read operation descriptor.
+    pub const fn read(
+        name: &'static str,
+        params: &'static [Param],
+        description: &'static str,
+    ) -> Self {
+        OperationDescriptor { name, kind: OpKind::Read, params, description }
+    }
+
+    /// Create a write operation descriptor.
+    pub const fn write(
+        name: &'static str,
+        params: &'static [Param],
+        description: &'static str,
+    ) -> Self {
+        OperationDescriptor { name, kind: OpKind::Write, params, description }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,5 +118,34 @@ mod tests {
         let _ = ParamType::Float;
         let _ = ParamType::Boolean;
         let _ = ParamType::Any;
+    }
+
+    #[test]
+    fn operation_descriptor_read_builder_sets_kind_read() {
+        static PARAMS: &[Param] = &[
+            Param::required("path", ParamType::String),
+        ];
+        let desc = OperationDescriptor::read("readFile", PARAMS, "Read file contents");
+        assert_eq!(desc.name, "readFile");
+        assert_eq!(desc.kind, OpKind::Read);
+        assert_eq!(desc.params.len(), 1);
+        assert_eq!(desc.description, "Read file contents");
+    }
+
+    #[test]
+    fn operation_descriptor_write_builder_sets_kind_write() {
+        static PARAMS: &[Param] = &[
+            Param::required("path", ParamType::String),
+            Param::required("content", ParamType::String),
+        ];
+        let desc = OperationDescriptor::write("writeFile", PARAMS, "Write file");
+        assert_eq!(desc.kind, OpKind::Write);
+        assert_eq!(desc.params.len(), 2);
+    }
+
+    #[test]
+    fn opkind_eq() {
+        assert_eq!(OpKind::Read, OpKind::Read);
+        assert_ne!(OpKind::Read, OpKind::Write);
     }
 }

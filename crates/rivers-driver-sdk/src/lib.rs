@@ -42,7 +42,7 @@ pub use broker::{
     OutboundMessage, PublishReceipt,
 };
 pub use error::DriverError;
-pub use operation_descriptor::{Param, ParamType};
+pub use operation_descriptor::{OpKind, OperationDescriptor, Param, ParamType};
 pub use traits::{
     Connection, ConnectionParams, DatabaseDriver, Driver, DriverType, HttpMethod, ParamStyle,
     SchemaDefinition, SchemaFieldDef, SchemaSyntaxError, ValidationDirection, ValidationError,
