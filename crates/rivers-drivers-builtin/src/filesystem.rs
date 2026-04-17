@@ -150,7 +150,7 @@ impl Connection for FilesystemConnection {
             "stat" => ops::stat(self, q).await,
             "exists" => ops::exists(self, q).await,
             "find" => ops::find(self, q).await,
-            "grep" => Err(DriverError::NotImplemented("grep — Task 19".into())),
+            "grep" => ops::grep(self, q).await,
             // Writes (Tasks 20–24)
             "writeFile" => Err(DriverError::NotImplemented("writeFile — Task 20".into())),
             "mkdir" => Err(DriverError::NotImplemented("mkdir — Task 21".into())),
@@ -488,6 +488,98 @@ mod ops {
         })
     }
 
+    pub async fn grep(
+        conn: &FilesystemConnection,
+        q: &Query,
+    ) -> Result<QueryResult, DriverError> {
+        let pattern = get_string(q, "pattern").ok_or_else(|| {
+            DriverError::Query("grep: required parameter 'pattern' missing".into())
+        })?;
+        let rel_path = get_string(q, "path").unwrap_or(".");
+        let max = match q.parameters.get("max_results") {
+            Some(QueryValue::Integer(n)) => (*n).max(0) as usize,
+            _ => 1000,
+        };
+        let base = conn.resolve_path(rel_path)?;
+        let re = regex::Regex::new(pattern)
+            .map_err(|e| DriverError::Query(format!("grep: invalid regex: {e}")))?;
+
+        let (hits, truncated) = tokio::task::spawn_blocking({
+            let root = conn.root.clone();
+            move || {
+                let mut hits: Vec<(String, usize, String)> = Vec::new();
+                let mut truncated = false;
+                walk_files(&base, &root, &mut |rel_path, contents| {
+                    for (i, line) in contents.lines().enumerate() {
+                        if re.is_match(line) {
+                            if hits.len() >= max {
+                                truncated = true;
+                                return false;
+                            }
+                            hits.push((rel_path.clone(), i + 1, line.to_string()));
+                        }
+                    }
+                    true
+                });
+                (hits, truncated)
+            }
+        })
+        .await
+        .map_err(|e| DriverError::Internal(format!("join: {e}")))?;
+
+        let results = QueryValue::Array(
+            hits.into_iter()
+                .map(|(file, line, content)| {
+                    QueryValue::Json(serde_json::json!({
+                        "file": file,
+                        "line": line,
+                        "content": content,
+                    }))
+                })
+                .collect(),
+        );
+        let mut row = HashMap::new();
+        row.insert("results".to_string(), results);
+        row.insert("truncated".to_string(), QueryValue::Boolean(truncated));
+        Ok(QueryResult {
+            rows: vec![row],
+            affected_rows: 1,
+            last_insert_id: None,
+            column_names: Some(vec!["results".to_string(), "truncated".to_string()]),
+        })
+    }
+
+    fn walk_files(
+        start: &std::path::Path,
+        root: &std::path::Path,
+        visit: &mut impl FnMut(String, String) -> bool,
+    ) {
+        let mut stack = vec![start.to_path_buf()];
+        while let Some(p) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&p) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if let Ok(bytes) = std::fs::read(&path) {
+                    let head_len = bytes.len().min(8192);
+                    if bytes[..head_len].contains(&0) {
+                        continue;
+                    }
+                    let Ok(text) = String::from_utf8(bytes) else { continue };
+                    let rel = path
+                        .strip_prefix(root)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .to_string();
+                    if !visit(rel, text) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     pub fn map_io_error(e: std::io::Error) -> DriverError {
         use std::io::ErrorKind::*;
         match e.kind() {
@@ -785,6 +877,75 @@ mod tests {
         );
         let err = conn.execute(&q).await.unwrap_err();
         assert!(format!("{err}").contains("unsupported encoding"));
+    }
+
+    #[tokio::test]
+    async fn grep_finds_matching_lines() {
+        let (dir, mut conn) = test_connection();
+        std::fs::write(dir.path().join("a.txt"), "foo\nTODO: bar\nbaz").unwrap();
+        let q = mkq(
+            "grep",
+            &[
+                ("pattern", QueryValue::String("TODO".into())),
+                ("path", QueryValue::String(".".into())),
+                ("max_results", QueryValue::Integer(10)),
+            ],
+        );
+        let r = conn.execute(&q).await.unwrap();
+        assert_eq!(
+            r.column_names.as_ref().unwrap(),
+            &vec!["results".to_string(), "truncated".to_string()]
+        );
+        let row = &r.rows[0];
+        match row.get("results") {
+            Some(QueryValue::Array(v)) => {
+                assert_eq!(v.len(), 1);
+                match &v[0] {
+                    QueryValue::Json(j) => {
+                        assert_eq!(j["file"], "a.txt");
+                        assert_eq!(j["line"], 2);
+                        assert_eq!(j["content"], "TODO: bar");
+                    }
+                    other => panic!("expected Json hit, got {other:?}"),
+                }
+            }
+            other => panic!("expected Array, got {other:?}"),
+        }
+        assert!(matches!(row.get("truncated"), Some(QueryValue::Boolean(false))));
+    }
+
+    #[tokio::test]
+    async fn grep_skips_binary_files() {
+        let (dir, mut conn) = test_connection();
+        std::fs::write(dir.path().join("a.txt"), "hello world").unwrap();
+        std::fs::write(dir.path().join("b.bin"), &[0xff, 0x00, 0x01, 0x02]).unwrap();
+        let q = mkq(
+            "grep",
+            &[
+                ("pattern", QueryValue::String("world".into())),
+                ("path", QueryValue::String(".".into())),
+            ],
+        );
+        let r = conn.execute(&q).await.unwrap();
+        let row = &r.rows[0];
+        match row.get("results") {
+            Some(QueryValue::Array(v)) => assert_eq!(v.len(), 1, "binary file should be skipped"),
+            other => panic!("expected Array, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn grep_invalid_regex_errors() {
+        let (_dir, mut conn) = test_connection();
+        let q = mkq(
+            "grep",
+            &[
+                ("pattern", QueryValue::String("[unclosed".into())),
+                ("path", QueryValue::String(".".into())),
+            ],
+        );
+        let err = conn.execute(&q).await.unwrap_err();
+        assert!(format!("{err}").contains("invalid regex"));
     }
 
     #[tokio::test]
