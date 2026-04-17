@@ -41,6 +41,84 @@ impl FilesystemDriver {
     }
 }
 
+impl FilesystemConnection {
+    pub fn resolve_path(&self, relative: &str) -> Result<PathBuf, DriverError> {
+        let normalized = relative.replace('\\', "/");
+
+        let bytes = normalized.as_bytes();
+        let is_windows_drive =
+            bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic();
+        if normalized.starts_with('/') || is_windows_drive {
+            return Err(DriverError::Query(
+                "absolute paths not permitted — all paths relative to datasource root".into(),
+            ));
+        }
+
+        let joined = self.root.join(&normalized);
+        let canonical = canonicalize_for_op(&joined)?;
+
+        if !canonical.starts_with(&self.root) {
+            return Err(DriverError::Forbidden(
+                "path escapes datasource root".into(),
+            ));
+        }
+
+        reject_symlinks_within(&self.root, &canonical)?;
+        Ok(canonical)
+    }
+}
+
+fn canonicalize_for_op(path: &std::path::Path) -> Result<PathBuf, DriverError> {
+    // For nonexistent paths (writeFile, mkdir), canonicalize the deepest existing
+    // ancestor, then append the remaining segments. This preserves chroot checks
+    // while letting write ops target paths that do not yet exist.
+    let mut existing = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    while !existing.exists() {
+        match existing.file_name() {
+            Some(name) => tail.push(name.to_os_string()),
+            None => break,
+        }
+        if !existing.pop() {
+            break;
+        }
+    }
+    let base = std::fs::canonicalize(&existing).map_err(|e| {
+        DriverError::Query(format!("could not canonicalize ancestor of path: {e}"))
+    })?;
+    let mut out = base;
+    for piece in tail.into_iter().rev() {
+        out.push(piece);
+    }
+    Ok(out)
+}
+
+fn reject_symlinks_within(
+    root: &std::path::Path,
+    path: &std::path::Path,
+) -> Result<(), DriverError> {
+    // Walk from root forward, checking every intermediate component.
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    let mut current = root.to_path_buf();
+    for comp in rel.components() {
+        current.push(comp);
+        if !current.exists() {
+            break;
+        }
+        let is_symlink = current
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if is_symlink {
+            return Err(DriverError::Forbidden(format!(
+                "symlink detected in path: {}",
+                current.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl DatabaseDriver for FilesystemDriver {
     fn name(&self) -> &str {
@@ -80,6 +158,12 @@ impl Connection for FilesystemConnection {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn test_connection() -> (TempDir, FilesystemConnection) {
+        let dir = TempDir::new().unwrap();
+        let root = FilesystemDriver::resolve_root(dir.path().to_str().unwrap()).unwrap();
+        (dir, FilesystemConnection { root })
+    }
 
     #[test]
     fn driver_name_is_filesystem() {
@@ -131,5 +215,42 @@ mod tests {
         let resolved = FilesystemDriver::resolve_root(dir.path().to_str().unwrap()).unwrap();
         assert!(resolved.is_absolute());
         assert!(resolved.is_dir());
+    }
+
+    #[test]
+    fn resolve_path_rejects_absolute_unix() {
+        let (_dir, conn) = test_connection();
+        let err = conn.resolve_path("/etc/passwd").unwrap_err();
+        assert!(format!("{err}").contains("absolute paths not permitted"));
+    }
+
+    #[test]
+    fn resolve_path_rejects_parent_escape() {
+        let (_dir, conn) = test_connection();
+        let err = conn.resolve_path("../../../etc/passwd").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("escapes datasource root") || msg.contains("does not exist"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_path_accepts_valid_relative() {
+        let (dir, conn) = test_connection();
+        std::fs::write(dir.path().join("hello.txt"), b"hi").unwrap();
+        let resolved = conn.resolve_path("hello.txt").unwrap();
+        assert!(resolved.starts_with(&conn.root));
+    }
+
+    #[test]
+    fn resolve_path_normalizes_backslashes() {
+        // On Unix this behaves like a literal; purpose is documentation — real
+        // Windows coverage comes via CI.
+        let (dir, conn) = test_connection();
+        std::fs::create_dir(dir.path().join("a")).unwrap();
+        std::fs::write(dir.path().join("a").join("b.txt"), b"x").unwrap();
+        let resolved = conn.resolve_path("a\\b.txt").unwrap();
+        assert!(resolved.starts_with(&conn.root));
     }
 }
