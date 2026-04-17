@@ -27,6 +27,8 @@ pub mod http_driver;
 pub mod http_executor;
 /// HTTP schema syntax and data validation.
 pub mod http_validation;
+/// Typed operation catalog types for the V8 proxy codegen framework.
+pub mod operation_descriptor;
 /// Core driver traits — [`DatabaseDriver`], [`Connection`], [`Driver`], and schema types.
 pub mod traits;
 /// Query model, result types, and operation classification.
@@ -40,6 +42,7 @@ pub use broker::{
     OutboundMessage, PublishReceipt,
 };
 pub use error::DriverError;
+pub use operation_descriptor::{Param, ParamType};
 pub use traits::{
     Connection, ConnectionParams, DatabaseDriver, Driver, DriverType, HttpMethod, ParamStyle,
     SchemaDefinition, SchemaFieldDef, SchemaSyntaxError, ValidationDirection, ValidationError,
