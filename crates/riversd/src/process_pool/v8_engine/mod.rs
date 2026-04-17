@@ -5,6 +5,7 @@
 
 mod catalog;
 mod direct_dispatch;
+mod proxy_codegen;
 mod task_locals;
 mod init;
 mod execution;
