@@ -152,7 +152,7 @@ impl Connection for FilesystemConnection {
             "find" => ops::find(self, q).await,
             "grep" => ops::grep(self, q).await,
             // Writes (Tasks 20–24)
-            "writeFile" => Err(DriverError::NotImplemented("writeFile — Task 20".into())),
+            "writeFile" => ops::write_file(self, q).await,
             "mkdir" => Err(DriverError::NotImplemented("mkdir — Task 21".into())),
             "delete" => Err(DriverError::NotImplemented("delete — Task 22".into())),
             "rename" => Err(DriverError::NotImplemented("rename — Task 23".into())),
@@ -580,6 +580,52 @@ mod ops {
         }
     }
 
+    pub async fn write_file(
+        conn: &FilesystemConnection,
+        q: &Query,
+    ) -> Result<QueryResult, DriverError> {
+        let rel = get_string(q, "path").ok_or_else(|| {
+            DriverError::Query("writeFile: required parameter 'path' missing".into())
+        })?;
+        let content = get_string(q, "content").ok_or_else(|| {
+            DriverError::Query("writeFile: required parameter 'content' missing".into())
+        })?;
+        let encoding = get_string(q, "encoding").unwrap_or("utf-8");
+        let path = conn.resolve_path(rel)?;
+
+        let bytes: Vec<u8> = match encoding {
+            "utf-8" => content.as_bytes().to_vec(),
+            "base64" => base64::engine::general_purpose::STANDARD
+                .decode(content)
+                .map_err(|e| DriverError::Query(format!("base64 decode: {e}")))?,
+            other => {
+                return Err(DriverError::Query(format!(
+                    "unsupported encoding: {other}"
+                )));
+            }
+        };
+
+        tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || -> std::io::Result<()> {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&path, bytes)
+            }
+        })
+        .await
+        .map_err(|e| DriverError::Internal(format!("join: {e}")))?
+        .map_err(map_io_error)?;
+
+        Ok(QueryResult {
+            rows: vec![],
+            affected_rows: 1,
+            last_insert_id: None,
+            column_names: None,
+        })
+    }
+
     pub fn map_io_error(e: std::io::Error) -> DriverError {
         use std::io::ErrorKind::*;
         match e.kind() {
@@ -877,6 +923,53 @@ mod tests {
         );
         let err = conn.execute(&q).await.unwrap_err();
         assert!(format!("{err}").contains("unsupported encoding"));
+    }
+
+    #[tokio::test]
+    async fn write_file_creates_parent_dirs_and_writes_utf8() {
+        let (dir, mut conn) = test_connection();
+        let q = mkq(
+            "writeFile",
+            &[
+                ("path", QueryValue::String("deep/nested/out.txt".into())),
+                ("content", QueryValue::String("hello".into())),
+            ],
+        );
+        let r = conn.execute(&q).await.unwrap();
+        assert_eq!(r.affected_rows, 1);
+        let read = std::fs::read_to_string(dir.path().join("deep/nested/out.txt")).unwrap();
+        assert_eq!(read, "hello");
+    }
+
+    #[tokio::test]
+    async fn write_file_base64_decodes_to_bytes() {
+        let (dir, mut conn) = test_connection();
+        let q = mkq(
+            "writeFile",
+            &[
+                ("path", QueryValue::String("b.bin".into())),
+                ("content", QueryValue::String("/wD+".into())),
+                ("encoding", QueryValue::String("base64".into())),
+            ],
+        );
+        conn.execute(&q).await.unwrap();
+        let bytes = std::fs::read(dir.path().join("b.bin")).unwrap();
+        assert_eq!(bytes, vec![0xff, 0x00, 0xfe]);
+    }
+
+    #[tokio::test]
+    async fn write_file_overwrites_existing() {
+        let (dir, mut conn) = test_connection();
+        std::fs::write(dir.path().join("ow.txt"), "old").unwrap();
+        let q = mkq(
+            "writeFile",
+            &[
+                ("path", QueryValue::String("ow.txt".into())),
+                ("content", QueryValue::String("new".into())),
+            ],
+        );
+        conn.execute(&q).await.unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("ow.txt")).unwrap(), "new");
     }
 
     #[tokio::test]
