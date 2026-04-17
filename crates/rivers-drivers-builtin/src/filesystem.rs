@@ -187,7 +187,7 @@ impl Connection for FilesystemConnection {
     }
 }
 
-static FILESYSTEM_OPERATIONS: &[OperationDescriptor] = &[
+pub static FILESYSTEM_OPERATIONS: &[OperationDescriptor] = &[
     // Reads
     OperationDescriptor::read(
         "readFile",
