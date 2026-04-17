@@ -154,7 +154,7 @@ impl Connection for FilesystemConnection {
             // Writes (Tasks 20–24)
             "writeFile" => ops::write_file(self, q).await,
             "mkdir" => ops::mkdir(self, q).await,
-            "delete" => Err(DriverError::NotImplemented("delete — Task 22".into())),
+            "delete" => ops::delete(self, q).await,
             "rename" => Err(DriverError::NotImplemented("rename — Task 23".into())),
             "copy" => Err(DriverError::NotImplemented("copy — Task 24".into())),
             other => Err(DriverError::Unsupported(format!(
@@ -646,6 +646,51 @@ mod ops {
         })
     }
 
+    pub async fn delete(
+        conn: &FilesystemConnection,
+        q: &Query,
+    ) -> Result<QueryResult, DriverError> {
+        let rel = get_string(q, "path").ok_or_else(|| {
+            DriverError::Query("delete: required parameter 'path' missing".into())
+        })?;
+        let path = match conn.resolve_path(rel) {
+            Ok(p) => p,
+            Err(DriverError::Query(_)) => {
+                return Ok(QueryResult {
+                    rows: vec![],
+                    affected_rows: 0,
+                    last_insert_id: None,
+                    column_names: None,
+                })
+            }
+            Err(e) => return Err(e),
+        };
+        let removed = tokio::task::spawn_blocking({
+            let p = path.clone();
+            move || -> std::io::Result<bool> {
+                if !p.exists() {
+                    return Ok(false);
+                }
+                if p.is_dir() {
+                    std::fs::remove_dir_all(&p)?;
+                } else {
+                    std::fs::remove_file(&p)?;
+                }
+                Ok(true)
+            }
+        })
+        .await
+        .map_err(|e| DriverError::Internal(format!("join: {e}")))?
+        .map_err(map_io_error)?;
+
+        Ok(QueryResult {
+            rows: vec![],
+            affected_rows: if removed { 1 } else { 0 },
+            last_insert_id: None,
+            column_names: None,
+        })
+    }
+
     pub fn map_io_error(e: std::io::Error) -> DriverError {
         use std::io::ErrorKind::*;
         match e.kind() {
@@ -943,6 +988,30 @@ mod tests {
         );
         let err = conn.execute(&q).await.unwrap_err();
         assert!(format!("{err}").contains("unsupported encoding"));
+    }
+
+    #[tokio::test]
+    async fn delete_removes_file_and_directory_recursively() {
+        let (dir, mut conn) = test_connection();
+        std::fs::create_dir_all(dir.path().join("d/e")).unwrap();
+        std::fs::write(dir.path().join("d/e/f.txt"), "").unwrap();
+        std::fs::write(dir.path().join("g.txt"), "").unwrap();
+
+        conn.execute(&mkq("delete", &[("path", QueryValue::String("d".into()))]))
+            .await
+            .unwrap();
+        assert!(!dir.path().join("d").exists());
+        conn.execute(&mkq("delete", &[("path", QueryValue::String("g.txt".into()))]))
+            .await
+            .unwrap();
+        assert!(!dir.path().join("g.txt").exists());
+
+        // idempotent — deleting nonexistent is not an error
+        let r = conn
+            .execute(&mkq("delete", &[("path", QueryValue::String("g.txt".into()))]))
+            .await
+            .unwrap();
+        assert_eq!(r.affected_rows, 0);
     }
 
     #[tokio::test]
