@@ -142,8 +142,25 @@ impl DatabaseDriver for FilesystemDriver {
 
 #[async_trait]
 impl Connection for FilesystemConnection {
-    async fn execute(&mut self, _q: &Query) -> Result<QueryResult, DriverError> {
-        Err(DriverError::NotImplemented("FilesystemConnection::execute — Task 26".into()))
+    async fn execute(&mut self, q: &Query) -> Result<QueryResult, DriverError> {
+        match q.operation.as_str() {
+            // Reads (Tasks 14–19)
+            "readFile" => Err(DriverError::NotImplemented("readFile — Task 14".into())),
+            "readDir" => Err(DriverError::NotImplemented("readDir — Task 15".into())),
+            "stat" => Err(DriverError::NotImplemented("stat — Task 16".into())),
+            "exists" => Err(DriverError::NotImplemented("exists — Task 17".into())),
+            "find" => Err(DriverError::NotImplemented("find — Task 18".into())),
+            "grep" => Err(DriverError::NotImplemented("grep — Task 19".into())),
+            // Writes (Tasks 20–24)
+            "writeFile" => Err(DriverError::NotImplemented("writeFile — Task 20".into())),
+            "mkdir" => Err(DriverError::NotImplemented("mkdir — Task 21".into())),
+            "delete" => Err(DriverError::NotImplemented("delete — Task 22".into())),
+            "rename" => Err(DriverError::NotImplemented("rename — Task 23".into())),
+            "copy" => Err(DriverError::NotImplemented("copy — Task 24".into())),
+            other => Err(DriverError::Unsupported(format!(
+                "unknown filesystem operation: {other}"
+            ))),
+        }
     }
 
     async fn ddl_execute(&mut self, _q: &Query) -> Result<QueryResult, DriverError> {
@@ -447,5 +464,21 @@ mod tests {
             }
             Ok(_) => panic!("expected error for nonexistent root"),
         }
+    }
+
+    #[tokio::test]
+    async fn execute_unknown_operation_returns_notimpl() {
+        let (_dir, mut conn) = test_connection();
+        let q = Query {
+            operation: "nope".into(),
+            target: String::new(),
+            parameters: std::collections::HashMap::new(),
+            statement: String::new(),
+        };
+        let err = conn.execute(&q).await.unwrap_err();
+        assert!(
+            matches!(err, DriverError::NotImplemented(_) | DriverError::Unsupported(_)),
+            "unexpected variant: {err:?}"
+        );
     }
 }
