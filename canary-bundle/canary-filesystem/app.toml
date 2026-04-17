@@ -1,0 +1,76 @@
+# ─────────────────────────────────────────────
+# FILESYSTEM Profile — Datasource
+# ─────────────────────────────────────────────
+# Direct-dispatch driver: no pool, no credentials. Root is a chroot-sandboxed
+# absolute path. /tmp is used here because it exists on every host; the handler
+# confines its work to the canary-fs-work/ subdirectory it creates itself.
+
+[data.datasources.canary-fs]
+name       = "canary-fs"
+driver     = "filesystem"
+database   = "/tmp"
+nopassword = true
+
+# ─────────────────────────────────────────────
+# Views — each endpoint returns a TestResult JSON
+# ─────────────────────────────────────────────
+
+[api.views.fs_crud_roundtrip]
+path      = "/canary/fs/crud-roundtrip"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.fs_crud_roundtrip.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/filesystem-tests.ts"
+entrypoint = "fsCrudRoundtrip"
+
+[api.views.fs_chroot_escape]
+path      = "/canary/fs/chroot-escape"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.fs_chroot_escape.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/filesystem-tests.ts"
+entrypoint = "fsChrootEscape"
+
+[api.views.fs_exists_and_stat]
+path      = "/canary/fs/exists-and-stat"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.fs_exists_and_stat.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/filesystem-tests.ts"
+entrypoint = "fsExistsAndStat"
+
+[api.views.fs_find_and_grep]
+path      = "/canary/fs/find-and-grep"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.fs_find_and_grep.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/filesystem-tests.ts"
+entrypoint = "fsFindAndGrep"
+
+[api.views.fs_arg_validation]
+path      = "/canary/fs/arg-validation"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.fs_arg_validation.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/filesystem-tests.ts"
+entrypoint = "fsArgValidation"

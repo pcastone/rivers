@@ -7,5 +7,6 @@ apps          = [
   "canary-nosql",
   "canary-handlers",
   "canary-streams",
+  "canary-filesystem",
   "canary-main"
 ]
