@@ -1466,4 +1466,110 @@ mod tests {
         names.sort();
         assert_eq!(names, vec!["a.txt".to_string(), "b".to_string()]);
     }
+
+    // ── Task 35: error-mapping table ──
+
+    #[tokio::test]
+    async fn error_mapping_not_found() {
+        let (_dir, mut conn) = test_connection();
+        let err = conn
+            .execute(&mkq("readFile", &[("path", QueryValue::String("nope.txt".into()))]))
+            .await
+            .unwrap_err();
+        match err {
+            DriverError::Query(m) => assert!(m.contains("not found"), "msg: {m}"),
+            other => panic!("expected Query(not found), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn error_mapping_absolute_path_rejected() {
+        let (_dir, mut conn) = test_connection();
+        let err = conn
+            .execute(&mkq(
+                "readFile",
+                &[("path", QueryValue::String("/etc/passwd".into()))],
+            ))
+            .await
+            .unwrap_err();
+        match err {
+            DriverError::Query(m) => assert!(
+                m.contains("absolute paths not permitted"),
+                "msg: {m}"
+            ),
+            other => panic!("expected Query(absolute paths not permitted), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn error_mapping_chroot_escape_is_forbidden() {
+        let (dir, mut conn) = test_connection();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        let err = conn
+            .execute(&mkq(
+                "readFile",
+                &[("path", QueryValue::String("../../outside".into()))],
+            ))
+            .await
+            .unwrap_err();
+        // Either Forbidden (canonical escape) or Query (couldn't canonicalize) — both valid per spec §10.
+        assert!(
+            matches!(err, DriverError::Forbidden(_) | DriverError::Query(_)),
+            "expected Forbidden or Query, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn error_mapping_unsupported_encoding() {
+        let (dir, mut conn) = test_connection();
+        std::fs::write(dir.path().join("e.txt"), "x").unwrap();
+        let err = conn
+            .execute(&mkq(
+                "readFile",
+                &[
+                    ("path", QueryValue::String("e.txt".into())),
+                    ("encoding", QueryValue::String("utf-16".into())),
+                ],
+            ))
+            .await
+            .unwrap_err();
+        match err {
+            DriverError::Query(m) => assert!(m.contains("unsupported encoding"), "msg: {m}"),
+            other => panic!("expected Query(unsupported encoding), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn error_mapping_unknown_operation() {
+        let (_dir, mut conn) = test_connection();
+        let err = conn
+            .execute(&mkq(
+                "bogus",
+                &[("path", QueryValue::String(".".into()))],
+            ))
+            .await
+            .unwrap_err();
+        match err {
+            DriverError::Unsupported(m) => {
+                assert!(m.contains("unknown filesystem operation"), "msg: {m}")
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    // ── Task 36: admin_operations() is empty (spec §11) ──
+
+    #[test]
+    fn admin_operations_is_empty() {
+        let dir = TempDir::new().unwrap();
+        let conn = FilesystemConnection {
+            root: FilesystemDriver::resolve_root(dir.path().to_str().unwrap()).unwrap(),
+            max_file_size: DEFAULT_MAX_FILE_SIZE,
+            max_depth: DEFAULT_MAX_DEPTH,
+        };
+        assert!(
+            conn.admin_operations().is_empty(),
+            "filesystem driver must not declare admin operations (spec §11)"
+        );
+    }
 }
