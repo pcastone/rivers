@@ -128,9 +128,10 @@ impl DatabaseDriver for FilesystemDriver {
 
     async fn connect(
         &self,
-        _params: &ConnectionParams,
+        params: &ConnectionParams,
     ) -> Result<Box<dyn Connection>, DriverError> {
-        Err(DriverError::NotImplemented("FilesystemDriver::connect — Task 11".into()))
+        let root = Self::resolve_root(&params.database)?;
+        Ok(Box::new(FilesystemConnection { root }))
     }
 }
 
@@ -285,5 +286,45 @@ mod tests {
             msg.contains("symlink detected") || msg.contains("escapes datasource root"),
             "unexpected error: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn connect_returns_connection_with_resolved_root() {
+        use std::collections::HashMap;
+        let dir = TempDir::new().unwrap();
+        let params = ConnectionParams {
+            host: String::new(),
+            port: 0,
+            database: dir.path().to_str().unwrap().to_string(),
+            username: String::new(),
+            password: String::new(),
+            options: HashMap::new(),
+        };
+        let driver = FilesystemDriver;
+        let conn = driver.connect(&params).await.unwrap();
+        // Dry-probe: we don't yet have execute(), but we should at least compile + connect.
+        drop(conn);
+    }
+
+    #[tokio::test]
+    async fn connect_fails_on_nonexistent_root() {
+        use std::collections::HashMap;
+        let params = ConnectionParams {
+            host: String::new(),
+            port: 0,
+            database: "/does/not/exist/nowhere".into(),
+            username: String::new(),
+            password: String::new(),
+            options: HashMap::new(),
+        };
+        let result = FilesystemDriver.connect(&params).await;
+        assert!(result.is_err());
+        match result {
+            Err(err) => {
+                let msg = format!("{err}");
+                assert!(msg.contains("does not exist") || msg.contains("not accessible"));
+            }
+            Ok(_) => panic!("expected error for nonexistent root"),
+        }
     }
 }
