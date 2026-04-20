@@ -5377,6 +5377,7 @@ dependencies = [
  "async-memcached",
  "async-trait",
  "base64 0.22.1",
+ "chrono",
  "glob",
  "mysql_async",
  "redis",

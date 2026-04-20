@@ -338,11 +338,29 @@ pub(super) extern "C" fn host_datasource_build(
         options: params_obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect(),
     };
 
-    // Build the Query object
+    // Build the Query object — convert JSON values to native QueryValue types
+    // so driver get_string/get_int helpers can match them correctly.
+    // Use with_operation to preserve the exact case of the operation name
+    // (Query::new would lowercase it via infer_operation).
     use rivers_runtime::rivers_driver_sdk::{Query, QueryValue};
-    let mut query = Query::new("", &statement);
+    let mut query = Query::with_operation(&statement, "", &statement);
     for (k, v) in &params_obj {
-        query.parameters.insert(k.clone(), QueryValue::Json(v.clone()));
+        let qv = match v {
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    QueryValue::Integer(i)
+                } else if let Some(f) = n.as_f64() {
+                    QueryValue::Float(f)
+                } else {
+                    QueryValue::Json(v.clone())
+                }
+            }
+            serde_json::Value::String(s) => QueryValue::String(s.clone()),
+            serde_json::Value::Bool(b) => QueryValue::Boolean(*b),
+            serde_json::Value::Null => QueryValue::Null,
+            _ => QueryValue::Json(v.clone()),
+        };
+        query.parameters.insert(k.clone(), qv);
     }
 
     // Isolate cdylib plugin calls — plugins have their own tokio, so they need

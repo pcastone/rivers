@@ -282,7 +282,328 @@ fn inject_ctx_object<'s>(
     // ctx.ddl(datasource, statement) — DDL execution via host callback
     inject_ddl_method(scope, obj);
 
+    // ctx.datasource(name) — typed proxy for direct (e.g. filesystem) datasources
+    inject_datasource_method(scope, obj, ctx);
+
     obj
+}
+
+// ── ctx.datasource() — Direct Datasource Proxy ─────────────────
+
+/// Parse a direct datasource token (format: `direct://filesystem?root=/path`).
+fn parse_direct_token(token: &str) -> Option<(&str, &str)> {
+    // Format: "direct://<driver>?root=<path>"
+    let rest = token.strip_prefix("direct://")?;
+    let (driver, query) = rest.split_once('?')?;
+    let root = query.strip_prefix("root=")?;
+    Some((driver, root))
+}
+
+fn inject_datasource_method<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    ctx_obj: v8::Local<'s, v8::Object>,
+    ctx: &SerializedTaskContext,
+) {
+    // Collect direct datasource entries (filesystem etc.)
+    let direct_entries: Vec<(String, String, String)> = ctx.datasource_tokens
+        .iter()
+        .filter_map(|(name, token)| {
+            parse_direct_token(token).map(|(driver, root)| {
+                (name.clone(), driver.to_string(), root.to_string())
+            })
+        })
+        .collect();
+
+    if direct_entries.is_empty() {
+        // No direct datasources — ctx.datasource not available
+        return;
+    }
+
+    // Serialize the direct datasource registry to JSON and inject into global scope
+    let registry_json = serde_json::to_string(
+        &direct_entries.iter()
+            .map(|(n, d, r)| {
+                (n.clone(), serde_json::json!({"driver": d, "root": r}))
+            })
+            .collect::<serde_json::Map<_, _>>()
+    ).unwrap_or_else(|_| "{}".to_string());
+
+    let setup_src = format!(
+        r#"(function() {{
+            var __rivers_direct_ds = {};
+            __rivers_ctx_datasource = function(name) {{
+                var cfg = __rivers_direct_ds[name];
+                if (!cfg) {{ throw new TypeError("ctx.datasource('" + name + "'): datasource not declared or not direct"); }}
+                var driver = cfg.driver;
+                var root = cfg.root;
+                return __rivers_build_fs_proxy(name, driver, root);
+            }};
+        }})()"#,
+        registry_json
+    );
+
+    let src = v8_str(scope, &setup_src);
+    if let Some(script) = v8::Script::compile(scope, src, None) {
+        script.run(scope);
+    }
+
+    // Inject __rivers_build_fs_proxy (builds per-datasource JS proxy object)
+    let proxy_fn = v8::Function::new(scope, build_fs_proxy_callback).unwrap();
+    let proxy_key = v8_str(scope, "__rivers_build_fs_proxy");
+    let global = scope.get_current_context().global(scope);
+    global.set(scope, proxy_key.into(), proxy_fn.into());
+
+    // Inject __rivers_ds_dispatch (bridges JS proxy operations to host_datasource_build)
+    let dispatch_fn = v8::Function::new(scope, ds_dispatch_callback).unwrap();
+    let dispatch_key = v8_str(scope, "__rivers_ds_dispatch");
+    let global = scope.get_current_context().global(scope);
+    global.set(scope, dispatch_key.into(), dispatch_fn.into());
+
+    // Wire ctx.datasource = __rivers_ctx_datasource
+    let fn_key = v8_str(scope, "__rivers_ctx_datasource");
+    let global = scope.get_current_context().global(scope);
+    if let Some(ds_fn) = global.get(scope, fn_key.into()) {
+        let ds_key = v8_str(scope, "datasource");
+        ctx_obj.set(scope, ds_key.into(), ds_fn);
+    }
+}
+
+/// `__rivers_build_fs_proxy(name, driver, root)` — called from JS to build the proxy object.
+fn build_fs_proxy_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ds_name = args.get(0).to_rust_string_lossy(scope);
+    let driver = args.get(1).to_rust_string_lossy(scope);
+    let root = args.get(2).to_rust_string_lossy(scope);
+
+    // Build a JS proxy object with the filesystem operations.
+    // Each method calls __rivers_ds_dispatch which returns {"rows":[...],"affected_rows":N}.
+    // We reshape the raw response into the shape the JS handler expects:
+    //   readFile  → string (rows[0].content)
+    //   exists    → boolean (rows[0].exists)
+    //   stat      → object (rows[0])
+    //   readDir   → array of {name} objects (all rows)
+    //   find/grep → {results, truncated} (rows[0])
+    //   write ops → void (undefined)
+    let proxy_src = format!(
+        r#"(function(name, driver, root) {{
+            function dispatch(op, params) {{
+                var raw = __rivers_ds_dispatch(name, driver, root, op, JSON.stringify(params || {{}}));
+                // raw is {{rows: [...], affected_rows: N}} from host_datasource_build
+                if (!raw || typeof raw !== 'object') return null;
+                var rows = raw.rows || [];
+                // Reshape per operation
+                if (op === "readFile") {{
+                    return rows.length > 0 ? rows[0].content : null;
+                }} else if (op === "exists") {{
+                    return rows.length > 0 ? !!rows[0].exists : false;
+                }} else if (op === "stat") {{
+                    return rows.length > 0 ? rows[0] : null;
+                }} else if (op === "readDir") {{
+                    return rows;
+                }} else if (op === "find" || op === "grep") {{
+                    return rows.length > 0 ? rows[0] : {{results: [], truncated: false}};
+                }} else {{
+                    // write ops: mkdir, writeFile, delete, rename, copy — return undefined
+                    return undefined;
+                }}
+            }}
+            return {{
+                readFile: function(path, encoding) {{
+                    if (path === undefined) throw new TypeError("path is required");
+                    if (typeof path !== 'string') throw new TypeError("path must be a string");
+                    return dispatch("readFile", {{path: path, encoding: encoding || "utf-8"}});
+                }},
+                writeFile: function(path, content, encoding) {{
+                    if (path === undefined) throw new TypeError("path is required");
+                    if (typeof path !== 'string') throw new TypeError("path must be a string");
+                    return dispatch("writeFile", {{path: path, content: content, encoding: encoding || "utf-8"}});
+                }},
+                deleteFile: function(path) {{
+                    if (path === undefined) throw new TypeError("path is required");
+                    if (typeof path !== 'string') throw new TypeError("path must be a string");
+                    return dispatch("delete", {{path: path}});
+                }},
+                delete: function(path) {{
+                    if (path === undefined) throw new TypeError("path is required");
+                    if (typeof path !== 'string') throw new TypeError("path must be a string");
+                    return dispatch("delete", {{path: path}});
+                }},
+                mkdir: function(path) {{
+                    if (path === undefined) throw new TypeError("path is required");
+                    if (typeof path !== 'string') throw new TypeError("path must be a string");
+                    return dispatch("mkdir", {{path: path}});
+                }},
+                exists: function(path) {{
+                    if (path === undefined) throw new TypeError("path is required");
+                    if (typeof path !== 'string') throw new TypeError("path must be a string");
+                    return dispatch("exists", {{path: path}});
+                }},
+                stat: function(path) {{
+                    if (path === undefined) throw new TypeError("path is required");
+                    if (typeof path !== 'string') throw new TypeError("path must be a string");
+                    return dispatch("stat", {{path: path}});
+                }},
+                rename: function(from_path, to_path) {{
+                    if (from_path === undefined) throw new TypeError("from_path is required");
+                    if (typeof from_path !== 'string') throw new TypeError("from_path must be a string");
+                    return dispatch("rename", {{oldPath: from_path, newPath: to_path}});
+                }},
+                copy: function(from_path, to_path) {{
+                    if (from_path === undefined) throw new TypeError("from_path is required");
+                    if (typeof from_path !== 'string') throw new TypeError("from_path must be a string");
+                    return dispatch("copy", {{src: from_path, dest: to_path}});
+                }},
+                readDir: function(path) {{
+                    if (path === undefined) throw new TypeError("path is required");
+                    if (typeof path !== 'string') throw new TypeError("path must be a string");
+                    return dispatch("readDir", {{path: path}});
+                }},
+                find: function(pattern, max_results) {{
+                    if (pattern === undefined) throw new TypeError("pattern is required");
+                    if (typeof pattern !== 'string') throw new TypeError("pattern must be a string");
+                    if (max_results !== undefined && (typeof max_results !== 'number' || !Number.isInteger(max_results)))
+                        throw new TypeError("max_results must be a integer");
+                    return dispatch("find", {{pattern: pattern, max_results: max_results}});
+                }},
+                grep: function(pattern, path, max_results) {{
+                    if (pattern === undefined) throw new TypeError("pattern is required");
+                    if (typeof pattern !== 'string') throw new TypeError("pattern must be a string");
+                    return dispatch("grep", {{pattern: pattern, path: path, max_results: max_results}});
+                }}
+            }};
+        }})("{}", "{}", "{}")"#,
+        ds_name.replace('"', "\\\""),
+        driver.replace('"', "\\\""),
+        root.replace('"', "\\\""),
+    );
+
+    let src = v8_str(scope, &proxy_src);
+    if let Some(script) = v8::Script::compile(scope, src, None) {
+        if let Some(result) = script.run(scope) {
+            rv.set(result);
+            return;
+        }
+    }
+
+    // Fallback: return empty object on error
+    rv.set(v8::Object::new(scope).into());
+}
+
+/// `__rivers_ds_dispatch(name, driver, root, op, params_json)` — bridge to host_datasource_build.
+fn ds_dispatch_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let _name = args.get(0).to_rust_string_lossy(scope);
+    let driver = args.get(1).to_rust_string_lossy(scope);
+    let root = args.get(2).to_rust_string_lossy(scope);
+    let op = args.get(3).to_rust_string_lossy(scope);
+    let params_json = args.get(4).to_rust_string_lossy(scope);
+
+    let params: serde_json::Value = serde_json::from_str(&params_json)
+        .unwrap_or(serde_json::json!({}));
+
+    let input = serde_json::json!({
+        "driver": driver,
+        "query": op,
+        "database": root,
+        "host": "",
+        "port": 0,
+        "username": "",
+        "params": params,
+    });
+
+    let callbacks = match HOST_CALLBACKS.get() {
+        Some(c) => c,
+        None => {
+            let msg = v8_str(scope, "ctx.datasource: host callbacks not available");
+            let exc = v8::Exception::error(scope, msg);
+            scope.throw_exception(exc);
+            return;
+        }
+    };
+
+    let ds_fn = match callbacks.datasource_build {
+        Some(f) => f,
+        None => {
+            let msg = v8_str(scope, "ctx.datasource: datasource_build callback not registered");
+            let exc = v8::Exception::error(scope, msg);
+            scope.throw_exception(exc);
+            return;
+        }
+    };
+
+    let input_str = input.to_string();
+    let input_bytes = input_str.as_bytes();
+    let mut out_ptr: *mut u8 = std::ptr::null_mut();
+    let mut out_len: usize = 0;
+
+    let ret = (ds_fn)(
+        input_bytes.as_ptr(), input_bytes.len(),
+        &mut out_ptr, &mut out_len,
+    );
+
+    if ret != 0 {
+        // Non-zero means error — try to read error message from output
+        let err_msg = if !out_ptr.is_null() && out_len > 0 {
+            unsafe {
+                let slice = std::slice::from_raw_parts(out_ptr, out_len);
+                let s = String::from_utf8_lossy(slice).to_string();
+                if let Some(callbacks) = HOST_CALLBACKS.get() {
+                    if let Some(free_fn) = callbacks.free_buffer {
+                        (free_fn)(out_ptr, out_len);
+                    }
+                }
+                s
+            }
+        } else {
+            format!("datasource operation '{}' failed (code {})", op, ret)
+        };
+        let msg = v8_str(scope, &err_msg);
+        let exc = v8::Exception::error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    }
+
+    if !out_ptr.is_null() && out_len > 0 {
+        let result_json = unsafe {
+            let slice = std::slice::from_raw_parts(out_ptr, out_len);
+            let s = String::from_utf8_lossy(slice).to_string();
+            if let Some(callbacks) = HOST_CALLBACKS.get() {
+                if let Some(free_fn) = callbacks.free_buffer {
+                    (free_fn)(out_ptr, out_len);
+                }
+            }
+            s
+        };
+
+        // Parse result JSON from host_datasource_build: {"rows":[...],"affected_rows":N}
+        let parsed: serde_json::Value = serde_json::from_str(&result_json)
+            .unwrap_or(serde_json::Value::Null);
+
+        // If it's {"error": ...}, throw
+        if let Some(err) = parsed.get("error").and_then(|e| e.as_str()) {
+            let msg = v8_str(scope, err);
+            let exc = v8::Exception::error(scope, msg);
+            scope.throw_exception(exc);
+            return;
+        }
+
+        // Return raw {rows, affected_rows} — the JS proxy dispatch() reshapes it per operation
+        let json_str = serde_json::to_string(&parsed).unwrap_or_default();
+        let v8_src = v8_str(scope, &json_str);
+        if let Some(parsed_val) = v8::json::parse(scope, v8_src) {
+            rv.set(parsed_val);
+        } else {
+            rv.set(v8::null(scope).into());
+        }
+    } else {
+        rv.set(v8::null(scope).into());
+    }
 }
 
 // ── ctx.store Methods ───────────────────────────────────────────

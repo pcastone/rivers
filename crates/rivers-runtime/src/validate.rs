@@ -55,7 +55,7 @@ pub fn validate_server_config(config: &ServerConfig) -> Result<(), Vec<RiversErr
 }
 
 /// Known view types accepted by the Rivers framework.
-const VALID_VIEW_TYPES: &[&str] = &["Rest", "Websocket", "ServerSentEvents", "MessageConsumer"];
+const VALID_VIEW_TYPES: &[&str] = &["Rest", "Websocket", "ServerSentEvents", "MessageConsumer", "Mcp"];
 
 /// Validate a loaded app config for internal consistency.
 pub fn validate_app_config(config: &AppConfig) -> Result<(), Vec<RiversError>> {
