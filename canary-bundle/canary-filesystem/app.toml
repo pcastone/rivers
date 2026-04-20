@@ -74,3 +74,15 @@ type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/filesystem-tests.ts"
 entrypoint = "fsArgValidation"
+
+[api.views.fs_read_dir]
+path      = "/canary/fs/read-dir"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.fs_read_dir.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/filesystem-tests.ts"
+entrypoint = "fsReadDir"

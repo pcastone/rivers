@@ -235,6 +235,7 @@ test_ep "fs-chroot-escape"   GET  "$BASE/filesystem/canary/fs/chroot-escape"
 test_ep "fs-exists-stat"     GET  "$BASE/filesystem/canary/fs/exists-and-stat"
 test_ep "fs-find-grep"       GET  "$BASE/filesystem/canary/fs/find-and-grep"
 test_ep "fs-arg-validation"  GET  "$BASE/filesystem/canary/fs/arg-validation"
+test_ep "fs-read-dir"        GET  "$BASE/filesystem/canary/fs/read-dir"
 
 # ── V8 Security (last — these are slow/destructive) ──────────────
 

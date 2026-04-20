@@ -211,3 +211,46 @@ function fsArgValidation(ctx) {
 
     ctx.resdata = t.finish();
 }
+
+// ── FS-READ-DIR — readDir returns {name:string}[] objects ──
+
+function fsReadDir(ctx) {
+    var t = new TestResult("FS-READ-DIR", "FILESYSTEM", "rivers-filesystem-driver-spec.md section 6.4");
+    var fs = ctx.datasource("canary-fs");
+    var work = workDir("readdir");
+    cleanup(fs, work);
+    try {
+        fs.mkdir(work);
+        fs.writeFile(work + "/alpha.txt", "a");
+        fs.writeFile(work + "/beta.txt", "b");
+        fs.mkdir(work + "/subdir");
+
+        var entries = fs.readDir(work);
+
+        // Must be an array
+        t.assert("is_array", Array.isArray(entries), "readDir returned: " + typeof entries);
+
+        // Each entry must be an object with a name property
+        t.assert("entries_have_name",
+            entries.every(function(e) { return typeof e === 'object' && typeof e.name === 'string'; }),
+            "entry shape wrong: " + JSON.stringify(entries[0]));
+
+        // Must contain our three entries (order not guaranteed)
+        var names = entries.map(function(e) { return e.name; }).sort();
+        t.assertEquals("entry_count", 3, names.length);
+        t.assertEquals("entry_alpha", "alpha.txt", names[0]);
+        t.assertEquals("entry_beta", "beta.txt", names[1]);
+        t.assertEquals("entry_subdir", "subdir", names[2]);
+
+        // Must not include . or ..
+        t.assert("no_dot_entries",
+            !names.some(function(n) { return n === '.' || n === '..'; }));
+
+    } catch (e) {
+        cleanup(fs, work);
+        ctx.resdata = t.fail(String(e));
+        return;
+    }
+    cleanup(fs, work);
+    ctx.resdata = t.finish();
+}
