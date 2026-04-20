@@ -24,6 +24,18 @@ pub(super) struct KeystoreContext {
     pub(super) keystore: Arc<rivers_keystore_engine::AppKeystore>,
 }
 
+/// Per-task state for a `DatasourceToken::Direct` entry.
+///
+/// The V8 worker keeps driver, resource root, and a lazily-built `Connection`
+/// so typed-proxy operations can dispatch without a pool round-trip. One entry
+/// per datasource name declared on the task.
+pub(super) struct DirectDatasource {
+    pub(super) driver: String,
+    pub(super) root: std::path::PathBuf,
+    pub(super) connection:
+        RefCell<Option<Box<dyn rivers_runtime::rivers_driver_sdk::Connection>>>,
+}
+
 // ── Thread-Local Async Bridge ───────────────────────────────────
 
 thread_local! {
@@ -93,6 +105,12 @@ thread_local! {
 
     /// Human-readable app name for the current task — used for per-app log routing.
     pub(super) static TASK_APP_NAME: RefCell<Option<String>> = RefCell::new(None);
+
+    /// `DatasourceToken::Direct` entries declared by the current task.
+    /// The typed-proxy host fn (`__rivers_direct_dispatch`) reads from this
+    /// map to build/reuse a `Connection` and run operations in-thread.
+    pub(super) static TASK_DIRECT_DATASOURCES:
+        RefCell<HashMap<String, DirectDatasource>> = RefCell::new(HashMap::new());
 }
 
 /// Get the current tokio runtime handle from the thread-local.
@@ -157,6 +175,22 @@ impl TaskLocals {
         TASK_KEYSTORE.with(|ks| {
             *ks.borrow_mut() = keystore_arc.map(|k| KeystoreContext { keystore: k });
         });
+        TASK_DIRECT_DATASOURCES.with(|m| {
+            let mut map = m.borrow_mut();
+            map.clear();
+            for (name, token) in &ctx.datasources {
+                if let DatasourceToken::Direct { driver, root } = token {
+                    map.insert(
+                        name.clone(),
+                        DirectDatasource {
+                            driver: driver.clone(),
+                            root: root.clone(),
+                            connection: RefCell::new(None),
+                        },
+                    );
+                }
+            }
+        });
         TaskLocals
     }
 }
@@ -177,5 +211,60 @@ impl Drop for TaskLocals {
         TASK_LOCKBOX.with(|lb| *lb.borrow_mut() = None);
         TASK_KEYSTORE.with(|ks| *ks.borrow_mut() = None);
         TASK_APP_NAME.with(|n| *n.borrow_mut() = None);
+        TASK_DIRECT_DATASOURCES.with(|m| m.borrow_mut().clear());
+    }
+}
+
+#[cfg(test)]
+mod direct_datasource_tests {
+    use super::*;
+    use crate::process_pool::{Entrypoint, TaskContextBuilder};
+
+    fn task_with_datasources(entries: Vec<(&str, DatasourceToken)>) -> TaskContext {
+        let mut b = TaskContextBuilder::new().entrypoint(Entrypoint {
+            module: "inline".into(),
+            function: "run".into(),
+            language: "javascript".into(),
+        });
+        for (name, token) in entries {
+            b = b.datasource(name.into(), token);
+        }
+        b.build().unwrap()
+    }
+
+    #[test]
+    fn direct_tokens_populate_thread_local() {
+        let ctx = task_with_datasources(vec![
+            (
+                "fs",
+                DatasourceToken::direct("filesystem", std::path::PathBuf::from("/tmp/root")),
+            ),
+            ("db", DatasourceToken::pooled("postgres:db")),
+        ]);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let guard = TaskLocals::set(&ctx, rt.handle().clone());
+
+        TASK_DIRECT_DATASOURCES.with(|m| {
+            let map = m.borrow();
+            assert_eq!(map.len(), 1, "only Direct tokens should populate");
+            let fs = map.get("fs").expect("fs entry");
+            assert_eq!(fs.driver, "filesystem");
+            assert_eq!(fs.root, std::path::PathBuf::from("/tmp/root"));
+            assert!(fs.connection.borrow().is_none(), "connection is lazy");
+        });
+
+        drop(guard);
+
+        TASK_DIRECT_DATASOURCES.with(|m| {
+            assert!(m.borrow().is_empty(), "Drop clears the map");
+        });
+    }
+
+    #[test]
+    fn pooled_only_leaves_map_empty() {
+        let ctx = task_with_datasources(vec![("db", DatasourceToken::pooled("postgres:db"))]);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = TaskLocals::set(&ctx, rt.handle().clone());
+        TASK_DIRECT_DATASOURCES.with(|m| assert!(m.borrow().is_empty()));
     }
 }

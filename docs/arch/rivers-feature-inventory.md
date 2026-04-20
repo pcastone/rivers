@@ -256,6 +256,7 @@ Extracted from all specification documents. Top-level features with granular sub
 - **Memcached** (async-memcached): standard KV operations
 - **EventBus** (internal): publish/subscribe via standard datasource interface
 - **Faker** (synthetic): schema-driven random data generation for testing/prototyping
+- **Filesystem** (std::fs): chroot-sandboxed directory access, eleven typed operations (readFile, readDir, stat, exists, find, grep, writeFile, mkdir, delete, rename, copy), direct I/O in the V8 worker thread (no pool, no IPC), no credentials required. Configurable `max_file_size` and `max_depth` limits. See `rivers-filesystem-driver-spec.md`.
 
 ### 6.2 HTTP Driver (Separate Trait)
 - Separate `HttpDriver` trait — distinct from `DatabaseDriver` and `MessageBrokerDriver`
@@ -297,6 +298,8 @@ Extracted from all specification documents. Top-level features with granular sub
 - `Connection::admin_operations()` — per-driver admin operation denylist
 - `is_ddl_statement()` — SQL DDL detection utility (CREATE/ALTER/DROP/TRUNCATE)
 - `check_admin_guard()` — combined SQL DDL + operation token guard
+- `DatabaseDriver::operations()` → `&[OperationDescriptor]` (default empty) — optional, framework-level opt-in for drivers that want to expose a typed JS method surface. Declaring a non-empty catalog lets the V8 isolate emit a typed proxy on `ctx.datasource("name")` with per-op type-checked arguments, defaults, and direct dispatch. Used today by `filesystem`; open to any future driver. See `OperationDescriptor`, `Param`, `ParamType` in `rivers-driver-sdk`.
+- `DatasourceToken::Direct { driver, root }` — self-contained dispatch token emitted by drivers whose ops don't need a pool. The V8 worker runs the driver's `Connection::execute` synchronously in-thread (no IPC, no pool round trip) via `Rivers.__directDispatch`. Contrasts with `Pooled { pool_id }` (the default for SQL/broker/HTTP drivers).
 
 ### 6.7 Two Driver Contracts
 - **DatabaseDriver**: request/response (query → result)

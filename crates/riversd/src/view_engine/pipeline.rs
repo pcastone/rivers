@@ -192,6 +192,28 @@ pub async fn execute_rest_view(
                     if config.allow_outbound_http {
                         builder = builder.http(crate::process_pool::HttpToken);
                     }
+                    // Wire direct datasources (e.g. filesystem) into the task context.
+                    // The executor holds all namespaced params; we scan for entries
+                    // belonging to this app's namespace that use a direct driver.
+                    if let Some(exec) = executor {
+                        let ns_prefix = format!("{}:", ctx.dv_namespace);
+                        for (key, params) in exec.datasource_params().iter() {
+                            // Match namespaced keys like "canary-filesystem:canary-fs"
+                            let ds_name = if let Some(n) = key.strip_prefix(&ns_prefix) {
+                                n
+                            } else {
+                                continue;
+                            };
+                            let driver = params.options.get("driver").map(|s| s.as_str()).unwrap_or("");
+                            if driver == "filesystem" {
+                                let token = rivers_runtime::process_pool::DatasourceToken::direct(
+                                    "filesystem",
+                                    std::path::PathBuf::from(&params.database),
+                                );
+                                builder = builder.datasource(ds_name.to_string(), token);
+                            }
+                        }
+                    }
                     let builder = crate::task_enrichment::enrich(builder, &ctx.app_id);
                     let task_ctx = builder
                         .build()

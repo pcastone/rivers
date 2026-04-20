@@ -52,7 +52,7 @@ fn builder_with_entrypoint_succeeds() {
 fn builder_with_capabilities() {
     let ctx = TaskContextBuilder::new()
         .entrypoint(test_entrypoint())
-        .datasource("db".to_string(), DatasourceToken("tok_db".to_string()))
+        .datasource("db".to_string(), DatasourceToken::pooled("tok_db"))
         .dataview("orders".to_string(), DataViewToken("tok_orders".to_string()))
         .env_var("API_KEY".to_string(), "secret".to_string())
         .build()
@@ -69,7 +69,7 @@ fn builder_with_capabilities() {
 fn validate_capabilities_passes_when_all_available() {
     let ctx = TaskContextBuilder::new()
         .entrypoint(test_entrypoint())
-        .datasource("db".to_string(), DatasourceToken("tok".to_string()))
+        .datasource("db".to_string(), DatasourceToken::pooled("tok"))
         .dataview("orders".to_string(), DataViewToken("tok".to_string()))
         .build()
         .unwrap();
@@ -84,7 +84,7 @@ fn validate_capabilities_passes_when_all_available() {
 fn validate_capabilities_fails_on_missing_datasource() {
     let ctx = TaskContextBuilder::new()
         .entrypoint(test_entrypoint())
-        .datasource("missing_db".to_string(), DatasourceToken("tok".to_string()))
+        .datasource("missing_db".to_string(), DatasourceToken::pooled("tok"))
         .build()
         .unwrap();
 

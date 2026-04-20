@@ -1,0 +1,7 @@
+appName       = "canary-filesystem"
+description   = "Canary Fleet — FILESYSTEM profile: chroot-sandboxed direct I/O driver"
+version       = "1.0.0"
+type          = "app-service"
+appId         = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee06"
+entryPoint    = "filesystem"
+source        = "https://github.com/pcastone/rivers/canary-fleet"

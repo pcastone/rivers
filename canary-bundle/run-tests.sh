@@ -226,6 +226,18 @@ echo ""
 echo "  ── STREAMS Profile ──"
 test_ep "poll-data"          GET  "$BASE/streams/canary/stream/poll/data"
 
+# ── FILESYSTEM Profile (direct-dispatch driver, chroot sandboxed /tmp) ──
+
+echo ""
+echo "  ── FILESYSTEM Profile ──"
+test_ep "fs-crud-roundtrip"  GET  "$BASE/filesystem/canary/fs/crud-roundtrip"
+test_ep "fs-chroot-escape"   GET  "$BASE/filesystem/canary/fs/chroot-escape"
+test_ep "fs-exists-stat"     GET  "$BASE/filesystem/canary/fs/exists-and-stat"
+test_ep "fs-find-grep"       GET  "$BASE/filesystem/canary/fs/find-and-grep"
+test_ep "fs-arg-validation"  GET  "$BASE/filesystem/canary/fs/arg-validation"
+test_ep "fs-read-dir"        GET  "$BASE/filesystem/canary/fs/read-dir"
+test_ep "fs-concurrent-writes" GET  "$BASE/filesystem/canary/fs/concurrent-writes"
+
 # ── V8 Security (last — these are slow/destructive) ──────────────
 
 echo ""

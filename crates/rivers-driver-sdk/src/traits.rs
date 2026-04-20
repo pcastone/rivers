@@ -592,4 +592,37 @@ pub trait DatabaseDriver: Send + Sync {
     fn supports_introspection(&self) -> bool {
         false
     }
+
+    /// Returns the typed operation catalog for V8 proxy codegen.
+    ///
+    /// Default: empty — driver uses standard `Query`/`execute()` dispatch.
+    /// Override to declare typed methods available on `ctx.datasource("name")`.
+    fn operations(&self) -> &[crate::OperationDescriptor] {
+        &[]
+    }
+}
+
+#[cfg(test)]
+mod operations_default_tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct NoOpsDriver;
+
+    #[async_trait]
+    impl DatabaseDriver for NoOpsDriver {
+        fn name(&self) -> &str { "noops" }
+        async fn connect(
+            &self,
+            _params: &ConnectionParams,
+        ) -> Result<Box<dyn Connection>, DriverError> {
+            unimplemented!("test-only driver")
+        }
+    }
+
+    #[test]
+    fn default_operations_returns_empty_slice() {
+        let driver = NoOpsDriver;
+        assert_eq!(driver.operations().len(), 0);
+    }
 }
