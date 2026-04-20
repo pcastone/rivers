@@ -1,8 +1,8 @@
 # Rivers Application Development — Build Spec
 
-**Rivers v0.53.0**
+**Rivers v0.54.1**
 
-## Getting Started (v0.53.0)
+## Getting Started (v0.54.1)
 
 The recommended way to create a new bundle is `riverpackage init`:
 
@@ -144,7 +144,7 @@ required   = true
 | `nopassword` | no | Set `true` for credential-free drivers (faker, sqlite) |
 | `required` | yes | If true, startup fails when unavailable |
 
-MUST: Use `nopassword = true` for faker, sqlite — omit `lockbox` entirely.
+MUST: Use `nopassword = true` for faker, sqlite, filesystem — omit `lockbox` entirely.
 MUST NOT: Include `lockbox` when `nopassword = true`.
 
 ### Keystores (Application Encryption Keys)
@@ -190,6 +190,7 @@ MUST: `appId` matches the app-service's `manifest.toml` appId exactly.
 | `postgres` | `postgres` | lockbox | Relational data |
 | `mysql` | `mysql` | lockbox | Relational data |
 | `sqlite` | `sqlite` | `nopassword = true` | Embedded relational |
+| `filesystem` | `filesystem` | `nopassword = true` | Chroot-sandboxed file I/O |
 | `redis` | `redis` | lockbox | Cache, sessions, KV, streams |
 | `http` | `http` | optional | External API proxy |
 | `mongodb` | `mongodb` | lockbox | Document store |
@@ -345,6 +346,58 @@ timeout_ms = 60000
 ```
 
 Commands are pinned by SHA-256 hash. Input is validated against JSON Schema. Processes run as a restricted OS user.
+
+### Filesystem Datasource (Chroot File I/O)
+
+For reading and writing files under a sandboxed root directory:
+
+```toml
+# resources.toml
+[[datasources]]
+name       = "fs"
+driver     = "filesystem"
+x-type     = "filesystem"
+nopassword = true
+required   = true
+
+# app.toml
+[data.datasources.fs]
+name       = "fs"
+driver     = "filesystem"
+database   = "/var/rivers/uploads"
+nopassword = true
+```
+
+`database` is the chroot root — must be an absolute path to an existing directory. No credentials required.
+
+The filesystem driver uses a **typed proxy** — `ctx.datasource("fs")` returns a typed object, not a query builder:
+
+```typescript
+const fs = ctx.datasource("fs");
+
+// Reads
+fs.readFile("config.json")              // → string (utf-8)
+fs.readFile("photo.jpg", "base64")      // → base64 string
+fs.readDir("uploads")                   // → [{name: "file.txt"}, …]
+fs.stat("report.pdf")                   // → {size, mtime, atime, ctime, isFile, isDirectory}
+fs.exists("data.csv")                   // → boolean (escape returns false, not error)
+fs.find("**/*.log", 100)                // → {results: ["path/a.log", …], truncated: bool}
+fs.grep("ERROR", "logs")               // → {results: [{file, line, content}], truncated: bool}
+
+// Writes
+fs.writeFile("out.txt", "hello")        // utf-8, overwrites, creates parent dirs
+fs.writeFile("img.png", base64, "base64")
+fs.mkdir("a/b/c")                       // recursive, idempotent
+fs.delete("old.txt")                    // file or recursive dir; missing → no-op
+fs.rename("old.txt", "new.txt")
+fs.copy("src.txt", "dst.txt")           // file or recursive dir
+```
+
+MUST: `database` must be an absolute path that exists at startup.
+MUST NOT: Pass absolute paths in operation arguments — rejected with `Query` error.
+MUST NOT: Declare `lockbox` — use `nopassword = true`.
+NOTE: Symlinks inside the root are rejected at operation time (`Forbidden` error). `exists()` on an escaping path returns `false` silently.
+NOTE: Optional config keys in `app.toml`: `max_file_size` (bytes, default 50 MB) and `max_depth` (default 100).
 
 ---
 
