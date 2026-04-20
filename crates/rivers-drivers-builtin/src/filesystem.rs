@@ -117,9 +117,10 @@ fn reject_symlinks_within(
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false);
         if is_symlink {
+            let display = current.strip_prefix(root).unwrap_or(&current);
             return Err(DriverError::Forbidden(format!(
                 "symlink detected in path: {}",
-                current.display()
+                display.display()
             )));
         }
     }
