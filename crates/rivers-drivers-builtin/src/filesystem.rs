@@ -477,6 +477,12 @@ mod ops {
             let mut truncated = false;
             if let Ok(paths) = glob::glob(&full_pattern) {
                 for entry in paths.flatten() {
+                    // Skip any path that passes through a symlink — glob follows
+                    // symlinks during ** traversal, which could expose paths
+                    // outside the chroot root.
+                    if reject_symlinks_within(&root, &entry).is_err() {
+                        continue;
+                    }
                     if let Ok(rel) = entry.strip_prefix(&root) {
                         if out.len() >= max {
                             truncated = true;
@@ -580,22 +586,31 @@ mod ops {
             }
             let Ok(entries) = std::fs::read_dir(&p) else { continue };
             for entry in entries.flatten() {
+                // Use file_type() — does NOT follow symlinks — so symlinked
+                // directories are never descended and symlinked files are
+                // never read. This prevents chroot escape via grep.
+                let Ok(ft) = entry.file_type() else { continue };
+                if ft.is_symlink() {
+                    continue;
+                }
                 let path = entry.path();
-                if path.is_dir() {
+                if ft.is_dir() {
                     stack.push((path, depth + 1));
-                } else if let Ok(bytes) = std::fs::read(&path) {
-                    let head_len = bytes.len().min(8192);
-                    if bytes[..head_len].contains(&0) {
-                        continue;
-                    }
-                    let Ok(text) = String::from_utf8(bytes) else { continue };
-                    let rel = path
-                        .strip_prefix(root)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .to_string();
-                    if !visit(rel, text) {
-                        return;
+                } else if ft.is_file() {
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        let head_len = bytes.len().min(8192);
+                        if bytes[..head_len].contains(&0) {
+                            continue;
+                        }
+                        let Ok(text) = String::from_utf8(bytes) else { continue };
+                        let rel = path
+                            .strip_prefix(root)
+                            .unwrap_or(&path)
+                            .to_string_lossy()
+                            .to_string();
+                        if !visit(rel, text) {
+                            return;
+                        }
                     }
                 }
             }
@@ -784,9 +799,15 @@ mod ops {
         std::fs::create_dir_all(dst)?;
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;
+            // Use file_type() — does NOT follow symlinks — so symlinked
+            // subdirs/files are never traversed or copied out of the chroot.
+            let ft = entry.file_type()?;
+            if ft.is_symlink() {
+                continue;
+            }
             let from = entry.path();
             let to = dst.join(entry.file_name());
-            if from.is_dir() {
+            if ft.is_dir() {
                 copy_dir_recursive(&from, &to)?;
             } else {
                 std::fs::copy(&from, &to)?;
@@ -1555,6 +1576,99 @@ mod tests {
                 assert!(m.contains("unknown filesystem operation"), "msg: {m}")
             }
             other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    // ── Security: symlink-follow prevention in copy, grep, find ──
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn copy_does_not_follow_symlinked_subdir() {
+        use std::os::unix::fs::symlink;
+        let (dir, mut conn) = test_connection();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret-data").unwrap();
+
+        // Create src/ inside root, with a symlink pointing outside root
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        symlink(outside.path(), dir.path().join("src/leak")).unwrap();
+
+        let q = mkq(
+            "copy",
+            &[
+                ("src", QueryValue::String("src".into())),
+                ("dest", QueryValue::String("dst".into())),
+            ],
+        );
+        conn.execute(&q).await.unwrap();
+        // The symlink itself must not have been followed — secret.txt must not appear under dst
+        assert!(
+            !dir.path().join("dst/leak/secret.txt").exists(),
+            "copy must not follow symlinked subdirectory out of chroot"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn grep_does_not_follow_symlinked_subdir() {
+        use std::os::unix::fs::symlink;
+        let (dir, mut conn) = test_connection();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "SECRET_VALUE").unwrap();
+
+        // Create a symlink inside root pointing to the outside dir
+        symlink(outside.path(), dir.path().join("leak")).unwrap();
+
+        let q = mkq(
+            "grep",
+            &[
+                ("pattern", QueryValue::String("SECRET_VALUE".into())),
+                ("path", QueryValue::String(".".into())),
+            ],
+        );
+        let r = conn.execute(&q).await.unwrap();
+        let row = &r.rows[0];
+        match row.get("results") {
+            Some(QueryValue::Array(v)) => assert_eq!(
+                v.len(),
+                0,
+                "grep must not follow symlinked directory out of chroot"
+            ),
+            other => panic!("expected Array, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn find_does_not_follow_symlinked_subdir() {
+        use std::os::unix::fs::symlink;
+        let (dir, mut conn) = test_connection();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("target.txt"), "").unwrap();
+
+        symlink(outside.path(), dir.path().join("leak")).unwrap();
+
+        let q = mkq(
+            "find",
+            &[("pattern", QueryValue::String("*.txt".into()))],
+        );
+        let r = conn.execute(&q).await.unwrap();
+        let row = &r.rows[0];
+        match row.get("results") {
+            Some(QueryValue::Array(v)) => {
+                let paths: Vec<String> = v
+                    .iter()
+                    .filter_map(|x| match x {
+                        QueryValue::String(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(
+                    !paths.iter().any(|p| p.contains("leak")),
+                    "find must not traverse symlinked directory out of chroot: {paths:?}"
+                );
+            }
+            other => panic!("expected Array, got {other:?}"),
         }
     }
 
