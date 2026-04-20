@@ -254,3 +254,48 @@ function fsReadDir(ctx) {
     cleanup(fs, work);
     ctx.resdata = t.finish();
 }
+
+// ── FS-CONCURRENT-WRITES — N independent write+read sequences in one handler ──
+// V8 is single-threaded per isolate — "concurrent" here means multiple
+// independent write sequences with no shared state between them.
+// Validates the driver's lock-free model (each op is path-independent).
+
+function fsConcurrentWrites(ctx) {
+    var t = new TestResult("FS-CONCURRENT-WRITES", "FILESYSTEM", "rivers-filesystem-driver-spec.md section 5.4");
+    var fs = ctx.datasource("canary-fs");
+    var N = 8;
+    var dirs = [];
+    for (var i = 0; i < N; i++) {
+        dirs.push(workDir("concurrent-" + i));
+    }
+    dirs.forEach(function(d) { cleanup(fs, d); });
+
+    try {
+        // Write phase — each dir is independent, no shared state
+        for (var i = 0; i < N; i++) {
+            fs.mkdir(dirs[i]);
+            fs.writeFile(dirs[i] + "/data.txt", "payload-" + i);
+        }
+
+        // Read-back phase — each file must contain exactly its own payload
+        var allCorrect = true;
+        for (var i = 0; i < N; i++) {
+            var got = fs.readFile(dirs[i] + "/data.txt");
+            if (got !== "payload-" + i) {
+                allCorrect = false;
+                t.assert("payload_" + i, false,
+                    "expected 'payload-" + i + "', got '" + got + "'");
+            } else {
+                t.assert("payload_" + i, true);
+            }
+        }
+        t.assert("all_payloads_correct", allCorrect);
+
+    } catch (e) {
+        dirs.forEach(function(d) { cleanup(fs, d); });
+        ctx.resdata = t.fail(String(e));
+        return;
+    }
+    dirs.forEach(function(d) { cleanup(fs, d); });
+    ctx.resdata = t.finish();
+}

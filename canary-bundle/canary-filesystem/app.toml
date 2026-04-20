@@ -86,3 +86,15 @@ type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/filesystem-tests.ts"
 entrypoint = "fsReadDir"
+
+[api.views.fs_concurrent_writes]
+path      = "/canary/fs/concurrent-writes"
+method    = "GET"
+view_type = "Rest"
+auth      = "session"
+
+[api.views.fs_concurrent_writes.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/filesystem-tests.ts"
+entrypoint = "fsConcurrentWrites"

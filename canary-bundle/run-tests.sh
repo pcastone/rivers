@@ -236,6 +236,7 @@ test_ep "fs-exists-stat"     GET  "$BASE/filesystem/canary/fs/exists-and-stat"
 test_ep "fs-find-grep"       GET  "$BASE/filesystem/canary/fs/find-and-grep"
 test_ep "fs-arg-validation"  GET  "$BASE/filesystem/canary/fs/arg-validation"
 test_ep "fs-read-dir"        GET  "$BASE/filesystem/canary/fs/read-dir"
+test_ep "fs-concurrent-writes" GET  "$BASE/filesystem/canary/fs/concurrent-writes"
 
 # ── V8 Security (last — these are slow/destructive) ──────────────
 
