@@ -206,14 +206,11 @@ proxy.readFile = function(path, encoding) {
     if (typeof path !== 'string') throw new TypeError("readFile: 'path' must be a string");
     encoding = encoding ?? "utf-8";
     if (typeof encoding !== 'string') throw new TypeError("readFile: 'encoding' must be a string");
-    return __rivers_datasource_dispatch("project_files", {
-        operation: "readFile",
-        parameters: { path, encoding }
-    });
+    return Rivers.__directDispatch("project_files", "readFile", { path, encoding });
 };
 ```
 
-`__rivers_datasource_dispatch` is the existing host function binding that resolves the datasource token and calls the driver. The typed proxy adds type checking and ergonomic method signatures on top of the same dispatch path.
+`Rivers.__directDispatch` is the host function binding for direct-dispatch datasources. The typed proxy adds type checking and ergonomic method signatures on top.
 
 ### 3.3 ParamType Validation Rules
 
