@@ -180,7 +180,14 @@ impl Connection for FilesystemConnection {
     }
 
     async fn ping(&mut self) -> Result<(), DriverError> {
-        Err(DriverError::NotImplemented("FilesystemConnection::ping — Task 11".into()))
+        if self.root.is_dir() {
+            Ok(())
+        } else {
+            Err(DriverError::Connection(format!(
+                "root directory no longer accessible: {}",
+                self.root.display()
+            )))
+        }
     }
 
     fn driver_name(&self) -> &str {
@@ -1685,6 +1692,25 @@ mod tests {
         assert!(
             conn.admin_operations().is_empty(),
             "filesystem driver must not declare admin operations (spec §11)"
+        );
+    }
+
+    #[tokio::test]
+    async fn ping_ok_when_root_exists() {
+        let (_dir, mut conn) = test_connection();
+        conn.ping().await.expect("ping should succeed when root exists");
+    }
+
+    #[tokio::test]
+    async fn ping_fails_when_root_removed() {
+        let (dir, mut conn) = test_connection();
+        let path = dir.path().to_path_buf();
+        drop(dir); // TempDir destructor removes the directory
+        assert!(!path.exists());
+        let err = conn.ping().await.unwrap_err();
+        assert!(
+            format!("{err}").contains("root directory"),
+            "expected 'root directory' in error, got: {err}"
         );
     }
 }
