@@ -142,10 +142,37 @@ impl DatabaseDriver for FilesystemDriver {
         params: &ConnectionParams,
     ) -> Result<Box<dyn Connection>, DriverError> {
         let root = Self::resolve_root(&params.database)?;
+
+        let max_file_size = params
+            .options
+            .get("max_file_size")
+            .and_then(|v| {
+                v.parse::<u64>().map_err(|_| {
+                    tracing::warn!(
+                        "filesystem: invalid max_file_size {:?}, using default {}",
+                        v, DEFAULT_MAX_FILE_SIZE
+                    );
+                }).ok()
+            })
+            .unwrap_or(DEFAULT_MAX_FILE_SIZE);
+
+        let max_depth = params
+            .options
+            .get("max_depth")
+            .and_then(|v| {
+                v.parse::<usize>().map_err(|_| {
+                    tracing::warn!(
+                        "filesystem: invalid max_depth {:?}, using default {}",
+                        v, DEFAULT_MAX_DEPTH
+                    );
+                }).ok()
+            })
+            .unwrap_or(DEFAULT_MAX_DEPTH);
+
         Ok(Box::new(FilesystemConnection {
             root,
-            max_file_size: DEFAULT_MAX_FILE_SIZE,
-            max_depth: DEFAULT_MAX_DEPTH,
+            max_file_size,
+            max_depth,
         }))
     }
 }
@@ -1712,5 +1739,98 @@ mod tests {
             format!("{err}").contains("root directory"),
             "expected 'root directory' in error, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn connect_custom_max_file_size_enforced() {
+        use std::collections::HashMap;
+        let dir = TempDir::new().unwrap();
+        let mut options = HashMap::new();
+        options.insert("max_file_size".to_string(), "10".to_string());
+        let params = ConnectionParams {
+            host: String::new(),
+            port: 0,
+            database: dir.path().to_str().unwrap().to_string(),
+            username: String::new(),
+            password: String::new(),
+            options,
+        };
+        let mut conn_box = FilesystemDriver.connect(&params).await.unwrap();
+        let mut parameters = std::collections::HashMap::new();
+        parameters.insert("path".to_string(), QueryValue::String("big.txt".into()));
+        parameters.insert("content".to_string(), QueryValue::String("a".repeat(100)));
+        let q = Query {
+            operation: "writeFile".into(),
+            target: String::new(),
+            parameters,
+            statement: String::new(),
+        };
+        let err = conn_box.execute(&q).await.unwrap_err();
+        assert!(format!("{err}").contains("exceeds max_file_size"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn connect_custom_max_depth_enforced() {
+        use std::collections::HashMap;
+        let dir = TempDir::new().unwrap();
+        // Create a file at depth 3
+        std::fs::create_dir_all(dir.path().join("a/b/c")).unwrap();
+        std::fs::write(dir.path().join("a/b/c/deep.txt"), "needle").unwrap();
+        std::fs::write(dir.path().join("shallow.txt"), "needle").unwrap();
+
+        let mut options = HashMap::new();
+        options.insert("max_depth".to_string(), "1".to_string());
+        let params = ConnectionParams {
+            host: String::new(),
+            port: 0,
+            database: dir.path().to_str().unwrap().to_string(),
+            username: String::new(),
+            password: String::new(),
+            options,
+        };
+        let mut conn_box = FilesystemDriver.connect(&params).await.unwrap();
+        let mut parameters = std::collections::HashMap::new();
+        parameters.insert("pattern".to_string(), QueryValue::String("needle".into()));
+        parameters.insert("path".to_string(), QueryValue::String(".".into()));
+        let q = Query {
+            operation: "grep".into(),
+            target: String::new(),
+            parameters,
+            statement: String::new(),
+        };
+        let r = conn_box.execute(&q).await.unwrap();
+        let row = &r.rows[0];
+        match row.get("results") {
+            Some(QueryValue::Array(v)) => {
+                let files: Vec<String> = v.iter().filter_map(|x| match x {
+                    QueryValue::Json(j) => j["file"].as_str().map(String::from),
+                    _ => None,
+                }).collect();
+                assert!(files.iter().any(|f| f == "shallow.txt"), "shallow.txt missing");
+                assert!(!files.iter().any(|f| f.contains("deep.txt")),
+                    "deep file beyond max_depth=1 should not appear: {files:?}");
+            }
+            other => panic!("expected Array, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_invalid_option_falls_back_to_default() {
+        use std::collections::HashMap;
+        let dir = TempDir::new().unwrap();
+        let mut options = HashMap::new();
+        options.insert("max_file_size".to_string(), "not_a_number".to_string());
+        options.insert("max_depth".to_string(), "also_bad".to_string());
+        let params = ConnectionParams {
+            host: String::new(),
+            port: 0,
+            database: dir.path().to_str().unwrap().to_string(),
+            username: String::new(),
+            password: String::new(),
+            options,
+        };
+        // Must not error — falls back to defaults silently
+        let conn = FilesystemDriver.connect(&params).await;
+        assert!(conn.is_ok(), "connect should succeed with invalid options, got: {:?}", conn.err());
     }
 }
