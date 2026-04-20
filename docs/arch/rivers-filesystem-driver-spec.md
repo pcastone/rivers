@@ -463,7 +463,7 @@ Following Node.js `fs` module conventions:
 | Operation | Returns |
 |---|---|
 | `readFile` | `string` — UTF-8 decoded content, or base64-encoded string for `encoding: "base64"` |
-| `readDir` | `string[]` — filenames only (not full paths), same as Node `fs.readdirSync()` |
+| `readDir` | `{ name: string }[]` — one object per entry, filename only (not full path) |
 | `stat` | `{ size: number, mtime: string, atime: string, ctime: string, isFile: boolean, isDirectory: boolean, mode: number }` |
 | `exists` | `boolean` |
 | `find` | `{ results: string[], truncated: boolean }` — relative paths from root |
@@ -493,7 +493,14 @@ For `writeFile` with `encoding: "base64"`, the `content` parameter is expected t
 
 ### 6.4 readDir
 
-Flat listing only. Returns filenames, not full paths. Does not include `.` or `..`. Entries are not sorted — order is filesystem-dependent, same as Node.
+Flat listing only. Returns one `{ name: string }` object per entry — filename only, not a full
+path. Does not include `.` or `..`. Entries are not sorted — order is filesystem-dependent.
+
+```javascript
+const entries = fs.readDir("src/");
+// entries: [{ name: "main.rs" }, { name: "lib.rs" }]
+const names = entries.map(e => e.name);
+```
 
 For recursive directory traversal, use `find("*")`. All returned paths use forward slashes on all platforms.
 
