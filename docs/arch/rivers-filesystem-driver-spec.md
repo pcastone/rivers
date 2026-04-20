@@ -464,7 +464,7 @@ Following Node.js `fs` module conventions:
 |---|---|
 | `readFile` | `string` — UTF-8 decoded content, or base64-encoded string for `encoding: "base64"` |
 | `readDir` | `{ name: string }[]` — one object per entry, filename only (not full path) |
-| `stat` | `{ size: number, mtime: string, atime: string, ctime: string, isFile: boolean, isDirectory: boolean, mode: number }` |
+| `stat` | `{ size: number, mtime: string, atime: string, ctime: string, isFile: boolean, isDirectory: boolean, mode: number }` — timestamps are RFC 3339 UTC strings e.g. `"2026-04-20T12:00:00+00:00"` |
 | `exists` | `boolean` |
 | `find` | `{ results: string[], truncated: boolean }` — relative paths from root |
 | `grep` | `{ results: { file: string, line: number, content: string }[], truncated: boolean }` |

@@ -24,6 +24,7 @@ redis = { workspace = true }
 base64 = { workspace = true }
 glob = { workspace = true }
 regex = { workspace = true }
+chrono = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 async-memcached = { workspace = true }

@@ -305,6 +305,7 @@ pub static FILESYSTEM_OPERATIONS: &[OperationDescriptor] = &[
 mod ops {
     use super::*;
     use base64::Engine;
+    use chrono::{DateTime, Utc};
     use rivers_driver_sdk::{Query, QueryResult, QueryValue};
     use std::collections::HashMap;
 
@@ -418,12 +419,9 @@ mod ops {
         .map_err(|e| DriverError::Internal(format!("join: {e}")))?
         .map_err(map_io_error)?;
 
-        fn epoch_secs(t: std::time::SystemTime) -> String {
-            let secs = t
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            secs.to_string()
+        fn to_iso8601(t: std::time::SystemTime) -> String {
+            let dt: DateTime<Utc> = t.into();
+            dt.to_rfc3339()
         }
 
         #[cfg(unix)]
@@ -438,15 +436,15 @@ mod ops {
         row.insert("size".into(), QueryValue::Integer(md.len() as i64));
         row.insert(
             "mtime".into(),
-            QueryValue::String(epoch_secs(md.modified().unwrap_or(std::time::UNIX_EPOCH))),
+            QueryValue::String(to_iso8601(md.modified().unwrap_or(std::time::UNIX_EPOCH))),
         );
         row.insert(
             "atime".into(),
-            QueryValue::String(epoch_secs(md.accessed().unwrap_or(std::time::UNIX_EPOCH))),
+            QueryValue::String(to_iso8601(md.accessed().unwrap_or(std::time::UNIX_EPOCH))),
         );
         row.insert(
             "ctime".into(),
-            QueryValue::String(epoch_secs(md.created().unwrap_or(std::time::UNIX_EPOCH))),
+            QueryValue::String(to_iso8601(md.created().unwrap_or(std::time::UNIX_EPOCH))),
         );
         row.insert("isFile".into(), QueryValue::Boolean(md.is_file()));
         row.insert("isDirectory".into(), QueryValue::Boolean(md.is_dir()));
@@ -1811,6 +1809,25 @@ mod tests {
                     "deep file beyond max_depth=1 should not appear: {files:?}");
             }
             other => panic!("expected Array, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stat_timestamps_are_iso8601() {
+        let (dir, mut conn) = test_connection();
+        std::fs::write(dir.path().join("ts.txt"), b"x").unwrap();
+        let q = mkq("stat", &[("path", QueryValue::String("ts.txt".into()))]);
+        let result = conn.execute(&q).await.unwrap();
+        let row = &result.rows[0];
+        for key in ["mtime", "atime", "ctime"] {
+            match row.get(key) {
+                Some(QueryValue::String(s)) => {
+                    chrono::DateTime::parse_from_rfc3339(s).unwrap_or_else(|e| {
+                        panic!("{key} value {:?} is not valid RFC 3339: {e}", s)
+                    });
+                }
+                other => panic!("{key}: expected String, got {other:?}"),
+            }
         }
     }
 
