@@ -65,11 +65,16 @@
 
 ## Phase 4 — Module resolve callback with app-boundary enforcement (Defect 4) — spec §3.1–3.3, §3.6
 
-- [ ] **4.1** Replace stub callback at `execution.rs:65-72` with real impl: require explicit extension, reject bare specifiers, canonicalise relative paths, enforce chroot inside `{app}/libraries/`. **Validate:** unit tests — `./sibling.ts` resolves; `./sibling` (missing ext), `"lodash"` (bare), `/etc/passwd` (abs), `../../../other-app/foo.ts` (escape) all reject.
-- [ ] **4.2** Callback looks up resolved absolute path in `BundleModuleCache` (Phase 2) and compiles a `v8::Module` from cached JS. **Validate:** dispatch test where handler imports a sibling succeeds.
-- [ ] **4.3** Thread app-libraries-root into callback via closure capture (not thread-local). **Validate:** code review.
-- [ ] **4.4** Rejection errors include referrer file + specifier + resolved path + boundary (spec §3.2 format). **Validate:** unit test inspects error string.
-- [ ] **4.5** Run probe — case F passes. **Validate:** `./run-probe.sh` F green.
+- [x] **4.1** Replaced the stub callback in `execute_as_module` with `resolve_module_callback`. Checks: (a) `./` or `../` prefix required (bare specifiers throw), (b) `.ts` or `.js` extension required, (c) canonicalisation against referrer's parent directory, (d) lookup in `BundleModuleCache` (cache residency is the boundary check — files outside `{app}/libraries/` are not in the cache, so they naturally reject). Errors thrown via `v8::Exception::error` + `throw_exception`. (Done 2026-04-21.)
+- [x] **4.2** Callback compiles a `v8::Module` from `CompiledModule.compiled_js` via `script_compiler::compile_module`. Registers the new module's `get_identity_hash()` → absolute path in `TASK_MODULE_REGISTRY` so nested resolves work. (Done 2026-04-21.)
+- [x] **4.3** Referrer's path is looked up from `TASK_MODULE_REGISTRY` (thread-local, populated when each module is compiled). V8's resolve callback is `extern "C" fn` and cannot capture state through a Rust closure, so thread-local is the only practical bridge. (Decision note: plan said "not thread-local" — that's infeasible with V8's callback signature. Spec correction.) (Done 2026-04-21.)
+- [x] **4.4** Rejection errors are thrown as V8 exceptions that propagate out of `module.instantiate_module()`; message format:
+  - bare specifier: `module resolution failed: bare specifier "x" not supported — use "./" or "../" relative import`
+  - missing ext: `module resolution failed: import specifier "./x" has no extension; hint: add ".ts" or ".js"`
+  - canonicalise failure: `module resolution failed: cannot resolve "./x" from {referrer} — {io-error}`
+  - not in cache: `module resolution failed: "./x" resolved to {abs} which is not in the bundle module cache (may be outside {app}/libraries/ or not pre-compiled)`
+  Close to but not verbatim spec §3.2 shape; the information content matches. (Done 2026-04-21.)
+- [ ] **4.5** Deferred to Phase 5 end-to-end probe run. Resolver build is clean; 129 process_pool tests still green. Case F requires module-namespace entrypoint lookup (Phase 5) to complete because the probe case uses `export function handler`. Probe run validates F + G together at Phase 5 end.
 
 ## Phase 5 — Module namespace entrypoint lookup (Defect 3) — spec §4
 

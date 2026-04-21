@@ -61,15 +61,20 @@ fn execute_as_module(
         TaskError::HandlerError(format!("module compilation failed: {msg}"))
     })?;
 
-    // Instantiate with a resolve callback that rejects imports (V1 -- no multi-module)
-    let instantiate_result = module.instantiate_module(
-        tc,
-        |_context, _specifier, _import_attributes, _referrer| {
-            // V1: reject all imports -- single-module only
-            // V2: implement module resolution from libraries/
-            None
-        },
-    );
+    // Register the root module's identity_hash → path so the V8 resolve
+    // callback (spec §3.6) can discover the referrer's path during nested
+    // resolves. The callback is an extern "C" fn and cannot capture state
+    // through a closure, so this registry is the bridge.
+    let root_path = std::path::PathBuf::from(module_name)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from(module_name));
+    let root_id = module.get_identity_hash().get();
+    super::task_locals::TASK_MODULE_REGISTRY.with(|reg| {
+        reg.borrow_mut().insert(root_id, root_path);
+    });
+
+    // Resolve callback — spec §3.1–3.6. Closed over only through thread-locals.
+    let instantiate_result = module.instantiate_module(tc, resolve_module_callback);
 
     if instantiate_result != Some(true) {
         let msg = tc
@@ -94,6 +99,127 @@ fn execute_as_module(
     tc.perform_microtask_checkpoint();
 
     Ok(())
+}
+
+/// V8 module resolve callback — spec §3.1–3.6.
+///
+/// Rules:
+/// - Specifier MUST start with `./` or `../` (no bare specifiers, no absolute)
+/// - Specifier MUST carry an explicit `.ts` or `.js` extension
+/// - Resolved path MUST exist in the bundle module cache
+///   (cache residency is the implicit chroot — the cache only contains files
+///    under each app's `libraries/` tree, so boundary is enforced for free)
+/// - Throws a V8 Error if any rule fails; V8 propagates it out of
+///   `instantiate_module` as the caught exception
+fn resolve_module_callback<'s>(
+    context: v8::Local<'s, v8::Context>,
+    specifier: v8::Local<'s, v8::String>,
+    _import_attributes: v8::Local<'s, v8::FixedArray>,
+    referrer: v8::Local<'s, v8::Module>,
+) -> Option<v8::Local<'s, v8::Module>> {
+    // SAFETY: V8 invokes this callback within a live isolate+context; we wrap
+    // that in a HandleScope via CallbackScope so we can manipulate V8 values.
+    let scope = &mut unsafe { v8::CallbackScope::new(context) };
+
+    let spec = specifier.to_rust_string_lossy(scope);
+
+    let throw_resolve_error = |scope: &mut v8::HandleScope<'s>, msg: String|
+        -> Option<v8::Local<'s, v8::Module>>
+    {
+        let err_str = v8::String::new(scope, &msg)?;
+        let err = v8::Exception::error(scope, err_str);
+        scope.throw_exception(err);
+        None
+    };
+
+    // Spec §3.2: bare specifiers rejected (no node_modules resolution).
+    if !(spec.starts_with("./") || spec.starts_with("../")) {
+        return throw_resolve_error(
+            scope,
+            format!(
+                "module resolution failed: bare specifier \"{spec}\" not supported — use \"./\" or \"../\" relative import"
+            ),
+        );
+    }
+
+    // Spec §3.1: explicit extension required.
+    if !(spec.ends_with(".ts") || spec.ends_with(".js")) {
+        return throw_resolve_error(
+            scope,
+            format!(
+                "module resolution failed: import specifier \"{spec}\" has no extension; hint: add \".ts\" or \".js\""
+            ),
+        );
+    }
+
+    // Find the referrer's path via its identity hash in the module registry.
+    let referrer_id = referrer.get_identity_hash().get();
+    let referrer_path = super::task_locals::TASK_MODULE_REGISTRY.with(|reg| {
+        reg.borrow().get(&referrer_id).cloned()
+    });
+    let Some(referrer_path) = referrer_path else {
+        return throw_resolve_error(
+            scope,
+            format!("module resolution failed: cannot identify referrer of \"{spec}\"; module registry missing entry"),
+        );
+    };
+
+    // Resolve against referrer's parent directory and canonicalise.
+    let parent = referrer_path.parent().unwrap_or_else(|| std::path::Path::new("/"));
+    let joined = parent.join(&spec);
+    let abs = match joined.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            return throw_resolve_error(
+                scope,
+                format!(
+                    "module resolution failed: cannot resolve \"{spec}\" from {} — {e}",
+                    referrer_path.display()
+                ),
+            );
+        }
+    };
+
+    // Spec §3.4: look up in the bundle module cache. Cache residency is the
+    // boundary check: if it's in the cache, it was walked from {app}/libraries/
+    // at bundle load. Anything outside the boundary is not in the cache.
+    let cache = super::super::module_cache::get_module_cache()?;
+    let Some(entry) = cache.get(&abs) else {
+        return throw_resolve_error(
+            scope,
+            format!(
+                "module resolution failed: \"{spec}\" resolved to {} which is not in the bundle module cache (may be outside {{app}}/libraries/ or not pre-compiled)",
+                abs.display()
+            ),
+        );
+    };
+
+    // Compile a v8::Module from the cached JS.
+    let source_str = v8::String::new(scope, &entry.compiled_js)?;
+    let name_str = v8::String::new(scope, &abs.to_string_lossy())?;
+    let origin = v8::ScriptOrigin::new(
+        scope,
+        name_str.into(),
+        0,
+        0,
+        false,
+        -1,
+        None,
+        false,
+        false,
+        true,
+        None,
+    );
+    let mut v8_source = v8::script_compiler::Source::new(source_str, Some(&origin));
+    let resolved_module = v8::script_compiler::compile_module(scope, &mut v8_source)?;
+
+    // Register this module's identity_hash → path so nested resolves work.
+    let id = resolved_module.get_identity_hash().get();
+    super::task_locals::TASK_MODULE_REGISTRY.with(|reg| {
+        reg.borrow_mut().insert(id, abs);
+    });
+
+    Some(resolved_module)
 }
 
 /// Detect if source uses ES module syntax.

@@ -93,6 +93,15 @@ thread_local! {
 
     /// Human-readable app name for the current task — used for per-app log routing.
     pub(super) static TASK_APP_NAME: RefCell<Option<String>> = RefCell::new(None);
+
+    /// Module-identity-hash → absolute source path for the modules compiled
+    /// during the current task's execute_as_module call (spec §3.6 V8
+    /// resolve callback). Needed because V8's resolve callback signature is
+    /// `extern "C" fn` — can't capture state via closure. The callback reads
+    /// the referrer's identity hash, looks up its path here, resolves the
+    /// specifier relative to that path's parent, and finds the target in
+    /// `BundleModuleCache`.
+    pub(crate) static TASK_MODULE_REGISTRY: RefCell<HashMap<i32, std::path::PathBuf>> = RefCell::new(HashMap::new());
 }
 
 /// Get the current tokio runtime handle from the thread-local.
@@ -177,5 +186,6 @@ impl Drop for TaskLocals {
         TASK_LOCKBOX.with(|lb| *lb.borrow_mut() = None);
         TASK_KEYSTORE.with(|ks| *ks.borrow_mut() = None);
         TASK_APP_NAME.with(|n| *n.borrow_mut() = None);
+        TASK_MODULE_REGISTRY.with(|r| r.borrow_mut().clear());
     }
 }

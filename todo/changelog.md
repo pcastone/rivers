@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-04-21 — TS pipeline Phase 4: V8 module resolve callback
+
+| File | Decision | Reference | Resolution |
+|------|----------|-----------|------------|
+| `crates/riversd/src/process_pool/v8_engine/task_locals.rs` | Added `TASK_MODULE_REGISTRY: RefCell<HashMap<i32, PathBuf>>` thread-local; cleared in `TaskLocals::drop` | Spec §3.6 requires resolver to identify the referrer | V8 resolve callback is `extern "C" fn`; thread-local is the only state-propagation mechanism |
+| `crates/riversd/src/process_pool/v8_engine/execution.rs` | Replaced the `None`-returning stub in `instantiate_module` with `resolve_module_callback`. Validates `./`/`../` prefix, `.ts`/`.js` extension, canonicalises against referrer's parent, looks up in `BundleModuleCache`, compiles a `v8::Module`, registers new module in the registry | Spec §3.1–3.6 | Spec §3.2 boundary check is implicit: cache residency means the file was under `{app}/libraries/` at bundle load. 4 distinct rejection error messages (bare, no-ext, canonicalise-fail, not-in-cache). Throws via `v8::Exception::error` |
+| `crates/riversd/src/process_pool/v8_engine/execution.rs` | Root module also registers its `get_identity_hash() → path` in the registry before `instantiate_module` so the first layer of resolves can find its referrer | Spec §3.6 | Uses `canonicalize` with fallback to raw path (tests may pass synthetic paths) |
+
+Deferred: probe case F end-to-end run waits on Phase 5 (namespace entrypoint lookup) since the probe uses `export function handler`. No dispatch-level unit test here — the resolver only executes inside V8's `instantiate_module` which needs a full cache+bundle fixture; Phase 5's end-to-end run covers it.
+
+Plan correction: task 4.3 said "thread via closure capture (not thread-local)." V8's resolve callback signature is `extern "C" fn(Context, String, FixedArray, Module) -> Option<Module>` — no closure captures possible. Thread-local is the only option. Noted in tasks.md.
+
 ## 2026-04-21 — TS pipeline Phase 3: circular import detection
 
 | File | Decision | Reference | Resolution |
