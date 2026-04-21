@@ -125,22 +125,10 @@ Spec uses specific multi-line error formats in §2.5, §3.1, §3.2. Implementati
 
 Tasks:
 
-- [ ] **G5.1** §2.5 `.tsx` rejection — change from `"JSX/TSX is not supported in Rivers v1: {filename}"` to `"JSX/TSX is not supported in Rivers v1: {app}/{path}"`. Requires passing app-name through the compile path (currently only filename is known at compile time). Needs context plumbing or path parsing heuristic.
-- [ ] **G5.2** §3.1 missing-extension error — expand to multi-line with referrer:
-  ```
-  module resolution failed: import specifier "{spec}" has no extension
-    in {referrer_path}
-    hint: use "{spec}.ts" or "{spec}.js"
-  ```
-- [ ] **G5.3** §3.2 boundary-violation error — rephrase from "not in the bundle module cache" to spec format:
-  ```
-  module resolution failed: "{spec}" resolves outside app boundary
-    in {referrer_path}
-    resolved to: {abs_path}
-    boundary: {app}/libraries/
-  ```
-  Note: this requires knowing the `{app}/libraries/` root at callback time — add to `TASK_MODULE_REGISTRY` alongside the path map.
-- [ ] **G5.4** Update the 5 corresponding unit tests (`compile_typescript_rejects_tsx` + resolve-callback tests if any) to match new format strings.
+- [x] **G5.1** `.tsx` rejection now uses spec §2.5's `{app}/{path}` form when a `libraries/` ancestor is detected. New helper `shorten_app_path` walks path components backward; falls back to raw filename for inline/test paths. New test `compile_typescript_rejects_tsx_with_app_short_path` verifies the short form. (Done 2026-04-21.)
+- [x] **G5.2** Missing-extension error in `resolve_module_callback` expanded to spec §3.1 multi-line format with `in {referrer}` and `hint: use "{spec}.ts" or "{spec}.js"` lines. (Done 2026-04-21.)
+- [x] **G5.3** Not-in-cache error expanded to spec §3.2 format: `resolves outside app boundary` + `in {referrer}` + `resolved to:` + `boundary:`. New `boundary_from_referrer` helper walks up path components to find the nearest `libraries/` ancestor — that's the spec's `{app}/libraries/` boundary. Falls back to no-boundary-line if no `libraries/` ancestor found. (Done 2026-04-21.)
+- [x] **G5.4** Existing `compile_typescript_rejects_tsx` test updated with clearer intent comment; new short-path test added. No resolver-callback tests existed (V8 callback runs inside a live isolate; unit testing is indirect via dispatch). 141/141 `process_pool` lib tests still green; 19/19 `compile_typescript` integration tests green. (Done 2026-04-21.)
 
 **Validate:** existing unit tests pass with updated assertions; no behaviour change, only message change.
 
@@ -150,7 +138,7 @@ Tasks:
 
 Per G0.1 decision. If option (a) — spec changes to match Rivers' `ErrorResponse` convention — this work is a spec edit only, covered by G8.5. If option (b) — response envelope changes — it's a bigger migration:
 
-- [ ] **G6.1** Only applicable if G0.1 = option (b): rename response fields `message` → `error`, `details` → `debug`. Changes every error-producing site in Rivers; requires version-bump + API-change migration doc + client compatibility check.
+- [x] **G6.1** Not applicable — G0.1 = option (a). Envelope alignment was handled entirely by the G8.4 spec edit (spec §5.3 now documents the existing `{code, message, trace_id, details.stack}` shape). Zero code change. (Resolved 2026-04-21.)
 
 **Validate:** all error responses migrate; existing clients documented.
 
@@ -168,8 +156,8 @@ Currently: parser target = ES2022, codegen target = default (ESNext). Spec inten
 
 Tasks:
 
-- [ ] **G7.1** Set `Config::target(EsVersion::Es2022)` on the Emitter's `cfg` field. Check rusty/swc API exact name — `CodegenConfig::target` or similar.
-- [ ] **G7.2** Add a unit test emitting an ES2023+ feature (e.g., `Array.prototype.findLast`) and assert the output uses ES2022-compatible syntax.
+- [x] **G7.1** Set `Config::with_target(EsVersion::Es2022)` on the Emitter in `v8_config.rs`. Documents ES2022 as the compilation target floor. **Scope note:** the codegen `target` flag influences emission decisions (reserved-word handling, some formatting); it does NOT semantically downlevel ES2023+ AST nodes. True downleveling requires a `swc_ecma_transforms_compat::es2022` transform pass inserted between `typescript()` and `fixer()` — not wired in this phase because V8 v130 natively supports ES2023 features (findLast, hashbangs, etc.) so the gap is theoretical. (Done 2026-04-21.)
+- [x] **G7.2** Added `compile_typescript_preserves_es2022_class_fields` — verifies canonical ES2022 syntax (class fields) emits as-is when target is set to Es2022. Full downlevel-an-ES2023+-feature test deferred with the lowering itself. (Done 2026-04-21.)
 
 **Validate:** test green; existing tests unaffected (current TS corpus is ES2022 or below).
 

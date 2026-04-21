@@ -112,6 +112,21 @@ fn execute_as_module(
     Ok(())
 }
 
+/// Walk upward from a referrer path to find the nearest ancestor directory
+/// named `libraries` — that's the app's chroot boundary per spec §3.2.
+///
+/// Returns `None` if no `libraries/` ancestor exists (e.g., inline test
+/// handlers or unusual bundle layouts). Callers should fall back gracefully.
+fn boundary_from_referrer(referrer: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut cursor = referrer.parent()?;
+    loop {
+        if cursor.file_name().and_then(|n| n.to_str()) == Some("libraries") {
+            return Some(cursor.to_path_buf());
+        }
+        cursor = cursor.parent()?;
+    }
+}
+
 /// V8 module resolve callback — spec §3.1–3.6.
 ///
 /// Rules:
@@ -134,6 +149,13 @@ fn resolve_module_callback<'s>(
 
     let spec = specifier.to_rust_string_lossy(scope);
 
+    // Find the referrer's path first — needed by every error message below
+    // (spec §3.1 / §3.2 multi-line format includes an `in {referrer}` line).
+    let referrer_id = referrer.get_identity_hash().get();
+    let referrer_path = super::task_locals::TASK_MODULE_REGISTRY.with(|reg| {
+        reg.borrow().get(&referrer_id).cloned()
+    });
+
     let throw_resolve_error = |scope: &mut v8::HandleScope<'s>, msg: String|
         -> Option<v8::Local<'s, v8::Module>>
     {
@@ -143,31 +165,34 @@ fn resolve_module_callback<'s>(
         None
     };
 
+    let referrer_line = match referrer_path.as_deref() {
+        Some(p) => format!("\n  in {}", p.display()),
+        None => String::new(),
+    };
+
     // Spec §3.2: bare specifiers rejected (no node_modules resolution).
     if !(spec.starts_with("./") || spec.starts_with("../")) {
         return throw_resolve_error(
             scope,
             format!(
-                "module resolution failed: bare specifier \"{spec}\" not supported — use \"./\" or \"../\" relative import"
+                "module resolution failed: bare specifier \"{spec}\" not supported{referrer_line}\n  hint: use \"./\" or \"../\" relative import"
             ),
         );
     }
 
-    // Spec §3.1: explicit extension required.
+    // Spec §3.1: explicit extension required. Multi-line format:
+    //   module resolution failed: import specifier "./X" has no extension
+    //     in {app}/libraries/handlers/orders.ts
+    //     hint: use "./X.ts" or "./X.js"
     if !(spec.ends_with(".ts") || spec.ends_with(".js")) {
         return throw_resolve_error(
             scope,
             format!(
-                "module resolution failed: import specifier \"{spec}\" has no extension; hint: add \".ts\" or \".js\""
+                "module resolution failed: import specifier \"{spec}\" has no extension{referrer_line}\n  hint: use \"{spec}.ts\" or \"{spec}.js\""
             ),
         );
     }
 
-    // Find the referrer's path via its identity hash in the module registry.
-    let referrer_id = referrer.get_identity_hash().get();
-    let referrer_path = super::task_locals::TASK_MODULE_REGISTRY.with(|reg| {
-        reg.borrow().get(&referrer_id).cloned()
-    });
     let Some(referrer_path) = referrer_path else {
         return throw_resolve_error(
             scope,
@@ -184,22 +209,30 @@ fn resolve_module_callback<'s>(
             return throw_resolve_error(
                 scope,
                 format!(
-                    "module resolution failed: cannot resolve \"{spec}\" from {} — {e}",
+                    "module resolution failed: cannot resolve \"{spec}\"\n  in {}\n  reason: {e}",
                     referrer_path.display()
                 ),
             );
         }
     };
 
-    // Spec §3.4: look up in the bundle module cache. Cache residency is the
-    // boundary check: if it's in the cache, it was walked from {app}/libraries/
-    // at bundle load. Anything outside the boundary is not in the cache.
+    // Spec §3.4: look up in the bundle module cache. Cache residency IS the
+    // boundary check. Error format matches spec §3.2:
+    //   module resolution failed: "{spec}" resolves outside app boundary
+    //     in {referrer}
+    //     resolved to: {abs}
+    //     boundary: {app}/libraries/
     let cache = super::super::module_cache::get_module_cache()?;
     let Some(entry) = cache.get(&abs) else {
+        let boundary = boundary_from_referrer(&referrer_path);
+        let boundary_line = boundary
+            .map(|p| format!("\n  boundary: {}", p.display()))
+            .unwrap_or_default();
         return throw_resolve_error(
             scope,
             format!(
-                "module resolution failed: \"{spec}\" resolved to {} which is not in the bundle module cache (may be outside {{app}}/libraries/ or not pre-compiled)",
+                "module resolution failed: \"{spec}\" resolves outside app boundary\n  in {}\n  resolved to: {}{boundary_line}",
+                referrer_path.display(),
                 abs.display()
             ),
         );

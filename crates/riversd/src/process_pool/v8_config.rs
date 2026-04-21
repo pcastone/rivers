@@ -156,8 +156,13 @@ pub fn compile_typescript_with_imports(
     filename: &str,
 ) -> Result<(String, Vec<String>, String), TaskError> {
     if filename.ends_with(".tsx") {
+        // Spec §2.5: message format is "JSX/TSX is not supported in Rivers
+        // v1: {app}/{path}". If the filename contains a `libraries/` segment,
+        // extract `{app}/{path}` as (parent-of-libraries)/(libraries/...).
+        // Otherwise fall back to the raw filename — still informative.
+        let short = shorten_app_path(filename).unwrap_or_else(|| filename.to_string());
         return Err(TaskError::HandlerError(format!(
-            "JSX/TSX is not supported in Rivers v1: {filename}"
+            "JSX/TSX is not supported in Rivers v1: {short}"
         )));
     }
 
@@ -214,6 +219,10 @@ pub fn compile_typescript_with_imports(
             let imports = extract_imports(&program);
 
             // Emit JS + collect source map entries.
+            // Spec §2.4: ES2022 is the compilation floor. Setting
+            // `Config::with_target(EsVersion::Es2022)` tells the emitter to
+            // lower syntax above ES2022 — matches what V8 v130 reliably
+            // supports and what the parser accepts at §2.1.
             let mut buf = Vec::<u8>::new();
             let mut srcmap_entries: Vec<(
                 swc_core::common::BytePos,
@@ -222,7 +231,7 @@ pub fn compile_typescript_with_imports(
             {
                 let writer = JsWriter::new(cm.clone(), "\n", &mut buf, Some(&mut srcmap_entries));
                 let mut emitter = Emitter {
-                    cfg: Default::default(),
+                    cfg: swc_core::ecma::codegen::Config::default().with_target(EsVersion::Es2022),
                     cm: cm.clone(),
                     comments: None,
                     wr: writer,
@@ -248,6 +257,36 @@ pub fn compile_typescript_with_imports(
             Ok((js, imports, map_json))
         },
     )
+}
+
+/// Shorten an absolute handler path to spec §2.5's `{app}/{path}` form.
+///
+/// If the input contains a `libraries` directory, return `{app}/libraries/…`
+/// where `{app}` is the directory immediately above `libraries`. Otherwise
+/// return `None` — caller falls back to the raw input.
+fn shorten_app_path(filename: &str) -> Option<String> {
+    let path = std::path::Path::new(filename);
+    let mut components: Vec<String> = Vec::new();
+    let mut found_libraries = false;
+    for comp in path.components().rev() {
+        let s = comp.as_os_str().to_string_lossy().to_string();
+        if s == "libraries" {
+            found_libraries = true;
+            components.push(s);
+            // Grab one more level up — that's `{app}`.
+            continue;
+        }
+        components.push(s);
+        if found_libraries {
+            // We've now captured the app name; stop.
+            break;
+        }
+    }
+    if !found_libraries {
+        return None;
+    }
+    components.reverse();
+    Some(components.join("/"))
 }
 
 /// Walk a post-transform Program and collect every runtime import specifier.

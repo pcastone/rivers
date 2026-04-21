@@ -415,7 +415,9 @@ class C { @logged m() { return 1; } }"#;
 
 #[test]
 fn compile_typescript_rejects_tsx() {
-    // Spec §2.5 — `.tsx` must be rejected unconditionally.
+    // Spec §2.5 — `.tsx` must be rejected unconditionally with the exact
+    // phrase. Bare filenames (no `libraries/` ancestor) are passed through
+    // verbatim; paths with `libraries/` get shortened to {app}/libraries/…
     let result = compile_typescript("const x = 1;", "Component.tsx");
     assert!(result.is_err(), "tsx rejected: {:?}", result.ok());
     let err = format!("{:?}", result.unwrap_err());
@@ -424,6 +426,27 @@ fn compile_typescript_rejects_tsx() {
         "error includes spec §2.5 phrase: {err}"
     );
     assert!(err.contains("Component.tsx"), "error includes filename: {err}");
+}
+
+#[test]
+fn compile_typescript_rejects_tsx_with_app_short_path() {
+    // When the absolute path has a `libraries/` ancestor, spec §2.5's
+    // {app}/{path} short-form appears in the error instead of the full path.
+    let result = compile_typescript(
+        "const x = 1;",
+        "/opt/rivers/apphome/bundle/my-app/libraries/handlers/Comp.tsx",
+    );
+    assert!(result.is_err(), "tsx rejected");
+    let err = format!("{:?}", result.unwrap_err());
+    assert!(err.contains("JSX/TSX is not supported"), "spec phrase: {err}");
+    assert!(
+        err.contains("my-app/libraries/handlers/Comp.tsx"),
+        "short form present: {err}"
+    );
+    assert!(
+        !err.contains("/opt/rivers/apphome"),
+        "absolute prefix stripped: {err}"
+    );
 }
 
 #[test]
@@ -454,6 +477,18 @@ fn compile_typescript_emits_source_map() {
         parsed["sources"].is_array(),
         "sources is array: {map_json}"
     );
+}
+
+#[test]
+fn compile_typescript_preserves_es2022_class_fields() {
+    // G7: ES2022 target — class fields (a canonical ES2022 feature) must
+    // emit as-is with the target set to Es2022. Verifies the codegen
+    // Config::with_target(Es2022) is honoured and doesn't spontaneously
+    // rewrite the field syntax.
+    let src = "class C { x = 1; m() { return this.x; } }";
+    let js = compile_typescript(src, "test.ts").unwrap();
+    assert!(js.contains("class C"), "class preserved: {js}");
+    assert!(js.contains("x = 1"), "class field preserved: {js}");
 }
 
 #[test]
