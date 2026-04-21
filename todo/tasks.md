@@ -87,12 +87,14 @@
 
 ## Phase 6 — Source maps + stack trace remapping — spec §5
 
-- [ ] **6.1** Enable swc source-map emission in Phase 1's compile path; store string in `CompiledModule.source_map`. **Validate:** cache entries have non-empty maps.
-- [ ] **6.2** Register `SetPrepareStackTraceCallback` at isolate acquisition in `execution.rs:acquire_isolate` path. **Validate:** callback fires when a handler throws.
-- [ ] **6.3** Implement callback: for each `CallSite`, extract `scriptName/line/column`, look up source map in `BundleModuleCache`, run swc source-map consumer to remap. **Validate:** unit test with known `.ts → .js` remaps line 47 (compiled) → line 32 (source).
-- [ ] **6.4** Wire remapped stacks into `execute_js_task` error path: write to per-app log via `AppLogRouter` with `trace_id`. **Validate:** integration test — handler throws; `log/apps/<app>.log` contains remapped trace.
-- [ ] **6.5** Debug mode only (`debug = true` in app config): include remapped trace in error response envelope under `debug.stack` (spec §5.3 JSON shape). Non-debug omits stack. **Validate:** two integration tests, debug-on and debug-off.
-- [ ] **6.6** Close `processpool-runtime-spec-v2 Open Question #5` — cross-ref note in both specs.
+- [x] **6.1** `compile_typescript_with_imports` now returns `(js, imports, source_map_json)`. Manual `Emitter` + `JsWriter` with `Some(&mut srcmap_entries)` collects byte-pos/line-col pairs; `cm.build_source_map(&entries, None, DefaultSourceMapGenConfig)` + `to_writer(Vec<u8>)` produces the v3 JSON. `CompiledModule.source_map` is populated for every `.ts` file at bundle load. Added `swc_sourcemap = "10"` dep (matches transitive version). New test `compile_typescript_emits_source_map` verifies v3 structure. 17/17 compile_typescript tests green; 135/135 process_pool suite green. (Done 2026-04-21.)
+- [ ] **6.2** Deferred. `PrepareStackTraceCallback` is an `extern "C" fn(Context, Value, Array)` in rusty_v8 with platform-specific ABI. Registration is ~20 LOC; the meat is the callback body.
+- [ ] **6.3** Deferred. Callback body needs to (a) extract `scriptName/line/column` from each `v8::CallSite`, (b) look up the script's source map in `get_module_cache()`, (c) use `swc_sourcemap::SourceMap::lookup_token` to remap, (d) build a result `v8::Array` of remapped frames. Self-contained but delicate V8 interop; ~80 LOC.
+- [ ] **6.4** Deferred. Requires `AppLogRouter` integration to route remapped traces into `log/apps/<app>.log` with trace_id correlation. Orthogonal to the callback itself.
+- [ ] **6.5** Deferred. Debug-mode envelope rendering — small once 6.3 lands.
+- [ ] **6.6** Deferred. Documentation update closes when 6.2–6.5 land.
+
+**Phase 6 partial-completion note:** source maps are now generated and stored with every compiled module — the data is ready for consumption. The remapping callback + log routing is a self-contained follow-on task that doesn't block Phase 10 canary extension or Phase 11 cleanup. A future session can pick up 6.2–6.5 with all dependencies in place.
 
 ## Phase 7 — ctx.transaction() (Defect 5) — spec §6
 

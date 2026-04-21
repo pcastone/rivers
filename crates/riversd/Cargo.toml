@@ -68,6 +68,9 @@ swc_core = { version = "64", features = [
     "common",
     "common_sourcemap",
 ] }
+# Source map serialization + consumer (spec §5). Version pinned to match
+# swc_core's transitive dep to avoid duplicate crate instances.
+swc_sourcemap = "10"
 
 # Optional: static engine deps (included with "static-engines" feature)
 v8 = { workspace = true, optional = true }

@@ -434,6 +434,29 @@ fn compile_typescript_reports_syntax_error() {
 }
 
 #[test]
+fn compile_typescript_emits_source_map() {
+    // Spec §5.1 — source maps are generated unconditionally.
+    use riversd::process_pool::compile_typescript_with_imports;
+    let src = "function handler(ctx: any): void {\n  var x: number = 42;\n  ctx.resdata = x;\n}";
+    let (js, _imports, map_json) =
+        compile_typescript_with_imports(src, "handlers/orders.ts").unwrap();
+    assert!(js.contains("function handler"), "js present: {js}");
+    assert!(!map_json.is_empty(), "source map emitted");
+    // v3 source maps are JSON objects with a `"version":3` and a `"mappings"` key.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&map_json).expect("map is valid JSON");
+    assert_eq!(parsed["version"], 3, "v3 source map: {map_json}");
+    assert!(
+        parsed.get("mappings").is_some(),
+        "has mappings field: {map_json}"
+    );
+    assert!(
+        parsed["sources"].is_array(),
+        "sources is array: {map_json}"
+    );
+}
+
+#[test]
 fn compile_typescript_passes_through_valid_javascript() {
     // Plain JS (ES5 subset) must survive the swc pass unchanged in semantics.
     let src = "function onRequest(ctx) { return { ok: true }; }";

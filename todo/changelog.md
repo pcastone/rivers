@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-04-21 — TS pipeline Phase 6 (partial): source map generation
+
+| File | Decision | Reference | Resolution |
+|------|----------|-----------|------------|
+| `crates/riversd/Cargo.toml` | Added `swc_sourcemap = "10"` direct dep | Spec §5.1 unconditional generation | Version pinned to match swc_core's transitive dep to avoid duplicate crate instances |
+| `crates/riversd/src/process_pool/v8_config.rs` | Replaced `to_code_default` with manual `Emitter` + `JsWriter` that collects `(BytePos, LineCol)` entries; `build_source_map` + `to_writer` produces v3 JSON | Spec §5.1 | Return signature changed from `(String, Vec<String>)` to `(String, Vec<String>, String)` where last is the source map JSON |
+| `crates/riversd/src/process_pool/module_cache.rs` | Destructuring updated to capture `source_map` from the compile return; stored in `CompiledModule.source_map` for every `.ts` file | Spec §3.4 cache shape | Field previously stored `""` — now always populated with real v3 JSON |
+| `crates/riversd/tests/process_pool_tests.rs` | Added `compile_typescript_emits_source_map` — verifies output is valid v3 JSON with `version: 3`, `mappings`, `sources` array | Spec §5.1 test coverage | 17/17 compile_typescript tests green |
+
+Phase 6 partially complete: **data path is done** (source maps generated and stored at bundle load). Remapping callback (task 6.2), log routing (6.4), and debug envelope (6.5) are deferred as a self-contained follow-on task that does not block Phase 10 or 11. The prerequisite data (v3 source maps in BundleModuleCache) is in place for any future session to pick up.
+
 ## 2026-04-21 — TS pipeline Phase 7: ctx.transaction() with executor integration
 
 | File | Decision | Reference | Resolution |

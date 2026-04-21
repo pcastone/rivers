@@ -93,7 +93,7 @@ pub fn compile_app_modules(
                     ))
                 })?;
                 let filename = abs.to_string_lossy().to_string();
-                let (compiled_js, imports) =
+                let (compiled_js, imports, source_map) =
                     compile_typescript_with_imports(&source, &filename).map_err(|e| {
                         RiversError::Config(format!(
                             "TypeScript compile error in app '{app_name}', file {filename}: {e:?}"
@@ -104,7 +104,7 @@ pub fn compile_app_modules(
                     CompiledModule {
                         source_path: abs,
                         compiled_js,
-                        source_map: String::new(),
+                        source_map,
                         imports,
                     },
                 );

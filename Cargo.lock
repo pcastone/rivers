@@ -5967,6 +5967,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "swc_core",
+ "swc_sourcemap",
  "tempfile",
  "thiserror 2.0.18",
  "time",
