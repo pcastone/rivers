@@ -29,6 +29,36 @@ required = false
 default  = 10
 
 # ─────────────────────────────────────────────
+# Datasources — TRANSACTIONS-TS profile
+# These reference the pg / sqlite_cross datasources declared in
+# resources.toml. The ping DataViews below do not require any schema
+# setup — `SELECT 1` is legal against an empty database.
+# ─────────────────────────────────────────────
+
+[data.datasources.pg]
+name       = "pg"
+driver     = "postgres"
+nopassword = true
+
+[data.datasources.sqlite_cross]
+name       = "sqlite_cross"
+driver     = "sqlite"
+nopassword = true
+
+[data.datasources.sqlite_cross.config]
+path = "data/canary-txn.db"
+
+[data.dataviews.txn_pg_ping]
+name          = "txn_pg_ping"
+datasource    = "pg"
+query         = "SELECT 1 AS one"
+
+[data.dataviews.txn_sqlite_ping]
+name          = "txn_sqlite_ping"
+datasource    = "sqlite_cross"
+query         = "SELECT 1 AS one"
+
+# ─────────────────────────────────────────────
 # Views — ctx.* API surface tests
 # ─────────────────────────────────────────────
 
@@ -638,3 +668,77 @@ type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/txn-tests.ts"
 entrypoint = "txnSurfaceExists"
+
+# ─────────────────────────
+# End-to-end transaction tests — spec §6 RT-TXN-* IDs.
+# These require a reachable PG datasource; the canary `PG_AVAIL`
+# gate in run-tests.sh skips them cleanly on no-infra deploys.
+# ─────────────────────────
+
+[api.views.txn_commit]
+path      = "/canary/rt/txn/commit"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_commit.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/txn-commit.ts"
+entrypoint = "txnCommit"
+
+# ─────────────────────────
+
+[api.views.txn_rollback]
+path      = "/canary/rt/txn/rollback"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_rollback.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/txn-rollback.ts"
+entrypoint = "txnRollback"
+
+# ─────────────────────────
+
+[api.views.txn_cross_ds]
+path      = "/canary/rt/txn/cross-ds"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_cross_ds.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/txn-cross-ds.ts"
+entrypoint = "txnCrossDs"
+
+# ─────────────────────────
+
+[api.views.txn_nested]
+path      = "/canary/rt/txn/nested"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_nested.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/txn-nested.ts"
+entrypoint = "txnNested"
+
+# ─────────────────────────
+
+[api.views.txn_unsupported]
+path      = "/canary/rt/txn/unsupported"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_unsupported.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/txn-unsupported.ts"
+entrypoint = "txnUnsupported"

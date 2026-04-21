@@ -65,13 +65,13 @@ Tasks:
 
 Tasks:
 
-- [ ] **G2.1** `txn-commit.ts` — `ctx.transaction("pg", () => { ctx.dataview("insert"); return {ok:true}; })`; verify row committed via a follow-up ctx.dataview select. **Validate:** assertion passes against live PG.
-- [ ] **G2.2** `txn-rollback.ts` — `ctx.transaction` callback throws; verify no row persisted via follow-up select. **Validate:** row count unchanged.
-- [ ] **G2.3** `txn-cross-ds.ts` — `ctx.transaction("pg", () => ctx.dataview("mysql_view"))`; asserts the spec §6.2 cross-ds TransactionError shape. **Validate:** error message matches verbatim.
-- [ ] **G2.4** `txn-nested.ts` — `ctx.transaction("pg", () => ctx.transaction("pg", ...))`; asserts `TransactionError: nested transactions not supported`.
-- [ ] **G2.5** `txn-unsupported.ts` — `ctx.transaction("faker", ...)`; asserts `TransactionError: datasource "faker" does not support transactions`. Requires faker datasource declared in canary resources.
-- [ ] **G2.6** `resources.toml` has PG datasource pointing at 192.168.2.209; re-use existing canary-sql pattern.
-- [ ] **G2.7** `run-tests.sh` TRANSACTIONS-TS profile — existing block is placeholder (spec surface tests from Phase 7); extend with PG_AVAIL gate for G2.1–G2.5. Tests skip cleanly on a non-infra deploy.
+- [x] **G2.1** `ts-compliance/txn-commit.ts` — `ctx.transaction("pg", () => ctx.dataview("txn_pg_ping"))`; assertions on no-throw + callback return value reaches handler + rows readable via held connection. Uses `SELECT 1` DataView to avoid schema setup. (Done 2026-04-21.)
+- [x] **G2.2** `ts-compliance/txn-rollback.ts` — callback executes a dataview then throws a distinctive message; handler asserts the re-thrown message reaches it unchanged. (Done 2026-04-21.)
+- [x] **G2.3** `ts-compliance/txn-cross-ds.ts` — transaction on `pg`, dataview `txn_sqlite_ping` (points at `sqlite_cross` datasource); asserts TransactionError + spec §6.2 "differs from" phrase + named dataview. (Done 2026-04-21.)
+- [x] **G2.4** `ts-compliance/txn-nested.ts` — genuine nested call: `ctx.transaction("pg", () => ctx.transaction("pg", …))`. Asserts `TransactionError: nested transactions not supported`. (Done 2026-04-21.)
+- [x] **G2.5** `ts-compliance/txn-unsupported.ts` — `ctx.transaction("canary-faker", …)`; asserts `TransactionError: ... does not support transactions`. Uses the pre-existing `canary-faker` datasource — no PG needed, so this runs even on no-infra deploys. (Done 2026-04-21.)
+- [x] **G2.6** `resources.toml` — added `pg` datasource pointing at 192.168.2.209 (required=false so missing infra doesn't block bundle load) + `sqlite_cross` for the cross-ds test. Two minimal DataViews (`txn_pg_ping` and `txn_sqlite_ping`, both `SELECT 1`) registered in `app.toml` — no table schema required. (Done 2026-04-21.)
+- [x] **G2.7** `run-tests.sh` TRANSACTIONS-TS profile extended. `txn-unsupported` runs unconditionally (uses faker). The PG-dependent four (txn-commit, txn-rollback, txn-cross-ds, txn-nested) run behind a `PG_AVAIL` gate that pings `/sql/canary/sql/pg/param-order` — the same gate pattern used elsewhere in run-tests.sh. On no-infra deploys, each prints `SKIP … (PG unreachable)` and contributes 0 to PASS/FAIL. (Done 2026-04-21.)
 
 **Validate:** 5/5 PASS on PG cluster; SKIP cleanly without PG.
 

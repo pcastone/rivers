@@ -203,12 +203,42 @@ fi
 # ── TRANSACTIONS-TS Profile (spec §6: ctx.transaction surface) ───
 
 echo ""
-echo "  ── TRANSACTIONS-TS Profile (ctx.transaction) ──"
+echo "  ── TRANSACTIONS-TS Profile (ctx.transaction surface) ──"
 test_ep "txn-args"           POST "$BASE/handlers/canary/rt/txn/args" '{}'
 test_ep "txn-cb-type"        POST "$BASE/handlers/canary/rt/txn/cb-type" '{}'
 test_ep "txn-unknown-ds"     POST "$BASE/handlers/canary/rt/txn/unknown-ds" '{}'
 test_ep "txn-cleanup"        POST "$BASE/handlers/canary/rt/txn/cleanup" '{}'
 test_ep "txn-surface"        POST "$BASE/handlers/canary/rt/txn/surface" '{}'
+
+# RT-TXN-UNSUPPORTED doesn't need PG — uses canary-faker.
+test_ep "txn-unsupported"    POST "$BASE/handlers/canary/rt/txn/unsupported" '{}'
+
+# ── TRANSACTIONS-TS Profile (spec §6 end-to-end — needs PG) ──────
+# The remaining RT-TXN-* IDs require a reachable PG datasource at
+# 192.168.2.209. Detect availability via the canary-sql ping; skip
+# the whole block if PG is unreachable.
+
+PG_AVAIL=$(curl -sk -m 2 "$BASE/sql/canary/sql/pg/param-order" \
+  -X POST -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: ${CSRF_TOKEN}" \
+  -b "$COOKIES" -c "$COOKIES" -d '{}' 2>/dev/null \
+  | python3 -c "import json,sys; print('1' if json.load(sys.stdin).get('test_id') else '0')" 2>/dev/null) \
+  || PG_AVAIL="0"
+
+echo ""
+if [ "$PG_AVAIL" = "1" ]; then
+    echo "  ── TRANSACTIONS-TS Profile (end-to-end, PG) ──"
+    test_ep "txn-commit"     POST "$BASE/handlers/canary/rt/txn/commit" '{}'
+    test_ep "txn-rollback"   POST "$BASE/handlers/canary/rt/txn/rollback" '{}'
+    test_ep "txn-cross-ds"   POST "$BASE/handlers/canary/rt/txn/cross-ds" '{}'
+    test_ep "txn-nested"     POST "$BASE/handlers/canary/rt/txn/nested" '{}'
+else
+    echo "  ── TRANSACTIONS-TS Profile (end-to-end, PG) — SKIPPED ──"
+    printf "  SKIP %-40s (PG unreachable)\n" "txn-commit"
+    printf "  SKIP %-40s (PG unreachable)\n" "txn-rollback"
+    printf "  SKIP %-40s (PG unreachable)\n" "txn-cross-ds"
+    printf "  SKIP %-40s (PG unreachable)\n" "txn-nested"
+fi
 
 # ── SQL Profile (auth=session, uses PG/MySQL/SQLite) ─────────────
 

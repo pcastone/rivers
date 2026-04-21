@@ -4,3 +4,30 @@ driver     = "faker"
 x-type     = "faker"
 nopassword = true
 required   = true
+
+# Optional PG datasource for the TRANSACTIONS-TS canary profile.
+# Omit from a no-infra deploy; the canary's `PG_AVAIL` gate skips
+# the txn-* probes cleanly when this datasource is absent or
+# unreachable. The ctx.transaction surface tests that don't need
+# real writes (nested, unsupported, args validation) still run.
+[[datasources]]
+name       = "pg"
+driver     = "postgres"
+x-type     = "postgres"
+host       = "192.168.2.209"
+port       = 5432
+database   = "rivers"
+username   = "rivers"
+password   = "rivers_test"
+required   = false
+
+# SQLite — used as the cross-datasource target for the spec §6.2
+# cross-ds TransactionError probe. SQLite supports transactions, so
+# the cross-ds check fires on datasource mismatch, not on driver
+# capability. No infrastructure needed.
+[[datasources]]
+name       = "sqlite_cross"
+driver     = "sqlite"
+x-type     = "sqlite"
+nopassword = true
+required   = false
