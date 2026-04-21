@@ -1,0 +1,168 @@
+# cb-ts-repro — probe app
+#
+# Each view below isolates one specific behavior of the Rivers v0.54.1
+# codecomponent + TypeScript compilation pipeline. Expected outcomes are
+# documented inline. Run `riverpackage validate .` then `riversd`, then
+# curl each endpoint and observe the result vs the expected outcome.
+
+[data.datasources.probe_db]
+name       = "probe_db"
+driver     = "sqlite"
+database   = "data/probe.db"
+nopassword = true
+
+# A single DataView so we can also probe ctx.dataview() behavior.
+
+[data.dataviews.probe_select]
+name       = "probe_select"
+datasource = "probe_db"
+query      = "SELECT 1 AS answer"
+return_schema = "schemas/answer.schema.json"
+
+# ─── Case A — PASS baseline: plain JS, no types, no imports ──────────
+
+[api.views.case_a]
+path      = "probe/case-a"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.case_a.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/case-a.js"
+entrypoint = "handler"
+
+# ─── Case B — Parameter type annotation ──────────────────────────────
+# Expected per docstring: stripped. Actual: NOT stripped. V8 errors.
+# Reference: docstring at v8_config.rs:124 claims "(x: string) -> (x)"
+# but strip_type_annotations() has no matching code.
+
+[api.views.case_b]
+path      = "probe/case-b"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.case_b.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/case-b.ts"
+entrypoint = "handler"
+
+# ─── Case C — Variable type annotation ───────────────────────────────
+# Expected: `const x: number = 42` → `const x = 42`. Actual: not stripped.
+# The test at process_pool_tests.rs:288 only asserts contains("const x");
+# it does not verify the ": number" is removed.
+
+[api.views.case_c]
+path      = "probe/case-c"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.case_c.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/case-c.ts"
+entrypoint = "handler"
+
+# ─── Case D — `type`-only import ─────────────────────────────────────
+# `import { type Ctx, bad, ok } from './_lib'` — the TS stripper has no
+# pattern for import-statement type hoists. Goes through to v8 verbatim,
+# is_module_syntax() detects `import `, module mode activates, then
+# compile_module() errors on the TS syntax.
+
+[api.views.case_d]
+path      = "probe/case-d"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.case_d.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/case-d.ts"
+entrypoint = "handler"
+
+# ─── Case E — Generic type parameter ─────────────────────────────────
+# Docstring claims `<T>` is stripped. No code does this.
+
+[api.views.case_e]
+path      = "probe/case-e"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.case_e.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/case-e.ts"
+entrypoint = "handler"
+
+# ─── Case F — Multi-module import ────────────────────────────────────
+# `import { foo } from './_lib'` — module resolve callback in
+# execution.rs rejects all non-root imports ("V1 -- no multi-module").
+# This is a documented limitation, not a stripper gap. Included here to
+# delineate it from the stripper cases.
+
+[api.views.case_f]
+path      = "probe/case-f"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.case_f.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/case-f.ts"
+entrypoint = "handler"
+
+# ─── Case G — ES module export (single-file module) ──────────────────
+# `export function handler(...)` with no imports. Module mode activates;
+# per comment at execution.rs:222-224, the exported function is on the
+# module namespace, not globalThis. `call_entrypoint("handler")` looks
+# up the global scope — fails to find the function.
+
+[api.views.case_g]
+path      = "probe/case-g"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.case_g.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/case-g.ts"
+entrypoint = "handler"
+
+# ─── Case H — The working TS shape ───────────────────────────────────
+# `function handler(ctx)` with only: return type, `as`, interface,
+# type-alias-equals. These ARE stripped. This case should PASS.
+
+[api.views.case_h]
+path      = "probe/case-h"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.case_h.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/case-h.ts"
+entrypoint = "handler"
+
+# ─── Case I — ctx.dataview() with pre-fetched resource ───────────────
+
+[api.views.case_i]
+path      = "probe/case-i"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.case_i.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "libraries/handlers/case-i.js"
+entrypoint = "handler"
+resources  = ["probe_select"]

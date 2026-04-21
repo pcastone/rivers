@@ -1,0 +1,5 @@
+appName    = "probe"
+appId      = "d5e8b9f1-3c4a-4a2b-9e7d-6f8a1b2c3d4e"
+type       = "app-service"
+entryPoint = "app.toml"
+appVersion = "0.1.0"
