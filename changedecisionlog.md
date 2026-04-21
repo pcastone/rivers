@@ -48,6 +48,27 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 **Spec reference:** `docs/arch/rivers-javascript-typescript-spec.md §2.7` ("exhaustive upfront compilation").
 **Resolution:** Strict spec compliance would error on cache miss. But during Phase 2 there are handlers outside `libraries/` (legacy, MCP-internal, etc.) whose modules are resolved by explicit paths set up in `resolve_handler_module`. A hard error would break these before Phases 4/5 land. The fallback is a defence-in-depth path with a debug log so operators can spot modules that should be moved into `libraries/`. Once Phase 4's module resolver lands and all handler modules are bundle-resident, the fallback can be promoted to `tracing::warn!` or an error.
 
+### ctx.transaction executor integration via thread-local bridge
+
+**File:** `crates/riversd/src/process_pool/v8_engine/{task_locals.rs, context.rs}` + `crates/rivers-runtime/src/dataview_engine.rs`
+**Decision:** Route `ctx.dataview()` calls inside a transaction through a held connection by (a) storing active `TaskTransactionState { map, datasource }` in a thread-local, (b) having `ctx_dataview_callback` read that thread-local + use `DataViewExecutor::datasource_for` to verify the cross-ds rule, and (c) threading `Some(&mut conn)` into the executor's existing `txn_conn` param via `take_connection/return_connection` around the `exec.execute()` call.
+**Spec reference:** `docs/arch/rivers-javascript-typescript-spec.md §6`.
+**Resolution:** The executor already exposed `txn_conn: Option<&mut Box<dyn Connection>>` — the plumbing was latent. My delta was (i) a new `datasource_for(name)` method on `DataViewExecutor` that exposes the registry's datasource mapping without executing anything, (ii) the thread-local bridge in task_locals, (iii) the callback in context.rs, and (iv) the take/return dance inside the `ctx_dataview_callback`'s `rt.block_on` so the connection is always returned even if execute fails. No signature changes to `exec.execute`. This satisfies spec §6.1 literally: `ctx.dataview()` inside the callback is implicitly scoped to the open transaction.
+
+### Rollback runs before RT_HANDLE is cleared in TaskLocals::drop
+
+**File:** `crates/riversd/src/process_pool/v8_engine/task_locals.rs`
+**Decision:** In `TaskLocals::drop`, drain `TASK_TRANSACTION` and call `auto_rollback_all()` via the still-live `RT_HANDLE` **before** clearing `RT_HANDLE`.
+**Spec reference:** `docs/arch/rivers-javascript-typescript-spec.md §6.2` (timeout semantics).
+**Resolution:** `auto_rollback_all` is async and needs the tokio runtime handle. If we cleared `RT_HANDLE` first, a timeout or handler panic that left a transaction open would be unable to roll back → pooled connection holds a dangling transaction. Order: extract transaction, run rollback, then clear. Documented in the drop impl so a future contributor doesn't reorder.
+
+### Spec §6.4 MongoDB row is incorrect — flagged for spec revision
+
+**File:** `docs/arch/rivers-javascript-typescript-spec.md §6.4`
+**Decision:** The spec lists MongoDB as `supports_transactions = true`, but Mongo is a plugin driver (`crates/rivers-plugin-mongodb`) whose `supports_transactions()` return is not directly verifiable from the core codebase. Same concern applies to Cassandra, CouchDB, Elasticsearch, Kafka, LDAP rows.
+**Spec reference:** `docs/arch/rivers-javascript-typescript-spec.md §6.4`, plan task 7.8.
+**Resolution:** Phase 7 implementation ships the correct behaviour — `DriverError::Unsupported` from a plugin driver maps to spec's exact error message at runtime. The spec's table of supported drivers should be amended to mark plugin rows "verify at plugin load" rather than baking an unverified assertion. Deferred to next spec revision cycle. Runtime enforcement is already authoritative.
+
 ### Source map generation deferred to Phase 6
 
 **File:** `crates/riversd/src/process_pool/v8_config.rs`

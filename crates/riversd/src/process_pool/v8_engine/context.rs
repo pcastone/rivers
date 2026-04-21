@@ -72,6 +72,15 @@ pub(super) fn inject_ctx_methods(
     let dv_key = v8_str(scope, "dataview")?;
     ctx_obj.set(scope, dv_key.into(), dataview_fn.into());
 
+    // ctx.transaction(datasource, fn) -- native V8 callback (spec §6).
+    // Begins a transaction on the named datasource, invokes fn, and
+    // commits on return / rolls back on throw. ctx.dataview() calls
+    // inside the callback are routed through the held connection.
+    let transaction_fn = v8::Function::new(scope, ctx_transaction_callback)
+        .ok_or_else(|| TaskError::Internal("failed to create ctx.transaction".into()))?;
+    let txn_key = v8_str(scope, "transaction")?;
+    ctx_obj.set(scope, txn_key.into(), transaction_fn.into());
+
     // ctx.store -- native V8 callbacks with reserved prefix enforcement (V2.4.4)
     let store_obj = v8::Object::new(scope);
 
@@ -448,6 +457,170 @@ fn throw_js_error(scope: &mut v8::HandleScope, message: &str) {
     scope.throw_exception(exception);
 }
 
+/// `ctx.transaction(datasource_name, callback)` — spec §6.
+///
+/// Begins a transaction on the named datasource, invokes the callback with
+/// no args, and commits on clean return / rolls back on throw. `ctx.dataview()`
+/// calls inside the callback are routed through the held connection.
+///
+/// Rejects:
+/// - `TransactionError: nested transactions not supported` — if a transaction
+///   is already active on this task (thread-local already populated).
+/// - `TransactionError: datasource "X" not found` — if the name is unknown.
+/// - `TransactionError: datasource "X" does not support transactions` — if the
+///   driver's `begin_transaction` returns `DriverError::Unsupported`.
+///
+/// On the callback's own throw, the exception is re-propagated after rollback.
+fn ctx_transaction_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use std::sync::Arc;
+    use rivers_runtime::rivers_driver_sdk::DriverError;
+
+    // ── Argument validation ─────────────────────────────────────
+    if args.length() < 2 {
+        throw_js_error(
+            scope,
+            "ctx.transaction requires two arguments: (datasource: string, fn: Function)",
+        );
+        return;
+    }
+    let ds_name = args.get(0).to_rust_string_lossy(scope);
+    let cb_val = args.get(1);
+    let cb_fn = match v8::Local::<v8::Function>::try_from(cb_val) {
+        Ok(f) => f,
+        Err(_) => {
+            throw_js_error(
+                scope,
+                "ctx.transaction second argument must be a function",
+            );
+            return;
+        }
+    };
+
+    // ── Spec §6.2: reject nested ─────────────────────────────────
+    let already_active = TASK_TRANSACTION.with(|t| t.borrow().is_some());
+    if already_active {
+        throw_js_error(scope, "TransactionError: nested transactions not supported");
+        return;
+    }
+
+    // ── Resolve datasource → driver + ConnectionParams ──────────
+    let resolved = TASK_DS_CONFIGS.with(|c| c.borrow().get(&ds_name).cloned());
+    let resolved = match resolved {
+        Some(r) => r,
+        None => {
+            throw_js_error(
+                scope,
+                &format!("TransactionError: datasource \"{ds_name}\" not found in task config"),
+            );
+            return;
+        }
+    };
+
+    // ── Get DriverFactory ───────────────────────────────────────
+    let factory = TASK_DRIVER_FACTORY.with(|f| f.borrow().clone());
+    let factory = match factory {
+        Some(f) => f,
+        None => {
+            throw_js_error(
+                scope,
+                "TransactionError: driver factory not available — transactions require configured datasources",
+            );
+            return;
+        }
+    };
+
+    // ── Begin transaction (async bridge) ────────────────────────
+    let rt = match get_rt_handle() {
+        Ok(r) => r,
+        Err(e) => {
+            throw_js_error(scope, &format!("TransactionError: {e}"));
+            return;
+        }
+    };
+
+    let txn_map = Arc::new(crate::transaction::TransactionMap::new());
+    let begin_outcome: Result<(), DriverError> = rt.block_on(async {
+        let conn = factory
+            .connect(&resolved.driver_name, &resolved.params)
+            .await?;
+        txn_map.begin(&ds_name, conn).await
+    });
+
+    if let Err(e) = begin_outcome {
+        let msg = match &e {
+            DriverError::Unsupported(_) => format!(
+                "TransactionError: datasource \"{ds_name}\" does not support transactions"
+            ),
+            _ => format!("TransactionError: begin failed: {e}"),
+        };
+        throw_js_error(scope, &msg);
+        return;
+    }
+
+    // ── Install thread-local so ctx.dataview() routes through us ──
+    TASK_TRANSACTION.with(|t| {
+        *t.borrow_mut() = Some(TaskTransactionState {
+            map: txn_map.clone(),
+            datasource: ds_name.clone(),
+        });
+    });
+
+    // ── Invoke the JS callback ──────────────────────────────────
+    let undefined = v8::undefined(scope).into();
+    let tc = &mut v8::TryCatch::new(scope);
+    let call_result = cb_fn.call(tc, undefined, &[]);
+
+    // ── Commit or rollback ──────────────────────────────────────
+    match call_result {
+        Some(val) => {
+            // Clean return → commit, yield callback's return value.
+            let commit_res = rt.block_on(txn_map.commit(&ds_name));
+            TASK_TRANSACTION.with(|t| *t.borrow_mut() = None);
+            match commit_res {
+                Ok(_conn) => {
+                    // Connection drops → pool slot released.
+                    rv.set(val);
+                }
+                Err(e) => {
+                    let msg = v8::String::new(
+                        tc,
+                        &format!("TransactionError: commit failed: {e}"),
+                    )
+                    .unwrap();
+                    let err = v8::Exception::error(tc, msg);
+                    tc.throw_exception(err);
+                }
+            }
+        }
+        None => {
+            // Callback threw → rollback, re-throw the original exception.
+            // Capture the exception BEFORE rolling back so we re-throw
+            // the handler's exception, not any rollback error.
+            let captured_exc = tc.exception();
+            let rollback_res = rt.block_on(txn_map.rollback(&ds_name));
+            TASK_TRANSACTION.with(|t| *t.borrow_mut() = None);
+            if let Err(e) = rollback_res {
+                tracing::warn!(
+                    target: "rivers.handler",
+                    datasource = %ds_name,
+                    error = %e,
+                    "rollback failed after handler threw"
+                );
+            }
+            // Re-throw the original handler exception.
+            if let Some(exc) = captured_exc {
+                tc.throw_exception(exc);
+            } else {
+                throw_js_error(tc, "TransactionError: callback threw (exception lost)");
+            }
+        }
+    }
+}
+
 ///
 /// V8 callback -- short constant strings, unwrap is safe.
 fn ctx_dataview_callback(
@@ -509,9 +682,67 @@ fn ctx_dataview_callback(
 
         let trace_id = TASK_TRACE_ID.with(|t| t.borrow().clone()).unwrap_or_default();
 
+        // Spec §6: if a transaction is active, route this dataview through
+        // the held connection. Enforce §6.2 cross-datasource check: the
+        // dataview's backing datasource MUST match the transaction's.
+        let txn_state: Option<(std::sync::Arc<crate::transaction::TransactionMap>, String)> =
+            TASK_TRANSACTION.with(|t| {
+                t.borrow().as_ref().map(|s| (s.map.clone(), s.datasource.clone()))
+            });
+        if let Some((_, ref txn_ds)) = txn_state {
+            // Look up the dataview's configured datasource.
+            let dv_ds = exec.datasource_for(&namespaced_name);
+            match dv_ds {
+                Some(ds) if ds == *txn_ds => { /* match — allowed */ }
+                Some(ds) => {
+                    throw_js_error(
+                        scope,
+                        &format!(
+                            "TransactionError: dataview \"{name}\" uses datasource \"{ds}\" which differs from transaction datasource \"{txn_ds}\""
+                        ),
+                    );
+                    return;
+                }
+                None => {
+                    // Unknown dataview — let execute() produce the "not found"
+                    // error for consistency with the non-txn path.
+                }
+            }
+        }
+
         match get_rt_handle() {
             Ok(rt) => {
-                match rt.block_on(exec.execute(&namespaced_name, query_params, "GET", &trace_id, None)) {
+                let exec_outcome = rt.block_on(async {
+                    if let Some((map, ds)) = txn_state {
+                        // Take the held connection out of the map, use it,
+                        // put it back. take/return is the pattern the
+                        // TransactionMap was designed for.
+                        if let Some(mut conn) = map.take_connection(&ds).await {
+                            let res = exec
+                                .execute(
+                                    &namespaced_name,
+                                    query_params,
+                                    "GET",
+                                    &trace_id,
+                                    Some(&mut conn),
+                                )
+                                .await;
+                            map.return_connection(&ds, conn).await;
+                            res
+                        } else {
+                            // Unreachable in practice — the thread-local
+                            // should stay consistent with the map — but
+                            // return a clear error rather than panic.
+                            Err(rivers_runtime::dataview_engine::DataViewError::Driver(
+                                format!("transaction connection for '{ds}' unavailable"),
+                            ))
+                        }
+                    } else {
+                        exec.execute(&namespaced_name, query_params, "GET", &trace_id, None)
+                            .await
+                    }
+                });
+                match exec_outcome {
                     Ok(response) => {
                         // Convert QueryResult rows to JSON
                         let json = serde_json::json!({

@@ -593,6 +593,17 @@ impl DataViewExecutor {
         self.registry.find_by_suffix(suffix)
     }
 
+    /// Return the datasource name a DataView is configured to execute on.
+    ///
+    /// Used by `ctx.transaction()`'s cross-datasource enforcement
+    /// (spec §6.2): inside a transaction callback, `ctx.dataview("foo")`
+    /// must reject if `foo`'s datasource differs from the transaction's.
+    /// This lookup is pure registry introspection — no connection is
+    /// acquired, no query is built.
+    pub fn datasource_for(&self, name: &str) -> Option<String> {
+        self.registry.get(name).map(|c| c.datasource.clone())
+    }
+
     /// Set the EventBus for cache invalidation events.
     pub fn set_event_bus(&mut self, event_bus: Arc<rivers_core::EventBus>) {
         self.event_bus = Some(event_bus);

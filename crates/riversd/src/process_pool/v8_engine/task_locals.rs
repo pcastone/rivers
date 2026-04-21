@@ -108,6 +108,22 @@ thread_local! {
     /// means look up on the namespace, None means classic-script path
     /// (lookup on globalThis).
     pub(crate) static TASK_MODULE_NAMESPACE: RefCell<Option<v8::Global<v8::Object>>> = RefCell::new(None);
+
+    /// Active handler transaction state (spec §6). `ctx.transaction(ds, fn)`
+    /// populates this before invoking the JS callback; `ctx.dataview()`
+    /// reads it to (a) enforce the spec §6.2 cross-datasource check and
+    /// (b) route execution through the held transaction connection.
+    /// Cleared in `TaskLocals::drop`. `auto_rollback_all` runs on any
+    /// still-held connection when the task ends.
+    pub(crate) static TASK_TRANSACTION: RefCell<Option<TaskTransactionState>> = RefCell::new(None);
+}
+
+/// Active transaction state for the current task.
+pub(super) struct TaskTransactionState {
+    /// The TransactionMap that holds the connection for commit/rollback.
+    pub(super) map: Arc<crate::transaction::TransactionMap>,
+    /// The single datasource this transaction is scoped to (spec §6.2).
+    pub(super) datasource: String,
 }
 
 /// Get the current tokio runtime handle from the thread-local.
@@ -178,6 +194,15 @@ impl TaskLocals {
 
 impl Drop for TaskLocals {
     fn drop(&mut self) {
+        // Auto-rollback any transaction the handler left open — BEFORE
+        // clearing RT_HANDLE, because auto_rollback_all is async and needs
+        // the runtime. Spec §6: timeout or panic must not leave a
+        // connection holding a transaction in the pool.
+        if let Some(state) = TASK_TRANSACTION.with(|t| t.borrow_mut().take()) {
+            if let Some(rt) = RT_HANDLE.with(|h| h.borrow().clone()) {
+                rt.block_on(state.map.auto_rollback_all());
+            }
+        }
         RT_HANDLE.with(|h| *h.borrow_mut() = None);
         TASK_ENV.with(|e| *e.borrow_mut() = None);
         TASK_STORE.with(|s| s.borrow_mut().clear());
@@ -194,5 +219,6 @@ impl Drop for TaskLocals {
         TASK_APP_NAME.with(|n| *n.borrow_mut() = None);
         TASK_MODULE_REGISTRY.with(|r| r.borrow_mut().clear());
         TASK_MODULE_NAMESPACE.with(|n| *n.borrow_mut() = None);
+        // TASK_TRANSACTION was drained above, before RT_HANDLE was cleared.
     }
 }

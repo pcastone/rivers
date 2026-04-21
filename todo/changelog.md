@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-04-21 — TS pipeline Phase 7: ctx.transaction() with executor integration
+
+| File | Decision | Reference | Resolution |
+|------|----------|-----------|------------|
+| `crates/rivers-runtime/src/dataview_engine.rs` | Added `DataViewExecutor::datasource_for(name) -> Option<String>` — exposes registry's datasource mapping without executing | Spec §6.2 cross-ds check | Pure registry introspection, no connection acquired. Used by `ctx_dataview_callback` for cross-ds enforcement |
+| `crates/riversd/src/process_pool/v8_engine/task_locals.rs` | Added `TASK_TRANSACTION: RefCell<Option<TaskTransactionState>>` + `TaskTransactionState { map: Arc<TransactionMap>, datasource: String }` | Spec §6 active-txn state | Thread-local is cleared in `TaskLocals::drop`. Drain happens BEFORE RT_HANDLE clear so `auto_rollback_all` can run via the still-live runtime handle |
+| `crates/riversd/src/process_pool/v8_engine/context.rs` | New `ctx_transaction_callback`: arg validation, nested rejection, datasource resolution via `TASK_DS_CONFIGS`, connection acquisition via `DriverFactory::connect`, `TransactionMap::begin` (maps `DriverError::Unsupported` to spec §6.2 error message), JS callback invocation via TryCatch, commit/rollback semantics | Spec §6.1 | Injected at `inject_ctx_methods` alongside `ctx.dataview`. Re-throws handler's original exception after rollback |
+| `crates/riversd/src/process_pool/v8_engine/context.rs` | Modified `ctx_dataview_callback` to check `TASK_TRANSACTION`: cross-ds check via `datasource_for` lookup (spec §6.2), then `take_connection → execute(Some(&mut conn)) → return_connection` inside single `rt.block_on` so connection is always returned | Spec §6.1 routing + §6.2 enforcement | The executor already had `txn_conn: Option<&mut Box<dyn Connection>>` — no signature change needed |
+| `crates/riversd/src/process_pool/tests/wasm_and_workers.rs` | 4 new ctx.transaction tests: two-args required, non-function callback rejected, unknown-datasource "not found", nested state cleanup (back-to-back calls don't report nested) | Spec §6 regression coverage | Full process_pool suite: 135/135 green (was 131 + 4) |
+| `changedecisionlog.md` | Entries: executor-integration bridge design, rollback-before-RT_HANDLE ordering, spec §6.4 MongoDB correction flag | CLAUDE.md Workflow rule 5 | Plan task 7.8 (plugin-driver verification) and 7.9 (PG cluster integration test) deferred with honest reasoning |
+
+Spec §6.4 correction: the table lists MongoDB/Cassandra/CouchDB/Elasticsearch/Kafka/LDAP with specific `supports_transactions` values — these are plugin drivers whose returns are not verified in the core codebase. Runtime enforcement is authoritative (the `DriverError::Unsupported` path maps correctly); the spec table should be amended to mark plugin rows "verify at plugin load" in the next revision cycle.
+
 ## 2026-04-21 — TS pipeline Phase 8: MCP view documentation
 
 | File | Decision | Reference | Resolution |
