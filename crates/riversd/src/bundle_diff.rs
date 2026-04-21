@@ -348,6 +348,7 @@ mod tests {
                     },
                     api: rivers_runtime::bundle::AppApiConfig { views },
                     static_files: None,
+                    base: Default::default(),
                 },
                 app_dir: std::path::PathBuf::from("/tmp"),
             }],

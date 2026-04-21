@@ -169,6 +169,19 @@ pub enum ViewError {
     #[error("handler error: {0}")]
     Handler(String),
 
+    /// Handler threw an uncaught exception, with the remapped `.ts` stack
+    /// preserved for the error response. Spec §5.3. The stack is always
+    /// routed to the per-app log; it is exposed in the response envelope
+    /// only in debug builds (`cfg!(debug_assertions)`) or when the app's
+    /// `[base] debug = true` is wired through (future work).
+    #[error("handler error: {message}")]
+    HandlerWithStack {
+        /// Short error message (Error.toString() output).
+        message: String,
+        /// Remapped stack — `.ts:line:col` positions.
+        stack: String,
+    },
+
     /// Error in the middleware pipeline.
     #[error("pipeline error: {0}")]
     Pipeline(String),

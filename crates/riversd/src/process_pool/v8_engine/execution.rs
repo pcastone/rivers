@@ -400,6 +400,20 @@ pub(crate) async fn execute_js_task(
             // Handle timeout detected during entrypoint call
             let return_value = match return_value {
                 Err(TaskError::Timeout(_)) => return Err(TaskError::Timeout(timeout_ms)),
+                Err(TaskError::HandlerErrorWithStack { message, stack }) => {
+                    // Spec §5.3: log the remapped `.ts:line:col` stack to
+                    // the per-app log. TASK_APP_NAME thread-local is still
+                    // populated here — TaskLocals::drop hasn't run yet — so
+                    // AppLogRouter routes this line to `log/apps/<app>.log`.
+                    tracing::error!(
+                        target: "rivers.handler",
+                        trace_id = %ctx.trace_id,
+                        message = %message,
+                        stack = %stack,
+                        "handler threw"
+                    );
+                    return Err(TaskError::HandlerErrorWithStack { message, stack });
+                }
                 other => other?,
             };
 
@@ -558,14 +572,31 @@ fn call_entrypoint(
             if tc_scope.has_terminated() {
                 return Err(TaskError::Timeout(0));
             }
-            let msg = if let Some(exception) = tc_scope.exception() {
-                exception.to_rust_string_lossy(tc_scope)
+            // Capture both the message and the remapped `.stack` — the
+            // PrepareStackTraceCallback fires when we read the stack
+            // property, producing remapped `.ts:line:col` positions.
+            let (msg, stack_opt) = if let Some(exception) = tc_scope.exception() {
+                let msg = exception.to_rust_string_lossy(tc_scope);
+                let stack = v8::Local::<v8::Object>::try_from(exception)
+                    .ok()
+                    .and_then(|obj| {
+                        let key = v8::String::new(tc_scope, "stack")?;
+                        obj.get(tc_scope, key.into())
+                    })
+                    .filter(|v| !v.is_null() && !v.is_undefined())
+                    .map(|v| v.to_rust_string_lossy(tc_scope));
+                (msg, stack)
             } else {
-                "unknown exception".to_string()
+                ("unknown exception".to_string(), None)
             };
-            Err(TaskError::HandlerError(format!(
-                "handler '{function_name}' threw: {msg}"
-            )))
+            let formatted = format!("handler '{function_name}' threw: {msg}");
+            match stack_opt {
+                Some(stack) => Err(TaskError::HandlerErrorWithStack {
+                    message: formatted,
+                    stack,
+                }),
+                None => Err(TaskError::HandlerError(formatted)),
+            }
         }
     }
 }

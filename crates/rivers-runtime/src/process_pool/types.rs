@@ -160,6 +160,19 @@ pub enum TaskError {
     #[error("handler error: {0}")]
     HandlerError(String),
 
+    /// Handler threw an uncaught exception, with the remapped `.ts` stack
+    /// attached. Spec §5.2. Emitted from V8 dispatch; consumed by the
+    /// per-app log router (always) and the debug-mode error envelope
+    /// (when the app has `debug = true`).
+    #[error("handler error: {message}")]
+    HandlerErrorWithStack {
+        /// Short error message (the error's `toString()` output without stack).
+        message: String,
+        /// Remapped stack trace — `.ts:line:col` positions resolved via
+        /// `BundleModuleCache.source_map`.
+        stack: String,
+    },
+
     /// Required capability (datasource, DataView, HTTP) not available.
     #[error("capability error: {0}")]
     Capability(String),

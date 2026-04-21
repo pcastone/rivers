@@ -420,6 +420,24 @@ module     = "libraries/handlers/misc-tests.ts"
 entrypoint = "fakerDeterminism"
 
 # ═════════════════════════════════════════════════════════════════
+# TYPESCRIPT profile — spec §5 source-map remap probe.
+# Handler throws intentionally; the test asserts the error response's
+# details.stack array (debug mode) contains `sourcemap.ts:14`.
+# ═════════════════════════════════════════════════════════════════
+
+[api.views.ts_sourcemap]
+path      = "/canary/rt/ts/sourcemap"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_sourcemap.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/sourcemap.ts"
+entrypoint = "sourcemapProbe"
+
+# ═════════════════════════════════════════════════════════════════
 # TRANSACTIONS-TS profile — ctx.transaction() surface checks.
 # Spec: docs/arch/rivers-javascript-typescript-spec.md §6.
 # These tests exercise argument validation, unknown-datasource errors,

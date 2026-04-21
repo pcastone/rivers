@@ -1172,6 +1172,7 @@ mod tests {
                 },
                 api: AppApiConfig { views },
                 static_files: None,
+                base: Default::default(),
             },
             app_dir: PathBuf::from(format!("/tmp/{}", name)),
         }

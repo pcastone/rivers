@@ -28,9 +28,9 @@
 
 **Files:** `crates/riversd/src/process_pool/v8_engine/execution.rs`
 
-- [ ] **6A.1** Add stub `prepare_stack_trace_cb` function matching `extern "C" fn(Local<Context>, Local<Value>, Local<Array>) -> PrepareStackTraceCallbackRet`. Initial behaviour: return the error's existing `.stack` string unchanged (so shipping the stub is a no-op for semantics).
-- [ ] **6A.2** In `execute_js_task` (execution.rs:~304) after `acquire_isolate(effective_heap)`, call `isolate.set_prepare_stack_trace_callback(prepare_stack_trace_cb)`.
-- [ ] **6A.3** Unit test using `make_js_task` — dispatch a handler that throws; assert response is a handler error (callback registration doesn't panic the isolate).
+- [x] **6A.1** Add stub `prepare_stack_trace_cb` function matching `extern "C" fn(Local<Context>, Local<Value>, Local<Array>) -> PrepareStackTraceCallbackRet`. Initial behaviour: return the error's existing `.stack` string unchanged (so shipping the stub is a no-op for semantics).
+- [x] **6A.2** In `execute_js_task` (execution.rs:~304) after `acquire_isolate(effective_heap)`, call `isolate.set_prepare_stack_trace_callback(prepare_stack_trace_cb)`.
+- [x] **6A.3** Unit test using `make_js_task` — dispatch a handler that throws; assert response is a handler error (callback registration doesn't panic the isolate).
 
 **Validate:** `cargo build -p riversd` clean; `cargo test -p riversd --lib 'process_pool'` shows 135+ tests still green.
 
@@ -38,13 +38,13 @@
 
 **Files:** new `crates/riversd/src/process_pool/v8_engine/sourcemap_cache.rs`; edit `v8_engine/mod.rs`, `process_pool/module_cache.rs`
 
-- [ ] **6B.1** Define `static PARSED_SOURCEMAPS: OnceCell<RwLock<HashMap<PathBuf, Arc<swc_sourcemap::SourceMap>>>>`.
-- [ ] **6B.2** `pub fn get_or_parse(path: &Path) -> Option<Arc<SourceMap>>`:
+- [x] **6B.1** Define `static PARSED_SOURCEMAPS: OnceCell<RwLock<HashMap<PathBuf, Arc<swc_sourcemap::SourceMap>>>>`.
+- [x] **6B.2** `pub fn get_or_parse(path: &Path) -> Option<Arc<SourceMap>>`:
   - Read-lock fast path: return cloned Arc if cached.
   - Slow path: fetch JSON via `module_cache::get_module_cache()?.get(path)?.source_map`; parse via `SourceMap::from_reader(bytes.as_bytes())`; write-lock, insert, return Arc.
-- [ ] **6B.3** `pub fn clear_sourcemap_cache()` — called from `install_module_cache` so hot reload wipes stale parsed maps (spec §3.4 atomic-swap).
-- [ ] **6B.4** Register submodule in `v8_engine/mod.rs`.
-- [ ] **6B.5** Unit tests: (a) two calls for the same path return `Arc::ptr_eq` identical Arcs; (b) `clear_sourcemap_cache` empties the cache.
+- [x] **6B.3** `pub fn clear_sourcemap_cache()` — called from `install_module_cache` so hot reload wipes stale parsed maps (spec §3.4 atomic-swap).
+- [x] **6B.4** Register submodule in `v8_engine/mod.rs`.
+- [x] **6B.5** Unit tests: (a) two calls for the same path return `Arc::ptr_eq` identical Arcs; (b) `clear_sourcemap_cache` empties the cache.
 
 **Validate:** 2/2 new tests green.
 
@@ -54,16 +54,16 @@
 
 V8's CallSite is a JS object; no rusty_v8 wrapper. Extract via property-lookup + function-call.
 
-- [ ] **6C.1** Define `struct CallSiteInfo { script_name: Option<String>, line: Option<u32>, column: Option<u32>, function_name: Option<String> }`.
-- [ ] **6C.2** Helper `extract_callsite(scope, callsite_obj) -> CallSiteInfo`:
+- [x] **6C.1** Define `struct CallSiteInfo { script_name: Option<String>, line: Option<u32>, column: Option<u32>, function_name: Option<String> }`.
+- [x] **6C.2** Helper `extract_callsite(scope, callsite_obj) -> CallSiteInfo`:
   - For each of `getScriptName`, `getLineNumber`, `getColumnNumber`, `getFunctionName`:
     - `callsite_obj.get(scope, method_name_v8_str.into())` → Value
     - Cast to `v8::Local<v8::Function>`
     - `fn.call(scope, callsite_obj.into(), &[])` → Option<Value>
     - Convert to `String` / `u32` as appropriate; treat null/undefined as None
   - Return info; every field Option so native/missing frames don't explode.
-- [ ] **6C.3** In the callback from 6A, walk the CallSite array and collect `Vec<CallSiteInfo>`.
-- [ ] **6C.4** Unit test: handler that calls a nested function then throws; extract frames via a test-only variant of the callback (or via parsing the returned stack string); assert ≥2 frames with distinct line numbers.
+- [x] **6C.3** In the callback from 6A, walk the CallSite array and collect `Vec<CallSiteInfo>`.
+- [x] **6C.4** Unit test: handler that calls a nested function then throws; extract frames via a test-only variant of the callback (or via parsing the returned stack string); assert ≥2 frames with distinct line numbers.
 
 **Validate:** extractor returns correct line/col/name for a known fixture.
 
@@ -71,17 +71,17 @@ V8's CallSite is a JS object; no rusty_v8 wrapper. Extract via property-lookup +
 
 **Files:** `crates/riversd/src/process_pool/v8_engine/execution.rs`
 
-- [ ] **6D.1** In callback: for each `CallSiteInfo` with `Some(script_name)`:
+- [x] **6D.1** In callback: for each `CallSiteInfo` with `Some(script_name)`:
   - `sourcemap_cache::get_or_parse(Path::new(&script_name))` → `Option<Arc<SourceMap>>`
   - If map exists and line/col are Some: `sm.lookup_token(line - 1, col - 1)` → `Option<Token>`
     - **1-based V8 → 0-based swc_sourcemap; re-apply `+ 1` on emit.**
   - Pull `token.get_src()`, `token.get_src_line() + 1`, `token.get_src_col() + 1`
-- [ ] **6D.2** Frame format:
+- [x] **6D.2** Frame format:
   - Remapped: `"    at {fn_name or '<anonymous>'} ({src_file}:{src_line}:{src_col})"`
   - Fallback (null script_name, cache miss, lookup None): `"    at {fn_name} ({script_name or '<unknown>'}:{line}:{col})"`
-- [ ] **6D.3** Prepend the error's `toString()` — V8 stack convention is `Error: msg\n    at …`.
-- [ ] **6D.4** Build a `v8::String::new(scope, &joined)` and return `PrepareStackTraceCallbackRet` containing it.
-- [ ] **6D.5** Integration test: write a `.ts` handler fixture that throws at line 42, compile + install into cache, dispatch, parse response.stack (or equivalent); assert `.ts` path and line `42` appear (not compiled line).
+- [x] **6D.3** Prepend the error's `toString()` — V8 stack convention is `Error: msg\n    at …`.
+- [x] **6D.4** Build a `v8::String::new(scope, &joined)` and return `PrepareStackTraceCallbackRet` containing it.
+- [x] **6D.5** Integration test: write a `.ts` handler fixture that throws at line 42, compile + install into cache, dispatch, parse response.stack (or equivalent); assert `.ts` path and line `42` appear (not compiled line).
 
 **Validate:** remap integration test green.
 
@@ -89,10 +89,10 @@ V8's CallSite is a JS object; no rusty_v8 wrapper. Extract via property-lookup +
 
 **Files:** `crates/riversd/src/process_pool/v8_engine/execution.rs`, `crates/riversd/src/process_pool/types.rs`, AppLogRouter call site
 
-- [ ] **6E.1** In `call_entrypoint`'s error branch (execution.rs:~529), after capturing the exception, cast to `v8::Local<v8::Object>`, read the `stack` property; convert to Rust `String`. This is already the remapped trace (the callback fires on `.stack` property access).
-- [ ] **6E.2** Introduce `TaskError::HandlerErrorWithStack { message: String, stack: String }` struct variant in `types.rs`. Additive — exhaustive matches elsewhere will surface in the build.
-- [ ] **6E.3** At the error logging site in `execute_js_task`'s return path, when the error variant is `HandlerErrorWithStack`, emit `tracing::error!(target: "rivers.handler", trace_id = %trace_id, app = %app, message = %message, stack = %stack, "handler threw")`. AppLogRouter routes via `TASK_APP_NAME` thread-local into `log/apps/<app>.log`.
-- [ ] **6E.4** Integration test: trigger a handler throw; read `log/apps/<app>.log`; assert it contains the `.ts:line:col` string.
+- [x] **6E.1** In `call_entrypoint`'s error branch (execution.rs:~529), after capturing the exception, cast to `v8::Local<v8::Object>`, read the `stack` property; convert to Rust `String`. This is already the remapped trace (the callback fires on `.stack` property access).
+- [x] **6E.2** Introduce `TaskError::HandlerErrorWithStack { message: String, stack: String }` struct variant in `types.rs`. Additive — exhaustive matches elsewhere will surface in the build.
+- [x] **6E.3** At the error logging site in `execute_js_task`'s return path, when the error variant is `HandlerErrorWithStack`, emit `tracing::error!(target: "rivers.handler", trace_id = %trace_id, app = %app, message = %message, stack = %stack, "handler threw")`. AppLogRouter routes via `TASK_APP_NAME` thread-local into `log/apps/<app>.log`.
+- [x] **6E.4** Integration test: trigger a handler throw; read `log/apps/<app>.log`; assert it contains the `.ts:line:col` string.
 
 **Validate:** log file contains remapped trace; existing log outputs unchanged.
 
@@ -100,11 +100,11 @@ V8's CallSite is a JS object; no rusty_v8 wrapper. Extract via property-lookup +
 
 **Files:** `crates/rivers-runtime/src/bundle.rs`, `crates/riversd/src/server/view_dispatch.rs` (or the `TaskError` → HTTP response conversion site)
 
-- [ ] **6F.1** Check `AppConfig` for existing `debug: bool`. If absent, add `#[serde(default)] pub debug: bool` to `AppConfig` in `rivers-runtime/src/bundle.rs`. Sourced from `[base] debug = true` in `app.toml`.
-- [ ] **6F.2** In the error-response serialization, when the error is `HandlerErrorWithStack` AND the app's `debug == true`:
+- [x] **6F.1** Check `AppConfig` for existing `debug: bool`. If absent, add `#[serde(default)] pub debug: bool` to `AppConfig` in `rivers-runtime/src/bundle.rs`. Sourced from `[base] debug = true` in `app.toml`.
+- [x] **6F.2** In the error-response serialization, when the error is `HandlerErrorWithStack` AND the app's `debug == true`:
   - Serialize `{ "error": message, "trace_id": id, "debug": { "stack": split_lines(stack) } }`.
   - Otherwise: `{ "error": message, "trace_id": id }` — no `debug` key at all.
-- [ ] **6F.3** Two integration tests: app with `debug = true` returns `debug.stack`; app with default `debug = false` omits it.
+- [x] **6F.3** Two integration tests: app with `debug = true` returns `debug.stack`; app with default `debug = false` omits it.
 
 **Validate:** both tests green; non-debug response byte-identical to pre-change.
 
@@ -112,15 +112,15 @@ V8's CallSite is a JS object; no rusty_v8 wrapper. Extract via property-lookup +
 
 **Files:** `docs/arch/rivers-processpool-runtime-spec-v2.md`, `docs/arch/rivers-javascript-typescript-spec.md`, `docs/guide/tutorials/tutorial-ts-handlers.md`, `changedecisionlog.md`, `todo/changelog.md`
 
-- [ ] **6G.1** `processpool-runtime-spec-v2` Open Question #5 — replace with "Resolved by `rivers-javascript-typescript-spec.md §5` — see Phase 6 completion commits (TBD)."
-- [ ] **6G.2** `rivers-javascript-typescript-spec.md §5.4` — tighten wording to note the implementation landed.
-- [ ] **6G.3** `tutorial-ts-handlers.md` — add "Debugging handler errors" subsection: enabling `[base] debug = true` for `debug.stack` in dev; per-app log location `log/apps/<app>.log` is always remapped.
-- [ ] **6G.4** `changedecisionlog.md` — four new entries:
+- [x] **6G.1** `processpool-runtime-spec-v2` Open Question #5 — replace with "Resolved by `rivers-javascript-typescript-spec.md §5` — see Phase 6 completion commits (TBD)."
+- [x] **6G.2** `rivers-javascript-typescript-spec.md §5.4` — tighten wording to note the implementation landed.
+- [x] **6G.3** `tutorial-ts-handlers.md` — add "Debugging handler errors" subsection: enabling `[base] debug = true` for `debug.stack` in dev; per-app log location `log/apps/<app>.log` is always remapped.
+- [x] **6G.4** `changedecisionlog.md` — four new entries:
   1. Parsed-map cache separate from BundleModuleCache (rationale: re-parse cost)
   2. CallSite extraction via JS reflection (rationale: rusty_v8 has no wrapper)
   3. `TaskError::HandlerErrorWithStack` struct variant (rationale: additive, matches surface)
   4. App-level debug flag not view-level (rationale: spec §5.3 says app config)
-- [ ] **6G.5** `todo/changelog.md` — Phase 6 completion entry.
+- [x] **6G.5** `todo/changelog.md` — Phase 6 completion entry.
 
 **Validate:** doc cross-refs resolve; changelog entries present.
 
@@ -128,8 +128,8 @@ V8's CallSite is a JS object; no rusty_v8 wrapper. Extract via property-lookup +
 
 **Files:** new `canary-bundle/canary-handlers/libraries/handlers/ts-compliance/sourcemap.ts`; edit `canary-handlers/app.toml`, `canary-bundle/run-tests.sh`
 
-- [ ] **6H.1** Create `sourcemap.ts` handler: top-of-file throw at a distinctive line (e.g., line 42 literally — line 41 is a blank line right above `throw new Error("canary sourcemap probe")`). Export as `sourcemapProbe`.
-- [ ] **6H.2** Register in `canary-handlers/app.toml`:
+- [x] **6H.1** Create `sourcemap.ts` handler: top-of-file throw at a distinctive line (e.g., line 42 literally — line 41 is a blank line right above `throw new Error("canary sourcemap probe")`). Export as `sourcemapProbe`.
+- [x] **6H.2** Register in `canary-handlers/app.toml`:
   ```toml
   [api.views.sourcemap_test]
   path      = "/canary/rt/ts/sourcemap"
@@ -145,7 +145,7 @@ V8's CallSite is a JS object; no rusty_v8 wrapper. Extract via property-lookup +
   entrypoint = "sourcemapProbe"
   ```
   (Move `debug` to the app-level `[base]` section if 6F.1 places it there rather than per-view.)
-- [ ] **6H.3** `run-tests.sh` — new "TYPESCRIPT Profile" block between HANDLERS and TRANSACTIONS-TS, with a `test_ep`-like probe that greps the response for `sourcemap.ts:42`.
+- [x] **6H.3** `run-tests.sh` — new "TYPESCRIPT Profile" block between HANDLERS and TRANSACTIONS-TS, with a `test_ep`-like probe that greps the response for `sourcemap.ts:42`.
 
 **Validate:** canary endpoint returns an error envelope; `debug.stack` array contains `sourcemap.ts:42`.
 

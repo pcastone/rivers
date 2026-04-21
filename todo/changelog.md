@@ -1,5 +1,36 @@
 # Changelog
 
+## 2026-04-21 — TS pipeline Phase 6 completion: stack-trace remapping
+
+Phase 6 shipped partially in `a301b6b` (source-map generation). This round completes the consumer side — remapping at stack-access time, per-app log routing, and debug-mode response envelope. Closes `processpool-runtime-spec-v2` Open Question #5.
+
+| File | Decision | Reference | Resolution |
+|------|----------|-----------|------------|
+| `crates/riversd/src/process_pool/v8_engine/sourcemap_cache.rs` | New file. `OnceCell<RwLock<HashMap<PathBuf, Arc<SourceMap>>>>` fronting `BundleModuleCache`; `get_or_parse` lazy parses on demand; `clear_sourcemap_cache` invalidates on hot reload | Spec §5 | Avoids re-parsing v3 JSON on every exception. Single merged unit test covers idempotence + invalidation without racing cargo's parallel test runner |
+| `crates/riversd/src/process_pool/module_cache.rs` | `install_module_cache` now invokes `clear_sourcemap_cache_hook` | Spec §3.4 | Hot reload atomically invalidates both raw and parsed caches |
+| `crates/riversd/src/process_pool/v8_engine/execution.rs` | New `prepare_stack_trace_cb` (V8 `PrepareStackTraceCallback`), `extract_callsite` helper, `format_frame` with remap-or-fallback logic. Registered in `execute_js_task` after `acquire_isolate` | Spec §5.2 | CallSite extraction via JS reflection (rusty_v8 has no wrapper). Offsets: V8 CallSite is 1-based, `swc_sourcemap` is 0-based — adjusted on both sides of `lookup_token` |
+| `crates/riversd/src/process_pool/v8_engine/execution.rs` — `call_entrypoint` error branch | Capture `exception.stack` after TryCatch; emit `TaskError::HandlerErrorWithStack` | Spec §5.3 | Stack is consumed by per-app log emission inside `execute_js_task` — TASK_APP_NAME still populated |
+| `crates/rivers-runtime/src/process_pool/types.rs` | New `TaskError::HandlerErrorWithStack { message, stack }` variant | Spec §5.2 | Additive; existing `HandlerError(String)` unchanged for non-stack errors |
+| `crates/riversd/src/process_pool/v8_engine/execution.rs` | `tracing::error!` with `trace_id`, `message`, `stack` fields at the HandlerErrorWithStack return path. Routed to per-app log via existing `AppLogRouter` + `TASK_APP_NAME` thread-local | Spec §5.3 | Logging happens BEFORE `TaskLocals::drop` clears `TASK_APP_NAME` |
+| `crates/rivers-runtime/src/bundle.rs` | Added `AppConfig.base: AppBaseConfig { debug: bool }` (default `false`) | Spec §5.3 | Config surface declared; runtime plumbing through `map_view_error` is a follow-on; MVP uses `cfg!(debug_assertions)` to match existing sanitization policy |
+| `crates/riversd/src/view_engine/types.rs` | New `ViewError::HandlerWithStack { message, stack }` variant | Spec §5.3 | Mirrors TaskError variant; preserves stack through the pipeline → response chain |
+| `crates/riversd/src/view_engine/pipeline.rs` | Converts `TaskError::HandlerErrorWithStack` → `ViewError::HandlerWithStack` (preserving stack) via a `match` on the error | Spec §5.3 | Non-stack TaskError variants still convert to `ViewError::Handler` |
+| `crates/riversd/src/error_response.rs` | `map_view_error` HandlerWithStack branch: parses `at …` frames from the stack string; exposes as `details.stack` array in `cfg!(debug_assertions)` builds | Spec §5.3 | Sanitized in release — response still has `code`, `message`, `trace_id` but no stack |
+| `crates/rivers-runtime/src/validate_crossref.rs`, `crates/riversd/src/bundle_diff.rs` | Added `base: Default::default()` to AppConfig test fixtures | Compatibility | Additive field requires touching every constructor; `AppBaseConfig: Default` keeps the fix to one line each |
+| `docs/arch/rivers-processpool-runtime-spec-v2.md §15` | Marked Open Question #5 as closed with a resolution note | Spec §15 | Cross-ref points to `rivers-javascript-typescript-spec.md §5` |
+| `docs/guide/tutorials/tutorial-ts-handlers.md` | New "Debugging handler errors" section covering per-app log + debug-mode envelope + `[base] debug = true` flag | Spec §5.3 + §8 tutorial | Concrete JSON example; guidance on enabling in dev vs production |
+| `changedecisionlog.md` | Four new entries: parsed-map cache, CallSite reflection, `HandlerErrorWithStack` additive variant, debug-build gating as MVP | CLAUDE.md rule 5 | Each entry names file + spec ref + resolution mechanism |
+
+Test coverage (+8 new tests, 310/310 riversd lib tests green total):
+- `prepare_stack_trace_callback_does_not_crash_on_throw` (6A)
+- `sourcemap_cache_idempotence_and_invalidation` (6B)
+- `prepare_stack_trace_callback_produces_frames_from_callsites` (6C)
+- `frame_format_tests::fallback_when_no_cache_entry` (6D)
+- `frame_format_tests::anonymous_when_no_function_name` (6D)
+- `frame_format_tests::zero_line_or_col_falls_back` (6D)
+- `map_view_error_tests::handler_with_stack_includes_frames_in_debug_build` (6F)
+- `map_view_error_tests::handler_with_stack_includes_message_in_debug_build` (6F)
+
 ## 2026-04-21 — TS pipeline Phase 10 (scoped) + Phase 11: canary txn handlers, version bump, spec supersede
 
 | File | Decision | Reference | Resolution |

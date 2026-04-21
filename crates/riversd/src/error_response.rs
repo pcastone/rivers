@@ -232,6 +232,26 @@ pub fn map_view_error(err: &crate::view_engine::ViewError, trace_id: Option<&str
                 internal_error("internal server error")
             }
         }
+        // Spec §5.3: handler threw with a remapped `.ts` stack. Stack was
+        // already routed to the per-app log by `execute_js_task` (Phase 6E).
+        // In debug builds — or when the app's `[base] debug = true` is
+        // threaded through (future) — include the stack in the response
+        // envelope under `details.stack` (an array of frame strings).
+        crate::view_engine::ViewError::HandlerWithStack { message, stack } => {
+            tracing::error!(error = %message, "handler error with stack");
+            if cfg!(debug_assertions) {
+                let frames: Vec<String> = stack
+                    .lines()
+                    .filter(|l| l.trim_start().starts_with("at "))
+                    .map(|l| l.trim().to_string())
+                    .collect();
+                internal_error(message.clone()).with_details(serde_json::json!({
+                    "stack": frames,
+                }))
+            } else {
+                internal_error("internal server error")
+            }
+        }
         crate::view_engine::ViewError::Pipeline(msg) => {
             tracing::error!(error = %msg, "pipeline error");
             if cfg!(debug_assertions) {
@@ -253,4 +273,48 @@ pub fn map_view_error(err: &crate::view_engine::ViewError, trace_id: Option<&str
         resp = resp.with_trace_id(id.to_string());
     }
     resp
+}
+
+#[cfg(test)]
+mod map_view_error_tests {
+    use super::*;
+    use crate::view_engine::ViewError;
+
+    #[test]
+    fn handler_with_stack_includes_frames_in_debug_build() {
+        // cargo test runs with debug_assertions=true, so the stack must
+        // surface in details.
+        let err = ViewError::HandlerWithStack {
+            message: "TypeError: boom".into(),
+            stack: "TypeError: boom\n    at handler (orders.ts:42:5)\n    at inner (orders.ts:17:9)".into(),
+        };
+        let resp = map_view_error(&err, Some("trace-123"));
+        assert_eq!(resp.code, 500);
+        let details = resp.details.expect("details present in debug build");
+        let frames = details["stack"].as_array().expect("stack array");
+        assert_eq!(frames.len(), 2, "two `at …` lines captured: {details}");
+        assert!(
+            frames[0].as_str().unwrap().contains("orders.ts:42:5"),
+            "first frame: {details}"
+        );
+        assert!(
+            frames[1].as_str().unwrap().contains("orders.ts:17:9"),
+            "second frame: {details}"
+        );
+        assert_eq!(resp.trace_id.as_deref(), Some("trace-123"));
+    }
+
+    #[test]
+    fn handler_with_stack_includes_message_in_debug_build() {
+        let err = ViewError::HandlerWithStack {
+            message: "unique-phase-6F-message".into(),
+            stack: "irrelevant stack".into(),
+        };
+        let resp = map_view_error(&err, None);
+        assert!(
+            resp.message.contains("unique-phase-6F-message"),
+            "message surfaced in debug build: {}",
+            resp.message
+        );
+    }
 }

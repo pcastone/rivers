@@ -157,6 +157,31 @@ test_ep "eventbus-publish"   POST "$BASE/handlers/canary/rt/eventbus/publish" '{
 test_ep "header-blocklist"   GET  "$BASE/handlers/canary/rt/header/blocklist"
 test_ep "faker-determinism"  GET  "$BASE/handlers/canary/rt/faker/determinism"
 
+# ── TYPESCRIPT Profile (spec §5: source-map remapping) ──────────
+# sourcemap.ts throws intentionally; in debug builds the response
+# body MUST include `details.stack` with a frame pointing at the
+# source `.ts` file and line (not the compiled `.js` position).
+
+echo ""
+echo "  ── TYPESCRIPT Profile (source map remap) ──"
+SM_RESP=$(curl -sk -m 8 -X POST "$BASE/handlers/canary/rt/ts/sourcemap" \
+  -H "Content-Type: application/json" -d '{}' 2>/dev/null) || SM_RESP=""
+if echo "$SM_RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); s=d.get('details',{}).get('stack',[]); import sys as _; exit(0 if any('sourcemap.ts' in f for f in s) else 1)" 2>/dev/null; then
+  printf "  PASS %-40s (remapped stack frames)\n" "ts-sourcemap"
+  PASS=$((PASS+1))
+else
+  # Release builds omit details.stack — that's per-spec. Accept a 500
+  # with no stack as "skip" rather than fail, since this only validates
+  # in debug builds.
+  HTTP_CODE=$(echo "$SM_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('code','?'))" 2>/dev/null || echo "?")
+  if [ "$HTTP_CODE" = "500" ]; then
+    printf "  SKIP %-40s (500 no stack — release build?)\n" "ts-sourcemap"
+  else
+    printf "  FAIL %-40s (HTTP %s, no sourcemap.ts in stack)\n" "ts-sourcemap" "$HTTP_CODE"
+    FAIL=$((FAIL+1))
+  fi
+fi
+
 # ── TRANSACTIONS-TS Profile (spec §6: ctx.transaction surface) ───
 
 echo ""

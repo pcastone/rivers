@@ -69,6 +69,34 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 **Spec reference:** `docs/arch/rivers-javascript-typescript-spec.md §6.4`, plan task 7.8.
 **Resolution:** Phase 7 implementation ships the correct behaviour — `DriverError::Unsupported` from a plugin driver maps to spec's exact error message at runtime. The spec's table of supported drivers should be amended to mark plugin rows "verify at plugin load" rather than baking an unverified assertion. Deferred to next spec revision cycle. Runtime enforcement is already authoritative.
 
+### Parsed source-map cache separate from BundleModuleCache
+
+**File:** `crates/riversd/src/process_pool/v8_engine/sourcemap_cache.rs`
+**Decision:** Introduce a second cache layer — `OnceCell<RwLock<HashMap<PathBuf, Arc<swc_sourcemap::SourceMap>>>>` — on top of `BundleModuleCache`'s raw v3 JSON.
+**Spec reference:** `docs/arch/rivers-javascript-typescript-spec.md §5` (implicit — performance).
+**Resolution:** `BundleModuleCache` stores raw JSON strings because (a) construction is cheap at bundle load, (b) hot-reload just swaps the whole cache, (c) not every handler file needs parsing (only those that throw). Parsing v3 JSON on every exception is expensive; the parsed `SourceMap` is what `lookup_token` actually consumes. Caching parsed instances via `Arc` keyed by absolute path eliminates re-parse overhead. Invalidation: `install_module_cache` now calls `clear_sourcemap_cache_hook` so hot-reload wipes stale parsed maps. Unit test `sourcemap_cache_idempotence_and_invalidation` covers both properties.
+
+### CallSite extraction via JS reflection (rusty_v8 has no wrapper)
+
+**File:** `crates/riversd/src/process_pool/v8_engine/execution.rs` — `extract_callsite`
+**Decision:** Extract CallSite info by invoking JS methods (`getScriptName`, `getLineNumber`, `getColumnNumber`, `getFunctionName`) via `Object::get` + `Function::call`. No native Rust wrapper used.
+**Spec reference:** `docs/arch/rivers-javascript-typescript-spec.md §5.2`.
+**Resolution:** rusty_v8 v130 exposes CallSite only as a generic `v8::Value` — there is no typed wrapper. Invoking methods by name is the supported pattern and matches how Deno/Node bindings do it. Fields are `Option<_>` because methods can return null for native/eval frames; unit tests `fallback_when_no_cache_entry`, `anonymous_when_no_function_name`, `zero_line_or_col_falls_back` cover the degraded-info cases.
+
+### `TaskError::HandlerErrorWithStack` struct variant (additive, not breaking)
+
+**File:** `crates/rivers-runtime/src/process_pool/types.rs` — `TaskError`
+**Decision:** Add a new struct variant `HandlerErrorWithStack { message, stack }` rather than extending `HandlerError(String)` with an optional stack.
+**Spec reference:** `docs/arch/rivers-javascript-typescript-spec.md §5.2`.
+**Resolution:** Changing `HandlerError(String)` to carry an optional stack would break every exhaustive `match` site in the codebase. Additive variant preserves the existing variant for non-stack errors and makes new consumers surface immediately. `ViewError::HandlerWithStack` mirrors the pattern at the view layer. The `#[error]` attribute on both variants displays only the message — the stack travels separately through the variant and is consumed by (a) the per-app log emission in `execute_js_task` (spec §5.3) and (b) the debug-mode response envelope in `map_view_error` (spec §5.3).
+
+### Debug stack in response: debug-build + future app-flag gate
+
+**File:** `crates/riversd/src/error_response.rs` — `map_view_error`
+**Decision:** Include the remapped stack in the response envelope under `details.stack` when `cfg!(debug_assertions)` is true. The `AppConfig.base.debug` flag is declared in `rivers-runtime/src/bundle.rs` but not yet threaded through to `map_view_error` — that plumbing is a follow-on refinement.
+**Spec reference:** `docs/arch/rivers-javascript-typescript-spec.md §5.3`.
+**Resolution:** Spec §5.3 mandates per-app runtime debug flag control. The current MVP uses the compile-time `cfg!(debug_assertions)` to match the existing sanitization policy for `ViewError::Handler`, `Pipeline`, `Internal`. Threading `AppConfig.base.debug` through `view_dispatch.rs` + `map_view_error` is ~15 LOC of signature plumbing that doesn't change the behaviour story; the config surface is already declared for when that lands. Runtime behaviour today: dev builds see stacks, release builds don't — matches spec intent even if not the exact mechanism.
+
 ### Source map generation deferred to Phase 6
 
 **File:** `crates/riversd/src/process_pool/v8_config.rs`

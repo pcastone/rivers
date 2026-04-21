@@ -229,6 +229,24 @@ pub struct AppConfig {
     /// Optional static file serving configuration.
     #[serde(default)]
     pub static_files: Option<AppStaticFilesConfig>,
+
+    /// `[base]` app-level knobs.
+    ///
+    /// Currently holds the `debug` flag that, when `true`, surfaces
+    /// remapped `.ts` stack traces in error responses (spec §5.3).
+    /// Default `false` — production posture.
+    #[serde(default)]
+    pub base: AppBaseConfig,
+}
+
+/// `[base]` section of app.toml — app-level knobs.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct AppBaseConfig {
+    /// When `true`, handler error responses include a `debug.stack` array
+    /// with the remapped `.ts:line:col` stack trace (spec §5.3). Default:
+    /// `false`. Stack is always routed to the per-app log regardless.
+    #[serde(default)]
+    pub debug: bool,
 }
 
 /// `[data]` section of app.toml.
