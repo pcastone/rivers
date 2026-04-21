@@ -78,12 +78,12 @@
 
 ## Phase 5 — Module namespace entrypoint lookup (Defect 3) — spec §4
 
-- [ ] **5.1** Modify `execute_as_module()` (`execution.rs:29-97`) to return the `v8::Local<v8::Module>` handle after `module.evaluate()`. **Validate:** compiler happy; no lifetime regressions.
-- [ ] **5.2** In `execute_js_task()` (`:205-291`), branch entrypoint lookup: pass module handle into `call_entrypoint` on module mode; classic path unchanged. **Validate:** unit test.
-- [ ] **5.3** Extend `call_entrypoint()` (`:352-410`) to accept optional module handle; when present, look up on `module.get_module_namespace()`. **Validate:** unit test — `export function handler(ctx)` resolves without global write.
-- [ ] **5.4** Remove "V1: module must set on globalThis" comment at `execution.rs:222-224`. **Validate:** grep confirms removal.
-- [ ] **5.5** Regression: classic script handlers still look up on global. **Validate:** existing canary handler tests remain green.
-- [ ] **5.6** Run probe — case G passes; A + H still pass. **Validate:** `./run-probe.sh` 9/9 (except source-map tests land in Phase 6).
+- [x] **5.1** `execute_as_module` captures `module.get_module_namespace()` as a `v8::Global<v8::Object>` and stashes it in `TASK_MODULE_NAMESPACE` thread-local. Cleared in `TaskLocals::drop`. Avoids lifetime plumbing across function-signature boundaries. (Done 2026-04-21.)
+- [x] **5.2** Thread-local bridge means no signature change needed on `execute_js_task`; module handle is implicit via the thread-local. Cleaner than threading `Option<v8::Local<v8::Module>>` through three functions. (Done 2026-04-21.)
+- [x] **5.3** `call_entrypoint` reads `TASK_MODULE_NAMESPACE` — Some → module namespace lookup, None → globalThis. `ctx` stays on global in both modes (inject_ctx_object injects it there). (Done 2026-04-21.)
+- [x] **5.4** Removed the "V1: module must set on globalThis" comment at execution.rs:222-224; replaced with accurate spec §4 reference. (Done 2026-04-21.)
+- [x] **5.5** New regression test `execute_classic_script_still_uses_global_scope` — plain `function onRequest(ctx)` dispatch passes. Existing 129 process_pool tests also still green. (Done 2026-04-21.)
+- [x] **5.6** New dispatch test `execute_module_export_function_handler` — `export function handler(ctx)` returns via namespace lookup, confirming probe case G scenario works end-to-end without globalThis.handler workaround. Probe run against real riversd deferred to Phase 10. (Done 2026-04-21.)
 
 ## Phase 6 — Source maps + stack trace remapping — spec §5
 

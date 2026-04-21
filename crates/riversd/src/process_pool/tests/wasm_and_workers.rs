@@ -100,6 +100,33 @@ async fn execute_typescript_handler() {
     assert_eq!(result.value["ok"], true);
 }
 
+#[tokio::test]
+async fn execute_module_export_function_handler() {
+    // Spec §4 — Phase 5: a handler declared as `export function handler(ctx)`
+    // must be reachable without the legacy globalThis.handler workaround.
+    // The source contains `export`, so is_module_syntax() routes to module
+    // mode; call_entrypoint then looks up on the module namespace.
+    let mut ctx = make_js_task(
+        "export function handler(ctx) { return { via: 'namespace' }; }",
+        "handler",
+    );
+    ctx.entrypoint.language = "typescript".into();
+    let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
+    assert_eq!(result.value["via"], "namespace");
+}
+
+#[tokio::test]
+async fn execute_classic_script_still_uses_global_scope() {
+    // Regression: non-module source must still use globalThis lookup.
+    // (No import/export keywords → classic path.)
+    let ctx = make_js_task(
+        "function onRequest(ctx) { return { classic: true }; }",
+        "onRequest",
+    );
+    let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
+    assert_eq!(result.value["classic"], true);
+}
+
 // ── V2.11: Wasmtime Engine Tests ─────────────────────
 
 #[tokio::test]

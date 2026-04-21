@@ -98,6 +98,17 @@ fn execute_as_module(
     // Pump microtask queue for top-level await
     tc.perform_microtask_checkpoint();
 
+    // Spec §4: capture the module namespace so call_entrypoint can look up
+    // `export function handler` without requiring `globalThis.handler = ...`.
+    // v8::Global is a persistent handle — safe to stash in a thread-local.
+    let namespace = module.get_module_namespace();
+    let ns_obj = v8::Local::<v8::Object>::try_from(namespace)
+        .map_err(|_| TaskError::Internal("module namespace is not an object".into()))?;
+    let global = v8::Global::new(tc, ns_obj);
+    super::task_locals::TASK_MODULE_NAMESPACE.with(|n| {
+        *n.borrow_mut() = Some(global);
+    });
+
     Ok(())
 }
 
@@ -342,12 +353,11 @@ pub(crate) async fn execute_js_task(
             // Inject Rivers global utilities (Rivers.log, Rivers.crypto, console)
             inject_rivers_global(&mut scope)?;
 
-            // Choose script or module execution (T4: ES module support)
+            // Choose script or module execution path.
+            // Module mode: entrypoint is looked up on the module namespace
+            // (spec §4). Classic-script mode: entrypoint on globalThis.
             if is_module_syntax(&source) {
                 execute_as_module(&mut scope, &source, &ctx.entrypoint.module)?;
-                // For modules, exported functions are set on the module namespace.
-                // For V1: the module must set the entrypoint on the global scope
-                // (e.g., via a side effect or `globalThis.handler = handler`).
             } else {
                 // Existing script-based execution
                 let v8_source = v8::String::new(&mut scope, &source)
@@ -479,21 +489,39 @@ fn call_entrypoint(
     scope: &mut v8::ContextScope<'_, v8::HandleScope<'_>>,
     function_name: &str,
 ) -> Result<serde_json::Value, TaskError> {
-    let global = scope.get_current_context().global(scope);
+    // Spec §4: module-mode entrypoint lookup on the module namespace.
+    // Classic-script mode falls through to the existing global-scope path.
+    let namespace_local: Option<v8::Local<v8::Object>> =
+        super::task_locals::TASK_MODULE_NAMESPACE.with(|n| {
+            n.borrow().as_ref().map(|g| v8::Local::new(scope, g))
+        });
 
     let func_key = v8::String::new(scope, function_name)
         .ok_or_else(|| TaskError::Internal(format!("failed to create key '{function_name}'")))?;
-    let func_val = global.get(scope, func_key.into()).ok_or_else(|| {
-        TaskError::HandlerError(format!("function '{function_name}' not found"))
-    })?;
+
+    let func_val = if let Some(ns) = namespace_local {
+        ns.get(scope, func_key.into()).ok_or_else(|| {
+            TaskError::HandlerError(format!(
+                "exported function '{function_name}' not found on module namespace"
+            ))
+        })?
+    } else {
+        let global = scope.get_current_context().global(scope);
+        global.get(scope, func_key.into()).ok_or_else(|| {
+            TaskError::HandlerError(format!("function '{function_name}' not found"))
+        })?
+    };
 
     let func = v8::Local::<v8::Function>::try_from(func_val).map_err(|_| {
         TaskError::HandlerError(format!("'{function_name}' is not a function"))
     })?;
 
+    // `ctx` is always injected on the global object (inject_ctx_object) —
+    // even in module mode. Read from there regardless of entrypoint scope.
     let ctx_key = v8::String::new(scope, "ctx")
         .ok_or_else(|| TaskError::Internal("failed to create 'ctx' key".into()))?;
-    let ctx_val = global
+    let ctx_global = scope.get_current_context().global(scope);
+    let ctx_val = ctx_global
         .get(scope, ctx_key.into())
         .ok_or_else(|| TaskError::Internal("ctx not found on global".into()))?;
 

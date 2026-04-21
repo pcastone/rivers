@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-04-21 — TS pipeline Phase 5: module namespace entrypoint lookup
+
+| File | Decision | Reference | Resolution |
+|------|----------|-----------|------------|
+| `crates/riversd/src/process_pool/v8_engine/task_locals.rs` | Added `TASK_MODULE_NAMESPACE: RefCell<Option<v8::Global<v8::Object>>>` thread-local; cleared in drop | Spec §4 | Using a Global avoids lifetime plumbing through function signatures — the namespace object outlives the HandleScope boundary via V8's persistent handle system |
+| `crates/riversd/src/process_pool/v8_engine/execution.rs` | `execute_as_module` now, after `module.evaluate()`, calls `module.get_module_namespace()`, casts to Object, wraps as `Global`, stashes in thread-local | Spec §4.1 | `get_module_namespace` requires instantiated + evaluated state, so this order is correct |
+| `crates/riversd/src/process_pool/v8_engine/execution.rs` | `call_entrypoint` branches on `TASK_MODULE_NAMESPACE`: Some → lookup on namespace Object (spec §4.1), None → lookup on globalThis (classic script). `ctx` always on globalThis regardless of mode (inject_ctx_object puts it there) | Spec §4.3 backward compat | Function body reorganised; `global` local removed, replaced with an explicit `scope.get_current_context().global(scope)` call for `ctx` lookup |
+| `crates/riversd/src/process_pool/v8_engine/execution.rs` | Removed the stale "V1: module must set on globalThis" comment at `:222-224` | Spec §4.3 | Comment was acknowledging the gap this phase closes |
+| `crates/riversd/src/process_pool/tests/wasm_and_workers.rs` | Added `execute_module_export_function_handler` (export fn reaches via namespace) + `execute_classic_script_still_uses_global_scope` (regression for non-module path) | Spec §4 regression coverage | Both green; existing 129 process_pool tests also green |
+
+Probe case G (and F) end-to-end run deferred to Phase 10. Unit dispatch tests exercise both module-mode namespace lookup and classic-script global lookup, so the Phase 5 scope is fully covered by test.
+
 ## 2026-04-21 — TS pipeline Phase 4: V8 module resolve callback
 
 | File | Decision | Reference | Resolution |

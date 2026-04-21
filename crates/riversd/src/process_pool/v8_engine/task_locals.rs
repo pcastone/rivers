@@ -102,6 +102,12 @@ thread_local! {
     /// specifier relative to that path's parent, and finds the target in
     /// `BundleModuleCache`.
     pub(crate) static TASK_MODULE_REGISTRY: RefCell<HashMap<i32, std::path::PathBuf>> = RefCell::new(HashMap::new());
+
+    /// Namespace Object for the currently-executing module, if the source
+    /// uses ES module syntax (spec §4). `call_entrypoint` reads this: Some
+    /// means look up on the namespace, None means classic-script path
+    /// (lookup on globalThis).
+    pub(crate) static TASK_MODULE_NAMESPACE: RefCell<Option<v8::Global<v8::Object>>> = RefCell::new(None);
 }
 
 /// Get the current tokio runtime handle from the thread-local.
@@ -187,5 +193,6 @@ impl Drop for TaskLocals {
         TASK_KEYSTORE.with(|ks| *ks.borrow_mut() = None);
         TASK_APP_NAME.with(|n| *n.borrow_mut() = None);
         TASK_MODULE_REGISTRY.with(|r| r.borrow_mut().clear());
+        TASK_MODULE_NAMESPACE.with(|n| *n.borrow_mut() = None);
     }
 }
