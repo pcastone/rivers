@@ -39,13 +39,22 @@ The existing specifications (feature-inventory §9.1, processpool-runtime-spec-v
 Rivers MUST use `swc_core` for all TypeScript-to-JavaScript compilation. The hand-rolled `strip_type_annotations()` and `compile_typescript()` functions in `v8_config.rs` MUST be deleted and replaced with a single swc-based compilation function.
 
 ```toml
-# crates/riversd/Cargo.toml
-swc_core = { version = "0.90", features = [
+# crates/riversd/Cargo.toml — pinned at the crates.io-current major.
+# swc_core uses major-per-release versioning; any reasonably recent
+# major works provided the feature flags below resolve. v64 is what
+# the reference implementation pins against.
+swc_core = { version = "64", features = [
+    "ecma_ast",
+    "ecma_parser",
     "ecma_parser_typescript",
     "ecma_transforms_typescript",
     "ecma_codegen",
-    "common"
+    "ecma_visit",
+    "common",
+    "common_sourcemap",
 ] }
+# Direct source-map serialization (matches swc_core's transitive).
+swc_sourcemap = "10"
 ```
 
 ### 2.2 Transform Mode
@@ -59,40 +68,31 @@ Rivers MUST use **full transform**, not strip-only. The swc `typescript::typescr
 - `interface` and `type` alias removal
 - `enum` lowering to IIFE-wrapped objects
 - `const enum` inlining at call sites
-- TC39 Stage 3 decorator lowering
 - `namespace` merging into nested objects
 - `const` assertions processing
 
-Rivers MUST NOT use the strip-only mode (`typescript::strip`). Strip-only leaves enums, decorators, and namespaces in the output, producing V8 syntax errors.
+Rivers MUST NOT use the strip-only mode (`typescript::strip`). Strip-only leaves enums and namespaces in the output, producing V8 syntax errors.
+
+TC39 Stage 3 decorators are **parsed but not lowered** by `typescript::typescript()` — decorator lowering lives in `swc_ecma_transforms_proposal::decorators`, a separate pass. See §2.3 for how decorator syntax reaches V8.
 
 ### 2.3 Decorator Support
 
 Rivers MUST support **TC39 Stage 3 decorators only**. Legacy decorators (`experimentalDecorators`) MUST NOT be supported.
 
-swc configuration:
+Decorator handling in Rivers is parse-and-pass-through: the swc parser accepts decorator syntax, the `typescript()` transform leaves decorators intact (it only strips type-layer TypeScript), and V8 executes them natively under its Stage 3 decorator support. The reference swc parser configuration is:
 
 ```rust
-let options = Options {
-    config: Config {
-        jsc: JscConfig {
-            parser: Some(Syntax::Typescript(TsConfig {
-                decorators: true,           // enable decorator parsing
-                ..Default::default()
-            })),
-            transform: Some(TransformConfig {
-                decorator_version: Some(DecoratorVersion::V202203),  // TC39 Stage 3
-                ..Default::default()
-            }),
-            target: Some(EsVersion::Es2022),
-            ..Default::default()
-        },
-        ..Default::default()
-    },
+use swc_core::ecma::parser::{Syntax, TsSyntax};
+
+let syntax = Syntax::Typescript(TsSyntax {
+    decorators: true,           // accept Stage 3 decorator syntax
     ..Default::default()
-};
+});
 ```
 
-If a handler uses legacy decorator semantics (`emitDecoratorMetadata`, `experimentalDecorators`), the swc parser will accept the syntax but the runtime behavior will follow TC39 semantics. Rivers documentation MUST state that only TC39 decorators are supported.
+No additional swc pass is required — specifically, there is no `decorator_version` option on `typescript::typescript()` in current swc_core (that API lives on the separate `swc_ecma_transforms_proposal::decorators` pass, which Rivers does NOT apply). If the pinned V8 ever drops native Stage 3 decorator support, Rivers would insert the proposal-decorators pass between `typescript()` and `fixer()` at that time.
+
+If a handler uses legacy decorator semantics (`emitDecoratorMetadata`, `experimentalDecorators`), the swc parser accepts the syntax but V8's Stage 3 execution semantics apply. Rivers documentation MUST state that only TC39 Stage 3 decorators are supported.
 
 ### 2.4 ES Target
 
@@ -350,13 +350,14 @@ fn prepare_stack_trace_callback(
 
 When a handler throws an uncaught exception, the error reported to the client (in non-debug mode) MUST NOT include stack traces. The remapped stack trace is written to the **Rivers structured log** at `error` level, correlated with the request trace ID.
 
-In debug mode (`debug = true` in app config), the remapped stack trace MAY be included in the error response envelope under a `debug` key:
+In debug mode (`[base] debug = true` in the app's `app.toml`), the remapped stack trace MAY be included in the error response envelope. The envelope matches Rivers' standard `ErrorResponse` shape (spec §18 / SHAPE-2): `{code, message, trace_id, details?}`. The stack appears under `details.stack` as an array of pre-formatted frame strings.
 
 ```json
 {
-  "error": "handler error: TypeError: Cannot read property 'name' of undefined",
+  "code": 500,
+  "message": "handler error: handler 'createOrder' threw: TypeError: Cannot read property 'name' of undefined",
   "trace_id": "abc-123",
-  "debug": {
+  "details": {
     "stack": [
       "at processOrder (libraries/handlers/orders.ts:47:12)",
       "at handler (libraries/handlers/orders.ts:12:5)"
@@ -364,6 +365,8 @@ In debug mode (`debug = true` in app config), the remapped stack trace MAY be in
   }
 }
 ```
+
+Non-debug responses omit the `details` key entirely — the envelope reduces to `{code, message, trace_id}`.
 
 ### 5.4 Resolves
 
@@ -420,20 +423,21 @@ The thread-local flag is checked by `ctx.dataview()` dispatch:
 
 ### 6.4 Drivers with Transaction Support
 
-Per the existing driver implementations:
+Runtime enforcement is authoritative: a driver's `supports_transactions()` return (or the `Unsupported` error from its default `begin_transaction` impl) determines whether `ctx.transaction()` accepts the datasource. The table below is informational — built-in driver rows are verified in `crates/rivers-drivers-builtin/`; plugin rows should be verified by inspecting each plugin crate or by invoking `ctx.transaction()` at plugin load time.
 
-| Driver | `supports_transactions()` | Notes |
-|--------|--------------------------|-------|
-| PostgreSQL | `true` | `BEGIN` / `COMMIT` / `ROLLBACK` |
-| MySQL | `true` | `START TRANSACTION` / `COMMIT` / `ROLLBACK` |
-| SQLite | `true` | `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK` |
-| MongoDB | `true` | Client session transactions (requires replica set) |
-| CouchDB | `false` | No transaction support |
-| Elasticsearch | `false` | No transaction support |
-| Cassandra | `false` | Lightweight transactions via `IF` clauses, not general txn |
-| Redis | `false` | `MULTI/EXEC` is pipelining, not ACID transactions |
-| LDAP | `false` | No transaction support |
-| Kafka | `false` | Producer transactions are a different model |
+| Driver | `supports_transactions()` | Source of truth | Notes |
+|--------|--------------------------|-----------------|-------|
+| PostgreSQL | `true` | `crates/rivers-drivers-builtin/src/postgres.rs` | `BEGIN` / `COMMIT` / `ROLLBACK` |
+| MySQL | `true` | `crates/rivers-drivers-builtin/src/mysql.rs` | `START TRANSACTION` / `COMMIT` / `ROLLBACK` |
+| SQLite | `true` | `crates/rivers-drivers-builtin/src/sqlite.rs` | `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK` |
+| Faker / EventBus / Memcached | `false` | `crates/rivers-drivers-builtin/` | No transaction semantics |
+| Redis | `false` | `crates/rivers-drivers-builtin/src/redis/driver.rs` | `MULTI/EXEC` is pipelining, not ACID transactions |
+| MongoDB | plugin — verify at plugin load | `crates/rivers-plugin-mongodb` | Client session transactions (would require replica set) |
+| CouchDB | plugin — verify at plugin load | `crates/rivers-plugin-couchdb` | No native transaction support expected |
+| Elasticsearch | plugin — verify at plugin load | `crates/rivers-plugin-elasticsearch` | No transaction support expected |
+| Cassandra | plugin — verify at plugin load | `crates/rivers-plugin-cassandra` | LWTs are not general transactions |
+| LDAP | plugin — verify at plugin load | `crates/rivers-plugin-ldap` | No transaction support expected |
+| Kafka | plugin — verify at plugin load | `crates/rivers-plugin-kafka` | Producer transactions are a different model |
 
 ---
 
@@ -514,8 +518,8 @@ Handler authors reference it in their `tsconfig.json`:
 
 The `.d.ts` file MUST declare:
 
-- `Rivers` global object (`Rivers.db`, `Rivers.view`, `Rivers.http`, `Rivers.env`, `Rivers.log`)
-- `ViewContext` interface
+- `Rivers` global object (`Rivers.log`, `Rivers.crypto`, `Rivers.keystore`, `Rivers.env`) — every namespace that the V8 host layer actually injects. See `crates/riversd/src/process_pool/v8_engine/rivers_global.rs` for the authoritative injection surface. Spec-listed namespaces that are NOT injected today (`Rivers.db`, `Rivers.view`, `Rivers.http`) MUST NOT be declared — typed stubs for surfaces that don't exist would let the type checker accept calls that fail at runtime. If a future release adds these namespaces at the host layer, this spec section and `rivers.d.ts` update together.
+- `ViewContext` interface (the type of the `ctx` argument passed to every handler)
 - `ParsedRequest` interface
 - `QueryResult` and `ExecuteResult` interfaces
 - `ctx.transaction()` signature and `TransactionError`

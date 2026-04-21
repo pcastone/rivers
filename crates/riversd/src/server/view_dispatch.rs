@@ -431,18 +431,78 @@ async fn view_dispatch_handler(
                 .into_response()
         }
         Err(e) => {
-            error_response::map_view_error(&e, Some(&trace_id))
+            // Spec §5.3: look up the matched app's `[base] debug` flag so
+            // `HandlerWithStack` errors surface the remapped stack in the
+            // response envelope when enabled. Falls back to `false` if the
+            // bundle/app lookup misses — `map_view_error` OR's in
+            // `cfg!(debug_assertions)` for dev-build convenience.
+            // `matched.app_id` was moved into `manifest_app_id` earlier;
+            // reuse that binding.
+            let debug_enabled = ctx
+                .loaded_bundle
+                .as_ref()
+                .and_then(|b| {
+                    b.apps
+                        .iter()
+                        .find(|a| a.manifest.app_id == manifest_app_id)
+                        .map(|a| a.config.base.debug)
+                })
+                .unwrap_or(false);
+            error_response::map_view_error(&e, Some(&trace_id), debug_enabled)
                 .into_axum_response()
         }
     }
 }
 
 /// Handle an MCP view — JSON-RPC 2.0 dispatch over HTTP POST.
+///
+/// GET requests to `{mcp_path}/instructions` are routed here via a synthetic
+/// route registered in the router (spec MCP-15). They return the compiled
+/// instructions document as `text/markdown`.
 async fn execute_mcp_view(
     ctx: AppContext,
     request: axum::http::Request<axum::body::Body>,
     matched: MatchedRoute,
 ) -> axum::response::Response {
+    // GET /mcp/.../instructions — serve compiled instructions as text/markdown (spec MCP-15)
+    if request.method() == axum::http::Method::GET {
+        let tools = &matched.config.tools;
+        let resources = &matched.config.resources;
+        let prompts = &matched.config.prompts;
+        let dv_namespace = &matched.app_entry_point;
+        let static_instructions = matched.config.instructions.as_deref();
+
+        let app_dir_buf = ctx.loaded_bundle.as_ref()
+            .and_then(|b| b.apps.iter().find(|a| {
+                a.manifest.entry_point.as_deref() == Some(dv_namespace.as_str())
+                    || a.manifest.app_entry_point.as_deref() == Some(dv_namespace.as_str())
+            }))
+            .map(|a| a.app_dir.clone())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let app_dir = app_dir_buf.as_path();
+
+        let dv_guard = ctx.dataview_executor.read().await;
+        let doc = crate::mcp::instructions::compile_instructions(
+            static_instructions,
+            app_dir,
+            tools, resources, prompts,
+            &|dv_name, method| {
+                let namespaced = format!("{}:{}", dv_namespace, dv_name);
+                dv_guard.as_ref()
+                    .and_then(|e| e.get_dataview_config(&namespaced))
+                    .map(|dv| dv.parameters_for_method(method).to_vec())
+                    .unwrap_or_default()
+            },
+        );
+        drop(dv_guard);
+
+        return axum::response::Response::builder()
+            .status(200)
+            .header("content-type", "text/markdown; charset=utf-8")
+            .body(axum::body::Body::from(doc))
+            .unwrap();
+    }
+
     // Extract session header BEFORE consuming body (into_body() moves the request)
     let session_id = request.headers()
         .get("mcp-session-id")

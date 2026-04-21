@@ -18,7 +18,7 @@
 //   }
 //
 //   // libraries/handlers/orders.ts
-//   export function handler(ctx: Ctx): void {
+//   export function handler(ctx: ViewContext): void {
 //     Rivers.log.info("processing order", { order_id: ctx.request.body.id });
 //     ctx.resdata = { ok: true };
 //   }
@@ -47,6 +47,7 @@ interface RiversGlobal {
     /**
      * Application keystore — per-app AES-256-GCM key management. Available
      * only when `[keystore]` is configured in the app manifest.
+     * @capability keystore
      */
     keystore: RiversKeystore;
     /** Environment variables exposed to the handler (subset allowlisted by config). */
@@ -73,9 +74,13 @@ interface RiversCrypto {
     /**
      * AES-256-GCM encrypt with the app's active keystore key.
      * Throws if `[keystore]` is not configured for the app.
+     * @capability keystore
      */
     encrypt(plaintext: string): string;
-    /** AES-256-GCM decrypt — inverse of `encrypt`. */
+    /**
+     * AES-256-GCM decrypt — inverse of `encrypt`.
+     * @capability keystore
+     */
     decrypt(ciphertext: string): string;
 }
 
@@ -98,8 +103,12 @@ interface KeystoreKeyInfo {
 /**
  * The `ctx` argument passed to every handler carries request metadata,
  * pre-fetched data, the response slot, and all host callbacks.
+ *
+ * `Ctx` is provided as a short alias for backwards compatibility with
+ * handlers written against earlier Rivers releases; new code should
+ * prefer `ViewContext`.
  */
-interface Ctx {
+interface ViewContext {
     /** Distributed-trace identifier — same value appears in log entries. */
     readonly trace_id: string;
     /** Per-node identifier — useful for debugging multi-node deployments. */
@@ -146,6 +155,10 @@ interface Ctx {
      *   - unknown datasource
      *   - driver that does not support transactions
      *   - cross-datasource `ctx.dataview` inside the callback
+     *
+     * @capability transaction — datasource driver's `supports_transactions()`
+     *   must return `true`. PostgreSQL, MySQL, SQLite ship with transactions
+     *   enabled; other drivers vary (see spec §6.4).
      */
     transaction<T>(datasource: string, fn: () => T): T;
 
@@ -227,12 +240,12 @@ declare class TransactionError extends Error {
  * Handler signature. Export a function matching this shape; the name
  * must match the `entrypoint` in the view config.
  *
- *   export function handler(ctx: Ctx): void { ... }
+ *   export function handler(ctx: ViewContext): void { ... }
  *
  * Return values are coerced to JSON and used as `ctx.resdata` if the
  * handler did not set `resdata` explicitly.
  */
-export type HandlerFn = (ctx: Ctx) => void | unknown;
+export type HandlerFn = (ctx: ViewContext) => void | unknown;
 
 // ── Negative declarations (spec §8.3) ──────────────────────────
 
@@ -245,5 +258,30 @@ export type HandlerFn = (ctx: Ctx) => void | unknown;
  * config `allow_outbound_http` and exposed through a different API that
  * will be typed in a future release.
  */
+
+// ── Capability gates (informational) ───────────────────────────
+
+/*
+ * Capability tags used in JSDoc across this file:
+ *
+ *   @capability keystore         — `[data.keystore]` declared in app.toml;
+ *                                  Rivers.crypto.encrypt/decrypt, Rivers.keystore
+ *   @capability transaction      — datasource driver's supports_transactions
+ *                                  returns true; ctx.transaction() + the
+ *                                  held-connection path of ctx.dataview
+ *   @capability outbound_http    — view's allow_outbound_http = true;
+ *                                  reserved for the future typed fetch API
+ *
+ * Handlers that call a capability-gated surface without the gate enabled
+ * will throw at runtime (`Unsupported`, `keystore not configured`, etc.).
+ */
+
+// ── Backwards-compatible alias ─────────────────────────────────
+
+/**
+ * Short alias for `ViewContext`. Earlier Rivers releases used `Ctx` as
+ * the primary interface name; new code should prefer `ViewContext`.
+ */
+type Ctx = ViewContext;
 
 export {};

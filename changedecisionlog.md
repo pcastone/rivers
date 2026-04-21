@@ -69,6 +69,20 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 **Spec reference:** `docs/arch/rivers-javascript-typescript-spec.md §6.4`, plan task 7.8.
 **Resolution:** Phase 7 implementation ships the correct behaviour — `DriverError::Unsupported` from a plugin driver maps to spec's exact error message at runtime. The spec's table of supported drivers should be amended to mark plugin rows "verify at plugin load" rather than baking an unverified assertion. Deferred to next spec revision cycle. Runtime enforcement is already authoritative.
 
+### G0.1 — Debug-mode envelope: align spec to existing `ErrorResponse` shape
+
+**File:** `docs/arch/rivers-javascript-typescript-spec.md §5.3` (to be edited in G8.4)
+**Decision:** Spec §5.3 currently shows `{error, trace_id, debug: {stack}}`. Rivers' existing `ErrorResponse` convention (used across every error path in the codebase, pre-dating this spec) is `{code, message, trace_id, details: {stack}}`. Amend the spec to match the existing shape. No code changes.
+**Spec reference:** `docs/arch/rivers-javascript-typescript-spec.md §5.3`; `crates/riversd/src/error_response.rs:ErrorResponse`.
+**Resolution:** Changing the envelope at the code layer would rename fields across every `ErrorResponse` site, break every API consumer that parses the current shape, and require a major version bump + migration doc. Zero information loss either way — `code+message` carries the same signal as `error`, `details.stack` carries the same signal as `debug.stack`. Spec edit is the low-risk path. Logged here because the choice locks the target for downstream tasks G5–G8.
+
+### G0.2 — `Rivers.db / Rivers.view / Rivers.http` — drop from spec §8.3
+
+**File:** `docs/arch/rivers-javascript-typescript-spec.md §8.3` (to be edited in G8.6)
+**Decision:** Spec §8.3 requires `rivers.d.ts` declare `Rivers.db`, `Rivers.view`, `Rivers.http`. None of these exist at runtime — grep of `crates/riversd/src/process_pool/v8_engine/rivers_global.rs` confirms only `Rivers.log`, `Rivers.crypto`, `Rivers.keystore`, `Rivers.env` are injected. Amend the spec to drop the three aspirational surfaces.
+**Spec reference:** `docs/arch/rivers-javascript-typescript-spec.md §8.3`.
+**Resolution:** Adding empty stub declarations would be aspirational clutter — a type checker would accept calls that fail at runtime. Adding real implementations is out of scope for the TS-pipeline work. Spec edit is the right lever. If `Rivers.db/view/http` ship as runtime surfaces in a future release, the `.d.ts` + spec can be updated together.
+
 ### Parsed source-map cache separate from BundleModuleCache
 
 **File:** `crates/riversd/src/process_pool/v8_engine/sourcemap_cache.rs`

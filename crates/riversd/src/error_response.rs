@@ -217,8 +217,20 @@ pub fn uri_too_long(message: impl Into<String>) -> ErrorResponse {
 ///
 /// Internal/handler/pipeline errors are sanitized — the full error is logged
 /// server-side but only a generic message is returned to the client.
-/// In debug builds, the full error is included for development convenience.
-pub fn map_view_error(err: &crate::view_engine::ViewError, trace_id: Option<&str>) -> ErrorResponse {
+///
+/// The `debug_enabled` flag controls whether full error detail (and, for
+/// `HandlerWithStack`, the remapped stack frames) reach the response
+/// envelope. Spec §5.3: debug is per-app, sourced from `[base] debug = true`
+/// in `app.toml`. Callers look up `AppConfig.base.debug` for the matched
+/// view's app and pass the result here. `cfg!(debug_assertions)` is OR'd
+/// in as a dev-build convenience — a debug cargo build always surfaces
+/// stacks regardless of per-app config.
+pub fn map_view_error(
+    err: &crate::view_engine::ViewError,
+    trace_id: Option<&str>,
+    debug_enabled: bool,
+) -> ErrorResponse {
+    let show_debug = debug_enabled || cfg!(debug_assertions);
     let mut resp = match err {
         crate::view_engine::ViewError::NotFound(msg) => not_found(msg.clone()),
         crate::view_engine::ViewError::MethodNotAllowed(msg) => method_not_allowed(msg.clone()),
@@ -226,7 +238,7 @@ pub fn map_view_error(err: &crate::view_engine::ViewError, trace_id: Option<&str
         // Sanitize internal errors — don't leak driver/infra details to clients
         crate::view_engine::ViewError::Handler(msg) => {
             tracing::error!(error = %msg, "handler error");
-            if cfg!(debug_assertions) {
+            if show_debug {
                 internal_error(msg.clone())
             } else {
                 internal_error("internal server error")
@@ -234,12 +246,12 @@ pub fn map_view_error(err: &crate::view_engine::ViewError, trace_id: Option<&str
         }
         // Spec §5.3: handler threw with a remapped `.ts` stack. Stack was
         // already routed to the per-app log by `execute_js_task` (Phase 6E).
-        // In debug builds — or when the app's `[base] debug = true` is
-        // threaded through (future) — include the stack in the response
-        // envelope under `details.stack` (an array of frame strings).
+        // Stack appears in the response envelope under `details.stack` only
+        // when `debug_enabled` is true (app's `[base] debug = true` OR a
+        // debug cargo build).
         crate::view_engine::ViewError::HandlerWithStack { message, stack } => {
             tracing::error!(error = %message, "handler error with stack");
-            if cfg!(debug_assertions) {
+            if show_debug {
                 let frames: Vec<String> = stack
                     .lines()
                     .filter(|l| l.trim_start().starts_with("at "))
@@ -254,7 +266,7 @@ pub fn map_view_error(err: &crate::view_engine::ViewError, trace_id: Option<&str
         }
         crate::view_engine::ViewError::Pipeline(msg) => {
             tracing::error!(error = %msg, "pipeline error");
-            if cfg!(debug_assertions) {
+            if show_debug {
                 internal_error(msg.clone())
             } else {
                 internal_error("internal server error")
@@ -262,7 +274,7 @@ pub fn map_view_error(err: &crate::view_engine::ViewError, trace_id: Option<&str
         }
         crate::view_engine::ViewError::Internal(msg) => {
             tracing::error!(error = %msg, "internal error");
-            if cfg!(debug_assertions) {
+            if show_debug {
                 internal_error(msg.clone())
             } else {
                 internal_error("internal server error")
@@ -281,16 +293,15 @@ mod map_view_error_tests {
     use crate::view_engine::ViewError;
 
     #[test]
-    fn handler_with_stack_includes_frames_in_debug_build() {
-        // cargo test runs with debug_assertions=true, so the stack must
-        // surface in details.
+    fn handler_with_stack_includes_frames_when_debug_enabled() {
+        // debug_enabled=true → stack must surface in details.
         let err = ViewError::HandlerWithStack {
             message: "TypeError: boom".into(),
             stack: "TypeError: boom\n    at handler (orders.ts:42:5)\n    at inner (orders.ts:17:9)".into(),
         };
-        let resp = map_view_error(&err, Some("trace-123"));
+        let resp = map_view_error(&err, Some("trace-123"), true);
         assert_eq!(resp.code, 500);
-        let details = resp.details.expect("details present in debug build");
+        let details = resp.details.expect("details present when debug enabled");
         let frames = details["stack"].as_array().expect("stack array");
         assert_eq!(frames.len(), 2, "two `at …` lines captured: {details}");
         assert!(
@@ -305,16 +316,43 @@ mod map_view_error_tests {
     }
 
     #[test]
-    fn handler_with_stack_includes_message_in_debug_build() {
+    fn handler_with_stack_includes_message_when_debug_enabled() {
         let err = ViewError::HandlerWithStack {
             message: "unique-phase-6F-message".into(),
             stack: "irrelevant stack".into(),
         };
-        let resp = map_view_error(&err, None);
+        let resp = map_view_error(&err, None, true);
         assert!(
             resp.message.contains("unique-phase-6F-message"),
-            "message surfaced in debug build: {}",
+            "message surfaced when debug enabled: {}",
             resp.message
         );
+    }
+
+    #[test]
+    fn handler_with_stack_sanitizes_when_debug_disabled_in_release_build() {
+        // G3: debug_enabled=false AND we're in a release build would hide
+        // the stack. In debug-assertions builds (cargo test), the cfg!
+        // fallback still surfaces it — that matches spec §5.3 intent of
+        // dev-build convenience. We assert the debug_enabled path directly.
+        //
+        // This test only makes a strong assertion in release builds; in
+        // debug builds it documents the OR semantics.
+        let err = ViewError::HandlerWithStack {
+            message: "release-sanitize-test".into(),
+            stack: "at handler (orders.ts:1:1)".into(),
+        };
+        let resp = map_view_error(&err, None, false);
+        if cfg!(debug_assertions) {
+            // Debug build fallback: details present despite flag=false
+            assert!(
+                resp.details.is_some(),
+                "cargo-test debug build surfaces stack regardless"
+            );
+        } else {
+            // Release build: flag=false must hide stack and sanitize message
+            assert!(resp.details.is_none(), "stack hidden");
+            assert_eq!(resp.message, "internal server error");
+        }
     }
 }
