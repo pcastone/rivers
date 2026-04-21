@@ -16,6 +16,8 @@ pub mod v8_engine;
 #[cfg(feature = "static-engines")]
 pub mod v8_config;
 #[cfg(feature = "static-engines")]
+pub mod module_cache;
+#[cfg(feature = "static-engines")]
 pub mod wasm_engine;
 #[cfg(feature = "static-engines")]
 pub mod wasm_config;

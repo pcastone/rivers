@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-04-21 — TS pipeline Phase 2: bundle-load-time compile + module cache
+
+| File | Decision | Reference | Resolution |
+|------|----------|-----------|------------|
+| `crates/rivers-runtime/src/module_cache.rs` | New file. `CompiledModule { source_path, compiled_js, source_map }` + `BundleModuleCache` wrapping `Arc<HashMap<PathBuf, CompiledModule>>` | Spec §3.4 | Types in rivers-runtime so any crate can reference them; Arc-clone is O(1). 3 unit tests |
+| `crates/rivers-runtime/src/lib.rs` | Registered new `module_cache` submodule | Module hygiene | One-line addition |
+| `crates/riversd/src/process_pool/module_cache.rs` | New file. Population helpers (`compile_app_modules`, `populate_module_cache`) + process-global slot (`install_module_cache`, `get_module_cache`) | Spec §2.6–2.7 | Kept in riversd to avoid dragging swc_core into rivers-runtime's build surface. Recursive walker; fail-fast compile; `.tsx` rejected at walk time. 5 unit tests |
+| `crates/riversd/src/process_pool/mod.rs` | Registered new `module_cache` submodule | Module hygiene | Feature-gated to `static-engines` alongside v8_config |
+| `crates/riversd/Cargo.toml` | Added `once_cell = "1"` | Global cache slot | Standard choice for statics with lazy init |
+| `crates/riversd/src/bundle_loader/load.rs` | After validation, call `populate_module_cache(&bundle)` + `install_module_cache(cache)` | Spec §2.6 bundle-load timing | Placed between cross-ref validation and DataViewRegistry setup; fail-fast via ServerError::Config |
+| `crates/riversd/src/process_pool/v8_engine/execution.rs` | Rewrote `resolve_module_source` to consult the global cache first, fall back to disk read + live compile on miss | Spec §2.8 | Fallback path kept for handlers outside `libraries/`; logged at debug level. Pre-existing 124 process_pool tests still green |
+| `changedecisionlog.md` | Added entries: rivers-runtime/riversd split, global OnceCell rationale, fallback-on-miss reasoning | CLAUDE.md Workflow rule 5 | Three new decisions, each naming file + spec ref + resolution |
+
 ## 2026-04-21 — TS pipeline Phase 1: swc full-transform drop-in
 
 | File | Decision | Reference | Resolution |

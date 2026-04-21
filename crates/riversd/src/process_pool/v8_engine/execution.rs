@@ -411,22 +411,48 @@ fn call_entrypoint(
 
 /// Resolve the JavaScript source code for a task.
 ///
-/// V2.10: TypeScript sources (detected by file extension or entrypoint
-/// language) are compiled to JavaScript via `compile_typescript()`.
+/// Per `docs/arch/rivers-javascript-typescript-spec.md` §2.6–2.8:
+/// every `.ts`/`.js` under every app's `libraries/` is pre-compiled at
+/// bundle load time into the process-global `BundleModuleCache`. This
+/// function performs a cache lookup — not a live compilation.
+///
+/// Two fallback paths remain:
+///
+/// 1. `ctx.args["_source"]` — tests and dynamic-dispatch callers may inject
+///    source inline without a disk file. TypeScript is compiled on the fly
+///    via `compile_typescript()`; JS is used verbatim.
+/// 2. Cache miss on `ctx.entrypoint.module` — read from disk and compile.
+///    This is a defence-in-depth path for modules that exist on disk but
+///    weren't walked (e.g., legacy handlers outside `libraries/`). Logged
+///    so we can detect and fix such cases.
 fn resolve_module_source(ctx: &TaskContext) -> Result<String, TaskError> {
     if let Some(source) = ctx.args.get("_source").and_then(|v| v.as_str()) {
-        // Check if the entrypoint language is typescript
         if ctx.entrypoint.language == "typescript" {
             return compile_typescript(source, &ctx.entrypoint.module);
         }
         return Ok(source.to_string());
     }
+
     let path = &ctx.entrypoint.module;
 
+    // Primary path — consult the bundle module cache populated at load time.
+    if let Some(cache) = super::super::module_cache::get_module_cache() {
+        let abs = std::path::PathBuf::from(path)
+            .canonicalize()
+            .unwrap_or_else(|_| std::path::PathBuf::from(path));
+        if let Some(entry) = cache.get(&abs) {
+            return Ok(entry.compiled_js.clone());
+        }
+    }
+
+    // Fallback — on-disk read + live compile. Should be rare after Phase 2.
+    tracing::debug!(
+        module = %path,
+        "module cache miss — falling back to disk + live compile"
+    );
     let source = std::fs::read_to_string(path)
         .map_err(|e| TaskError::HandlerError(format!("cannot read module '{path}': {e}")))?;
 
-    // Auto-detect TypeScript by file extension
     let compiled = if path.ends_with(".ts") || ctx.entrypoint.language == "typescript" {
         compile_typescript(&source, path)?
     } else {
