@@ -58,10 +58,10 @@
 
 ## Phase 3 — Circular import detection — spec §3.5
 
-- [ ] **3.1** During 2.4's compile pass, extract `import` specifiers from each compiled module's swc AST; store as `Vec<PathBuf>` per module. **Validate:** unit test on a 3-import file returns all 3 paths.
-- [ ] **3.2** Build per-app dependency graph after all modules compile. **Validate:** unit test: 5-module graph has correct edges.
-- [ ] **3.3** DFS cycle detection; on cycle, fail bundle load with spec §3.5 formatted error (full path chain). **Validate:** fixtures for 2-module cycle, 3-module cycle, self-import all reject.
-- [ ] **3.4** Document circular-import rejection in tutorial + `rivers.d.ts` preamble. **Validate:** tutorial has a "gotcha" subsection.
+- [x] **3.1** Added `compile_typescript_with_imports` in `v8_config.rs` — same pipeline as `compile_typescript` but walks the post-transform Program for `ImportDecl`/`ExportAll`/`NamedExport` and returns `(String, Vec<String>)`. `imports` field added to `CompiledModule` in rivers-runtime. (Done 2026-04-21.)
+- [x] **3.2** `check_cycles_for_app` in `riversd/.../module_cache.rs` resolves each module's raw specifiers against its referrer's directory, filters to same-app edges, and builds a `HashMap<PathBuf, Vec<PathBuf>>`. (Done 2026-04-21.)
+- [x] **3.3** DFS with white/gray/black colouring; back-edge to gray yields the cycle path, formatted per spec §3.5. 5 unit tests green: two-module cycle, three-module cycle, self-import (side-effect form), acyclic-tree passthrough, type-only-imports-not-cycles. (Done 2026-04-21.)
+- [ ] **3.4** Deferred to Phase 8.1 (tutorial covers `rivers.d.ts` + handler patterns + TS gotchas in one pass). Cycle-detection test names + error message format are the interim contract.
 
 ## Phase 4 — Module resolve callback with app-boundary enforcement (Defect 4) — spec §3.1–3.3, §3.6
 

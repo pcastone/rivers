@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-04-21 — TS pipeline Phase 3: circular import detection
+
+| File | Decision | Reference | Resolution |
+|------|----------|-----------|------------|
+| `crates/rivers-runtime/src/module_cache.rs` | Added `imports: Vec<String>` field to `CompiledModule` (raw specifiers, post-transform). Doc note that type-only imports are erased by the swc pass before extraction | Spec §3.5 | Construct sites updated with `imports: Vec::new()` where the real list comes from the compile step |
+| `crates/riversd/src/process_pool/v8_config.rs` | Split `compile_typescript` into a thin wrapper over `compile_typescript_with_imports(&str, &str) -> Result<(String, Vec<String>), _>`. New `extract_imports(&Program)` walks ModuleItem::ModuleDecl for Import/ExportAll/NamedExport | Spec §3.5 | Keeps 21 existing callers on the String-returning API; only the populate path sees the `Vec<String>` |
+| `crates/riversd/src/process_pool/module_cache.rs` | `check_cycles_for_app` builds per-app adjacency, DFS cycle detection, formats errors per spec §3.5. Runs after each app's compile inside `populate_module_cache`. Only relative specifiers (`./`, `../`) are cycle candidates — bare and absolute are deferred to Phase 4's resolver | Spec §3.5 | Graph is per-app; cross-app imports are prohibited so cross-app cycles are structurally impossible. 5 new unit tests cover two-module, three-module, self-import, acyclic-tree-OK, and type-only-not-cycle |
+
 ## 2026-04-21 — TS pipeline Phase 2: bundle-load-time compile + module cache
 
 | File | Decision | Reference | Resolution |

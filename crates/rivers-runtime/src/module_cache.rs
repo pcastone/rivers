@@ -20,7 +20,9 @@ use std::sync::Arc;
 /// One entry in the bundle module cache.
 ///
 /// Fields map 1:1 to spec §3.4 `CompiledModule`. `source_map` is populated by
-/// Phase 6; Phase 2 stores an empty string.
+/// Phase 6; Phase 2 stores an empty string. `imports` holds the raw import
+/// specifiers extracted from the post-transform AST (Phase 3 uses these for
+/// circular-dependency detection; Phase 4 resolves them).
 #[derive(Debug, Clone)]
 pub struct CompiledModule {
     /// Absolute path on disk of the original source file.
@@ -29,6 +31,11 @@ pub struct CompiledModule {
     pub compiled_js: String,
     /// Source map (JSON string). Empty until Phase 6 lands.
     pub source_map: String,
+    /// Raw import specifiers after type-only-import erasure — e.g.
+    /// `["./sibling.ts", "../shared/util.ts"]`. Type-only `import { type X }`
+    /// entries are already erased by the swc typescript transform, so this
+    /// list reflects runtime imports only.
+    pub imports: Vec<String>,
 }
 
 /// Map of absolute handler source paths to their compiled JS.
@@ -84,6 +91,7 @@ mod tests {
                 source_path: path.clone(),
                 compiled_js: "function h(ctx){}".into(),
                 source_map: String::new(),
+                imports: Vec::new(),
             },
         );
         let cache = BundleModuleCache::from_map(map);

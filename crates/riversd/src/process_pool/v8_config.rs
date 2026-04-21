@@ -117,13 +117,21 @@ impl V8Worker {
 // ── TypeScript Compiler ─────────────────────────────────────────
 
 use swc_core::common::{sync::Lrc, FileName, Globals, Mark, SourceMap, GLOBALS};
-use swc_core::ecma::ast::EsVersion;
+use swc_core::ecma::ast::{EsVersion, ModuleDecl, ModuleItem, Program};
 use swc_core::ecma::codegen::to_code_default;
 use swc_core::ecma::parser::{parse_file_as_program, Syntax, TsSyntax};
 use swc_core::ecma::transforms::base::{fixer::fixer, resolver};
 use swc_core::ecma::transforms::typescript::{typescript, Config as TsConfig};
 
-/// Compile TypeScript source to JavaScript via the swc full-transform pass.
+/// Compile TypeScript source to JavaScript, discarding import metadata.
+///
+/// See `compile_typescript_with_imports` for the variant that returns both
+/// the compiled JS and the post-transform import specifier list.
+pub fn compile_typescript(source: &str, filename: &str) -> Result<String, TaskError> {
+    compile_typescript_with_imports(source, filename).map(|(js, _)| js)
+}
+
+/// Compile TypeScript and return both the JS and its runtime import specifiers.
 ///
 /// Per `docs/arch/rivers-javascript-typescript-spec.md` §2.1–2.5:
 /// - Full transform (not strip-only): erases type annotations, `type`-only
@@ -134,7 +142,15 @@ use swc_core::ecma::transforms::typescript::{typescript, Config as TsConfig};
 ///   pinned runtime; legacy `experimentalDecorators` is not supported.
 /// - ES2022 is the compilation target floor (spec §2.4).
 /// - `.tsx` is rejected unconditionally (spec §2.5).
-pub fn compile_typescript(source: &str, filename: &str) -> Result<String, TaskError> {
+///
+/// Import extraction (spec §3.5): specifiers are pulled from the
+/// post-transform AST, so type-only imports (which the typescript pass has
+/// already erased) do not appear in the result. Cycle detection operates on
+/// runtime imports only — a type-only cycle is not a runtime cycle.
+pub fn compile_typescript_with_imports(
+    source: &str,
+    filename: &str,
+) -> Result<(String, Vec<String>), TaskError> {
     if filename.ends_with(".tsx") {
         return Err(TaskError::HandlerError(format!(
             "JSX/TSX is not supported in Rivers v1: {filename}"
@@ -176,20 +192,55 @@ pub fn compile_typescript(source: &str, filename: &str) -> Result<String, TaskEr
         )));
     }
 
-    GLOBALS.set(&Globals::default(), || -> Result<String, TaskError> {
-        let unresolved_mark = Mark::new();
-        let top_level_mark = Mark::new();
+    GLOBALS.set(
+        &Globals::default(),
+        || -> Result<(String, Vec<String>), TaskError> {
+            let unresolved_mark = Mark::new();
+            let top_level_mark = Mark::new();
 
-        let program = program
-            .apply(resolver(unresolved_mark, top_level_mark, true))
-            .apply(typescript(
-                TsConfig::default(),
-                unresolved_mark,
-                top_level_mark,
-            ))
-            .apply(fixer(None));
+            let program = program
+                .apply(resolver(unresolved_mark, top_level_mark, true))
+                .apply(typescript(
+                    TsConfig::default(),
+                    unresolved_mark,
+                    top_level_mark,
+                ))
+                .apply(fixer(None));
 
-        Ok(to_code_default(cm.clone(), None, &program))
-    })
+            let imports = extract_imports(&program);
+            let js = to_code_default(cm.clone(), None, &program);
+            Ok((js, imports))
+        },
+    )
+}
+
+/// Walk a post-transform Program and collect every runtime import specifier.
+///
+/// Covers:
+/// - `import ... from "x"`
+/// - `import "x"` (bare side-effect import)
+/// - `export ... from "x"`
+/// - `export * from "x"`
+///
+/// Dynamic `import("x")` calls are ignored — cycle detection is static.
+fn extract_imports(program: &Program) -> Vec<String> {
+    let Program::Module(module) = program else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(decl) = item else { continue; };
+        match decl {
+            ModuleDecl::Import(i) => out.push(i.src.value.to_atom_lossy().as_str().to_string()),
+            ModuleDecl::ExportAll(e) => out.push(e.src.value.to_atom_lossy().as_str().to_string()),
+            ModuleDecl::ExportNamed(n) => {
+                if let Some(src) = &n.src {
+                    out.push(src.value.to_atom_lossy().as_str().to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 

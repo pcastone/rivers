@@ -25,7 +25,7 @@ use rivers_runtime::module_cache::{BundleModuleCache, CompiledModule};
 use rivers_runtime::rivers_core_config::RiversError;
 use rivers_runtime::LoadedBundle;
 
-use super::v8_config::compile_typescript;
+use super::v8_config::compile_typescript_with_imports;
 
 /// Process-global cache slot. Installed after bundle load; swapped atomically
 /// on hot reload.
@@ -93,17 +93,19 @@ pub fn compile_app_modules(
                     ))
                 })?;
                 let filename = abs.to_string_lossy().to_string();
-                let compiled_js = compile_typescript(&source, &filename).map_err(|e| {
-                    RiversError::Config(format!(
-                        "TypeScript compile error in app '{app_name}', file {filename}: {e:?}"
-                    ))
-                })?;
+                let (compiled_js, imports) =
+                    compile_typescript_with_imports(&source, &filename).map_err(|e| {
+                        RiversError::Config(format!(
+                            "TypeScript compile error in app '{app_name}', file {filename}: {e:?}"
+                        ))
+                    })?;
                 acc.insert(
                     abs.clone(),
                     CompiledModule {
                         source_path: abs,
                         compiled_js,
                         source_map: String::new(),
+                        imports,
                     },
                 );
             }
@@ -129,6 +131,11 @@ pub fn compile_app_modules(
                         source_path: abs.clone(),
                         compiled_js: source,
                         source_map: String::new(),
+                        // Plain .js imports would need a separate parser pass.
+                        // Phase 3 cycle detection operates on the post-transform
+                        // TS AST; .js handlers in the canary today don't use
+                        // multi-module imports. Leave empty until needed.
+                        imports: Vec::new(),
                     },
                 );
             }
@@ -146,13 +153,133 @@ pub fn compile_app_modules(
 /// Spec §2.7: exhaustive upfront compilation — every `.ts` under every
 /// app's `libraries/` is compiled regardless of whether any view references
 /// it. Any single compile failure aborts the whole bundle load.
+///
+/// Spec §3.5: after all modules compile, per-app circular-import detection
+/// runs; any cycle aborts bundle load with a formatted path chain.
 pub fn populate_module_cache(bundle: &LoadedBundle) -> Result<BundleModuleCache, RiversError> {
     let mut map = HashMap::new();
     for app in &bundle.apps {
         let app_name = app.manifest.entry_point.as_deref().unwrap_or("unknown");
+        let before = map.len();
         compile_app_modules(app_name, &app.app_dir, &mut map)?;
+        let app_paths: Vec<PathBuf> = map
+            .keys()
+            .skip(before)
+            .cloned()
+            .collect();
+        check_cycles_for_app(app_name, &app.app_dir, &app_paths, &map)?;
     }
     Ok(BundleModuleCache::from_map(map))
+}
+
+/// Detect circular imports within a single app.
+///
+/// Builds a directed graph from every compiled module's `imports` field
+/// (raw specifiers resolved against the referrer's directory) and runs DFS
+/// cycle detection. On a cycle, returns a `RiversError::Config` whose
+/// message matches spec §3.5:
+///
+/// ```text
+/// circular import detected in {app}:
+///   libraries/handlers/a.ts
+///     → libraries/shared/b.ts
+///     → libraries/helpers/c.ts
+///     → libraries/handlers/a.ts
+/// ```
+fn check_cycles_for_app(
+    app_name: &str,
+    app_dir: &Path,
+    app_paths: &[PathBuf],
+    cache: &HashMap<PathBuf, CompiledModule>,
+) -> Result<(), RiversError> {
+    // Build adjacency list: module → resolved import paths (only those that
+    // resolve inside the same app's cache).
+    let mut graph: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    for module_path in app_paths {
+        let module = match cache.get(module_path) {
+            Some(m) => m,
+            None => continue,
+        };
+        let parent = module_path.parent().unwrap_or_else(|| Path::new("/"));
+        let mut edges = Vec::new();
+        for spec in &module.imports {
+            // Only relative imports are cycle candidates. Bare and absolute
+            // specifiers are handled (rejected) by the Phase 4 resolver.
+            if !(spec.starts_with("./") || spec.starts_with("../")) {
+                continue;
+            }
+            let joined = parent.join(spec);
+            // Canonicalise lazily — if the file doesn't exist on disk, skip:
+            // the Phase 4 resolver will surface the missing-import error at
+            // dispatch time. Here we only care about resolvable edges.
+            if let Ok(abs) = joined.canonicalize() {
+                if cache.contains_key(&abs) {
+                    edges.push(abs);
+                }
+            }
+        }
+        graph.insert(module_path.clone(), edges);
+    }
+
+    // DFS: colour 0 = unvisited, 1 = on current path (gray), 2 = fully
+    // explored (black). A back-edge to a gray node is a cycle.
+    let mut color: HashMap<&PathBuf, u8> = graph.keys().map(|k| (k, 0u8)).collect();
+    let mut path: Vec<&PathBuf> = Vec::new();
+
+    for start in graph.keys() {
+        if color.get(start).copied() != Some(0) {
+            continue;
+        }
+        if let Some(cycle) = dfs_find_cycle(start, &graph, &mut color, &mut path) {
+            let rel = |p: &Path| -> String {
+                p.strip_prefix(app_dir)
+                    .map(|r| r.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| p.to_string_lossy().to_string())
+            };
+            let mut msg = format!("circular import detected in {app_name}:\n");
+            for (i, p) in cycle.iter().enumerate() {
+                if i == 0 {
+                    msg.push_str(&format!("  {}\n", rel(p)));
+                } else {
+                    msg.push_str(&format!("    → {}\n", rel(p)));
+                }
+            }
+            return Err(RiversError::Config(msg.trim_end().to_string()));
+        }
+    }
+
+    Ok(())
+}
+
+fn dfs_find_cycle<'a>(
+    node: &'a PathBuf,
+    graph: &'a HashMap<PathBuf, Vec<PathBuf>>,
+    color: &mut HashMap<&'a PathBuf, u8>,
+    path: &mut Vec<&'a PathBuf>,
+) -> Option<Vec<PathBuf>> {
+    color.insert(node, 1); // gray
+    path.push(node);
+    if let Some(edges) = graph.get(node) {
+        for next in edges {
+            let c = color.get(next).copied().unwrap_or(0);
+            if c == 0 {
+                if let Some(cycle) = dfs_find_cycle(next, graph, color, path) {
+                    return Some(cycle);
+                }
+            } else if c == 1 {
+                // Back-edge → cycle. Slice the current path from `next` back
+                // to the top, then append `next` again to show the loop close.
+                let start_idx = path.iter().position(|p| *p == next).unwrap_or(0);
+                let mut cycle: Vec<PathBuf> =
+                    path[start_idx..].iter().map(|p| (*p).clone()).collect();
+                cycle.push(next.clone());
+                return Some(cycle);
+            }
+        }
+    }
+    path.pop();
+    color.insert(node, 2); // black
+    None
 }
 
 /// Recursive directory walk yielding regular files.
@@ -267,6 +394,146 @@ mod tests {
         assert!(msg.contains("broken.ts"), "broken file named: {msg}");
     }
 
+    fn make_bundle_with_app(app_dir: PathBuf) -> LoadedBundle {
+        use rivers_runtime::bundle::{AppManifest, BundleManifest, ResourcesConfig};
+        use rivers_runtime::LoadedApp;
+
+        LoadedBundle {
+            manifest: BundleManifest {
+                bundle_name: "probe-bundle".into(),
+                bundle_version: "0.0.0".into(),
+                source: None,
+                apps: vec!["probe".into()],
+            },
+            apps: vec![LoadedApp {
+                manifest: AppManifest {
+                    app_name: "probe".into(),
+                    description: None,
+                    version: None,
+                    app_type: "app-service".into(),
+                    app_id: "00000000-0000-0000-0000-000000000000".into(),
+                    entry_point: Some("probe".into()),
+                    app_entry_point: None,
+                    source: None,
+                    spa: None,
+                    init: None,
+                },
+                resources: ResourcesConfig::default(),
+                config: Default::default(),
+                app_dir,
+            }],
+        }
+    }
+
+    #[test]
+    fn cycle_detection_two_module_loop() {
+        let dir = TempDir::new().unwrap();
+        let app = dir.path().to_path_buf();
+        write(
+            &app,
+            "libraries/handlers/a.ts",
+            "import { b } from \"./b.ts\";\nexport function a() { return b(); }",
+        );
+        write(
+            &app,
+            "libraries/handlers/b.ts",
+            "import { a } from \"./a.ts\";\nexport function b() { return a(); }",
+        );
+        let bundle = make_bundle_with_app(app);
+        let err = populate_module_cache(&bundle).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("circular import detected"), "got: {msg}");
+        assert!(msg.contains("a.ts"), "a.ts in cycle msg: {msg}");
+        assert!(msg.contains("b.ts"), "b.ts in cycle msg: {msg}");
+    }
+
+    #[test]
+    fn cycle_detection_three_module_loop() {
+        let dir = TempDir::new().unwrap();
+        let app = dir.path().to_path_buf();
+        write(
+            &app,
+            "libraries/handlers/a.ts",
+            "import \"./b.ts\";\nexport const a = 1;",
+        );
+        write(
+            &app,
+            "libraries/handlers/b.ts",
+            "import \"./c.ts\";\nexport const b = 1;",
+        );
+        write(
+            &app,
+            "libraries/handlers/c.ts",
+            "import \"./a.ts\";\nexport const c = 1;",
+        );
+        let bundle = make_bundle_with_app(app);
+        let err = populate_module_cache(&bundle).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("circular import detected"), "got: {msg}");
+        for f in &["a.ts", "b.ts", "c.ts"] {
+            assert!(msg.contains(f), "{f} in cycle msg: {msg}");
+        }
+    }
+
+    #[test]
+    fn cycle_detection_self_import() {
+        let dir = TempDir::new().unwrap();
+        let app = dir.path().to_path_buf();
+        // Side-effect import (no named binding) so swc cannot tree-shake it
+        // away — this genuinely reaches the runtime import graph.
+        write(
+            &app,
+            "libraries/handlers/loop.ts",
+            "import \"./loop.ts\";\nexport const z = 1;",
+        );
+        let bundle = make_bundle_with_app(app);
+        let err = populate_module_cache(&bundle).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("circular import detected"), "got: {msg}");
+        assert!(msg.contains("loop.ts"), "self-loop filename: {msg}");
+    }
+
+    #[test]
+    fn cycle_detection_acyclic_tree_ok() {
+        let dir = TempDir::new().unwrap();
+        let app = dir.path().to_path_buf();
+        write(
+            &app,
+            "libraries/handlers/main.ts",
+            "import { helper } from \"./util.ts\";\nexport function main() { return helper(); }",
+        );
+        write(
+            &app,
+            "libraries/handlers/util.ts",
+            "export function helper() { return 42; }",
+        );
+        let bundle = make_bundle_with_app(app);
+        let cache = populate_module_cache(&bundle).expect("acyclic bundle loads");
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn cycle_detection_type_only_imports_are_not_cycles() {
+        // Spec §3.5 operates on runtime imports; type-only imports are
+        // erased by the swc typescript transform before extract_imports runs.
+        let dir = TempDir::new().unwrap();
+        let app = dir.path().to_path_buf();
+        write(
+            &app,
+            "libraries/handlers/a.ts",
+            "import type { X } from \"./b.ts\";\nexport const a: X = 1 as X;",
+        );
+        write(
+            &app,
+            "libraries/handlers/b.ts",
+            "import type { A } from \"./a.ts\";\nexport type X = A;",
+        );
+        let bundle = make_bundle_with_app(app);
+        // No runtime imports → no cycle. swc erased both `import type` lines.
+        let cache = populate_module_cache(&bundle).expect("type-only: no cycle");
+        assert_eq!(cache.len(), 2);
+    }
+
     #[test]
     fn install_and_get_roundtrip() {
         // This test mutates the process-global slot; keep assertions scoped
@@ -278,6 +545,7 @@ mod tests {
                 source_path: PathBuf::from("/tmp/x.ts"),
                 compiled_js: "const x = 1;".into(),
                 source_map: String::new(),
+                imports: Vec::new(),
             },
         );
         let cache = BundleModuleCache::from_map(map);
