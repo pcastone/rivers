@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-04-21 — TS pipeline Phase 10 (scoped) + Phase 11: canary txn handlers, version bump, spec supersede
+
+| File | Decision | Reference | Resolution |
+|------|----------|-----------|------------|
+| `canary-bundle/canary-handlers/libraries/handlers/txn-tests.ts` | New file. Five handlers probing spec §6: txnRequiresTwoArgs, txnRejectsNonFunction, txnUnknownDatasourceThrows, txnStateCleanupBetweenCalls, txnSurfaceExists | Phase 7 canary coverage | Each handler exercises a slice of ctx.transaction semantics without needing a real DB. Commit/rollback round-trip against PG is deferred to a future integration session |
+| `canary-bundle/canary-handlers/app.toml` | Registered 5 `[api.views.txn_*]` blocks (paths `/canary/rt/txn/{args,cb-type,unknown-ds,cleanup,surface}`, method POST, Rest, auth none) | Phase 10.3 | Uses the existing canary view pattern verbatim |
+| `canary-bundle/run-tests.sh` | Added "TRANSACTIONS-TS Profile" block between HANDLERS and SQL profiles, 5 test_ep lines | Phase 10.5 | No PG_AVAIL conditional — these handlers don't touch a DB |
+| `Cargo.toml` | Bumped workspace version `0.54.1 → 0.55.0` | Phase 11.5 | Breaking handler semantics (swc replaces hand-rolled stripper, bundle-load compile timing, new ctx.transaction API) warrant a minor bump in 0.x |
+| `docs/arch/rivers-processpool-runtime-spec-v2.md §5.3` | Added superseded-by header note pointing to `rivers-javascript-typescript-spec.md` | Phase 11.2 | Historical paragraph preserved for audit trail |
+| `CLAUDE.md` | Updated rivers-runtime Key Crates row to mention `module_cache::{CompiledModule, BundleModuleCache}` | Phase 11.3 | Table now reflects the module-cache types added in Phase 2 |
+
 ## 2026-04-21 — TS pipeline Phase 9: rivers.d.ts type definitions
 
 | File | Decision | Reference | Resolution |

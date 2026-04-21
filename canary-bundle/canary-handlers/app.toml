@@ -418,3 +418,79 @@ type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/misc-tests.ts"
 entrypoint = "fakerDeterminism"
+
+# ═════════════════════════════════════════════════════════════════
+# TRANSACTIONS-TS profile — ctx.transaction() surface checks.
+# Spec: docs/arch/rivers-javascript-typescript-spec.md §6.
+# These tests exercise argument validation, unknown-datasource errors,
+# and thread-local cleanup without needing a real DB. Commit/rollback
+# round-trip tests against PG live in canary-sql (follow-on).
+# ═════════════════════════════════════════════════════════════════
+
+[api.views.txn_requires_two_args]
+path      = "/canary/rt/txn/args"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_requires_two_args.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/txn-tests.ts"
+entrypoint = "txnRequiresTwoArgs"
+
+# ─────────────────────────
+
+[api.views.txn_rejects_non_function]
+path      = "/canary/rt/txn/cb-type"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_rejects_non_function.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/txn-tests.ts"
+entrypoint = "txnRejectsNonFunction"
+
+# ─────────────────────────
+
+[api.views.txn_unknown_datasource]
+path      = "/canary/rt/txn/unknown-ds"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_unknown_datasource.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/txn-tests.ts"
+entrypoint = "txnUnknownDatasourceThrows"
+
+# ─────────────────────────
+
+[api.views.txn_state_cleanup]
+path      = "/canary/rt/txn/cleanup"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_state_cleanup.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/txn-tests.ts"
+entrypoint = "txnStateCleanupBetweenCalls"
+
+# ─────────────────────────
+
+[api.views.txn_surface]
+path      = "/canary/rt/txn/surface"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_surface.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/txn-tests.ts"
+entrypoint = "txnSurfaceExists"

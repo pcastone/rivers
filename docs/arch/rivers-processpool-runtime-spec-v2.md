@@ -310,6 +310,8 @@ declare const Rivers: {
 
 ### 5.3 TypeScript Compilation
 
+> **Superseded by [`rivers-javascript-typescript-spec.md`](./rivers-javascript-typescript-spec.md)** (v1.0, 2026-04-21). See that spec for the authoritative swc compiler integration, module resolution algorithm, entrypoint lookup semantics, source maps, and `ctx.transaction()` API. The paragraph below is preserved for historical context.
+
 TypeScript handlers are compiled at bundle load time (not at request time) using the embedded `swc` compiler. The compiled JS is stored in the bundle cache. At dispatch, the worker loads pre-compiled JS — there is no per-request transpilation overhead.
 
 ### 5.4 Isolate Reuse and Context Unbinding

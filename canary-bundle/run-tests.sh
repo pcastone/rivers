@@ -157,6 +157,16 @@ test_ep "eventbus-publish"   POST "$BASE/handlers/canary/rt/eventbus/publish" '{
 test_ep "header-blocklist"   GET  "$BASE/handlers/canary/rt/header/blocklist"
 test_ep "faker-determinism"  GET  "$BASE/handlers/canary/rt/faker/determinism"
 
+# ── TRANSACTIONS-TS Profile (spec §6: ctx.transaction surface) ───
+
+echo ""
+echo "  ── TRANSACTIONS-TS Profile (ctx.transaction) ──"
+test_ep "txn-args"           POST "$BASE/handlers/canary/rt/txn/args" '{}'
+test_ep "txn-cb-type"        POST "$BASE/handlers/canary/rt/txn/cb-type" '{}'
+test_ep "txn-unknown-ds"     POST "$BASE/handlers/canary/rt/txn/unknown-ds" '{}'
+test_ep "txn-cleanup"        POST "$BASE/handlers/canary/rt/txn/cleanup" '{}'
+test_ep "txn-surface"        POST "$BASE/handlers/canary/rt/txn/surface" '{}'
+
 # ── SQL Profile (auth=session, uses PG/MySQL/SQLite) ─────────────
 
 echo ""
