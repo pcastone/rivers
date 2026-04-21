@@ -232,6 +232,10 @@ fn scaffold_runtime(deploy_path: &Path, version: &str, mode: &str, workspace_roo
     println!("  copying docs/arch...");
     copy_arch_specs(workspace_root, deploy_path);
 
+    // Copy rivers.d.ts so deployed handlers can reference types
+    println!("  copying types/rivers.d.ts...");
+    copy_type_definitions(workspace_root, deploy_path);
+
     // VERSION
     write_version_file(deploy_path, version, mode);
 }
@@ -249,6 +253,25 @@ fn copy_guides(workspace_root: &Path, deploy_path: &Path) {
     } else {
         println!("  guides: {}", dst.display());
     }
+}
+
+/// Copy `types/rivers.d.ts` into the deployed instance so handler authors
+/// can reference it from their `tsconfig.json` without extra setup.
+/// Spec: `rivers-javascript-typescript-spec.md §8.2`.
+fn copy_type_definitions(workspace_root: &Path, deploy_path: &Path) {
+    let src = workspace_root.join("types/rivers.d.ts");
+    if !src.is_file() {
+        eprintln!(
+            "  warn: types/rivers.d.ts not found at {}, skipping",
+            src.display()
+        );
+        return;
+    }
+    let dst_dir = deploy_path.join("types");
+    create_dir(&dst_dir);
+    let dst = dst_dir.join("rivers.d.ts");
+    copy_file(&src, &dst);
+    println!("  types: {}", dst.display());
 }
 
 /// Copy the `docs/arch` directory from the workspace into the deploy path.

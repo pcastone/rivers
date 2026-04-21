@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-04-21 — TS pipeline Phase 9: rivers.d.ts type definitions
+
+| File | Decision | Reference | Resolution |
+|------|----------|-----------|------------|
+| `types/rivers.d.ts` | New file. Ambient declarations for `Rivers` global, `Ctx`, `ParsedRequest`, `SessionClaims`, `DataViewResult`, `QueryResult`, `ExecuteResult`, `CtxStore`, `DatasourceBuilder`, `KeystoreKeyInfo`, `TransactionError`, `HandlerFn`. JSDoc on every member | Spec §8 | `TransactionError` declared as a class with a `kind` discriminant (`"nested" \| "unsupported" \| "cross-datasource" \| "unknown-datasource" \| "begin-failed" \| "commit-failed"`). Trailing comment block documents the intentional omission of console/process/require/fetch per spec §8.3 |
+| `docs/guide/tutorials/tutorial-ts-handlers.md` | Added "Using the Rivers-shipped rivers.d.ts" section with recommended `tsconfig.json` (target ES2022, module ES2022, moduleResolution bundler, strict true, types `./types/rivers`) | Spec §8.2 distribution | Placed between the inline type discussion and "Basic Handler" section so existing reading flow is preserved |
+| `crates/cargo-deploy/src/main.rs` | Added `copy_type_definitions` helper; invoked from `scaffold_runtime` after `copy_arch_specs`. Deployed instance gets `types/rivers.d.ts` | Spec §8.2 release artifact | Follows the pattern of `copy_guides` / `copy_arch_specs` — same logging style, same graceful-on-missing behaviour |
+
 ## 2026-04-21 — TS pipeline Phase 6 (partial): source map generation
 
 | File | Decision | Reference | Resolution |

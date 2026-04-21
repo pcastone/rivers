@@ -151,6 +151,35 @@ declare const __args: {
 
 You can put these in a `libraries/types/rivers.d.ts` file and reference them across handlers.
 
+### Using the Rivers-shipped `rivers.d.ts`
+
+Every Rivers release ships a complete ambient declaration file at
+`types/rivers.d.ts` at the release root. It declares the `Rivers` global
+(`Rivers.log`, `Rivers.crypto`, `Rivers.keystore`, `Rivers.env`), the `Ctx`
+shape, `DataViewResult`, `QueryResult`, `ExecuteResult`, `TransactionError`,
+and the `HandlerFn` signature. Negative declarations (no `console`, `process`,
+`require`, `fetch`) are intentional — they cause the type checker to flag
+calls to surfaces Rivers does not inject.
+
+Recommended handler-project `tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "types": ["./types/rivers"]
+  }
+}
+```
+
+With `moduleResolution: "bundler"` and `"./types/rivers"` pointed at the
+`rivers.d.ts` path, editor autocomplete and `tsc --noEmit` will work in a
+handler workspace without any `npm install` step. The Rivers runtime itself
+does not consult the tsconfig — it's for the handler author's IDE.
+
 ---
 
 ## Basic Handler

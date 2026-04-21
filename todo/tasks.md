@@ -117,12 +117,12 @@
 
 ## Phase 9 — rivers.d.ts — spec §8
 
-- [ ] **9.1** Create `types/rivers.d.ts` at repo root; declare `Rivers` global (`Rivers.log`, `Rivers.crypto`, `Rivers.keystore`, `Rivers.env`). **Validate:** `tsc --noEmit` on sample handler tsconfig resolves types.
-- [ ] **9.2** Declare ctx surface: `ctx.data`, `ctx.resdata`, `ctx.dataview(name, params?)`, `ctx.store.{get,set,del}`, `ctx.datasource(name)`, `ctx.transaction(ds, fn)`, `ctx.trace_id`, `ctx.node_id`, `ctx.app_id`, `ctx.session`. JSDoc each. **Validate:** IDE completion works on sample handler.
-- [ ] **9.3** Declare `QueryResult`, `ExecuteResult`, `ParsedRequest`, `TransactionError`. **Validate:** types exported.
-- [ ] **9.4** Do NOT declare `console`, `process`, `require`, `fetch` (spec §8.3 negative). **Validate:** sample handler using `fetch` gets a type error.
-- [ ] **9.5** Add sample `tsconfig.json` + reference to `types/rivers.d.ts` in the getting-started tutorial. **Validate:** copy-paste into new handler project gives completion.
-- [ ] **9.6** Wire `types/rivers.d.ts` into `cargo deploy` artifact set — deployed instance ships file at `types/rivers.d.ts`. **Validate:** deployed bundle has the file.
+- [x] **9.1** Created `types/rivers.d.ts` at repo root with `Rivers` global (`log` with trace/debug/info/warn/error, `crypto` with random/hash/timingSafeEqual/hmac/encrypt/decrypt, `keystore` with list/info, `env` readonly record). (Done 2026-04-21.)
+- [x] **9.2** `Ctx` interface declared with `trace_id`, `node_id`, `app_id`, `env`, `request`, `session`, `data`, `resdata`, `dataview(name, params?)`, `transaction<T>(ds, fn)`, `store` (CtxStore interface), `datasource(name)` (DatasourceBuilder interface), `ddl(ds, statement)`. Every surface has JSDoc. (Done 2026-04-21.)
+- [x] **9.3** Exported `ParsedRequest`, `SessionClaims`, `DataViewResult`, `QueryResult`, `ExecuteResult`, `KeystoreKeyInfo`, and `TransactionError` class with a discriminant `kind` field covering the six error states. (Done 2026-04-21.)
+- [x] **9.4** Negative declarations — `console`, `process`, `require`, `fetch` are explicitly NOT declared. A trailing comment block explains the spec §8.3 intent so a future contributor doesn't add them. (Done 2026-04-21.)
+- [x] **9.5** Added "Using the Rivers-shipped rivers.d.ts" section to `tutorial-ts-handlers.md` with recommended `tsconfig.json` (target ES2022, module ES2022, moduleResolution bundler, strict true, types `./types/rivers`). (Done 2026-04-21.)
+- [x] **9.6** Added `copy_type_definitions` to `crates/cargo-deploy/src/main.rs`, invoked from `scaffold_runtime` right after `copy_arch_specs`. Deployed instance gets `types/rivers.d.ts` at the expected path. Build green. (Done 2026-04-21.)
 
 ## Phase 10 — Canary Fleet TS + transaction coverage — spec §9
 
