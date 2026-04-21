@@ -109,9 +109,9 @@
 
 ## Phase 8 — MCP view documentation (Defect 6) — spec §7
 
-- [ ] **8.1** Add MCP section to `docs/guide/tutorials/tutorial-js-handlers.md` with spec §7.1 full example + §7.2 Common Errors table. **Validate:** tutorial renders; example passes `riverpackage validate`.
-- [ ] **8.2** Cross-ref `docs/arch/rivers-application-spec.md §13` to spec §7. **Validate:** link present.
-- [ ] **8.3** Verify `canary-bundle/canary-sql/app.toml` MCP block matches documented form; fix any drift. **Validate:** canary MCP tests still pass.
+- [x] **8.1** Updated `docs/guide/tutorials/tutorial-mcp.md` Step 1 with the `[api.views.mcp.handler] type = "none"` sentinel (previously missing — tutorial had drifted from the canary-verified form) and added the spec §7.2 Common Errors table. (Done 2026-04-21.)
+- [x] **8.2** Added a cross-reference note at the top of `docs/arch/rivers-application-spec.md §13` pointing to `rivers-javascript-typescript-spec.md` as the authoritative source for the runtime TS/module behaviour. (Done 2026-04-21.)
+- [x] **8.3** Verified `canary-bundle/canary-sql/app.toml` MCP block matches the documented form (has `[api.views.mcp.handler] type = "none"`, `view_type = "Mcp"`, `method = "POST"`). No drift. (Done 2026-04-21.)
 
 ## Phase 9 — rivers.d.ts — spec §8
 

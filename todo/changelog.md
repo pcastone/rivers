@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-04-21 — TS pipeline Phase 8: MCP view documentation
+
+| File | Decision | Reference | Resolution |
+|------|----------|-----------|------------|
+| `docs/guide/tutorials/tutorial-mcp.md` | Added the `[api.views.mcp.handler] type = "none"` sentinel to Step 1's example (was missing — doc drift) and added spec §7.2 Common Errors table | Spec §7.1 + §7.2 | Canary had the correct form but the tutorial didn't. Four error-cause-fix rows: invalid view_type, missing method, missing handler, invalid guard type |
+| `docs/arch/rivers-application-spec.md` | Added cross-reference at top of §13 pointing to `rivers-javascript-typescript-spec.md` as the authoritative source for runtime TS/module behaviour | Spec boundary clarity | rivers-application-spec is about config surface; rivers-javascript-typescript-spec is about runtime — cross-ref disambiguates |
+
 ## 2026-04-21 — TS pipeline Phase 5: module namespace entrypoint lookup
 
 | File | Decision | Reference | Resolution |

@@ -705,6 +705,8 @@ Pre-flight is advisory for optional resources — missing optional resources pro
 
 ## 13. Module Resolution
 
+> **See also:** [`rivers-javascript-typescript-spec.md`](./rivers-javascript-typescript-spec.md) — the authoritative spec for the swc-based TypeScript compilation pipeline, module resolution algorithm (Deno-style explicit extensions, bundle-cache residency boundary), source maps, and MCP view TOML format. This section covers the app-level configuration surface; the JS/TS spec covers the runtime behaviour.
+
 ### 13.1 Base path
 
 All module paths in view configs are relative to the app's directory root inside the bundle. The app directory root is the directory containing `manifest.json` and `resources.json`.

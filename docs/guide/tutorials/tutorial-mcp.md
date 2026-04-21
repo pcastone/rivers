@@ -29,12 +29,25 @@ Open your app's `app.toml` file and add an MCP view:
 ```toml
 [api.views.mcp]
 path      = "/mcp"
-view_type = "Mcp"
-method    = "POST"
-auth      = "none"
+view_type = "Mcp"                # Case-sensitive: "Mcp", not "MCP" or "mcp"
+method    = "POST"               # Required: MCP is JSON-RPC 2.0 over POST
+auth      = "none"               # Or "session" / a guard reference
+
+[api.views.mcp.handler]
+type = "none"                    # Required sentinel — MCP dispatch is internal,
+                                 # no user handler runs
 ```
 
 This creates a JSON-RPC 2.0 endpoint at `POST /mcp` that accepts `initialize`, `tools/list`, `tools/call`, `resources/list`, `prompts/list`, and other MCP methods.
+
+### Common Errors When Adding an MCP View
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `invalid view_type` | Used `"MCP"` or `"mcp"` | Use `"Mcp"` — capital M, lowercase cp |
+| `missing method` | Omitted `method = "POST"` | MCP is JSON-RPC 2.0 over HTTP POST, so the field is required |
+| `missing handler` | Omitted the `[api.views.mcp.handler]` section | Add `[api.views.mcp.handler]` with `type = "none"` — this sentinel tells Rivers the dispatcher is MCP-internal, not a user handler |
+| `invalid guard type` | Used `guard = "guard_name"` (string reference) | MCP endpoints use the standard `auth` field — see the view layer spec for allowed values |
 
 Reload the bundle:
 
