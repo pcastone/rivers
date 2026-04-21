@@ -282,16 +282,164 @@ fn wasmtime_config_defaults() {
     assert_eq!(config.memory_pages, 256);
 }
 
-// ── TypeScript Compiler (V2.10) ─────────────────────────────────
+// ── TypeScript Compiler (spec: rivers-javascript-typescript-spec.md §2) ─────
+//
+// These cases cover every defect CB reported in
+// `dist/rivers-upstream/rivers-ts-pipeline-findings.md` (probe B/C/D/E) plus
+// the extra syntax categories the spec §2.2 mandates the full transform
+// handles: enum, namespace, satisfies, TC39 decorator, interface, const
+// assertion. Each assertion is written as "the stripped type is absent" (not
+// "contains variable name"), so a stripper that returns input unchanged cannot
+// accidentally pass.
 
 #[test]
-fn compile_typescript_strips_annotations() {
-    // V2.10: compile_typescript now returns Ok with type annotations stripped
-    let result = compile_typescript("const x: number = 42;", "test.ts");
-    assert!(result.is_ok(), "compile_typescript should succeed: {:?}", result.err());
-    let js = result.unwrap();
-    // The output should still contain the assignment (type annotation stripped)
-    assert!(js.contains("const x"), "should preserve variable declaration");
+fn compile_typescript_strips_variable_annotation() {
+    // Probe case C — `const x: number = 42`.
+    let js = compile_typescript("const x: number = 42;", "test.ts").unwrap();
+    assert!(js.contains("const x"), "variable declaration preserved: {js}");
+    assert!(!js.contains(": number"), "type annotation stripped: {js}");
+}
+
+#[test]
+fn compile_typescript_strips_parameter_annotation() {
+    // Probe case B — `function handler(ctx: any)`.
+    let src = "function handler(ctx: any) { return ctx.resdata; }";
+    let js = compile_typescript(src, "test.ts").unwrap();
+    assert!(js.contains("function handler(ctx)"), "params stripped: {js}");
+    assert!(!js.contains(": any"), "annotation gone: {js}");
+}
+
+#[test]
+fn compile_typescript_strips_return_annotation() {
+    let src = "function greet(name: string): string { return name; }";
+    let js = compile_typescript(src, "test.ts").unwrap();
+    assert!(!js.contains(": string"), "return type stripped: {js}");
+    assert!(js.contains("function greet(name)"), "signature preserved: {js}");
+}
+
+#[test]
+fn compile_typescript_strips_generic_parameters() {
+    // Probe case E — `function identity<T>(x: T): T`.
+    let src = "function identity<T>(x: T): T { return x; }";
+    let js = compile_typescript(src, "test.ts").unwrap();
+    assert!(!js.contains("<T>"), "generic param stripped: {js}");
+    assert!(js.contains("function identity(x)"), "body preserved: {js}");
+}
+
+#[test]
+fn compile_typescript_erases_type_only_imports() {
+    // Probe case D — `import { type Something, foo } from "./helpers.ts"`.
+    let src = r#"import { type Something, foo } from "./helpers.ts";
+function handler(ctx) { return foo(ctx); }"#;
+    let js = compile_typescript(src, "test.ts").unwrap();
+    assert!(!js.contains("Something"), "type-only name dropped: {js}");
+    assert!(js.contains("foo"), "runtime name preserved: {js}");
+}
+
+#[test]
+fn compile_typescript_removes_as_assertion() {
+    let src = "const n = (42 as number);";
+    let js = compile_typescript(src, "test.ts").unwrap();
+    assert!(!js.contains("as number"), "as assertion stripped: {js}");
+    assert!(js.contains("42"), "value preserved: {js}");
+}
+
+#[test]
+fn compile_typescript_removes_satisfies() {
+    let src = r#"const cfg = { host: "localhost" } satisfies { host: string };"#;
+    let js = compile_typescript(src, "test.ts").unwrap();
+    assert!(!js.contains("satisfies"), "satisfies stripped: {js}");
+    assert!(js.contains("host"), "value preserved: {js}");
+}
+
+#[test]
+fn compile_typescript_removes_interface_block() {
+    let src = r#"interface User { id: string; name: string; }
+function getUser(): void { }"#;
+    let js = compile_typescript(src, "test.ts").unwrap();
+    assert!(!js.contains("interface"), "interface removed: {js}");
+    assert!(js.contains("function getUser"), "code preserved: {js}");
+}
+
+#[test]
+fn compile_typescript_removes_type_alias() {
+    let src = "type UserId = string;\nconst uid = \"abc\";";
+    let js = compile_typescript(src, "test.ts").unwrap();
+    assert!(!js.contains("type UserId"), "type alias removed: {js}");
+    assert!(js.contains("const uid"), "runtime decl preserved: {js}");
+}
+
+#[test]
+fn compile_typescript_lowers_enum() {
+    // Spec §2.2 — enum must lower to runtime object, not pass through as TS.
+    let src = "enum Status { Active, Inactive }";
+    let js = compile_typescript(src, "test.ts").unwrap();
+    assert!(!js.contains("enum Status"), "enum keyword lowered: {js}");
+    assert!(
+        js.contains("Active") && js.contains("Inactive"),
+        "enum members preserved: {js}"
+    );
+}
+
+#[test]
+fn compile_typescript_lowers_namespace() {
+    // Spec §2.2 — namespace must lower to nested object, not pass through.
+    let src = "namespace util { export const VERSION = \"1.0\"; }";
+    let js = compile_typescript(src, "test.ts").unwrap();
+    assert!(!js.contains("namespace util"), "namespace keyword lowered: {js}");
+    assert!(js.contains("VERSION"), "namespace member preserved: {js}");
+}
+
+#[test]
+fn compile_typescript_preserves_const_assertion_value() {
+    // `as const` is a TS-only assertion; swc strips it, value stays.
+    let src = r#"const x = [1, 2, 3] as const;"#;
+    let js = compile_typescript(src, "test.ts").unwrap();
+    assert!(!js.contains("as const"), "const assertion stripped: {js}");
+    assert!(js.contains("[1, 2, 3]") || js.contains("[\n    1,\n    2,\n    3\n]"),
+        "value preserved: {js}");
+}
+
+#[test]
+fn compile_typescript_accepts_tc39_decorator_syntax() {
+    // Spec §2.3 — Stage 3 decorators: parser accepts the syntax; lowering is
+    // deferred to V8 (which supports them natively in the pinned runtime).
+    let src = r#"function logged(target, ctx) { return target; }
+class C { @logged m() { return 1; } }"#;
+    let js = compile_typescript(src, "test.ts").unwrap();
+    // Decorator either passed through or lowered — either way no parse error
+    // and the class body must reach the output.
+    assert!(js.contains("class C"), "class preserved: {js}");
+    assert!(js.contains("m()"), "method preserved: {js}");
+}
+
+#[test]
+fn compile_typescript_rejects_tsx() {
+    // Spec §2.5 — `.tsx` must be rejected unconditionally.
+    let result = compile_typescript("const x = 1;", "Component.tsx");
+    assert!(result.is_err(), "tsx rejected: {:?}", result.ok());
+    let err = format!("{:?}", result.unwrap_err());
+    assert!(
+        err.contains("JSX/TSX is not supported"),
+        "error includes spec §2.5 phrase: {err}"
+    );
+    assert!(err.contains("Component.tsx"), "error includes filename: {err}");
+}
+
+#[test]
+fn compile_typescript_reports_syntax_error() {
+    // Genuine syntax error must Err — not silently swallow.
+    let result = compile_typescript("function ((((", "broken.ts");
+    assert!(result.is_err(), "broken TS must error: {:?}", result.ok());
+}
+
+#[test]
+fn compile_typescript_passes_through_valid_javascript() {
+    // Plain JS (ES5 subset) must survive the swc pass unchanged in semantics.
+    let src = "function onRequest(ctx) { return { ok: true }; }";
+    let js = compile_typescript(src, "test.ts").unwrap();
+    assert!(js.contains("function onRequest"), "function preserved: {js}");
+    assert!(js.contains("ok"), "literal preserved: {js}");
 }
 
 // ── AU: JS/WASM Integration Tests (dispatch through pool) ────────

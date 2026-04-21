@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-04-21 — TS pipeline Phase 1: swc full-transform drop-in
+
+| File | Decision | Reference | Resolution |
+|------|----------|-----------|------------|
+| `crates/riversd/Cargo.toml` | Added `swc_core = "64"` with features `ecma_ast`, `ecma_parser`, `ecma_parser_typescript`, `ecma_transforms_typescript`, `ecma_codegen`, `ecma_visit`, `common`, `common_sourcemap` | Spec §2.1 | Spec says v0.90 but crates.io current is v64; v0.90 builds fail due to `serde::__private` regression. Decision logged in `changedecisionlog.md` |
+| `crates/riversd/src/process_pool/v8_config.rs` | Replaced hand-rolled `compile_typescript` + `strip_type_annotations` with swc full-transform pipeline (parse → resolver → typescript → fixer → to_code_default) | Spec §2.1–2.5 | ES2022 target, `TsSyntax { decorators: true }`, `.tsx` rejected at entry with spec §2.5 error message |
+| `crates/riversd/tests/process_pool_tests.rs` | Replaced single `contains("const x")` regression test with 16 cases covering every spec §2.2 feature | Spec §9.2 regression coverage | Cases: parameter/variable/return annotations, generics, type-only imports, `as`, `satisfies`, interface, type alias, enum, namespace, `as const`, TC39 decorator, `.tsx` rejection, syntax error reporting, JS passthrough. All 16 green |
+| `crates/riversd/src/process_pool/tests/wasm_and_workers.rs` | 3 pre-existing TS tests + `execute_typescript_handler` dispatch test verified green unchanged | Spec §10 item 1 | swc is a superset of the old stripper for those inputs; no assertion tweaks needed |
+| `changedecisionlog.md` | New file; captures swc full-transform vs strip-only, v0.90→v64 correction, decorator lowering strategy, source-map deferral to Phase 6 | CLAUDE.md Workflow rule 5 | CB drift-detection baseline starts here |
+
 ## 2026-04-21 — TS pipeline Phase 0: preflight for `rivers-javascript-typescript-spec.md`
 
 | File | Decision | Reference | Resolution |

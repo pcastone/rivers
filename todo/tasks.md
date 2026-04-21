@@ -33,14 +33,14 @@
 
 ## Phase 1 — swc drop-in (Defects 1, 2) — spec §2.1–2.5
 
-- [ ] **1.1** Add `swc_core = { version = "0.90", features = ["ecma_parser_typescript", "ecma_transforms_typescript", "ecma_codegen", "common"] }` to `crates/riversd/Cargo.toml`. **Validate:** `cargo build -p riversd` succeeds.
-- [ ] **1.2** Replace body of `compile_typescript()` in `crates/riversd/src/process_pool/v8_config.rs:133-193` with swc full-transform pipeline (parse → `typescript::typescript()` pass → emit). ES2022 target, TC39 Stage 3 decorators enabled, `decorators: true` in parser. **Validate:** Task 1.5 suite passes.
-- [ ] **1.3** Delete `strip_type_annotations()` (`v8_config.rs:196-226`) and the line-based stripping loop (`:134-192`). Update docstring to describe swc-backed full transform. **Validate:** `cargo build` clean, no dead-code warnings.
-- [ ] **1.4** Add `.tsx` rejection at compile entry: `TaskError::HandlerError("JSX/TSX not supported in Rivers v1: <path>")`. **Validate:** unit test asserts the error.
-- [ ] **1.5** Strengthen `crates/riversd/tests/process_pool_tests.rs:288`: replace `contains("const x")` with an equality assertion. Add cases for parameter annotation, variable annotation, `type`-only import, generic function, `as` assertion, `enum`, `namespace`, `satisfies`, TC39 decorator, `interface` block, `const` assertion. **Validate:** `cargo test compile_typescript` green.
-- [ ] **1.6** Update the 3 TS tests in `crates/riversd/src/process_pool/tests/wasm_and_workers.rs` to match new semantics (swc is a superset; should still pass unchanged, may need assertion tweaks). **Validate:** `cargo test wasm_and_workers` green.
-- [ ] **1.7** Run probe bundle against a built riversd — expect A, B, C, D, E, H, I green; F and G still red (waiting on Phases 4/5). **Validate:** `./run-probe.sh` matches expected-at-Phase-1 matrix.
-- [ ] **1.8** Log decision (full-transform vs strip-only) in `changedecisionlog.md`; append `changelog.md`. **Validate:** both files have new entries.
+- [x] **1.1** Add `swc_core` to `crates/riversd/Cargo.toml`. **Correction:** spec says `v0.90` but crates.io current is `v64` (swc uses major-per-release); used `v64` + features `ecma_ast`, `ecma_parser`, `ecma_parser_typescript`, `ecma_transforms_typescript`, `ecma_codegen`, `ecma_visit`, `common`, `common_sourcemap`. `cargo build -p riversd` green. (Done 2026-04-21.)
+- [x] **1.2** Replaced body of `compile_typescript()` with swc full-transform pipeline (parse → resolver → `typescript()` → fixer → `to_code_default`). `TsSyntax { decorators: true }`, `EsVersion::Es2022`. (Done 2026-04-21.)
+- [x] **1.3** Deleted `strip_type_annotations()` + line-based loop. Docstring rewritten to describe the swc pipeline. No dead-code warnings on the touched file. (Done 2026-04-21.)
+- [x] **1.4** `.tsx` rejection at compile entry returns `TaskError::HandlerError("JSX/TSX is not supported in Rivers v1: <path>")`. Unit test `compile_typescript_rejects_tsx` green. (Done 2026-04-21.)
+- [x] **1.5** Replaced the single `contains("const x")` assertion with 16 rigorous cases in `process_pool_tests.rs`: variable/parameter/return annotations, generics, type-only imports, `as`, `satisfies`, interface, type-alias, `enum`, `namespace`, `as const`, TC39 decorator, `.tsx` rejection, syntax-error reporting, JS passthrough. All 16 green. (Done 2026-04-21.)
+- [x] **1.6** Verified the 3 pre-existing TS tests in `wasm_and_workers.rs` + `execute_typescript_handler` dispatch test still pass unchanged — swc is a superset of the old stripper's semantics for those inputs. (Done 2026-04-21.)
+- [ ] **1.7** **Deferred to Phase 5 integration run.** At Phase 1 end the probe would only re-test cases A/B/C/D/E/H/I (already covered by 16 unit tests). Real signal comes at Phase 5 when 9/9 is achievable. Running it now requires full deploy + service registry + infra for no net-new coverage.
+- [x] **1.8** Created `changedecisionlog.md` (first entry: swc full-transform + v0.90→v64 correction + decorator-lowering strategy + source-map deferral) and appended `todo/changelog.md` with Phase 1 summary. (Done 2026-04-21.)
 
 ## Phase 2 — Bundle-load-time compile + module cache — spec §2.6, §2.7, §3.4
 

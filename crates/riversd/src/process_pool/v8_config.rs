@@ -2,8 +2,6 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
-
 use rivers_runtime::rivers_core::config::ProcessPoolConfig;
 
 use super::types::*;
@@ -118,110 +116,80 @@ impl V8Worker {
 
 // ── TypeScript Compiler ─────────────────────────────────────────
 
-/// Compile TypeScript source to JavaScript by stripping type annotations.
+use swc_core::common::{sync::Lrc, FileName, Globals, Mark, SourceMap, GLOBALS};
+use swc_core::ecma::ast::EsVersion;
+use swc_core::ecma::codegen::to_code_default;
+use swc_core::ecma::parser::{parse_file_as_program, Syntax, TsSyntax};
+use swc_core::ecma::transforms::base::{fixer::fixer, resolver};
+use swc_core::ecma::transforms::typescript::{typescript, Config as TsConfig};
+
+/// Compile TypeScript source to JavaScript via the swc full-transform pass.
 ///
-/// This is a lightweight approach that handles common TypeScript patterns:
-/// - Type annotations on parameters: `(x: string)` -> `(x)`
-/// - Return type annotations: `): string {` -> `) {`
-/// - Interface/type declarations: removed entirely
-/// - Generic type parameters: `<T>` -> removed
-/// - `as` type assertions: `x as string` -> `x`
-///
-/// For complex TypeScript features (decorators, enums, namespace merging),
-/// the full SWC compiler should be used. This covers the 90% case for
-/// Rivers handler functions.
-pub fn compile_typescript(source: &str, _filename: &str) -> Result<String, TaskError> {
-    let mut result = String::with_capacity(source.len());
-    let mut in_interface = false;
-    let mut brace_depth: i32 = 0;
-    let mut interface_brace_start: i32 = 0;
-
-    let lines: Vec<&str> = source.lines().collect();
-
-    for line in &lines {
-        let trimmed = line.trim();
-
-        // Skip interface/type declarations entirely
-        if trimmed.starts_with("interface ")
-            || (trimmed.starts_with("type ") && trimmed.contains('='))
-        {
-            if trimmed.contains('{') && !trimmed.contains('}') {
-                in_interface = true;
-                interface_brace_start = brace_depth;
-            }
-            for c in trimmed.chars() {
-                if c == '{' {
-                    brace_depth += 1;
-                }
-                if c == '}' {
-                    brace_depth -= 1;
-                }
-            }
-            continue;
-        }
-
-        if in_interface {
-            for c in trimmed.chars() {
-                if c == '{' {
-                    brace_depth += 1;
-                }
-                if c == '}' {
-                    brace_depth -= 1;
-                }
-            }
-            if brace_depth <= interface_brace_start {
-                in_interface = false;
-            }
-            continue;
-        }
-
-        for c in trimmed.chars() {
-            if c == '{' {
-                brace_depth += 1;
-            }
-            if c == '}' {
-                brace_depth -= 1;
-            }
-        }
-
-        let stripped = strip_type_annotations(line);
-        result.push_str(&stripped);
-        result.push('\n');
+/// Per `docs/arch/rivers-javascript-typescript-spec.md` §2.1–2.5:
+/// - Full transform (not strip-only): erases type annotations, `type`-only
+///   imports, `as` / `satisfies` assertions, `interface` / `type` aliases,
+///   generic parameters, and lowers `enum` / `namespace` / `const enum`.
+/// - Parser accepts TC39 Stage 3 decorator syntax (spec §2.3). Lowering is
+///   deferred to V8, which supports Stage 3 decorators natively in the
+///   pinned runtime; legacy `experimentalDecorators` is not supported.
+/// - ES2022 is the compilation target floor (spec §2.4).
+/// - `.tsx` is rejected unconditionally (spec §2.5).
+pub fn compile_typescript(source: &str, filename: &str) -> Result<String, TaskError> {
+    if filename.ends_with(".tsx") {
+        return Err(TaskError::HandlerError(format!(
+            "JSX/TSX is not supported in Rivers v1: {filename}"
+        )));
     }
 
-    Ok(result)
-}
+    let cm: Lrc<SourceMap> = Default::default();
+    let fm = cm.new_source_file(
+        FileName::Custom(filename.into()).into(),
+        source.to_string(),
+    );
 
-/// Strip type annotations from a single line of TypeScript.
-fn strip_type_annotations(line: &str) -> String {
-    let mut result = line.to_string();
+    let mut recovered = Vec::<swc_core::ecma::parser::error::Error>::new();
+    let program = parse_file_as_program(
+        &fm,
+        Syntax::Typescript(TsSyntax {
+            decorators: true,
+            ..Default::default()
+        }),
+        EsVersion::Es2022,
+        None,
+        &mut recovered,
+    )
+    .map_err(|e| {
+        TaskError::HandlerError(format!(
+            "TypeScript parse error in {filename}: {:?}",
+            e.kind()
+        ))
+    })?;
 
-    // Remove return type annotations: `): ReturnType {` -> `) {`
-    while let Some(pos) = result.find("): ") {
-        if let Some(brace) = result[pos + 2..].find('{') {
-            let between = &result[pos + 2..pos + 2 + brace];
-            if !between.contains("=>") {
-                result = format!("{}) {{{}", &result[..pos], &result[pos + 2 + brace + 1..]);
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
+    if !recovered.is_empty() {
+        let msgs: Vec<String> = recovered
+            .iter()
+            .map(|e| format!("{:?}", e.kind()))
+            .collect();
+        return Err(TaskError::HandlerError(format!(
+            "TypeScript parse errors in {filename}: {}",
+            msgs.join("; ")
+        )));
     }
 
-    // Remove `as Type` assertions
-    let as_pattern = " as ";
-    while let Some(pos) = result.find(as_pattern) {
-        let after = &result[pos + 4..];
-        let end = after
-            .find(|c: char| {
-                !c.is_alphanumeric() && c != '_' && c != '<' && c != '>' && c != '[' && c != ']'
-            })
-            .unwrap_or(after.len());
-        result = format!("{}{}", &result[..pos], &result[pos + 4 + end..]);
-    }
+    GLOBALS.set(&Globals::default(), || -> Result<String, TaskError> {
+        let unresolved_mark = Mark::new();
+        let top_level_mark = Mark::new();
 
-    result
+        let program = program
+            .apply(resolver(unresolved_mark, top_level_mark, true))
+            .apply(typescript(
+                TsConfig::default(),
+                unresolved_mark,
+                top_level_mark,
+            ))
+            .apply(fixer(None));
+
+        Ok(to_code_default(cm.clone(), None, &program))
+    })
 }
 
