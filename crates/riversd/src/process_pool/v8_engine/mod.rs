@@ -10,6 +10,11 @@ mod context;
 mod datasource;
 mod rivers_global;
 mod http;
+mod sourcemap_cache;
+
+// Exposed to `process_pool::module_cache::install_module_cache` for
+// hot-reload invalidation.
+pub(crate) use sourcemap_cache::clear_sourcemap_cache as clear_sourcemap_cache_hook;
 
 // Re-export public API used by process_pool/mod.rs and siblings
 pub(crate) use execution::execute_js_task;

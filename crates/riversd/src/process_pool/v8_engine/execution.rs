@@ -314,6 +314,13 @@ pub(crate) async fn execute_js_task(
         let effective_heap = if heap_bytes > 0 { heap_bytes } else { DEFAULT_HEAP_LIMIT };
         let mut isolate = acquire_isolate(effective_heap);
 
+        // Phase 6: install the PrepareStackTrace callback on the isolate so
+        // `Error.stack` reports original `.ts` positions remapped through
+        // `sourcemap_cache`. On first access of `.stack` after a throw, V8
+        // invokes `prepare_stack_trace_cb` with the structured CallSite[]
+        // and expects back a Local<Value> to use as the stack string.
+        isolate.set_prepare_stack_trace_callback(prepare_stack_trace_cb);
+
         // Install near-heap-limit callback with HeapCallbackData.
         // The callback sets oom_triggered flag + calls terminate_execution()
         // with extra headroom so V8 can propagate the termination cleanly.
@@ -614,4 +621,197 @@ fn resolve_module_source(ctx: &TaskContext) -> Result<String, TaskError> {
     };
 
     Ok(compiled)
+}
+
+// ── Prepare Stack Trace Callback (spec §5.2) ────────────────────
+
+/// Structured info extracted from a single V8 CallSite object.
+///
+/// Every field is `Option` because CallSite methods can return null for
+/// native frames, eval frames, or when position metadata is absent.
+#[derive(Debug, Default, Clone)]
+struct CallSiteInfo {
+    script_name: Option<String>,
+    line: Option<u32>,
+    column: Option<u32>,
+    function_name: Option<String>,
+}
+
+/// Call a no-arg method on a CallSite object via V8 reflection.
+///
+/// rusty_v8 doesn't wrap CallSite — the type-safe API is to look up the
+/// method name on the object, cast to Function, and invoke with the
+/// CallSite as `this`. Returns `None` if the lookup or call fails.
+fn call_callsite_method<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    site: v8::Local<'s, v8::Object>,
+    method: &str,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let name = v8::String::new(scope, method)?;
+    let method_val = site.get(scope, name.into())?;
+    let func = v8::Local::<v8::Function>::try_from(method_val).ok()?;
+    func.call(scope, site.into(), &[])
+}
+
+/// Extract `(script_name, line, column, function_name)` from a CallSite.
+///
+/// V8 CallSite method reference:
+/// https://v8.dev/docs/stack-trace-api — `getScriptName()`, `getLineNumber()`,
+/// `getColumnNumber()`, `getFunctionName()`. Null/undefined returns become
+/// `None` in the resulting `CallSiteInfo`.
+fn extract_callsite<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    site_val: v8::Local<'s, v8::Value>,
+) -> CallSiteInfo {
+    let mut info = CallSiteInfo::default();
+    let Ok(site) = v8::Local::<v8::Object>::try_from(site_val) else {
+        return info;
+    };
+
+    if let Some(v) = call_callsite_method(scope, site, "getScriptName") {
+        if !v.is_null() && !v.is_undefined() {
+            info.script_name = Some(v.to_rust_string_lossy(scope));
+        }
+    }
+    if let Some(v) = call_callsite_method(scope, site, "getLineNumber") {
+        if v.is_number() {
+            info.line = v.uint32_value(scope);
+        }
+    }
+    if let Some(v) = call_callsite_method(scope, site, "getColumnNumber") {
+        if v.is_number() {
+            info.column = v.uint32_value(scope);
+        }
+    }
+    if let Some(v) = call_callsite_method(scope, site, "getFunctionName") {
+        if !v.is_null() && !v.is_undefined() {
+            info.function_name = Some(v.to_rust_string_lossy(scope));
+        }
+    }
+
+    info
+}
+
+/// V8 `PrepareStackTraceCallback` — intercepts `Error.stack` construction
+/// to rewrite frame positions from compiled-JS to original `.ts` coordinates.
+///
+/// Spec: `docs/arch/rivers-javascript-typescript-spec.md §5.2`. The
+/// `sites` array is V8's structured CallSite list per
+/// https://v8.dev/docs/stack-trace-api . V8 asserts the return is a
+/// non-empty Local<Value>, so we always build a string even on failure.
+///
+/// For each frame, attempts source-map remap via `sourcemap_cache::get_or_parse`;
+/// falls back to the unmapped compiled-JS position on cache miss, null
+/// scriptName, or lookup failure.
+fn prepare_stack_trace_cb<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    error: v8::Local<'s, v8::Value>,
+    sites: v8::Local<'s, v8::Array>,
+) -> v8::Local<'s, v8::Value> {
+    let mut out = error.to_rust_string_lossy(scope);
+    let len = sites.length();
+    for i in 0..len {
+        let Some(site_val) = sites.get_index(scope, i) else {
+            continue;
+        };
+        let info = extract_callsite(scope, site_val);
+        out.push_str(&format_frame(&info));
+    }
+    v8::String::new(scope, &out)
+        .map(|s| s.into())
+        .unwrap_or_else(|| v8::String::empty(scope).into())
+}
+
+/// Format a single stack frame, remapping via the source-map cache when
+/// possible. Falls back to the raw compiled-JS position otherwise.
+///
+/// Offset note: V8's CallSite positions are 1-based; swc_sourcemap's
+/// `lookup_token` expects 0-based. The remapped output is re-incremented
+/// back to 1-based for stack-trace convention.
+fn format_frame(info: &CallSiteInfo) -> String {
+    let fn_name = info
+        .function_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("<anonymous>");
+
+    if let (Some(script), Some(line), Some(col)) =
+        (info.script_name.as_deref(), info.line, info.column)
+    {
+        if line > 0 && col > 0 {
+            let path = std::path::Path::new(script);
+            if let Some(sm) = super::sourcemap_cache::get_or_parse(path) {
+                if let Some(token) = sm.lookup_token(line - 1, col - 1) {
+                    let src_line = token.get_src_line();
+                    let src_col = token.get_src_col();
+                    // Sentinel: u32::MAX = unmapped.
+                    if src_line != u32::MAX && src_col != u32::MAX {
+                        let src_file = token
+                            .get_source()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| script.to_string());
+                        return format!(
+                            "\n    at {fn_name} ({src_file}:{}:{})",
+                            src_line + 1,
+                            src_col + 1
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Unmapped / native / eval / cache-miss fallback.
+    let script = info.script_name.as_deref().unwrap_or("<unknown>");
+    let line = info.line.map(|n| n.to_string()).unwrap_or_else(|| "?".into());
+    let col = info.column.map(|n| n.to_string()).unwrap_or_else(|| "?".into());
+    format!("\n    at {fn_name} ({script}:{line}:{col})")
+}
+
+#[cfg(test)]
+mod frame_format_tests {
+    use super::{format_frame, CallSiteInfo};
+
+    #[test]
+    fn fallback_when_no_cache_entry() {
+        // No source map cached for this path → unmapped format.
+        let info = CallSiteInfo {
+            script_name: Some("/never-installed/handler.ts".into()),
+            line: Some(42),
+            column: Some(5),
+            function_name: Some("handler".into()),
+        };
+        let s = format_frame(&info);
+        assert!(s.contains("handler"), "fn name: {s}");
+        assert!(s.contains(":42:5"), "unmapped 1-based position: {s}");
+        assert!(s.contains("/never-installed/handler.ts"), "raw path: {s}");
+    }
+
+    #[test]
+    fn anonymous_when_no_function_name() {
+        let info = CallSiteInfo {
+            script_name: None,
+            line: None,
+            column: None,
+            function_name: None,
+        };
+        let s = format_frame(&info);
+        assert!(s.contains("<anonymous>"), "anon placeholder: {s}");
+        assert!(s.contains("<unknown>"), "unknown script placeholder: {s}");
+        assert!(s.contains(":?:?"), "unknown position placeholders: {s}");
+    }
+
+    #[test]
+    fn zero_line_or_col_falls_back() {
+        // line/col of 0 are invalid positions (V8 uses 1-based) — fall
+        // through to unmapped to avoid u32 underflow at `line - 1`.
+        let info = CallSiteInfo {
+            script_name: Some("/some-file.ts".into()),
+            line: Some(0),
+            column: Some(0),
+            function_name: Some("f".into()),
+        };
+        let s = format_frame(&info);
+        assert!(s.contains(":0:0"), "unmapped retained 0s: {s}");
+    }
 }

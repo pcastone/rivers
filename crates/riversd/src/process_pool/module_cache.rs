@@ -33,10 +33,13 @@ static MODULE_CACHE: OnceCell<RwLock<Arc<BundleModuleCache>>> = OnceCell::new();
 
 /// Install (or replace) the global module cache.
 ///
-/// Spec §3.4: "Hot reload replaces the entire cache atomically."
+/// Spec §3.4: "Hot reload replaces the entire cache atomically." Phase 6
+/// extension: also invalidate the parsed source-map cache so stale maps
+/// are never served after a reload.
 pub fn install_module_cache(cache: BundleModuleCache) {
     let cell = MODULE_CACHE.get_or_init(|| RwLock::new(Arc::new(BundleModuleCache::default())));
     *cell.write().expect("module cache lock poisoned") = Arc::new(cache);
+    super::v8_engine::clear_sourcemap_cache_hook();
 }
 
 /// Read the current global module cache, if installed.

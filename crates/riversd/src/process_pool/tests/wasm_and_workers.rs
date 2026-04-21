@@ -115,6 +115,64 @@ async fn execute_module_export_function_handler() {
     assert_eq!(result.value["via"], "namespace");
 }
 
+// ── Phase 6A: stack-trace callback registration ─────────
+
+#[tokio::test]
+async fn prepare_stack_trace_callback_does_not_crash_on_throw() {
+    // Handler accesses err.stack inside a catch block — that forces the
+    // PrepareStackTraceCallback to fire. If registration is broken or the
+    // callback returns an invalid Local<Value>, V8 asserts/aborts.
+    //
+    // Spec §5.2 + Phase 6A.
+    let ctx = make_js_task(
+        r#"function handler(ctx) {
+            try {
+                throw new Error("canary: phase-6A stub");
+            } catch (e) {
+                // Access .stack — this drives the callback.
+                var s = String(e.stack || "<no stack>");
+                return { caught: true, stack_kind: typeof e.stack };
+            }
+        }"#,
+        "handler",
+    );
+    let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
+    assert_eq!(result.value["caught"], true);
+    assert_eq!(result.value["stack_kind"], "string");
+}
+
+#[tokio::test]
+async fn prepare_stack_trace_callback_produces_frames_from_callsites() {
+    // Spec §5.2 + Phase 6C: the callback extracts structured info from
+    // every CallSite in the V8 stack array and formats it into the
+    // returned string. This test verifies the format matches the
+    // unmapped-frame shape (line numbers from compiled JS). Phase 6D
+    // replaces the unmapped format with remapped positions.
+    let ctx = make_js_task(
+        r#"function inner() { throw new Error("phase-6C extraction test"); }
+        function handler(ctx) {
+            try {
+                inner();
+            } catch (e) {
+                var stack = String(e.stack);
+                return { stack: stack, has_inner: stack.indexOf("inner") >= 0, has_error: stack.indexOf("phase-6C extraction test") >= 0 };
+            }
+            return { no_throw: true };
+        }"#,
+        "handler",
+    );
+    let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
+    let stack = result.value["stack"].as_str().unwrap_or("");
+    assert!(stack.contains("Error"), "stack starts with error toString: {stack}");
+    assert!(
+        stack.contains("\n    at "),
+        "stack contains at-least-one formatted frame: {stack}"
+    );
+    // Both throw site and catch site should show up — at minimum two frames.
+    let frame_count = stack.matches("\n    at ").count();
+    assert!(frame_count >= 2, "expected ≥2 frames, got {frame_count}: {stack}");
+}
+
 // ── ctx.transaction (spec §6) ────────────────────────────
 
 #[tokio::test]
