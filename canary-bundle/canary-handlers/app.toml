@@ -437,6 +437,132 @@ language   = "typescript"
 module     = "libraries/handlers/ts-compliance/sourcemap.ts"
 entrypoint = "sourcemapProbe"
 
+# ─────────────────────────
+
+[api.views.ts_param_strip]
+path      = "/canary/rt/ts/param-strip"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_param_strip.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/param-strip.ts"
+entrypoint = "paramStrip"
+
+# ─────────────────────────
+
+[api.views.ts_var_strip]
+path      = "/canary/rt/ts/var-strip"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_var_strip.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/var-strip.ts"
+entrypoint = "varStrip"
+
+# ─────────────────────────
+
+[api.views.ts_import_type]
+path      = "/canary/rt/ts/import-type"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_import_type.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/import-type.ts"
+entrypoint = "importType"
+
+# ─────────────────────────
+
+[api.views.ts_generic]
+path      = "/canary/rt/ts/generic"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_generic.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/generic.ts"
+entrypoint = "generic"
+
+# ─────────────────────────
+
+[api.views.ts_multimod]
+path      = "/canary/rt/ts/multimod"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_multimod.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/multimod.ts"
+entrypoint = "multimod"
+
+# ─────────────────────────
+
+[api.views.ts_export_fn]
+path      = "/canary/rt/ts/export-fn"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_export_fn.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/export-fn.ts"
+entrypoint = "exportFn"
+
+# ─────────────────────────
+
+[api.views.ts_enum]
+path      = "/canary/rt/ts/enum"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_enum.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/enum.ts"
+entrypoint = "enumTest"
+
+# ─────────────────────────
+
+[api.views.ts_decorator]
+path      = "/canary/rt/ts/decorator"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_decorator.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/decorator.ts"
+entrypoint = "decoratorTest"
+
+# ─────────────────────────
+
+[api.views.ts_namespace]
+path      = "/canary/rt/ts/namespace"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_namespace.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/namespace.ts"
+entrypoint = "namespaceTest"
+
 # ═════════════════════════════════════════════════════════════════
 # TRANSACTIONS-TS profile — ctx.transaction() surface checks.
 # Spec: docs/arch/rivers-javascript-typescript-spec.md §6.

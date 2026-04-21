@@ -1,0 +1,4 @@
+appName  = "circ-app"
+type     = "app-service"
+appId    = "00000000-cccc-bbbb-aaaa-ccccccccccc0"
+entryPoint = "circ"

@@ -157,13 +157,31 @@ test_ep "eventbus-publish"   POST "$BASE/handlers/canary/rt/eventbus/publish" '{
 test_ep "header-blocklist"   GET  "$BASE/handlers/canary/rt/header/blocklist"
 test_ep "faker-determinism"  GET  "$BASE/handlers/canary/rt/faker/determinism"
 
-# ── TYPESCRIPT Profile (spec §5: source-map remapping) ──────────
-# sourcemap.ts throws intentionally; in debug builds the response
-# body MUST include `details.stack` with a frame pointing at the
-# source `.ts` file and line (not the compiled `.js` position).
+# ── TYPESCRIPT Profile (spec §2 / §3 / §4 / §5) ─────────────────
+# Spec §9.2 required IDs: RT-TS-{PARAM-STRIP, VAR-STRIP, IMPORT-TYPE,
+# GENERIC, MULTIMOD, EXPORT-FN, ENUM, DECORATOR, NAMESPACE,
+# CIRCULAR, SOURCEMAP}. CIRCULAR runs outside this profile as a
+# standalone shell test (canary-bundle/tests/circular-import-rejection.sh)
+# against `riverpackage validate` — it tests that the bundle fails to
+# LOAD, which is incompatible with a dispatch-style probe.
+
+echo ""
+echo "  ── TYPESCRIPT Profile (syntax + modules) ──"
+test_ep "ts-param-strip"   POST "$BASE/handlers/canary/rt/ts/param-strip" '{}'
+test_ep "ts-var-strip"     POST "$BASE/handlers/canary/rt/ts/var-strip" '{}'
+test_ep "ts-import-type"   POST "$BASE/handlers/canary/rt/ts/import-type" '{}'
+test_ep "ts-generic"       POST "$BASE/handlers/canary/rt/ts/generic" '{}'
+test_ep "ts-multimod"      POST "$BASE/handlers/canary/rt/ts/multimod" '{}'
+test_ep "ts-export-fn"     POST "$BASE/handlers/canary/rt/ts/export-fn" '{}'
+test_ep "ts-enum"          POST "$BASE/handlers/canary/rt/ts/enum" '{}'
+test_ep "ts-decorator"     POST "$BASE/handlers/canary/rt/ts/decorator" '{}'
+test_ep "ts-namespace"     POST "$BASE/handlers/canary/rt/ts/namespace" '{}'
 
 echo ""
 echo "  ── TYPESCRIPT Profile (source map remap) ──"
+# sourcemap.ts throws intentionally; in debug builds the response
+# body MUST include `details.stack` with a frame pointing at the
+# source `.ts` file and line (not the compiled `.js` position).
 SM_RESP=$(curl -sk -m 8 -X POST "$BASE/handlers/canary/rt/ts/sourcemap" \
   -H "Content-Type: application/json" -d '{}' 2>/dev/null) || SM_RESP=""
 if echo "$SM_RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); s=d.get('details',{}).get('stack',[]); import sys as _; exit(0 if any('sourcemap.ts' in f for f in s) else 1)" 2>/dev/null; then

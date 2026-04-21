@@ -36,18 +36,18 @@ Before executing G1–G8, two small calls clear ambiguity for the rest of the pl
 
 Tasks:
 
-- [ ] **G1.1** `param-strip.ts` — handler with `function h(ctx: any)` typed params; return `{ passed: true }` if it loads. Exercises probe case B.
-- [ ] **G1.2** `var-strip.ts` — `const x: number = 42` body; validates variable annotation stripping (probe case C).
-- [ ] **G1.3** `import-type.ts` + `import-type-helpers.ts` — `import { type Something, foo } from "./import-type-helpers.ts"`; uses `foo` at runtime (probe case D).
-- [ ] **G1.4** `generic.ts` — `function identity<T>(x: T): T { return x; }` + call site (probe case E).
-- [ ] **G1.5** `multimod.ts` + `multimod-helpers.ts` — relative import across two files (probe case F). Both must end up in the module cache at bundle load.
-- [ ] **G1.6** `export-fn.ts` — `export function handler(ctx) { ... }`; verifies module namespace entrypoint lookup (probe case G).
-- [ ] **G1.7** `enum.ts` — `enum Status { Active, Inactive }` with runtime use; verifies swc enum lowering is wired.
-- [ ] **G1.8** `decorator.ts` — TC39 Stage 3 decorator on a class method; verifies parser accepts syntax + V8 executes.
-- [ ] **G1.9** `namespace.ts` — `namespace util { export const VERSION = "1.0"; }` with runtime read; verifies swc namespace lowering.
-- [ ] **G1.10** Circular-import shell test: fixture bundle with an a.ts ↔ b.ts cycle; `riverpackage validate` must fail with the spec §3.5 error format. Lives at `canary-bundle/tests/circular-import-rejection.sh`.
-- [ ] **G1.11** Register all 9 runtime handlers in `canary-handlers/app.toml` under `[api.views.ts_*]` (10 views — 9 runtime + 1 path decision helper if needed).
-- [ ] **G1.12** Extend `run-tests.sh` TYPESCRIPT profile with 9 `test_ep` lines; `ts-sourcemap` already present from Phase 6H.
+- [x] **G1.1** `ts-compliance/param-strip.ts` — `function paramStrip(ctx: any)` + typed assertions. Probe case B. (Done 2026-04-21.)
+- [x] **G1.2** `ts-compliance/var-strip.ts` — `const answer: number = 42` + `const name: string = "rivers"`. Probe case C. (Done 2026-04-21.)
+- [x] **G1.3** `ts-compliance/import-type.ts` + `import-type-helpers.ts` — `import { type Answer, buildAnswer }`; uses `buildAnswer` at runtime. Probe case D. (Done 2026-04-21.)
+- [x] **G1.4** `ts-compliance/generic.ts` — `function identity<T>(x: T): T` with call sites for number + string. Probe case E. (Done 2026-04-21.)
+- [x] **G1.5** `ts-compliance/multimod.ts` + `multimod-helpers.ts` — imports `double`, `MODULE_MARKER`. Probe case F. Both files under `libraries/` are cached at bundle load. (Done 2026-04-21.)
+- [x] **G1.6** `ts-compliance/export-fn.ts` — `export function exportFn(ctx)` hits the module namespace entrypoint path. Probe case G. (Done 2026-04-21.)
+- [x] **G1.7** `ts-compliance/enum.ts` — numeric enum with forward + reverse lookup assertions (reverse lookup is lowering-specific). (Done 2026-04-21.)
+- [x] **G1.8** `ts-compliance/decorator.ts` — TC39 Stage 3 decorator on a class method; sets `globalThis.__decorator_fired` + `__decorator_kind` so the handler can probe decorator-runtime execution. (Done 2026-04-21.)
+- [x] **G1.9** `ts-compliance/namespace.ts` — `namespace util { export const VERSION = "1.0"; export function greet(who) { … } }` with runtime reads. (Done 2026-04-21.)
+- [x] **G1.10** `canary-bundle/tests/circular-import-rejection.sh` + `fixtures/circular-import-reject/` — a.ts ↔ b.ts cycle. Shell test invokes `riverpackage validate`, asserts non-zero exit + the `circular import detected` phrase + both filenames in the error. SKIP path if `riverpackage` not on PATH. (Done 2026-04-21.)
+- [x] **G1.11** 9 new `[api.views.ts_*]` blocks registered in `canary-handlers/app.toml` — ts_param_strip, ts_var_strip, ts_import_type, ts_generic, ts_multimod, ts_export_fn, ts_enum, ts_decorator, ts_namespace. All `method = "POST"`, `view_type = "Rest"`, `auth = "none"`. (Done 2026-04-21.)
+- [x] **G1.12** `run-tests.sh` TYPESCRIPT profile split into "syntax + modules" (9 new `test_ep` lines) + "source map remap" (existing ts-sourcemap probe, unchanged). (Done 2026-04-21.)
 
 **Validate:** `./run-tests.sh` shows PASS for all 9 new IDs + the sourcemap probe; canary total goes from 69+N/69+N to 69+N+9/69+N+9 green.
 
