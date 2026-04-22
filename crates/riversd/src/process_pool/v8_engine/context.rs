@@ -148,8 +148,17 @@ pub(super) fn inject_ctx_methods(
             };
         };
 
-        // X7: ctx.datasource() -- builder chain with native .build() execution
+        // Typed-proxy registry for DatasourceToken::Direct datasources (29d).
+        // Populated per-task below by direct_proxy bootstrap.
+        if (typeof __rivers_direct_proxies === 'undefined') {
+            __rivers_direct_proxies = {};
+        }
+
+        // X7 + 29d: ctx.datasource() — typed proxy if direct, builder otherwise.
         ctx.datasource = function(name) {
+            if (__rivers_direct_proxies && Object.prototype.hasOwnProperty.call(__rivers_direct_proxies, name)) {
+                return __rivers_direct_proxies[name];
+            }
             return {
                 _datasource: name,
                 _query: null,
@@ -177,6 +186,61 @@ pub(super) fn inject_ctx_methods(
     script
         .run(scope)
         .ok_or_else(|| TaskError::Internal("failed to run ctx methods".into()))?;
+
+    // 29d: populate __rivers_direct_proxies from this task's Direct datasources.
+    bootstrap_direct_proxies(scope)?;
+
+    Ok(())
+}
+
+/// Build and install one typed proxy per direct datasource declared on this task.
+///
+/// For each entry in `TASK_DIRECT_DATASOURCES`, look up the driver's operation
+/// catalog; if present, compile a small IIFE that returns a proxy object and
+/// store it under `__rivers_direct_proxies[name]`.
+fn bootstrap_direct_proxies(
+    scope: &mut v8::ContextScope<'_, v8::HandleScope<'_>>,
+) -> Result<(), TaskError> {
+    // Collect (name, driver) pairs without holding the thread-local borrow.
+    let entries: Vec<(String, String)> = TASK_DIRECT_DATASOURCES.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|(n, d)| (n.clone(), d.driver.clone()))
+            .collect()
+    });
+
+    for (name, driver) in entries {
+        let Some(catalog) = super::catalog::catalog_for(&driver) else {
+            continue;
+        };
+        let proxy_js = super::proxy_codegen::build_proxy_script(&name, catalog);
+
+        // Wrap so the proxy is stored on __rivers_direct_proxies[name].
+        let mut wrapped = String::with_capacity(proxy_js.len() + name.len() + 48);
+        wrapped.push_str("__rivers_direct_proxies[\"");
+        // Reuse the same escape rules — names are trusted (configured via TOML)
+        // but belt-and-suspenders against quotes.
+        for c in name.chars() {
+            match c {
+                '\\' => wrapped.push_str("\\\\"),
+                '"' => wrapped.push_str("\\\""),
+                _ => wrapped.push(c),
+            }
+        }
+        wrapped.push_str("\"]=");
+        wrapped.push_str(&proxy_js);
+        wrapped.push(';');
+
+        let src = v8::String::new(scope, &wrapped).ok_or_else(|| {
+            TaskError::Internal("failed to create direct proxy source".into())
+        })?;
+        let script = v8::Script::compile(scope, src, None).ok_or_else(|| {
+            TaskError::Internal(format!("failed to compile direct proxy for '{name}'"))
+        })?;
+        script
+            .run(scope)
+            .ok_or_else(|| TaskError::Internal(format!("failed to run direct proxy for '{name}'")))?;
+    }
 
     Ok(())
 }

@@ -1,0 +1,6 @@
+[[datasources]]
+name       = "fs"
+driver     = "filesystem"
+x-type     = "filesystem"
+nopassword = true
+required   = true

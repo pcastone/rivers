@@ -582,6 +582,17 @@ pub(super) fn inject_rivers_global(
         rivers_obj.set(scope, http_key.into(), http_obj.into());
     }
 
+    // ── Rivers.__directDispatch -- typed-proxy dispatch for Direct datasources ──
+    // Called only by the typed-proxy codegen (Task 29d). Handlers reach the
+    // typed proxy via `ctx.datasource(name)`, not this raw entrypoint.
+    let direct_dispatch_fn = v8::Function::new(
+        scope,
+        super::direct_dispatch::rivers_direct_dispatch_callback,
+    )
+    .ok_or_else(|| TaskError::Internal("failed to create __directDispatch".into()))?;
+    let direct_key = v8_str(scope, "__directDispatch")?;
+    rivers_obj.set(scope, direct_key.into(), direct_dispatch_fn.into());
+
     // ── Rivers.env -- task environment variables (V2) ─────────────
     let env_map = TASK_ENV.with(|e| e.borrow().clone()).unwrap_or_default();
     let env_json = serde_json::to_value(&env_map)

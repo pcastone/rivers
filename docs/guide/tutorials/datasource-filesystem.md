@@ -1,6 +1,6 @@
 # Tutorial: Filesystem Datasource
 
-**Rivers v0.54.1**
+**Rivers v0.54.0**
 
 ## Overview
 
@@ -9,7 +9,7 @@ The filesystem driver exposes a chroot-sandboxed directory as a datasource with 
 Use the filesystem driver when:
 
 - A handler needs to read application-managed files (uploaded attachments, generated reports, static content)
-- You want a simple persistence layer for short-lived state (scratch files, small caches) without standing up a database
+- You want a simple persistence layer for short-lived state (scratch scratch files, small caches) without standing up a database
 - You're building tooling that inspects a specific directory (config watcher, log tailer)
 
 The filesystem driver is a built-in driver. No plugin dylib is required.
@@ -64,20 +64,6 @@ The `database` field is the resource root. It **must**:
 
 On startup the driver calls `std::fs::canonicalize` on this path and stores the result. Every subsequent operation is resolved against the canonical root.
 
-### Optional limits
-
-Add these keys under `[data.datasources.fs]` to override the defaults:
-
-```toml
-[data.datasources.fs]
-name           = "fs"
-driver         = "filesystem"
-database       = "/var/rivers/uploads"
-nopassword     = true
-max_file_size  = 10485760   # 10 MB (default: 52428800 = 50 MB)
-max_depth      = 20         # grep recursion depth (default: 100)
-```
-
 ## Step 3: Use the driver from a handler
 
 ```toml
@@ -129,7 +115,7 @@ fs.writeFile("bin.dat", "AQID", "base64");   // decode before write
 fs.mkdir("a/b/c");                           // recursive, idempotent
 fs.delete("old.txt");                        // file or recursive dir; missing → no-op
 fs.rename("old.txt", "new.txt");             // must stay within root
-fs.copy("src.txt", "dst.txt");              // file or recursive dir
+fs.copy("src.txt", "dst.txt");               // file or recursive dir
 ```
 
 Optional `encoding` on `readFile`/`writeFile` is `"utf-8"` (default) or `"base64"`. Any other value throws.
@@ -148,6 +134,15 @@ fs.exists("../../etc/passwd");    // returns false (not an error)
 ```
 
 `exists` is the one exception: a traversal that escapes the root is treated as "not visible" rather than an error, which matches common JS intuition.
+
+## Limits
+
+Two safety knobs apply per-operation:
+
+- **`max_file_size`** — default 50 MB. Any `readFile` / `writeFile` that exceeds this byte count is rejected with a `Query` error before the I/O runs.
+- **`max_depth`** — default 100. Applies to `grep`'s recursive walk. Directories beyond this depth are silently skipped.
+
+Both are set on the `FilesystemConnection` at connection time. In v0.54 they use the defaults above; richer `extra` config plumbing is planned.
 
 ## Error model
 
@@ -198,5 +193,5 @@ cargo deploy /tmp/scratch-dist
 ## See also
 
 - Spec: `docs/arch/rivers-filesystem-driver-spec.md`
-- AI guide: `docs/guide/AI/rivers-app-development.md` — Filesystem Datasource section
+- Feature inventory §6.1 and §6.6: `docs/arch/rivers-feature-inventory.md`
 - Canary profile (live reference): `canary-bundle/canary-filesystem/`

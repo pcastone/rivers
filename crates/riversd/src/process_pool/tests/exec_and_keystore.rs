@@ -74,7 +74,7 @@ async fn exec_driver_base_test_no_params() {
             function: "handler".into(),
             language: "javascript".into(),
         })
-        .datasource("ops".into(), DatasourceToken("ops".into()))
+        .datasource("ops".into(), DatasourceToken::pooled("ops"))
         .datasource_config("ops".into(), ResolvedDatasource {
             driver_name: "rivers-exec".into(),
             params,
@@ -132,7 +132,7 @@ echo "{\"received\":$INPUT,\"processed\":true}"
             function: "handler".into(),
             language: "javascript".into(),
         })
-        .datasource("tools".into(), DatasourceToken("tools".into()))
+        .datasource("tools".into(), DatasourceToken::pooled("tools"))
         .datasource_config("tools".into(), ResolvedDatasource {
             driver_name: "rivers-exec".into(),
             params,
@@ -209,7 +209,7 @@ echo "{\"domain\":\"$1\",\"type\":\"$2\",\"resolved\":true}"
             function: "handler".into(),
             language: "javascript".into(),
         })
-        .datasource("dns".into(), DatasourceToken("dns".into()))
+        .datasource("dns".into(), DatasourceToken::pooled("dns"))
         .datasource_config("dns".into(), ResolvedDatasource {
             driver_name: "rivers-exec".into(),
             params,
@@ -264,7 +264,7 @@ async fn exec_driver_error_propagation() {
             function: "handler".into(),
             language: "javascript".into(),
         })
-        .datasource("ops".into(), DatasourceToken("ops".into()))
+        .datasource("ops".into(), DatasourceToken::pooled("ops"))
         .datasource_config("ops".into(), ResolvedDatasource {
             driver_name: "rivers-exec".into(),
             params,

@@ -431,7 +431,7 @@ async fn x7_datasource_build_without_query_throws() {
             function: "handler".into(),
             language: "javascript".into(),
         })
-        .datasource("mydb".into(), DatasourceToken("mydb".into()))
+        .datasource("mydb".into(), DatasourceToken::pooled("mydb"))
         .datasource_config("mydb".into(), ResolvedDatasource {
             driver_name: "faker".into(),
             params: rivers_runtime::rivers_driver_sdk::ConnectionParams {
@@ -474,7 +474,7 @@ async fn x7_datasource_build_no_factory_throws() {
             function: "handler".into(),
             language: "javascript".into(),
         })
-        .datasource("mydb".into(), DatasourceToken("mydb".into()))
+        .datasource("mydb".into(), DatasourceToken::pooled("mydb"))
         .datasource_config("mydb".into(), ResolvedDatasource {
             driver_name: "faker".into(),
             params: rivers_runtime::rivers_driver_sdk::ConnectionParams {
@@ -548,7 +548,7 @@ async fn x7_datasource_build_with_faker_driver() {
             function: "handler".into(),
             language: "javascript".into(),
         })
-        .datasource("faker-ds".into(), DatasourceToken("faker-ds".into()))
+        .datasource("faker-ds".into(), DatasourceToken::pooled("faker-ds"))
         .datasource_config("faker-ds".into(), ResolvedDatasource {
             driver_name: "faker".into(),
             params: rivers_runtime::rivers_driver_sdk::ConnectionParams {

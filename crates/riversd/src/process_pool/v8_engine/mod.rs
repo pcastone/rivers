@@ -3,6 +3,9 @@
 //! This module contains all code that depends on the `v8` crate.
 //! Gated behind #[cfg(feature = "static-engines")].
 
+mod catalog;
+mod direct_dispatch;
+mod proxy_codegen;
 mod task_locals;
 mod init;
 mod execution;

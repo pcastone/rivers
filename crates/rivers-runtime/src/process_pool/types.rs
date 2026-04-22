@@ -11,8 +11,41 @@ use crate::DataViewExecutor;
 // ── Opaque Tokens ────────────────────────────────────────────────
 
 /// Opaque handle to a datasource — the isolate never holds a real connection.
+///
+/// Two dispatch modes:
+/// - `Pooled` — resolves to a host-side connection pool by id (default for all
+///   request/response drivers: postgres, mysql, redis, etc.).
+/// - `Direct` — worker performs I/O directly against the given resource root.
+///   Reserved for self-contained drivers like `filesystem` (spec §7.3).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DatasourceToken(pub String);
+pub enum DatasourceToken {
+    /// Pool-backed — isolate dispatches to host pool by id.
+    Pooled { pool_id: String },
+    /// Self-contained — worker performs I/O directly with the given resource handle.
+    Direct {
+        /// Driver name (e.g. "filesystem").
+        driver: String,
+        /// Canonical root path the worker is allowed to operate within.
+        root: std::path::PathBuf,
+    },
+}
+
+impl DatasourceToken {
+    /// Construct a `Pooled` token from a pool id.
+    pub fn pooled(pool_id: impl Into<String>) -> Self {
+        DatasourceToken::Pooled {
+            pool_id: pool_id.into(),
+        }
+    }
+
+    /// Construct a `Direct` token for a self-contained driver bound to `root`.
+    pub fn direct(driver: impl Into<String>, root: std::path::PathBuf) -> Self {
+        DatasourceToken::Direct {
+            driver: driver.into(),
+            root,
+        }
+    }
+}
 
 /// Opaque handle to a DataView.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -30,6 +63,21 @@ pub struct ResolvedDatasource {
     pub driver_name: String,
     /// Connection parameters for the driver.
     pub params: crate::rivers_driver_sdk::ConnectionParams,
+}
+
+/// Emit the `DatasourceToken` variant appropriate for a resolved datasource.
+///
+/// Self-contained drivers (today just `filesystem`) dispatch directly from the
+/// worker and require `Direct` tokens carrying the resource root; every other
+/// driver receives a `Pooled` token that routes through the host pool manager.
+pub fn resolve_token_for_dispatch(rd: &ResolvedDatasource) -> DatasourceToken {
+    if rd.driver_name == "filesystem" {
+        return DatasourceToken::direct(
+            rd.driver_name.clone(),
+            std::path::PathBuf::from(&rd.params.database),
+        );
+    }
+    DatasourceToken::pooled(format!("{}:{}", rd.driver_name, rd.params.database))
 }
 
 // ── Entrypoint ───────────────────────────────────────────────────
@@ -236,4 +284,69 @@ pub fn validate_capabilities(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod direct_token_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn pooled_token_constructs() {
+        let t = DatasourceToken::pooled("pool-42");
+        assert!(matches!(t, DatasourceToken::Pooled { .. }));
+    }
+
+    #[test]
+    fn direct_token_carries_driver_and_root() {
+        let t = DatasourceToken::direct("filesystem", PathBuf::from("/tmp/x"));
+        match t {
+            DatasourceToken::Direct { driver, root } => {
+                assert_eq!(driver, "filesystem");
+                assert_eq!(root, PathBuf::from("/tmp/x"));
+            }
+            _ => panic!("expected Direct variant"),
+        }
+    }
+
+    fn mk_resolved(driver: &str, database: &str) -> ResolvedDatasource {
+        ResolvedDatasource {
+            driver_name: driver.into(),
+            params: crate::rivers_driver_sdk::ConnectionParams {
+                host: String::new(),
+                port: 0,
+                database: database.into(),
+                username: String::new(),
+                password: String::new(),
+                options: std::collections::HashMap::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn filesystem_driver_yields_direct_token() {
+        let rd = mk_resolved("filesystem", "/tmp");
+        let tok = resolve_token_for_dispatch(&rd);
+        match tok {
+            DatasourceToken::Direct { driver, root } => {
+                assert_eq!(driver, "filesystem");
+                assert_eq!(root, PathBuf::from("/tmp"));
+            }
+            _ => panic!("expected Direct variant for filesystem driver"),
+        }
+    }
+
+    #[test]
+    fn postgres_driver_yields_pooled_token() {
+        let rd = mk_resolved("postgres", "db");
+        let tok = resolve_token_for_dispatch(&rd);
+        assert!(matches!(tok, DatasourceToken::Pooled { .. }));
+    }
+
+    #[test]
+    fn faker_driver_yields_pooled_token() {
+        let rd = mk_resolved("faker", "noop");
+        let tok = resolve_token_for_dispatch(&rd);
+        assert!(matches!(tok, DatasourceToken::Pooled { .. }));
+    }
 }
