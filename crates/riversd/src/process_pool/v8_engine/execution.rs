@@ -61,15 +61,20 @@ fn execute_as_module(
         TaskError::HandlerError(format!("module compilation failed: {msg}"))
     })?;
 
-    // Instantiate with a resolve callback that rejects imports (V1 -- no multi-module)
-    let instantiate_result = module.instantiate_module(
-        tc,
-        |_context, _specifier, _import_attributes, _referrer| {
-            // V1: reject all imports -- single-module only
-            // V2: implement module resolution from libraries/
-            None
-        },
-    );
+    // Register the root module's identity_hash → path so the V8 resolve
+    // callback (spec §3.6) can discover the referrer's path during nested
+    // resolves. The callback is an extern "C" fn and cannot capture state
+    // through a closure, so this registry is the bridge.
+    let root_path = std::path::PathBuf::from(module_name)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from(module_name));
+    let root_id = module.get_identity_hash().get();
+    super::task_locals::TASK_MODULE_REGISTRY.with(|reg| {
+        reg.borrow_mut().insert(root_id, root_path);
+    });
+
+    // Resolve callback — spec §3.1–3.6. Closed over only through thread-locals.
+    let instantiate_result = module.instantiate_module(tc, resolve_module_callback);
 
     if instantiate_result != Some(true) {
         let msg = tc
@@ -93,7 +98,172 @@ fn execute_as_module(
     // Pump microtask queue for top-level await
     tc.perform_microtask_checkpoint();
 
+    // Spec §4: capture the module namespace so call_entrypoint can look up
+    // `export function handler` without requiring `globalThis.handler = ...`.
+    // v8::Global is a persistent handle — safe to stash in a thread-local.
+    let namespace = module.get_module_namespace();
+    let ns_obj = v8::Local::<v8::Object>::try_from(namespace)
+        .map_err(|_| TaskError::Internal("module namespace is not an object".into()))?;
+    let global = v8::Global::new(tc, ns_obj);
+    super::task_locals::TASK_MODULE_NAMESPACE.with(|n| {
+        *n.borrow_mut() = Some(global);
+    });
+
     Ok(())
+}
+
+/// Walk upward from a referrer path to find the nearest ancestor directory
+/// named `libraries` — that's the app's chroot boundary per spec §3.2.
+///
+/// Returns `None` if no `libraries/` ancestor exists (e.g., inline test
+/// handlers or unusual bundle layouts). Callers should fall back gracefully.
+fn boundary_from_referrer(referrer: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut cursor = referrer.parent()?;
+    loop {
+        if cursor.file_name().and_then(|n| n.to_str()) == Some("libraries") {
+            return Some(cursor.to_path_buf());
+        }
+        cursor = cursor.parent()?;
+    }
+}
+
+/// V8 module resolve callback — spec §3.1–3.6.
+///
+/// Rules:
+/// - Specifier MUST start with `./` or `../` (no bare specifiers, no absolute)
+/// - Specifier MUST carry an explicit `.ts` or `.js` extension
+/// - Resolved path MUST exist in the bundle module cache
+///   (cache residency is the implicit chroot — the cache only contains files
+///    under each app's `libraries/` tree, so boundary is enforced for free)
+/// - Throws a V8 Error if any rule fails; V8 propagates it out of
+///   `instantiate_module` as the caught exception
+fn resolve_module_callback<'s>(
+    context: v8::Local<'s, v8::Context>,
+    specifier: v8::Local<'s, v8::String>,
+    _import_attributes: v8::Local<'s, v8::FixedArray>,
+    referrer: v8::Local<'s, v8::Module>,
+) -> Option<v8::Local<'s, v8::Module>> {
+    // SAFETY: V8 invokes this callback within a live isolate+context; we wrap
+    // that in a HandleScope via CallbackScope so we can manipulate V8 values.
+    let scope = &mut unsafe { v8::CallbackScope::new(context) };
+
+    let spec = specifier.to_rust_string_lossy(scope);
+
+    // Find the referrer's path first — needed by every error message below
+    // (spec §3.1 / §3.2 multi-line format includes an `in {referrer}` line).
+    let referrer_id = referrer.get_identity_hash().get();
+    let referrer_path = super::task_locals::TASK_MODULE_REGISTRY.with(|reg| {
+        reg.borrow().get(&referrer_id).cloned()
+    });
+
+    let throw_resolve_error = |scope: &mut v8::HandleScope<'s>, msg: String|
+        -> Option<v8::Local<'s, v8::Module>>
+    {
+        let err_str = v8::String::new(scope, &msg)?;
+        let err = v8::Exception::error(scope, err_str);
+        scope.throw_exception(err);
+        None
+    };
+
+    let referrer_line = match referrer_path.as_deref() {
+        Some(p) => format!("\n  in {}", p.display()),
+        None => String::new(),
+    };
+
+    // Spec §3.2: bare specifiers rejected (no node_modules resolution).
+    if !(spec.starts_with("./") || spec.starts_with("../")) {
+        return throw_resolve_error(
+            scope,
+            format!(
+                "module resolution failed: bare specifier \"{spec}\" not supported{referrer_line}\n  hint: use \"./\" or \"../\" relative import"
+            ),
+        );
+    }
+
+    // Spec §3.1: explicit extension required. Multi-line format:
+    //   module resolution failed: import specifier "./X" has no extension
+    //     in {app}/libraries/handlers/orders.ts
+    //     hint: use "./X.ts" or "./X.js"
+    if !(spec.ends_with(".ts") || spec.ends_with(".js")) {
+        return throw_resolve_error(
+            scope,
+            format!(
+                "module resolution failed: import specifier \"{spec}\" has no extension{referrer_line}\n  hint: use \"{spec}.ts\" or \"{spec}.js\""
+            ),
+        );
+    }
+
+    let Some(referrer_path) = referrer_path else {
+        return throw_resolve_error(
+            scope,
+            format!("module resolution failed: cannot identify referrer of \"{spec}\"; module registry missing entry"),
+        );
+    };
+
+    // Resolve against referrer's parent directory and canonicalise.
+    let parent = referrer_path.parent().unwrap_or_else(|| std::path::Path::new("/"));
+    let joined = parent.join(&spec);
+    let abs = match joined.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            return throw_resolve_error(
+                scope,
+                format!(
+                    "module resolution failed: cannot resolve \"{spec}\"\n  in {}\n  reason: {e}",
+                    referrer_path.display()
+                ),
+            );
+        }
+    };
+
+    // Spec §3.4: look up in the bundle module cache. Cache residency IS the
+    // boundary check. Error format matches spec §3.2:
+    //   module resolution failed: "{spec}" resolves outside app boundary
+    //     in {referrer}
+    //     resolved to: {abs}
+    //     boundary: {app}/libraries/
+    let cache = super::super::module_cache::get_module_cache()?;
+    let Some(entry) = cache.get(&abs) else {
+        let boundary = boundary_from_referrer(&referrer_path);
+        let boundary_line = boundary
+            .map(|p| format!("\n  boundary: {}", p.display()))
+            .unwrap_or_default();
+        return throw_resolve_error(
+            scope,
+            format!(
+                "module resolution failed: \"{spec}\" resolves outside app boundary\n  in {}\n  resolved to: {}{boundary_line}",
+                referrer_path.display(),
+                abs.display()
+            ),
+        );
+    };
+
+    // Compile a v8::Module from the cached JS.
+    let source_str = v8::String::new(scope, &entry.compiled_js)?;
+    let name_str = v8::String::new(scope, &abs.to_string_lossy())?;
+    let origin = v8::ScriptOrigin::new(
+        scope,
+        name_str.into(),
+        0,
+        0,
+        false,
+        -1,
+        None,
+        false,
+        false,
+        true,
+        None,
+    );
+    let mut v8_source = v8::script_compiler::Source::new(source_str, Some(&origin));
+    let resolved_module = v8::script_compiler::compile_module(scope, &mut v8_source)?;
+
+    // Register this module's identity_hash → path so nested resolves work.
+    let id = resolved_module.get_identity_hash().get();
+    super::task_locals::TASK_MODULE_REGISTRY.with(|reg| {
+        reg.borrow_mut().insert(id, abs);
+    });
+
+    Some(resolved_module)
 }
 
 /// Detect if source uses ES module syntax.
@@ -177,6 +347,13 @@ pub(crate) async fn execute_js_task(
         let effective_heap = if heap_bytes > 0 { heap_bytes } else { DEFAULT_HEAP_LIMIT };
         let mut isolate = acquire_isolate(effective_heap);
 
+        // Phase 6: install the PrepareStackTrace callback on the isolate so
+        // `Error.stack` reports original `.ts` positions remapped through
+        // `sourcemap_cache`. On first access of `.stack` after a throw, V8
+        // invokes `prepare_stack_trace_cb` with the structured CallSite[]
+        // and expects back a Local<Value> to use as the stack string.
+        isolate.set_prepare_stack_trace_callback(prepare_stack_trace_cb);
+
         // Install near-heap-limit callback with HeapCallbackData.
         // The callback sets oom_triggered flag + calls terminate_execution()
         // with extra headroom so V8 can propagate the termination cleanly.
@@ -216,12 +393,11 @@ pub(crate) async fn execute_js_task(
             // Inject Rivers global utilities (Rivers.log, Rivers.crypto, console)
             inject_rivers_global(&mut scope)?;
 
-            // Choose script or module execution (T4: ES module support)
+            // Choose script or module execution path.
+            // Module mode: entrypoint is looked up on the module namespace
+            // (spec §4). Classic-script mode: entrypoint on globalThis.
             if is_module_syntax(&source) {
                 execute_as_module(&mut scope, &source, &ctx.entrypoint.module)?;
-                // For modules, exported functions are set on the module namespace.
-                // For V1: the module must set the entrypoint on the global scope
-                // (e.g., via a side effect or `globalThis.handler = handler`).
             } else {
                 // Existing script-based execution
                 let v8_source = v8::String::new(&mut scope, &source)
@@ -257,6 +433,43 @@ pub(crate) async fn execute_js_task(
             // Handle timeout detected during entrypoint call
             let return_value = match return_value {
                 Err(TaskError::Timeout(_)) => return Err(TaskError::Timeout(timeout_ms)),
+                Err(TaskError::HandlerErrorWithStack { message, stack }) => {
+                    // Spec §6 + financial-correctness gate: if the exception
+                    // actually came from a failed `commit_transaction()` call
+                    // inside `ctx_transaction_callback`, upgrade it to the
+                    // distinct `TransactionCommitFailed` variant so the
+                    // response envelope can flag the transaction state as
+                    // "unknown." `TASK_COMMIT_FAILED` is set by the callback
+                    // immediately before the V8 exception is thrown.
+                    let commit_failure =
+                        super::task_locals::TASK_COMMIT_FAILED.with(|c| c.borrow_mut().take());
+                    if let Some((datasource, driver_msg)) = commit_failure {
+                        tracing::error!(
+                            target: "rivers.handler",
+                            trace_id = %ctx.trace_id,
+                            datasource = %datasource,
+                            driver_error = %driver_msg,
+                            stack = %stack,
+                            "transaction commit failed — state unknown"
+                        );
+                        return Err(TaskError::TransactionCommitFailed {
+                            datasource,
+                            message: driver_msg,
+                        });
+                    }
+                    // Spec §5.3: log the remapped `.ts:line:col` stack to
+                    // the per-app log. TASK_APP_NAME thread-local is still
+                    // populated here — TaskLocals::drop hasn't run yet — so
+                    // AppLogRouter routes this line to `log/apps/<app>.log`.
+                    tracing::error!(
+                        target: "rivers.handler",
+                        trace_id = %ctx.trace_id,
+                        message = %message,
+                        stack = %stack,
+                        "handler threw"
+                    );
+                    return Err(TaskError::HandlerErrorWithStack { message, stack });
+                }
                 other => other?,
             };
 
@@ -353,21 +566,39 @@ fn call_entrypoint(
     scope: &mut v8::ContextScope<'_, v8::HandleScope<'_>>,
     function_name: &str,
 ) -> Result<serde_json::Value, TaskError> {
-    let global = scope.get_current_context().global(scope);
+    // Spec §4: module-mode entrypoint lookup on the module namespace.
+    // Classic-script mode falls through to the existing global-scope path.
+    let namespace_local: Option<v8::Local<v8::Object>> =
+        super::task_locals::TASK_MODULE_NAMESPACE.with(|n| {
+            n.borrow().as_ref().map(|g| v8::Local::new(scope, g))
+        });
 
     let func_key = v8::String::new(scope, function_name)
         .ok_or_else(|| TaskError::Internal(format!("failed to create key '{function_name}'")))?;
-    let func_val = global.get(scope, func_key.into()).ok_or_else(|| {
-        TaskError::HandlerError(format!("function '{function_name}' not found"))
-    })?;
+
+    let func_val = if let Some(ns) = namespace_local {
+        ns.get(scope, func_key.into()).ok_or_else(|| {
+            TaskError::HandlerError(format!(
+                "exported function '{function_name}' not found on module namespace"
+            ))
+        })?
+    } else {
+        let global = scope.get_current_context().global(scope);
+        global.get(scope, func_key.into()).ok_or_else(|| {
+            TaskError::HandlerError(format!("function '{function_name}' not found"))
+        })?
+    };
 
     let func = v8::Local::<v8::Function>::try_from(func_val).map_err(|_| {
         TaskError::HandlerError(format!("'{function_name}' is not a function"))
     })?;
 
+    // `ctx` is always injected on the global object (inject_ctx_object) —
+    // even in module mode. Read from there regardless of entrypoint scope.
     let ctx_key = v8::String::new(scope, "ctx")
         .ok_or_else(|| TaskError::Internal("failed to create 'ctx' key".into()))?;
-    let ctx_val = global
+    let ctx_global = scope.get_current_context().global(scope);
+    let ctx_val = ctx_global
         .get(scope, ctx_key.into())
         .ok_or_else(|| TaskError::Internal("ctx not found on global".into()))?;
 
@@ -397,36 +628,79 @@ fn call_entrypoint(
             if tc_scope.has_terminated() {
                 return Err(TaskError::Timeout(0));
             }
-            let msg = if let Some(exception) = tc_scope.exception() {
-                exception.to_rust_string_lossy(tc_scope)
+            // Capture both the message and the remapped `.stack` — the
+            // PrepareStackTraceCallback fires when we read the stack
+            // property, producing remapped `.ts:line:col` positions.
+            let (msg, stack_opt) = if let Some(exception) = tc_scope.exception() {
+                let msg = exception.to_rust_string_lossy(tc_scope);
+                let stack = v8::Local::<v8::Object>::try_from(exception)
+                    .ok()
+                    .and_then(|obj| {
+                        let key = v8::String::new(tc_scope, "stack")?;
+                        obj.get(tc_scope, key.into())
+                    })
+                    .filter(|v| !v.is_null() && !v.is_undefined())
+                    .map(|v| v.to_rust_string_lossy(tc_scope));
+                (msg, stack)
             } else {
-                "unknown exception".to_string()
+                ("unknown exception".to_string(), None)
             };
-            Err(TaskError::HandlerError(format!(
-                "handler '{function_name}' threw: {msg}"
-            )))
+            let formatted = format!("handler '{function_name}' threw: {msg}");
+            match stack_opt {
+                Some(stack) => Err(TaskError::HandlerErrorWithStack {
+                    message: formatted,
+                    stack,
+                }),
+                None => Err(TaskError::HandlerError(formatted)),
+            }
         }
     }
 }
 
 /// Resolve the JavaScript source code for a task.
 ///
-/// V2.10: TypeScript sources (detected by file extension or entrypoint
-/// language) are compiled to JavaScript via `compile_typescript()`.
+/// Per `docs/arch/rivers-javascript-typescript-spec.md` §2.6–2.8:
+/// every `.ts`/`.js` under every app's `libraries/` is pre-compiled at
+/// bundle load time into the process-global `BundleModuleCache`. This
+/// function performs a cache lookup — not a live compilation.
+///
+/// Two fallback paths remain:
+///
+/// 1. `ctx.args["_source"]` — tests and dynamic-dispatch callers may inject
+///    source inline without a disk file. TypeScript is compiled on the fly
+///    via `compile_typescript()`; JS is used verbatim.
+/// 2. Cache miss on `ctx.entrypoint.module` — read from disk and compile.
+///    This is a defence-in-depth path for modules that exist on disk but
+///    weren't walked (e.g., legacy handlers outside `libraries/`). Logged
+///    so we can detect and fix such cases.
 fn resolve_module_source(ctx: &TaskContext) -> Result<String, TaskError> {
     if let Some(source) = ctx.args.get("_source").and_then(|v| v.as_str()) {
-        // Check if the entrypoint language is typescript
         if ctx.entrypoint.language == "typescript" {
             return compile_typescript(source, &ctx.entrypoint.module);
         }
         return Ok(source.to_string());
     }
+
     let path = &ctx.entrypoint.module;
 
+    // Primary path — consult the bundle module cache populated at load time.
+    if let Some(cache) = super::super::module_cache::get_module_cache() {
+        let abs = std::path::PathBuf::from(path)
+            .canonicalize()
+            .unwrap_or_else(|_| std::path::PathBuf::from(path));
+        if let Some(entry) = cache.get(&abs) {
+            return Ok(entry.compiled_js.clone());
+        }
+    }
+
+    // Fallback — on-disk read + live compile. Should be rare after Phase 2.
+    tracing::debug!(
+        module = %path,
+        "module cache miss — falling back to disk + live compile"
+    );
     let source = std::fs::read_to_string(path)
         .map_err(|e| TaskError::HandlerError(format!("cannot read module '{path}': {e}")))?;
 
-    // Auto-detect TypeScript by file extension
     let compiled = if path.ends_with(".ts") || ctx.entrypoint.language == "typescript" {
         compile_typescript(&source, path)?
     } else {
@@ -434,4 +708,197 @@ fn resolve_module_source(ctx: &TaskContext) -> Result<String, TaskError> {
     };
 
     Ok(compiled)
+}
+
+// ── Prepare Stack Trace Callback (spec §5.2) ────────────────────
+
+/// Structured info extracted from a single V8 CallSite object.
+///
+/// Every field is `Option` because CallSite methods can return null for
+/// native frames, eval frames, or when position metadata is absent.
+#[derive(Debug, Default, Clone)]
+struct CallSiteInfo {
+    script_name: Option<String>,
+    line: Option<u32>,
+    column: Option<u32>,
+    function_name: Option<String>,
+}
+
+/// Call a no-arg method on a CallSite object via V8 reflection.
+///
+/// rusty_v8 doesn't wrap CallSite — the type-safe API is to look up the
+/// method name on the object, cast to Function, and invoke with the
+/// CallSite as `this`. Returns `None` if the lookup or call fails.
+fn call_callsite_method<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    site: v8::Local<'s, v8::Object>,
+    method: &str,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let name = v8::String::new(scope, method)?;
+    let method_val = site.get(scope, name.into())?;
+    let func = v8::Local::<v8::Function>::try_from(method_val).ok()?;
+    func.call(scope, site.into(), &[])
+}
+
+/// Extract `(script_name, line, column, function_name)` from a CallSite.
+///
+/// V8 CallSite method reference:
+/// https://v8.dev/docs/stack-trace-api — `getScriptName()`, `getLineNumber()`,
+/// `getColumnNumber()`, `getFunctionName()`. Null/undefined returns become
+/// `None` in the resulting `CallSiteInfo`.
+fn extract_callsite<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    site_val: v8::Local<'s, v8::Value>,
+) -> CallSiteInfo {
+    let mut info = CallSiteInfo::default();
+    let Ok(site) = v8::Local::<v8::Object>::try_from(site_val) else {
+        return info;
+    };
+
+    if let Some(v) = call_callsite_method(scope, site, "getScriptName") {
+        if !v.is_null() && !v.is_undefined() {
+            info.script_name = Some(v.to_rust_string_lossy(scope));
+        }
+    }
+    if let Some(v) = call_callsite_method(scope, site, "getLineNumber") {
+        if v.is_number() {
+            info.line = v.uint32_value(scope);
+        }
+    }
+    if let Some(v) = call_callsite_method(scope, site, "getColumnNumber") {
+        if v.is_number() {
+            info.column = v.uint32_value(scope);
+        }
+    }
+    if let Some(v) = call_callsite_method(scope, site, "getFunctionName") {
+        if !v.is_null() && !v.is_undefined() {
+            info.function_name = Some(v.to_rust_string_lossy(scope));
+        }
+    }
+
+    info
+}
+
+/// V8 `PrepareStackTraceCallback` — intercepts `Error.stack` construction
+/// to rewrite frame positions from compiled-JS to original `.ts` coordinates.
+///
+/// Spec: `docs/arch/rivers-javascript-typescript-spec.md §5.2`. The
+/// `sites` array is V8's structured CallSite list per
+/// https://v8.dev/docs/stack-trace-api . V8 asserts the return is a
+/// non-empty Local<Value>, so we always build a string even on failure.
+///
+/// For each frame, attempts source-map remap via `sourcemap_cache::get_or_parse`;
+/// falls back to the unmapped compiled-JS position on cache miss, null
+/// scriptName, or lookup failure.
+fn prepare_stack_trace_cb<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    error: v8::Local<'s, v8::Value>,
+    sites: v8::Local<'s, v8::Array>,
+) -> v8::Local<'s, v8::Value> {
+    let mut out = error.to_rust_string_lossy(scope);
+    let len = sites.length();
+    for i in 0..len {
+        let Some(site_val) = sites.get_index(scope, i) else {
+            continue;
+        };
+        let info = extract_callsite(scope, site_val);
+        out.push_str(&format_frame(&info));
+    }
+    v8::String::new(scope, &out)
+        .map(|s| s.into())
+        .unwrap_or_else(|| v8::String::empty(scope).into())
+}
+
+/// Format a single stack frame, remapping via the source-map cache when
+/// possible. Falls back to the raw compiled-JS position otherwise.
+///
+/// Offset note: V8's CallSite positions are 1-based; swc_sourcemap's
+/// `lookup_token` expects 0-based. The remapped output is re-incremented
+/// back to 1-based for stack-trace convention.
+fn format_frame(info: &CallSiteInfo) -> String {
+    let fn_name = info
+        .function_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("<anonymous>");
+
+    if let (Some(script), Some(line), Some(col)) =
+        (info.script_name.as_deref(), info.line, info.column)
+    {
+        if line > 0 && col > 0 {
+            let path = std::path::Path::new(script);
+            if let Some(sm) = super::sourcemap_cache::get_or_parse(path) {
+                if let Some(token) = sm.lookup_token(line - 1, col - 1) {
+                    let src_line = token.get_src_line();
+                    let src_col = token.get_src_col();
+                    // Sentinel: u32::MAX = unmapped.
+                    if src_line != u32::MAX && src_col != u32::MAX {
+                        let src_file = token
+                            .get_source()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| script.to_string());
+                        return format!(
+                            "\n    at {fn_name} ({src_file}:{}:{})",
+                            src_line + 1,
+                            src_col + 1
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Unmapped / native / eval / cache-miss fallback.
+    let script = info.script_name.as_deref().unwrap_or("<unknown>");
+    let line = info.line.map(|n| n.to_string()).unwrap_or_else(|| "?".into());
+    let col = info.column.map(|n| n.to_string()).unwrap_or_else(|| "?".into());
+    format!("\n    at {fn_name} ({script}:{line}:{col})")
+}
+
+#[cfg(test)]
+mod frame_format_tests {
+    use super::{format_frame, CallSiteInfo};
+
+    #[test]
+    fn fallback_when_no_cache_entry() {
+        // No source map cached for this path → unmapped format.
+        let info = CallSiteInfo {
+            script_name: Some("/never-installed/handler.ts".into()),
+            line: Some(42),
+            column: Some(5),
+            function_name: Some("handler".into()),
+        };
+        let s = format_frame(&info);
+        assert!(s.contains("handler"), "fn name: {s}");
+        assert!(s.contains(":42:5"), "unmapped 1-based position: {s}");
+        assert!(s.contains("/never-installed/handler.ts"), "raw path: {s}");
+    }
+
+    #[test]
+    fn anonymous_when_no_function_name() {
+        let info = CallSiteInfo {
+            script_name: None,
+            line: None,
+            column: None,
+            function_name: None,
+        };
+        let s = format_frame(&info);
+        assert!(s.contains("<anonymous>"), "anon placeholder: {s}");
+        assert!(s.contains("<unknown>"), "unknown script placeholder: {s}");
+        assert!(s.contains(":?:?"), "unknown position placeholders: {s}");
+    }
+
+    #[test]
+    fn zero_line_or_col_falls_back() {
+        // line/col of 0 are invalid positions (V8 uses 1-based) — fall
+        // through to unmapped to avoid u32 underflow at `line - 1`.
+        let info = CallSiteInfo {
+            script_name: Some("/some-file.ts".into()),
+            line: Some(0),
+            column: Some(0),
+            function_name: Some("f".into()),
+        };
+        let s = format_frame(&info);
+        assert!(s.contains(":0:0"), "unmapped retained 0s: {s}");
+    }
 }

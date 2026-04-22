@@ -222,7 +222,26 @@ pub async fn execute_rest_view(
                     let result = pool
                         .dispatch("default", task_ctx)
                         .await
-                        .map_err(|e| ViewError::Handler(format!("codecomponent dispatch: {e}")))?;
+                        .map_err(|e| match e {
+                            // Spec §5.3: preserve the remapped stack so the
+                            // error-response serializer can include it in the
+                            // `debug.stack` envelope when debug is enabled.
+                            rivers_runtime::process_pool::TaskError::HandlerErrorWithStack {
+                                message,
+                                stack,
+                            } => ViewError::HandlerWithStack {
+                                message: format!("codecomponent dispatch: {message}"),
+                                stack,
+                            },
+                            // Spec §6 commit-failure: unknown transaction
+                            // state must surface as a distinct error class so
+                            // the client can pick retry policy correctly.
+                            rivers_runtime::process_pool::TaskError::TransactionCommitFailed {
+                                datasource,
+                                message,
+                            } => ViewError::TransactionCommitFailed { datasource, message },
+                            other => ViewError::Handler(format!("codecomponent dispatch: {other}")),
+                        })?;
 
                     // Check for handler result envelope { status, headers, body }
                     if let Some(view_result) = parse_handler_view_result(&result.value) {

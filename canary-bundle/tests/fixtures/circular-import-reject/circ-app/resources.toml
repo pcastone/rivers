@@ -1,0 +1,3 @@
+# No datasources, services, or keystores — bundle is minimal; the
+# point is that `riverpackage validate` refuses to load it because
+# of the a.ts ↔ b.ts import cycle in libraries/handlers/.

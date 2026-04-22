@@ -33,6 +33,8 @@ pub mod dataview_engine;
 pub mod env_override;
 /// TOML file loading for server config and app bundles.
 pub mod loader;
+/// Pre-compiled handler source cache (bundle load time — spec §3.4).
+pub mod module_cache;
 /// Runtime-constructed DataViews for internal/synthetic endpoints.
 pub mod pseudo_dataview;
 /// JSON-schema system — field types, validation, and driver attributes.

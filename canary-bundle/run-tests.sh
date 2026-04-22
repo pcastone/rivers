@@ -157,6 +157,89 @@ test_ep "eventbus-publish"   POST "$BASE/handlers/canary/rt/eventbus/publish" '{
 test_ep "header-blocklist"   GET  "$BASE/handlers/canary/rt/header/blocklist"
 test_ep "faker-determinism"  GET  "$BASE/handlers/canary/rt/faker/determinism"
 
+# ── TYPESCRIPT Profile (spec §2 / §3 / §4 / §5) ─────────────────
+# Spec §9.2 required IDs: RT-TS-{PARAM-STRIP, VAR-STRIP, IMPORT-TYPE,
+# GENERIC, MULTIMOD, EXPORT-FN, ENUM, DECORATOR, NAMESPACE,
+# CIRCULAR, SOURCEMAP}. CIRCULAR runs outside this profile as a
+# standalone shell test (canary-bundle/tests/circular-import-rejection.sh)
+# against `riverpackage validate` — it tests that the bundle fails to
+# LOAD, which is incompatible with a dispatch-style probe.
+
+echo ""
+echo "  ── TYPESCRIPT Profile (syntax + modules) ──"
+test_ep "ts-param-strip"   POST "$BASE/handlers/canary/rt/ts/param-strip" '{}'
+test_ep "ts-var-strip"     POST "$BASE/handlers/canary/rt/ts/var-strip" '{}'
+test_ep "ts-import-type"   POST "$BASE/handlers/canary/rt/ts/import-type" '{}'
+test_ep "ts-generic"       POST "$BASE/handlers/canary/rt/ts/generic" '{}'
+test_ep "ts-multimod"      POST "$BASE/handlers/canary/rt/ts/multimod" '{}'
+test_ep "ts-export-fn"     POST "$BASE/handlers/canary/rt/ts/export-fn" '{}'
+test_ep "ts-enum"          POST "$BASE/handlers/canary/rt/ts/enum" '{}'
+test_ep "ts-decorator"     POST "$BASE/handlers/canary/rt/ts/decorator" '{}'
+test_ep "ts-namespace"     POST "$BASE/handlers/canary/rt/ts/namespace" '{}'
+
+echo ""
+echo "  ── TYPESCRIPT Profile (source map remap) ──"
+# sourcemap.ts throws intentionally; in debug builds the response
+# body MUST include `details.stack` with a frame pointing at the
+# source `.ts` file and line (not the compiled `.js` position).
+SM_RESP=$(curl -sk -m 8 -X POST "$BASE/handlers/canary/rt/ts/sourcemap" \
+  -H "Content-Type: application/json" -d '{}' 2>/dev/null) || SM_RESP=""
+if echo "$SM_RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); s=d.get('details',{}).get('stack',[]); import sys as _; exit(0 if any('sourcemap.ts' in f for f in s) else 1)" 2>/dev/null; then
+  printf "  PASS %-40s (remapped stack frames)\n" "ts-sourcemap"
+  PASS=$((PASS+1))
+else
+  # Release builds omit details.stack — that's per-spec. Accept a 500
+  # with no stack as "skip" rather than fail, since this only validates
+  # in debug builds.
+  HTTP_CODE=$(echo "$SM_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('code','?'))" 2>/dev/null || echo "?")
+  if [ "$HTTP_CODE" = "500" ]; then
+    printf "  SKIP %-40s (500 no stack — release build?)\n" "ts-sourcemap"
+  else
+    printf "  FAIL %-40s (HTTP %s, no sourcemap.ts in stack)\n" "ts-sourcemap" "$HTTP_CODE"
+    FAIL=$((FAIL+1))
+  fi
+fi
+
+# ── TRANSACTIONS-TS Profile (spec §6: ctx.transaction surface) ───
+
+echo ""
+echo "  ── TRANSACTIONS-TS Profile (ctx.transaction surface) ──"
+test_ep "txn-args"           POST "$BASE/handlers/canary/rt/txn/args" '{}'
+test_ep "txn-cb-type"        POST "$BASE/handlers/canary/rt/txn/cb-type" '{}'
+test_ep "txn-unknown-ds"     POST "$BASE/handlers/canary/rt/txn/unknown-ds" '{}'
+test_ep "txn-cleanup"        POST "$BASE/handlers/canary/rt/txn/cleanup" '{}'
+test_ep "txn-surface"        POST "$BASE/handlers/canary/rt/txn/surface" '{}'
+
+# RT-TXN-UNSUPPORTED doesn't need PG — uses canary-faker.
+test_ep "txn-unsupported"    POST "$BASE/handlers/canary/rt/txn/unsupported" '{}'
+
+# ── TRANSACTIONS-TS Profile (spec §6 end-to-end — needs PG) ──────
+# The remaining RT-TXN-* IDs require a reachable PG datasource at
+# 192.168.2.209. Detect availability via the canary-sql ping; skip
+# the whole block if PG is unreachable.
+
+PG_AVAIL=$(curl -sk -m 2 "$BASE/sql/canary/sql/pg/param-order" \
+  -X POST -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: ${CSRF_TOKEN}" \
+  -b "$COOKIES" -c "$COOKIES" -d '{}' 2>/dev/null \
+  | python3 -c "import json,sys; print('1' if json.load(sys.stdin).get('test_id') else '0')" 2>/dev/null) \
+  || PG_AVAIL="0"
+
+echo ""
+if [ "$PG_AVAIL" = "1" ]; then
+    echo "  ── TRANSACTIONS-TS Profile (end-to-end, PG) ──"
+    test_ep "txn-commit"     POST "$BASE/handlers/canary/rt/txn/commit" '{}'
+    test_ep "txn-rollback"   POST "$BASE/handlers/canary/rt/txn/rollback" '{}'
+    test_ep "txn-cross-ds"   POST "$BASE/handlers/canary/rt/txn/cross-ds" '{}'
+    test_ep "txn-nested"     POST "$BASE/handlers/canary/rt/txn/nested" '{}'
+else
+    echo "  ── TRANSACTIONS-TS Profile (end-to-end, PG) — SKIPPED ──"
+    printf "  SKIP %-40s (PG unreachable)\n" "txn-commit"
+    printf "  SKIP %-40s (PG unreachable)\n" "txn-rollback"
+    printf "  SKIP %-40s (PG unreachable)\n" "txn-cross-ds"
+    printf "  SKIP %-40s (PG unreachable)\n" "txn-nested"
+fi
+
 # ── SQL Profile (auth=session, uses PG/MySQL/SQLite) ─────────────
 
 echo ""

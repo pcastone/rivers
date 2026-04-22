@@ -106,11 +106,55 @@ thread_local! {
     /// Human-readable app name for the current task — used for per-app log routing.
     pub(super) static TASK_APP_NAME: RefCell<Option<String>> = RefCell::new(None);
 
+    /// Module-identity-hash → absolute source path for the modules compiled
+    /// during the current task's execute_as_module call (spec §3.6 V8
+    /// resolve callback). Needed because V8's resolve callback signature is
+    /// `extern "C" fn` — can't capture state via closure. The callback reads
+    /// the referrer's identity hash, looks up its path here, resolves the
+    /// specifier relative to that path's parent, and finds the target in
+    /// `BundleModuleCache`.
+    pub(crate) static TASK_MODULE_REGISTRY: RefCell<HashMap<i32, std::path::PathBuf>> = RefCell::new(HashMap::new());
+
+    /// Namespace Object for the currently-executing module, if the source
+    /// uses ES module syntax (spec §4). `call_entrypoint` reads this: Some
+    /// means look up on the namespace, None means classic-script path
+    /// (lookup on globalThis).
+    pub(crate) static TASK_MODULE_NAMESPACE: RefCell<Option<v8::Global<v8::Object>>> = RefCell::new(None);
+
+    /// Active handler transaction state (spec §6). `ctx.transaction(ds, fn)`
+    /// populates this before invoking the JS callback; `ctx.dataview()`
+    /// reads it to (a) enforce the spec §6.2 cross-datasource check and
+    /// (b) route execution through the held transaction connection.
+    /// Cleared in `TaskLocals::drop`. `auto_rollback_all` runs on any
+    /// still-held connection when the task ends.
+    pub(crate) static TASK_TRANSACTION: RefCell<Option<TaskTransactionState>> = RefCell::new(None);
+
+    /// Set by `ctx_transaction_callback` when the post-callback
+    /// `commit_transaction()` call fails. `execute_js_task` checks this
+    /// after `call_entrypoint` returns an error and upgrades the error
+    /// from the generic `HandlerErrorWithStack` (indistinguishable from a
+    /// handler throw) to the distinct `TransactionCommitFailed` variant.
+    /// Stores (datasource, driver-error-message).
+    ///
+    /// Why this matters: for financial workloads, "handler threw" and
+    /// "commit failed after handler returned" have different retry
+    /// semantics. Without this disambiguation the client sees the same
+    /// HTTP 500 for both cases.
+    pub(crate) static TASK_COMMIT_FAILED: RefCell<Option<(String, String)>> = RefCell::new(None);
+
     /// `DatasourceToken::Direct` entries declared by the current task.
     /// The typed-proxy host fn (`__rivers_direct_dispatch`) reads from this
     /// map to build/reuse a `Connection` and run operations in-thread.
     pub(super) static TASK_DIRECT_DATASOURCES:
         RefCell<HashMap<String, DirectDatasource>> = RefCell::new(HashMap::new());
+}
+
+/// Active transaction state for the current task.
+pub(super) struct TaskTransactionState {
+    /// The TransactionMap that holds the connection for commit/rollback.
+    pub(super) map: Arc<crate::transaction::TransactionMap>,
+    /// The single datasource this transaction is scoped to (spec §6.2).
+    pub(super) datasource: String,
 }
 
 /// Get the current tokio runtime handle from the thread-local.
@@ -197,6 +241,15 @@ impl TaskLocals {
 
 impl Drop for TaskLocals {
     fn drop(&mut self) {
+        // Auto-rollback any transaction the handler left open — BEFORE
+        // clearing RT_HANDLE, because auto_rollback_all is async and needs
+        // the runtime. Spec §6: timeout or panic must not leave a
+        // connection holding a transaction in the pool.
+        if let Some(state) = TASK_TRANSACTION.with(|t| t.borrow_mut().take()) {
+            if let Some(rt) = RT_HANDLE.with(|h| h.borrow().clone()) {
+                rt.block_on(state.map.auto_rollback_all());
+            }
+        }
         RT_HANDLE.with(|h| *h.borrow_mut() = None);
         TASK_ENV.with(|e| *e.borrow_mut() = None);
         TASK_STORE.with(|s| s.borrow_mut().clear());
@@ -211,6 +264,10 @@ impl Drop for TaskLocals {
         TASK_LOCKBOX.with(|lb| *lb.borrow_mut() = None);
         TASK_KEYSTORE.with(|ks| *ks.borrow_mut() = None);
         TASK_APP_NAME.with(|n| *n.borrow_mut() = None);
+        TASK_MODULE_REGISTRY.with(|r| r.borrow_mut().clear());
+        TASK_MODULE_NAMESPACE.with(|n| *n.borrow_mut() = None);
+        // TASK_TRANSACTION was drained above, before RT_HANDLE was cleared.
+        TASK_COMMIT_FAILED.with(|c| *c.borrow_mut() = None);
         TASK_DIRECT_DATASOURCES.with(|m| m.borrow_mut().clear());
     }
 }

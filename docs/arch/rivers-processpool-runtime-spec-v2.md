@@ -310,6 +310,8 @@ declare const Rivers: {
 
 ### 5.3 TypeScript Compilation
 
+> **Superseded by [`rivers-javascript-typescript-spec.md`](./rivers-javascript-typescript-spec.md)** (v1.0, 2026-04-21). See that spec for the authoritative swc compiler integration, module resolution algorithm, entrypoint lookup semantics, source maps, and `ctx.transaction()` API. The paragraph below is preserved for historical context.
+
 TypeScript handlers are compiled at bundle load time (not at request time) using the embedded `swc` compiler. The compiled JS is stored in the bundle cache. At dispatch, the worker loads pre-compiled JS — there is no per-request transpilation overhead.
 
 ### 5.4 Isolate Reuse and Context Unbinding
@@ -969,4 +971,4 @@ No lib can appear in a view that was not provisioned by the RPS for that node's 
 | 2 | ~~Isolate-per-request vs reuse~~ | ~~Current design reuses isolates with context reset.~~ | **Closed** — Isolates reused. Fresh context per request; context unbound between executions. Streaming handlers get long-lived context. <!-- SHAPE-9 amendment --> |
 | 3 | WASM threading | Wasmtime supports WASM threads (wasm-threads proposal). Should the WASM pool support multi-threaded WASM modules? Significant complexity increase. | **Deferred to v3** |
 | 4 | ~~Shared V8 Heap Snapshot~~ | ~~The V8 heap snapshot is shared read-only across workers.~~ | **Closed** — No snapshots used. Moot. <!-- SHAPE-10 amendment --> |
-| 5 | TypeScript source maps | When a TS handler throws an exception, stack traces reference compiled JS line numbers. Source maps are needed to surface original TS line numbers in error reports. | **Implement with TS compilation step** |
+| 5 | ~~TypeScript source maps~~ | ~~When a TS handler throws an exception, stack traces reference compiled JS line numbers.~~ | **Closed** — Resolved by `rivers-javascript-typescript-spec.md §5`. swc emits v3 source maps at bundle load; a V8 `PrepareStackTraceCallback` remaps frames to original `.ts:line:col` on `Error.stack` access. Always logged to per-app log; exposed in error envelope under `details.stack` in debug builds. |

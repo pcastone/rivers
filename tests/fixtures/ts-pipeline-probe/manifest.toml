@@ -1,0 +1,6 @@
+bundleName    = "cb-ts-repro"
+bundleVersion = "0.1.0"
+
+[[apps]]
+name = "probe"
+path = "probe/"

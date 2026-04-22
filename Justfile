@@ -34,6 +34,12 @@ test:
 check:
     cargo check
 
+# Run TS pipeline probe bundle against a running riversd
+# Prereq: riversd is serving tests/fixtures/ts-pipeline-probe/ on $BASE
+# Default BASE targets a local instance on port 8080 with the probe mount path.
+probe-ts base="http://localhost:8080/cb-ts-repro/probe":
+    tests/fixtures/ts-pipeline-probe/run-probe.sh {{base}}
+
 # Clean all build artifacts
 clean:
     cargo clean

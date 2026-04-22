@@ -113,6 +113,17 @@ pub async fn load_and_wire_bundle(
         }
     }
 
+    // ── Phase 2 (spec §2.6–2.7): compile every `.ts`/`.js` under every app's
+    //    `libraries/` at load time, populate the process-global module cache,
+    //    and install it atomically. Any compile failure aborts bundle load.
+    let module_cache = crate::process_pool::module_cache::populate_module_cache(&bundle)
+        .map_err(|e| ServerError::Config(format!("module cache population failed: {e}")))?;
+    tracing::info!(
+        modules = module_cache.len(),
+        "bundle: module cache populated"
+    );
+    crate::process_pool::module_cache::install_module_cache(module_cache);
+
     let mut registry = rivers_runtime::DataViewRegistry::new();
     let mut ds_params: HashMap<String, rivers_runtime::rivers_driver_sdk::ConnectionParams> = HashMap::new();
     let mut view_count = 0usize;

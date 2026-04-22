@@ -2,8 +2,6 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
-
 use rivers_runtime::rivers_core::config::ProcessPoolConfig;
 
 use super::types::*;
@@ -118,110 +116,248 @@ impl V8Worker {
 
 // ── TypeScript Compiler ─────────────────────────────────────────
 
-/// Compile TypeScript source to JavaScript by stripping type annotations.
+use swc_core::common::source_map::DefaultSourceMapGenConfig;
+use swc_core::common::{sync::Lrc, FileName, Globals, Mark, SourceMap, GLOBALS};
+use swc_core::ecma::ast::{EsVersion, ModuleDecl, ModuleItem, Program};
+use swc_core::ecma::codegen::{text_writer::JsWriter, Emitter};
+use swc_core::ecma::parser::{parse_file_as_program, Syntax, TsSyntax};
+use swc_core::ecma::transforms::base::{fixer::fixer, resolver};
+use swc_core::ecma::transforms::typescript::{typescript, Config as TsConfig};
+
+/// Compile TypeScript source to JavaScript, discarding import metadata.
 ///
-/// This is a lightweight approach that handles common TypeScript patterns:
-/// - Type annotations on parameters: `(x: string)` -> `(x)`
-/// - Return type annotations: `): string {` -> `) {`
-/// - Interface/type declarations: removed entirely
-/// - Generic type parameters: `<T>` -> removed
-/// - `as` type assertions: `x as string` -> `x`
-///
-/// For complex TypeScript features (decorators, enums, namespace merging),
-/// the full SWC compiler should be used. This covers the 90% case for
-/// Rivers handler functions.
-pub fn compile_typescript(source: &str, _filename: &str) -> Result<String, TaskError> {
-    let mut result = String::with_capacity(source.len());
-    let mut in_interface = false;
-    let mut brace_depth: i32 = 0;
-    let mut interface_brace_start: i32 = 0;
-
-    let lines: Vec<&str> = source.lines().collect();
-
-    for line in &lines {
-        let trimmed = line.trim();
-
-        // Skip interface/type declarations entirely
-        if trimmed.starts_with("interface ")
-            || (trimmed.starts_with("type ") && trimmed.contains('='))
-        {
-            if trimmed.contains('{') && !trimmed.contains('}') {
-                in_interface = true;
-                interface_brace_start = brace_depth;
-            }
-            for c in trimmed.chars() {
-                if c == '{' {
-                    brace_depth += 1;
-                }
-                if c == '}' {
-                    brace_depth -= 1;
-                }
-            }
-            continue;
-        }
-
-        if in_interface {
-            for c in trimmed.chars() {
-                if c == '{' {
-                    brace_depth += 1;
-                }
-                if c == '}' {
-                    brace_depth -= 1;
-                }
-            }
-            if brace_depth <= interface_brace_start {
-                in_interface = false;
-            }
-            continue;
-        }
-
-        for c in trimmed.chars() {
-            if c == '{' {
-                brace_depth += 1;
-            }
-            if c == '}' {
-                brace_depth -= 1;
-            }
-        }
-
-        let stripped = strip_type_annotations(line);
-        result.push_str(&stripped);
-        result.push('\n');
-    }
-
-    Ok(result)
+/// See `compile_typescript_with_imports` for the variant that returns both
+/// the compiled JS and the post-transform import specifier list.
+pub fn compile_typescript(source: &str, filename: &str) -> Result<String, TaskError> {
+    compile_typescript_with_imports(source, filename).map(|(js, _, _)| js)
 }
 
-/// Strip type annotations from a single line of TypeScript.
-fn strip_type_annotations(line: &str) -> String {
-    let mut result = line.to_string();
-
-    // Remove return type annotations: `): ReturnType {` -> `) {`
-    while let Some(pos) = result.find("): ") {
-        if let Some(brace) = result[pos + 2..].find('{') {
-            let between = &result[pos + 2..pos + 2 + brace];
-            if !between.contains("=>") {
-                result = format!("{}) {{{}", &result[..pos], &result[pos + 2 + brace + 1..]);
+/// Compile TypeScript and return the JS, runtime import specifiers, and source map.
+///
+/// Per `docs/arch/rivers-javascript-typescript-spec.md` §2.1–2.5, §3.5, §5.1:
+/// - Full transform (not strip-only): erases type annotations, `type`-only
+///   imports, `as` / `satisfies` assertions, `interface` / `type` aliases,
+///   generic parameters, and lowers `enum` / `namespace` / `const enum`.
+/// - Parser accepts TC39 Stage 3 decorator syntax (spec §2.3). Lowering is
+///   deferred to V8, which supports Stage 3 decorators natively in the
+///   pinned runtime; legacy `experimentalDecorators` is not supported.
+/// - ES2022 is the compilation target floor (spec §2.4).
+/// - `.tsx` is rejected unconditionally (spec §2.5).
+/// - Source maps are emitted unconditionally (spec §5.1 — "generation is not
+///   optional"). The map is returned as a JSON string (SourceMap v3 format)
+///   suitable for storage in `CompiledModule.source_map`.
+///
+/// Import extraction (spec §3.5): specifiers are pulled from the
+/// post-transform AST, so type-only imports (which the typescript pass has
+/// already erased) do not appear in the result. Cycle detection operates on
+/// runtime imports only — a type-only cycle is not a runtime cycle.
+pub fn compile_typescript_with_imports(
+    source: &str,
+    filename: &str,
+) -> Result<(String, Vec<String>, String), TaskError> {
+    // swc has a documented history of panicking on crafted or malformed TS
+    // input. At bundle-load time the caller is `populate_module_cache`, which
+    // runs during `load_and_wire_bundle` — a panic there takes down riversd
+    // startup. Wrap the whole compile in `catch_unwind` so a crafted handler
+    // produces a recoverable error rather than aborting the process.
+    //
+    // `AssertUnwindSafe` is needed because swc's `GLOBALS` + `Mark` types are
+    // not `UnwindSafe`. This is acceptable here: on panic we discard the
+    // intermediate state entirely and return a `TaskError`, so there's no way
+    // for partially-constructed swc state to leak out.
+    let source_owned = source.to_string();
+    let filename_owned = filename.to_string();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        compile_typescript_with_imports_inner(&source_owned, &filename_owned)
+    }));
+    match result {
+        Ok(r) => r,
+        Err(panic_payload) => {
+            let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                s.clone()
             } else {
-                break;
+                "<non-string panic payload>".to_string()
+            };
+            tracing::error!(
+                target: "rivers.ts",
+                filename = %filename,
+                panic = %panic_msg,
+                "swc compile panicked — treating as compile error"
+            );
+            Err(TaskError::HandlerError(format!(
+                "TypeScript compile panicked in {filename}: {panic_msg}"
+            )))
+        }
+    }
+}
+
+fn compile_typescript_with_imports_inner(
+    source: &str,
+    filename: &str,
+) -> Result<(String, Vec<String>, String), TaskError> {
+    if filename.ends_with(".tsx") {
+        // Spec §2.5: message format is "JSX/TSX is not supported in Rivers
+        // v1: {app}/{path}". If the filename contains a `libraries/` segment,
+        // extract `{app}/{path}` as (parent-of-libraries)/(libraries/...).
+        // Otherwise fall back to the raw filename — still informative.
+        let short = shorten_app_path(filename).unwrap_or_else(|| filename.to_string());
+        return Err(TaskError::HandlerError(format!(
+            "JSX/TSX is not supported in Rivers v1: {short}"
+        )));
+    }
+
+    let cm: Lrc<SourceMap> = Default::default();
+    let fm = cm.new_source_file(
+        FileName::Custom(filename.into()).into(),
+        source.to_string(),
+    );
+
+    let mut recovered = Vec::<swc_core::ecma::parser::error::Error>::new();
+    let program = parse_file_as_program(
+        &fm,
+        Syntax::Typescript(TsSyntax {
+            decorators: true,
+            ..Default::default()
+        }),
+        EsVersion::Es2022,
+        None,
+        &mut recovered,
+    )
+    .map_err(|e| {
+        TaskError::HandlerError(format!(
+            "TypeScript parse error in {filename}: {:?}",
+            e.kind()
+        ))
+    })?;
+
+    if !recovered.is_empty() {
+        let msgs: Vec<String> = recovered
+            .iter()
+            .map(|e| format!("{:?}", e.kind()))
+            .collect();
+        return Err(TaskError::HandlerError(format!(
+            "TypeScript parse errors in {filename}: {}",
+            msgs.join("; ")
+        )));
+    }
+
+    GLOBALS.set(
+        &Globals::default(),
+        || -> Result<(String, Vec<String>, String), TaskError> {
+            let unresolved_mark = Mark::new();
+            let top_level_mark = Mark::new();
+
+            let program = program
+                .apply(resolver(unresolved_mark, top_level_mark, true))
+                .apply(typescript(
+                    TsConfig::default(),
+                    unresolved_mark,
+                    top_level_mark,
+                ))
+                .apply(fixer(None));
+
+            let imports = extract_imports(&program);
+
+            // Emit JS + collect source map entries.
+            // Spec §2.4: ES2022 is the compilation floor. Setting
+            // `Config::with_target(EsVersion::Es2022)` tells the emitter to
+            // lower syntax above ES2022 — matches what V8 v130 reliably
+            // supports and what the parser accepts at §2.1.
+            let mut buf = Vec::<u8>::new();
+            let mut srcmap_entries: Vec<(
+                swc_core::common::BytePos,
+                swc_core::common::source_map::LineCol,
+            )> = Vec::new();
+            {
+                let writer = JsWriter::new(cm.clone(), "\n", &mut buf, Some(&mut srcmap_entries));
+                let mut emitter = Emitter {
+                    cfg: swc_core::ecma::codegen::Config::default().with_target(EsVersion::Es2022),
+                    cm: cm.clone(),
+                    comments: None,
+                    wr: writer,
+                };
+                emitter
+                    .emit_program(&program)
+                    .map_err(|e| TaskError::Internal(format!("swc codegen failed: {e}")))?;
             }
-        } else {
+            let js = String::from_utf8(buf)
+                .map_err(|e| TaskError::Internal(format!("swc output not UTF-8: {e}")))?;
+
+            // Build + serialize the source map. DefaultSourceMapGenConfig
+            // yields path-only `sources` entries (no inlined content).
+            let source_map =
+                cm.build_source_map(&srcmap_entries, None, DefaultSourceMapGenConfig);
+            let mut map_buf = Vec::<u8>::new();
+            source_map
+                .to_writer(&mut map_buf)
+                .map_err(|e| TaskError::Internal(format!("source map write: {e}")))?;
+            let map_json = String::from_utf8(map_buf)
+                .map_err(|e| TaskError::Internal(format!("source map not UTF-8: {e}")))?;
+
+            Ok((js, imports, map_json))
+        },
+    )
+}
+
+/// Shorten an absolute handler path to spec §2.5's `{app}/{path}` form.
+///
+/// If the input contains a `libraries` directory, return `{app}/libraries/…`
+/// where `{app}` is the directory immediately above `libraries`. Otherwise
+/// return `None` — caller falls back to the raw input.
+fn shorten_app_path(filename: &str) -> Option<String> {
+    let path = std::path::Path::new(filename);
+    let mut components: Vec<String> = Vec::new();
+    let mut found_libraries = false;
+    for comp in path.components().rev() {
+        let s = comp.as_os_str().to_string_lossy().to_string();
+        if s == "libraries" {
+            found_libraries = true;
+            components.push(s);
+            // Grab one more level up — that's `{app}`.
+            continue;
+        }
+        components.push(s);
+        if found_libraries {
+            // We've now captured the app name; stop.
             break;
         }
     }
-
-    // Remove `as Type` assertions
-    let as_pattern = " as ";
-    while let Some(pos) = result.find(as_pattern) {
-        let after = &result[pos + 4..];
-        let end = after
-            .find(|c: char| {
-                !c.is_alphanumeric() && c != '_' && c != '<' && c != '>' && c != '[' && c != ']'
-            })
-            .unwrap_or(after.len());
-        result = format!("{}{}", &result[..pos], &result[pos + 4 + end..]);
+    if !found_libraries {
+        return None;
     }
+    components.reverse();
+    Some(components.join("/"))
+}
 
-    result
+/// Walk a post-transform Program and collect every runtime import specifier.
+///
+/// Covers:
+/// - `import ... from "x"`
+/// - `import "x"` (bare side-effect import)
+/// - `export ... from "x"`
+/// - `export * from "x"`
+///
+/// Dynamic `import("x")` calls are ignored — cycle detection is static.
+fn extract_imports(program: &Program) -> Vec<String> {
+    let Program::Module(module) = program else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(decl) = item else { continue; };
+        match decl {
+            ModuleDecl::Import(i) => out.push(i.src.value.to_atom_lossy().as_str().to_string()),
+            ModuleDecl::ExportAll(e) => out.push(e.src.value.to_atom_lossy().as_str().to_string()),
+            ModuleDecl::ExportNamed(n) => {
+                if let Some(src) = &n.src {
+                    out.push(src.value.to_atom_lossy().as_str().to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 

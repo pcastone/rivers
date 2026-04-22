@@ -151,6 +151,35 @@ declare const __args: {
 
 You can put these in a `libraries/types/rivers.d.ts` file and reference them across handlers.
 
+### Using the Rivers-shipped `rivers.d.ts`
+
+Every Rivers release ships a complete ambient declaration file at
+`types/rivers.d.ts` at the release root. It declares the `Rivers` global
+(`Rivers.log`, `Rivers.crypto`, `Rivers.keystore`, `Rivers.env`), the `ViewContext`
+shape, `DataViewResult`, `QueryResult`, `ExecuteResult`, `TransactionError`,
+and the `HandlerFn` signature. Negative declarations (no `console`, `process`,
+`require`, `fetch`) are intentional — they cause the type checker to flag
+calls to surfaces Rivers does not inject.
+
+Recommended handler-project `tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "types": ["./types/rivers"]
+  }
+}
+```
+
+With `moduleResolution: "bundler"` and `"./types/rivers"` pointed at the
+`rivers.d.ts` path, editor autocomplete and `tsc --noEmit` will work in a
+handler workspace without any `npm install` step. The Rivers runtime itself
+does not consult the tsconfig — it's for the handler author's IDE.
+
 ---
 
 ## Basic Handler
@@ -622,3 +651,53 @@ Put shared interfaces (ViewContext, SessionClaims, etc.) in `types/rivers.d.ts`.
 | `"ts"` | Alias for typescript |
 | `"ts_v8"` | Alias for typescript |
 | `"typescript_strict"` | Strict mode — additional type checks enforced |
+
+---
+
+## Debugging handler errors
+
+When a TS handler throws, Rivers remaps the V8 stack trace from the compiled JS back to the original `.ts:line:col` positions using the v3 source maps generated at bundle load. This happens automatically — no configuration required.
+
+### Per-app log (always)
+
+Remapped traces are written to `log/apps/<app>.log` alongside every handler error, correlated with the request's `trace_id`. In a deployed instance:
+
+```
+tail -f log/apps/canary-handlers.log
+```
+
+Each error appears as a structured line with `trace_id`, `message`, and `stack` fields. Stack entries use the original `.ts` file path and 1-based line/column.
+
+### Error response envelope (debug builds / debug mode)
+
+In debug builds — and when `[base] debug = true` is set in the app's `app.toml` — the error response body includes a `details.stack` array:
+
+```json
+{
+  "code": 500,
+  "message": "handler error: handler 'createOrder' threw: TypeError: Cannot read property 'name' of undefined",
+  "details": {
+    "stack": [
+      "at createOrder (libraries/handlers/orders.ts:47:12)",
+      "at handler (libraries/handlers/orders.ts:12:5)"
+    ]
+  },
+  "trace_id": "abc-123"
+}
+```
+
+Release builds without the debug flag omit `details.stack` — the response still carries `code`, `message`, `trace_id`, but no client-exposed stack. The per-app log always has the full remapped trace.
+
+### Enabling debug mode
+
+```toml
+# app.toml
+[base]
+debug = true
+```
+
+This flag is per-app, not per-view. Leave it at the default (`false`) in production; enable it in dev instances where source-position disclosure is acceptable.
+
+### Source-map cache behaviour
+
+Source maps are parsed once per handler file and cached as `Arc<SourceMap>` inside the runtime. Hot reload of a bundle (`cargo deploy` into an active instance) atomically invalidates the parsed cache — a redeploy with changed TypeScript yields remapped traces against the new code immediately.

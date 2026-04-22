@@ -1,0 +1,3 @@
+bundleName = "circular-import-reject"
+bundleVersion = "0.1.0"
+apps = ["circ-app"]

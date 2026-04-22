@@ -169,6 +169,32 @@ pub enum ViewError {
     #[error("handler error: {0}")]
     Handler(String),
 
+    /// Handler threw an uncaught exception, with the remapped `.ts` stack
+    /// preserved for the error response. Spec §5.3. The stack is always
+    /// routed to the per-app log; it is exposed in the response envelope
+    /// only in debug builds (`cfg!(debug_assertions)`) or when the app's
+    /// `[base] debug = true` is wired through (future work).
+    #[error("handler error: {message}")]
+    HandlerWithStack {
+        /// Short error message (Error.toString() output).
+        message: String,
+        /// Remapped stack — `.ts:line:col` positions.
+        stack: String,
+    },
+
+    /// `ctx.transaction()` callback returned cleanly but `commit_transaction`
+    /// failed. Transaction outcome is **unknown** — writes may or may not
+    /// have persisted. Client retry policy differs from a handler throw; the
+    /// response envelope flags this explicitly. Spec §6 +
+    /// financial-correctness gate.
+    #[error("transaction commit failed on datasource '{datasource}': {message}")]
+    TransactionCommitFailed {
+        /// Datasource the transaction was scoped to.
+        datasource: String,
+        /// Driver-layer error message.
+        message: String,
+    },
+
     /// Error in the middleware pipeline.
     #[error("pipeline error: {0}")]
     Pipeline(String),

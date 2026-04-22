@@ -29,6 +29,36 @@ required = false
 default  = 10
 
 # ─────────────────────────────────────────────
+# Datasources — TRANSACTIONS-TS profile
+# These reference the pg / sqlite_cross datasources declared in
+# resources.toml. The ping DataViews below do not require any schema
+# setup — `SELECT 1` is legal against an empty database.
+# ─────────────────────────────────────────────
+
+[data.datasources.pg]
+name       = "pg"
+driver     = "postgres"
+nopassword = true
+
+[data.datasources.sqlite_cross]
+name       = "sqlite_cross"
+driver     = "sqlite"
+nopassword = true
+
+[data.datasources.sqlite_cross.config]
+path = "data/canary-txn.db"
+
+[data.dataviews.txn_pg_ping]
+name          = "txn_pg_ping"
+datasource    = "pg"
+query         = "SELECT 1 AS one"
+
+[data.dataviews.txn_sqlite_ping]
+name          = "txn_sqlite_ping"
+datasource    = "sqlite_cross"
+query         = "SELECT 1 AS one"
+
+# ─────────────────────────────────────────────
 # Views — ctx.* API surface tests
 # ─────────────────────────────────────────────
 
@@ -418,3 +448,297 @@ type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/misc-tests.ts"
 entrypoint = "fakerDeterminism"
+
+# ═════════════════════════════════════════════════════════════════
+# TYPESCRIPT profile — spec §5 source-map remap probe.
+# Handler throws intentionally; the test asserts the error response's
+# details.stack array (debug mode) contains `sourcemap.ts:14`.
+# ═════════════════════════════════════════════════════════════════
+
+[api.views.ts_sourcemap]
+path      = "/canary/rt/ts/sourcemap"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_sourcemap.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/sourcemap.ts"
+entrypoint = "sourcemapProbe"
+
+# ─────────────────────────
+
+[api.views.ts_param_strip]
+path      = "/canary/rt/ts/param-strip"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_param_strip.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/param-strip.ts"
+entrypoint = "paramStrip"
+
+# ─────────────────────────
+
+[api.views.ts_var_strip]
+path      = "/canary/rt/ts/var-strip"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_var_strip.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/var-strip.ts"
+entrypoint = "varStrip"
+
+# ─────────────────────────
+
+[api.views.ts_import_type]
+path      = "/canary/rt/ts/import-type"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_import_type.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/import-type.ts"
+entrypoint = "importType"
+
+# ─────────────────────────
+
+[api.views.ts_generic]
+path      = "/canary/rt/ts/generic"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_generic.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/generic.ts"
+entrypoint = "generic"
+
+# ─────────────────────────
+
+[api.views.ts_multimod]
+path      = "/canary/rt/ts/multimod"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_multimod.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/multimod.ts"
+entrypoint = "multimod"
+
+# ─────────────────────────
+
+[api.views.ts_export_fn]
+path      = "/canary/rt/ts/export-fn"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_export_fn.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/export-fn.ts"
+entrypoint = "exportFn"
+
+# ─────────────────────────
+
+[api.views.ts_enum]
+path      = "/canary/rt/ts/enum"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_enum.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/enum.ts"
+entrypoint = "enumTest"
+
+# ─────────────────────────
+
+[api.views.ts_decorator]
+path      = "/canary/rt/ts/decorator"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_decorator.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/decorator.ts"
+entrypoint = "decoratorTest"
+
+# ─────────────────────────
+
+[api.views.ts_namespace]
+path      = "/canary/rt/ts/namespace"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ts_namespace.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/namespace.ts"
+entrypoint = "namespaceTest"
+
+# ═════════════════════════════════════════════════════════════════
+# TRANSACTIONS-TS profile — ctx.transaction() surface checks.
+# Spec: docs/arch/rivers-javascript-typescript-spec.md §6.
+# These tests exercise argument validation, unknown-datasource errors,
+# and thread-local cleanup without needing a real DB. Commit/rollback
+# round-trip tests against PG live in canary-sql (follow-on).
+# ═════════════════════════════════════════════════════════════════
+
+[api.views.txn_requires_two_args]
+path      = "/canary/rt/txn/args"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_requires_two_args.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/txn-tests.ts"
+entrypoint = "txnRequiresTwoArgs"
+
+# ─────────────────────────
+
+[api.views.txn_rejects_non_function]
+path      = "/canary/rt/txn/cb-type"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_rejects_non_function.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/txn-tests.ts"
+entrypoint = "txnRejectsNonFunction"
+
+# ─────────────────────────
+
+[api.views.txn_unknown_datasource]
+path      = "/canary/rt/txn/unknown-ds"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_unknown_datasource.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/txn-tests.ts"
+entrypoint = "txnUnknownDatasourceThrows"
+
+# ─────────────────────────
+
+[api.views.txn_state_cleanup]
+path      = "/canary/rt/txn/cleanup"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_state_cleanup.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/txn-tests.ts"
+entrypoint = "txnStateCleanupBetweenCalls"
+
+# ─────────────────────────
+
+[api.views.txn_surface]
+path      = "/canary/rt/txn/surface"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_surface.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/txn-tests.ts"
+entrypoint = "txnSurfaceExists"
+
+# ─────────────────────────
+# End-to-end transaction tests — spec §6 RT-TXN-* IDs.
+# These require a reachable PG datasource; the canary `PG_AVAIL`
+# gate in run-tests.sh skips them cleanly on no-infra deploys.
+# ─────────────────────────
+
+[api.views.txn_commit]
+path      = "/canary/rt/txn/commit"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_commit.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/txn-commit.ts"
+entrypoint = "txnCommit"
+
+# ─────────────────────────
+
+[api.views.txn_rollback]
+path      = "/canary/rt/txn/rollback"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_rollback.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/txn-rollback.ts"
+entrypoint = "txnRollback"
+
+# ─────────────────────────
+
+[api.views.txn_cross_ds]
+path      = "/canary/rt/txn/cross-ds"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_cross_ds.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/txn-cross-ds.ts"
+entrypoint = "txnCrossDs"
+
+# ─────────────────────────
+
+[api.views.txn_nested]
+path      = "/canary/rt/txn/nested"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_nested.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/txn-nested.ts"
+entrypoint = "txnNested"
+
+# ─────────────────────────
+
+[api.views.txn_unsupported]
+path      = "/canary/rt/txn/unsupported"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.txn_unsupported.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ts-compliance/txn-unsupported.ts"
+entrypoint = "txnUnsupported"

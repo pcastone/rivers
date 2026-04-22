@@ -128,42 +128,42 @@ fn convenience_service_unavailable() {
 #[test]
 fn map_view_not_found() {
     let err = ViewError::NotFound("no route".into());
-    let resp = map_view_error(&err, None);
+    let resp = map_view_error(&err, None, false);
     assert_eq!(resp.code, 404);
 }
 
 #[test]
 fn map_view_method_not_allowed() {
     let err = ViewError::MethodNotAllowed("POST not supported".into());
-    let resp = map_view_error(&err, None);
+    let resp = map_view_error(&err, None, false);
     assert_eq!(resp.code, 405);
 }
 
 #[test]
 fn map_view_handler_error() {
     let err = ViewError::Handler("handler crashed".into());
-    let resp = map_view_error(&err, None);
+    let resp = map_view_error(&err, None, false);
     assert_eq!(resp.code, 500);
 }
 
 #[test]
 fn map_view_validation_error() {
     let err = ViewError::Validation("invalid params".into());
-    let resp = map_view_error(&err, None);
+    let resp = map_view_error(&err, None, false);
     assert_eq!(resp.code, 422);
 }
 
 #[test]
 fn map_view_internal_error() {
     let err = ViewError::Internal("unexpected".into());
-    let resp = map_view_error(&err, None);
+    let resp = map_view_error(&err, None, false);
     assert_eq!(resp.code, 500);
 }
 
 #[test]
 fn map_view_error_includes_trace_id() {
     let err = ViewError::NotFound("missing".into());
-    let resp = map_view_error(&err, Some("abc-123"));
+    let resp = map_view_error(&err, Some("abc-123"), false);
     assert_eq!(resp.code, 404);
     assert_eq!(resp.trace_id.as_deref(), Some("abc-123"));
 }
@@ -172,4 +172,87 @@ fn map_view_error_includes_trace_id() {
 fn error_response_trace_id_on_new() {
     let resp = ErrorResponse::new(500, "test").with_trace_id("trace-xyz".to_string());
     assert_eq!(resp.trace_id.as_deref(), Some("trace-xyz"));
+}
+
+// ── G3: per-app debug flag runtime gating ───────────────────────
+
+#[test]
+fn g3_handler_with_stack_surfaces_when_debug_enabled() {
+    // debug_enabled=true → stack present in details regardless of build type.
+    let err = ViewError::HandlerWithStack {
+        message: "handler threw: TypeError: x".into(),
+        stack: "TypeError: x\n    at h (orders.ts:10:5)\n    at inner (orders.ts:3:1)".into(),
+    };
+    let resp = map_view_error(&err, Some("t"), true);
+    assert_eq!(resp.code, 500);
+    let details = resp.details.expect("stack surfaced when debug_enabled=true");
+    let frames = details["stack"].as_array().expect("stack array");
+    assert_eq!(frames.len(), 2, "two `at …` lines extracted");
+}
+
+#[test]
+fn p0_2_transaction_commit_failed_exposes_unknown_state() {
+    // P0-2: commit-after-clean-return failure is observably different from
+    // handler-threw; the response envelope must flag transaction_state as
+    // "unknown" regardless of debug mode — it's a correctness signal, not
+    // debug info.
+    let err = ViewError::TransactionCommitFailed {
+        datasource: "pg".into(),
+        message: "connection reset during COMMIT".into(),
+    };
+    let resp = map_view_error(&err, Some("trace-p02"), false);
+    assert_eq!(resp.code, 500);
+    let details = resp.details.expect("details present unconditionally");
+    assert_eq!(details["transaction_state"], "unknown");
+    assert_eq!(details["datasource"], "pg");
+    assert_eq!(details["driver_error"], "connection reset during COMMIT");
+    assert!(
+        resp.message.contains("transaction commit failed"),
+        "message names the failure class: {}",
+        resp.message
+    );
+    assert!(
+        resp.message.contains("'pg'"),
+        "message names the datasource: {}",
+        resp.message
+    );
+}
+
+#[test]
+fn p0_2_commit_failed_not_sanitized_in_release() {
+    // The commit-failed path must emit details even with debug=false
+    // (opposite of HandlerWithStack which hides stack). This is because
+    // clients NEED the "unknown state" signal to pick retry policy.
+    let err = ViewError::TransactionCommitFailed {
+        datasource: "mysql".into(),
+        message: "deadlock victim".into(),
+    };
+    let resp = map_view_error(&err, None, false);
+    assert!(
+        resp.details.is_some(),
+        "transaction_state surfaces in release build regardless of debug flag"
+    );
+}
+
+#[test]
+fn g3_handler_with_stack_debug_disabled_in_release_hides() {
+    // debug_enabled=false + release build → stack hidden.
+    // In cargo-test debug builds, cfg!(debug_assertions) OR fallback surfaces
+    // it; test documents the OR semantics without over-asserting in debug.
+    let err = ViewError::HandlerWithStack {
+        message: "release-only sanitize".into(),
+        stack: "TypeError: y\n    at h (x.ts:1:1)".into(),
+    };
+    let resp = map_view_error(&err, None, false);
+    if !cfg!(debug_assertions) {
+        // Release build: flag=false must hide stack and sanitize.
+        assert!(resp.details.is_none(), "release build hides stack when disabled");
+        assert_eq!(resp.message, "internal server error");
+    } else {
+        // Debug build: cfg fallback still surfaces stack — OR semantics.
+        assert!(
+            resp.details.is_some(),
+            "cargo-test debug build surfaces stack via cfg!(debug_assertions) fallback"
+        );
+    }
 }

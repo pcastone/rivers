@@ -52,6 +52,25 @@ async-graphql-axum = { workspace = true }
 tokio-stream = { workspace = true }
 zeroize = { workspace = true }
 percent-encoding = { workspace = true }
+once_cell = "1"
+
+# TypeScript compilation (spec: rivers-javascript-typescript-spec.md §2.1)
+# Full-transform pipeline: parse → typescript::typescript() → emit.
+# NOTE: spec specifies v0.90 but crates.io current is v64 (swc uses major-per-release).
+# Spec correction logged in todo/changelog.md for Phase 1.
+swc_core = { version = "64", features = [
+    "ecma_ast",
+    "ecma_parser",
+    "ecma_parser_typescript",
+    "ecma_transforms_typescript",
+    "ecma_codegen",
+    "ecma_visit",
+    "common",
+    "common_sourcemap",
+] }
+# Source map serialization + consumer (spec §5). Version pinned to match
+# swc_core's transitive dep to avoid duplicate crate instances.
+swc_sourcemap = "10"
 
 # Optional: static engine deps (included with "static-engines" feature)
 v8 = { workspace = true, optional = true }
