@@ -129,6 +129,19 @@ thread_local! {
     /// still-held connection when the task ends.
     pub(crate) static TASK_TRANSACTION: RefCell<Option<TaskTransactionState>> = RefCell::new(None);
 
+    /// Set by `ctx_transaction_callback` when the post-callback
+    /// `commit_transaction()` call fails. `execute_js_task` checks this
+    /// after `call_entrypoint` returns an error and upgrades the error
+    /// from the generic `HandlerErrorWithStack` (indistinguishable from a
+    /// handler throw) to the distinct `TransactionCommitFailed` variant.
+    /// Stores (datasource, driver-error-message).
+    ///
+    /// Why this matters: for financial workloads, "handler threw" and
+    /// "commit failed after handler returned" have different retry
+    /// semantics. Without this disambiguation the client sees the same
+    /// HTTP 500 for both cases.
+    pub(crate) static TASK_COMMIT_FAILED: RefCell<Option<(String, String)>> = RefCell::new(None);
+
     /// `DatasourceToken::Direct` entries declared by the current task.
     /// The typed-proxy host fn (`__rivers_direct_dispatch`) reads from this
     /// map to build/reuse a `Connection` and run operations in-thread.
@@ -254,6 +267,7 @@ impl Drop for TaskLocals {
         TASK_MODULE_REGISTRY.with(|r| r.borrow_mut().clear());
         TASK_MODULE_NAMESPACE.with(|n| *n.borrow_mut() = None);
         // TASK_TRANSACTION was drained above, before RT_HANDLE was cleared.
+        TASK_COMMIT_FAILED.with(|c| *c.borrow_mut() = None);
         TASK_DIRECT_DATASOURCES.with(|m| m.borrow_mut().clear());
     }
 }

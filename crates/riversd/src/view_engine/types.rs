@@ -182,6 +182,19 @@ pub enum ViewError {
         stack: String,
     },
 
+    /// `ctx.transaction()` callback returned cleanly but `commit_transaction`
+    /// failed. Transaction outcome is **unknown** — writes may or may not
+    /// have persisted. Client retry policy differs from a handler throw; the
+    /// response envelope flags this explicitly. Spec §6 +
+    /// financial-correctness gate.
+    #[error("transaction commit failed on datasource '{datasource}': {message}")]
+    TransactionCommitFailed {
+        /// Datasource the transaction was scoped to.
+        datasource: String,
+        /// Driver-layer error message.
+        message: String,
+    },
+
     /// Error in the middleware pipeline.
     #[error("pipeline error: {0}")]
     Pipeline(String),

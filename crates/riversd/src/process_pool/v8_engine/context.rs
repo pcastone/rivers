@@ -9,6 +9,22 @@ use super::datasource::ctx_datasource_build_callback;
 use super::http::json_to_v8;
 use rivers_runtime::rivers_core::storage::Bytes;
 
+/// Build a V8 `String` with a graceful fallback to an empty string on
+/// allocation failure.
+///
+/// V8 callbacks are `extern "C" fn` — a Rust panic from an `.unwrap()` at
+/// this boundary is undefined behaviour at best, `SIGABRT` at worst. An
+/// empty-string fallback is strictly worse for debuggability on the extreme
+/// OOM path, but it preserves the invariant that the callback always hands
+/// V8 a valid `Local<Value>`.
+#[inline]
+fn v8_str_safe<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    s: &str,
+) -> v8::Local<'s, v8::String> {
+    v8::String::new(scope, s).unwrap_or_else(|| v8::String::empty(scope))
+}
+
 /// Build the `ctx` global object from the task context.
 ///
 /// Injects `ctx` with trace_id, request, session, data, resdata
@@ -271,7 +287,7 @@ fn ctx_store_get_callback(
     let key = args.get(0).to_rust_string_lossy(scope);
 
     if store_key_is_reserved(&key) {
-        let msg = v8::String::new(scope, &format!("ctx.store: key '{}' uses reserved namespace", key)).unwrap();
+        let msg = v8_str_safe(scope, &format!("ctx.store: key '{}' uses reserved namespace", key));
         let exception = v8::Exception::error(scope, msg);
         scope.throw_exception(exception);
         return;
@@ -286,7 +302,7 @@ fn ctx_store_get_callback(
                 match rt.block_on(engine.get(&namespace, &key)) {
                     Ok(Some(bytes)) => {
                         let json_str = String::from_utf8(bytes).unwrap_or_else(|_| "null".into());
-                        let v8_str = v8::String::new(scope, &json_str).unwrap();
+                        let v8_str = v8_str_safe(scope, &json_str);
                         if let Some(parsed) = v8::json::parse(scope, v8_str.into()) {
                             rv.set(parsed);
                         } else {
@@ -314,7 +330,7 @@ fn ctx_store_get_callback(
     match value {
         Some(v) => {
             let json_str = serde_json::to_string(&v).unwrap_or_else(|_| "null".into());
-            let v8_str = v8::String::new(scope, &json_str).unwrap();
+            let v8_str = v8_str_safe(scope, &json_str);
             if let Some(parsed) = v8::json::parse(scope, v8_str.into()) {
                 rv.set(parsed);
             } else {
@@ -340,7 +356,7 @@ fn ctx_store_set_callback(
     let key = args.get(0).to_rust_string_lossy(scope);
 
     if store_key_is_reserved(&key) {
-        let msg = v8::String::new(scope, &format!("ctx.store: key '{}' uses reserved namespace", key)).unwrap();
+        let msg = v8_str_safe(scope, &format!("ctx.store: key '{}' uses reserved namespace", key));
         let exception = v8::Exception::error(scope, msg);
         scope.throw_exception(exception);
         return;
@@ -401,7 +417,7 @@ fn ctx_store_del_callback(
     let key = args.get(0).to_rust_string_lossy(scope);
 
     if store_key_is_reserved(&key) {
-        let msg = v8::String::new(scope, &format!("ctx.store: key '{}' uses reserved namespace", key)).unwrap();
+        let msg = v8_str_safe(scope, &format!("ctx.store: key '{}' uses reserved namespace", key));
         let exception = v8::Exception::error(scope, msg);
         scope.throw_exception(exception);
         return;
@@ -500,7 +516,7 @@ fn ctx_ddl_callback(
     match rx.recv() {
         Ok(Ok(())) => {
             let result_json = serde_json::json!({"ok": true}).to_string();
-            let v8_val = v8::String::new(scope, &result_json).unwrap();
+            let v8_val = v8_str_safe(scope, &result_json);
             if let Some(parsed) = v8::json::parse(scope, v8_val) {
                 rv.set(parsed);
             }
@@ -516,7 +532,7 @@ fn ctx_ddl_callback(
 
 /// Helper to throw a JS error from a V8 callback without borrow conflicts.
 fn throw_js_error(scope: &mut v8::HandleScope, message: &str) {
-    let msg = v8::String::new(scope, message).unwrap();
+    let msg = v8_str_safe(scope, message);
     let exception = v8::Exception::error(scope, msg);
     scope.throw_exception(exception);
 }
@@ -650,11 +666,22 @@ fn ctx_transaction_callback(
                     rv.set(val);
                 }
                 Err(e) => {
-                    let msg = v8::String::new(
+                    // Spec §6 + financial-correctness gate: commit failure
+                    // is observably different from a handler throw — the
+                    // handler's writes may or may not have persisted. Stash
+                    // the details in a thread-local that execute_js_task
+                    // reads to upgrade the error to
+                    // `TaskError::TransactionCommitFailed`.
+                    let driver_msg = format!("{e}");
+                    TASK_COMMIT_FAILED.with(|c| {
+                        *c.borrow_mut() = Some((ds_name.clone(), driver_msg.clone()));
+                    });
+                    let msg = v8_str_safe(
                         tc,
-                        &format!("TransactionError: commit failed: {e}"),
-                    )
-                    .unwrap();
+                        &format!(
+                            "TransactionError: commit failed on datasource '{ds_name}': {driver_msg}"
+                        ),
+                    );
                     let err = v8::Exception::error(tc, msg);
                     tc.throw_exception(err);
                 }
@@ -696,13 +723,13 @@ fn ctx_dataview_callback(
 
     // Look up in pre-fetched ctx.data first (fast path -- handles 90% of use cases)
     let global = scope.get_current_context().global(scope);
-    let ctx_key = v8::String::new(scope, "ctx").unwrap();
+    let ctx_key = v8_str_safe(scope, "ctx");
     if let Some(ctx_val) = global.get(scope, ctx_key.into()) {
         if let Ok(ctx_obj) = v8::Local::<v8::Object>::try_from(ctx_val) {
-            let data_key = v8::String::new(scope, "data").unwrap();
+            let data_key = v8_str_safe(scope, "data");
             if let Some(data_val) = ctx_obj.get(scope, data_key.into()) {
                 if let Ok(data_obj) = v8::Local::<v8::Object>::try_from(data_val) {
-                    let name_key = v8::String::new(scope, &name).unwrap();
+                    let name_key = v8_str_safe(scope, &name);
                     if let Some(cached) = data_obj.get(scope, name_key.into()) {
                         if !cached.is_undefined() && !cached.is_null() {
                             rv.set(cached);
@@ -815,7 +842,7 @@ fn ctx_dataview_callback(
                             "last_insert_id": response.query_result.last_insert_id,
                         });
                         let json_str = serde_json::to_string(&json).unwrap_or_else(|_| "null".into());
-                        let v8_str = v8::String::new(scope, &json_str).unwrap();
+                        let v8_str = v8_str_safe(scope, &json_str);
                         if let Some(parsed) = v8::json::parse(scope, v8_str.into()) {
                             rv.set(parsed);
                         } else {
@@ -824,10 +851,10 @@ fn ctx_dataview_callback(
                         return;
                     }
                     Err(e) => {
-                        let msg = v8::String::new(
+                        let msg = v8_str_safe(
                             scope,
                             &format!("ctx.dataview('{}') execution error: {e}", name),
-                        ).unwrap();
+                        );
                         let exception = v8::Exception::error(scope, msg);
                         scope.throw_exception(exception);
                         return;
@@ -847,7 +874,7 @@ fn ctx_dataview_callback(
         name, name
     );
     tracing::warn!(target: "rivers.handler", "{}", err_msg);
-    let msg = v8::String::new(scope, &err_msg).unwrap();
+    let msg = v8_str_safe(scope, &err_msg);
     let exception = v8::Exception::error(scope, msg);
     scope.throw_exception(exception);
 }

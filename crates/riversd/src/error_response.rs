@@ -264,6 +264,30 @@ pub fn map_view_error(
                 internal_error("internal server error")
             }
         }
+        // Spec §6 + financial-correctness gate: commit failed after the
+        // handler returned cleanly — the transaction's persistence is
+        // indeterminate. Expose it as HTTP 500 with an explicit
+        // `details.transaction_state = "unknown"` flag so clients can
+        // distinguish it from "handler threw" (safe to retry) vs
+        // "commit failed" (DO NOT naively retry; check DB state first).
+        // Emitted regardless of debug mode — this is a correctness
+        // signal, not a debugging convenience.
+        crate::view_engine::ViewError::TransactionCommitFailed { datasource, message } => {
+            tracing::error!(
+                target: "rivers.transaction",
+                datasource = %datasource,
+                error = %message,
+                "commit failed — transaction state unknown"
+            );
+            internal_error(format!(
+                "transaction commit failed on datasource '{datasource}' — state unknown"
+            ))
+            .with_details(serde_json::json!({
+                "transaction_state": "unknown",
+                "datasource": datasource,
+                "driver_error": message,
+            }))
+        }
         crate::view_engine::ViewError::Pipeline(msg) => {
             tracing::error!(error = %msg, "pipeline error");
             if show_debug {

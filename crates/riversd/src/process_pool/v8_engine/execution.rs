@@ -434,6 +434,29 @@ pub(crate) async fn execute_js_task(
             let return_value = match return_value {
                 Err(TaskError::Timeout(_)) => return Err(TaskError::Timeout(timeout_ms)),
                 Err(TaskError::HandlerErrorWithStack { message, stack }) => {
+                    // Spec §6 + financial-correctness gate: if the exception
+                    // actually came from a failed `commit_transaction()` call
+                    // inside `ctx_transaction_callback`, upgrade it to the
+                    // distinct `TransactionCommitFailed` variant so the
+                    // response envelope can flag the transaction state as
+                    // "unknown." `TASK_COMMIT_FAILED` is set by the callback
+                    // immediately before the V8 exception is thrown.
+                    let commit_failure =
+                        super::task_locals::TASK_COMMIT_FAILED.with(|c| c.borrow_mut().take());
+                    if let Some((datasource, driver_msg)) = commit_failure {
+                        tracing::error!(
+                            target: "rivers.handler",
+                            trace_id = %ctx.trace_id,
+                            datasource = %datasource,
+                            driver_error = %driver_msg,
+                            stack = %stack,
+                            "transaction commit failed — state unknown"
+                        );
+                        return Err(TaskError::TransactionCommitFailed {
+                            datasource,
+                            message: driver_msg,
+                        });
+                    }
                     // Spec §5.3: log the remapped `.ts:line:col` stack to
                     // the per-app log. TASK_APP_NAME thread-local is still
                     // populated here — TaskLocals::drop hasn't run yet — so

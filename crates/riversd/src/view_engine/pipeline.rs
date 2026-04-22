@@ -233,6 +233,13 @@ pub async fn execute_rest_view(
                                 message: format!("codecomponent dispatch: {message}"),
                                 stack,
                             },
+                            // Spec §6 commit-failure: unknown transaction
+                            // state must surface as a distinct error class so
+                            // the client can pick retry policy correctly.
+                            rivers_runtime::process_pool::TaskError::TransactionCommitFailed {
+                                datasource,
+                                message,
+                            } => ViewError::TransactionCommitFailed { datasource, message },
                             other => ViewError::Handler(format!("codecomponent dispatch: {other}")),
                         })?;
 

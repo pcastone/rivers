@@ -191,6 +191,50 @@ fn g3_handler_with_stack_surfaces_when_debug_enabled() {
 }
 
 #[test]
+fn p0_2_transaction_commit_failed_exposes_unknown_state() {
+    // P0-2: commit-after-clean-return failure is observably different from
+    // handler-threw; the response envelope must flag transaction_state as
+    // "unknown" regardless of debug mode — it's a correctness signal, not
+    // debug info.
+    let err = ViewError::TransactionCommitFailed {
+        datasource: "pg".into(),
+        message: "connection reset during COMMIT".into(),
+    };
+    let resp = map_view_error(&err, Some("trace-p02"), false);
+    assert_eq!(resp.code, 500);
+    let details = resp.details.expect("details present unconditionally");
+    assert_eq!(details["transaction_state"], "unknown");
+    assert_eq!(details["datasource"], "pg");
+    assert_eq!(details["driver_error"], "connection reset during COMMIT");
+    assert!(
+        resp.message.contains("transaction commit failed"),
+        "message names the failure class: {}",
+        resp.message
+    );
+    assert!(
+        resp.message.contains("'pg'"),
+        "message names the datasource: {}",
+        resp.message
+    );
+}
+
+#[test]
+fn p0_2_commit_failed_not_sanitized_in_release() {
+    // The commit-failed path must emit details even with debug=false
+    // (opposite of HandlerWithStack which hides stack). This is because
+    // clients NEED the "unknown state" signal to pick retry policy.
+    let err = ViewError::TransactionCommitFailed {
+        datasource: "mysql".into(),
+        message: "deadlock victim".into(),
+    };
+    let resp = map_view_error(&err, None, false);
+    assert!(
+        resp.details.is_some(),
+        "transaction_state surfaces in release build regardless of debug flag"
+    );
+}
+
+#[test]
 fn g3_handler_with_stack_debug_disabled_in_release_hides() {
     // debug_enabled=false + release build → stack hidden.
     // In cargo-test debug builds, cfg!(debug_assertions) OR fallback surfaces

@@ -155,6 +155,48 @@ pub fn compile_typescript_with_imports(
     source: &str,
     filename: &str,
 ) -> Result<(String, Vec<String>, String), TaskError> {
+    // swc has a documented history of panicking on crafted or malformed TS
+    // input. At bundle-load time the caller is `populate_module_cache`, which
+    // runs during `load_and_wire_bundle` — a panic there takes down riversd
+    // startup. Wrap the whole compile in `catch_unwind` so a crafted handler
+    // produces a recoverable error rather than aborting the process.
+    //
+    // `AssertUnwindSafe` is needed because swc's `GLOBALS` + `Mark` types are
+    // not `UnwindSafe`. This is acceptable here: on panic we discard the
+    // intermediate state entirely and return a `TaskError`, so there's no way
+    // for partially-constructed swc state to leak out.
+    let source_owned = source.to_string();
+    let filename_owned = filename.to_string();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        compile_typescript_with_imports_inner(&source_owned, &filename_owned)
+    }));
+    match result {
+        Ok(r) => r,
+        Err(panic_payload) => {
+            let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<non-string panic payload>".to_string()
+            };
+            tracing::error!(
+                target: "rivers.ts",
+                filename = %filename,
+                panic = %panic_msg,
+                "swc compile panicked — treating as compile error"
+            );
+            Err(TaskError::HandlerError(format!(
+                "TypeScript compile panicked in {filename}: {panic_msg}"
+            )))
+        }
+    }
+}
+
+fn compile_typescript_with_imports_inner(
+    source: &str,
+    filename: &str,
+) -> Result<(String, Vec<String>, String), TaskError> {
     if filename.ends_with(".tsx") {
         // Spec §2.5: message format is "JSX/TSX is not supported in Rivers
         // v1: {app}/{path}". If the filename contains a `libraries/` segment,

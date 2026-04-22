@@ -221,6 +221,21 @@ pub enum TaskError {
         stack: String,
     },
 
+    /// `ctx.transaction(ds, fn)` callback returned cleanly but the subsequent
+    /// `driver.commit_transaction()` failed. The handler's side-effects MAY
+    /// or MAY NOT have persisted — treat the transaction outcome as
+    /// **unknown**. Spec §6 + financial-correctness gate: distinct from
+    /// `HandlerErrorWithStack` so clients can distinguish "handler threw, no
+    /// writes" from "commit failed, writes ambiguous" and choose retry policy
+    /// accordingly.
+    #[error("transaction commit failed on datasource '{datasource}': {message}")]
+    TransactionCommitFailed {
+        /// Datasource the transaction was scoped to (spec §6.2 single-ds rule).
+        datasource: String,
+        /// Driver-layer error message from `commit_transaction`.
+        message: String,
+    },
+
     /// Required capability (datasource, DataView, HTTP) not available.
     #[error("capability error: {0}")]
     Capability(String),
