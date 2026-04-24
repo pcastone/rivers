@@ -2,6 +2,21 @@
 # Canary Fleet Test Runner — hits all endpoints and reports verdicts
 # Usage: ./run-tests.sh [base_url]
 #   base_url defaults to https://localhost:8090
+#
+# ── Infra-gated test pattern (CS0.3, rivers-canary-scenarios-spec.md §2) ──
+#   Tests that depend on external infra (PG, MySQL, Kafka, …) MUST:
+#     1. Probe availability with a 2-second curl to a known-good endpoint:
+#          X_AVAIL=$(curl -sk -m 2 "$BASE/…" -X POST … \
+#            | python3 -c "import json,sys; print('1' if json.load(sys.stdin).get('test_id') else '0')" \
+#            2>/dev/null) || X_AVAIL="0"
+#     2. Gate every test_ep invocation behind the resulting flag:
+#          if [ "$X_AVAIL" = "1" ]; then
+#              test_ep "foo"  POST "$BASE/…"
+#          else
+#              echo "  SKIP: foo (X unreachable)"
+#          fi
+#   Skipped tests contribute 0 to PASS/FAIL/ERR — running without infra
+#   must produce a clean success on the available subset.
 set -euo pipefail
 
 # ADMIN_URL — admin API base URL (e.g., http://localhost:9090), required for circuit breaker tests
@@ -307,6 +322,29 @@ test_ep "redis-admin-reject" POST "$BASE/nosql/canary/nosql/redis/admin-reject" 
 
 echo ""
 echo "  ── STREAMS Profile ──"
+
+# BR-2026-04-23 / BR4: broker publish atomics. Gated on Kafka reachability.
+KAFKA_AVAIL=$(curl -sk -m 2 "$BASE/streams/canary/stream/kafka/publish-unknown-ds" \
+    -X POST -H "Content-Type: application/json" -H "X-CSRF-Token: ${CSRF_TOKEN}" \
+    -b "$COOKIES" -c "$COOKIES" -d '{}' 2>/dev/null \
+    | python3 -c "import json,sys; print('1' if json.load(sys.stdin).get('test_id') else '0')" 2>/dev/null) \
+    || KAFKA_AVAIL="0"
+
+# Unknown-datasource + missing-destination probes don't need Kafka to be up
+# (they fail early in the V8 bridge before create_producer is invoked).
+test_ep "stream-kafka-publish-unknown-ds"   POST "$BASE/streams/canary/stream/kafka/publish-unknown-ds"   '{}'
+test_ep "stream-kafka-publish-missing-dest" POST "$BASE/streams/canary/stream/kafka/publish-missing-dest" '{}'
+
+if [ "$KAFKA_AVAIL" = "1" ]; then
+    test_ep "stream-kafka-publish-receipt"      POST "$BASE/streams/canary/stream/kafka/publish-receipt"      '{}'
+    test_ep "stream-kafka-publish-then-consume" POST "$BASE/streams/canary/stream/kafka/publish-then-consume" '{}'
+    # Verify endpoint reads back what the MessageConsumer captured.
+    test_ep "stream-kafka-verify"               GET  "$BASE/streams/canary/stream/kafka/verify"
+else
+    printf "  SKIP %-40s (Kafka unreachable)\n" "STREAM-KAFKA-PUBLISH-RECEIPT"
+    printf "  SKIP %-40s (Kafka unreachable)\n" "STREAM-KAFKA-PUBLISH-THEN-CONSUME"
+    printf "  SKIP %-40s (Kafka unreachable)\n" "STREAM-KAFKA-VERIFY"
+fi
 test_ep "poll-data"          GET  "$BASE/streams/canary/stream/poll/data"
 
 # ── FILESYSTEM Profile (direct-dispatch driver, chroot sandboxed /tmp) ──
@@ -330,11 +368,12 @@ ORIG_TIMEOUT=8
 test_ep_v8sec() {
   local label="$1" test_id="$2" method="$3" url="$4"
   local raw_resp curl_exit http_status body
-  # Get both response body and HTTP status
-  raw_resp=$(curl -sk -m 15 -b "$COOKIES" -c "$COOKIES" -X "$method" -w '\n%{http_code}' "$url" 2>/dev/null) ; curl_exit=$?
+  # Get both response body and HTTP status.
+  # task_timeout_ms=30000ms — need >30s for the V8 watchdog to fire.
+  raw_resp=$(curl -sk -m 35 -b "$COOKIES" -c "$COOKIES" -X "$method" -w '\n%{http_code}' "$url" 2>/dev/null) ; curl_exit=$?
 
   if [ "$curl_exit" -eq 28 ]; then
-    printf "  TIMEOUT %-38s (curl timeout — 15s)\n" "$label"
+    printf "  TIMEOUT %-38s (curl timeout — 35s)\n" "$label"
     ERR=$((ERR+1)); return
   elif [ "$curl_exit" -eq 7 ]; then
     printf "  CONNREF %-38s (server crashed)\n" "$label"
@@ -355,8 +394,11 @@ test_ep_v8sec() {
   if [ "$js_passed" = "1" ]; then
     printf "  PASS %-40s\n" "$test_id"; PASS=$((PASS+1))
   elif [ "$http_status" = "500" ]; then
-    # 500 = server survived the attack and returned a graceful error (PASS)
+    # 500 = V8 watchdog fired, server returned graceful error (PASS)
     printf "  PASS %-40s (500 — server survived)\n" "$test_id"; PASS=$((PASS+1))
+  elif [ "$http_status" = "408" ]; then
+    # 408 = HTTP request timeout fired before V8 watchdog (both at 30s) — server survived (PASS)
+    printf "  PASS %-40s (408 — server survived request timeout)\n" "$test_id"; PASS=$((PASS+1))
   else
     printf "  FAIL %-40s (HTTP %s)\n" "$test_id" "$http_status"; FAIL=$((FAIL+1))
   fi
@@ -396,14 +438,65 @@ else
   printf "  SKIP %-40s (MySQL unreachable)\n" "INT-MYSQL-DDL"
 fi
 
+# ── SCENARIOS Profile (rivers-canary-scenarios-spec.md) ──────────
+# Multi-step integration tests that exercise Rivers features in
+# composition. Verdict envelope differs from atomic tests
+# (type="scenario", steps[]). See CS0.3 header comment for skip-gate
+# pattern. PG_AVAIL / MYSQL_AVAIL are still in scope from the
+# INTEGRATION block above.
+echo ""
+echo "  ── SCENARIOS Profile ──"
+
+# Harness probes (CS1.4) — unconditional; local harness only.
+test_ep "scen-sql-probe"         POST "$BASE/sql/canary/scenarios/sql/probe"           '{}'
+test_ep "scen-stream-probe"      POST "$BASE/streams/canary/scenarios/stream/probe"    '{}'
+test_ep "scen-runtime-probe"     POST "$BASE/handlers/canary/scenarios/runtime/probe"  '{}'
+
+# Messaging (CS2) — 3 driver variants, PG/MySQL gated.
+test_ep "scen-sql-messaging-sqlite" POST "$BASE/sql/canary/scenarios/sql/messaging/sqlite" '{}'
+
+if [ "$PG_AVAIL" = "1" ]; then
+  test_ep "scen-sql-messaging-pg"    POST "$BASE/sql/canary/scenarios/sql/messaging/pg"    '{}'
+else
+  printf "  SKIP %-40s (PG unreachable)\n" "SCEN-SQL-MESSAGING-PG"
+fi
+
+if [ "$MYSQL_AVAIL" = "1" ]; then
+  test_ep "scen-sql-messaging-mysql" POST "$BASE/sql/canary/scenarios/sql/messaging/mysql" '{}'
+else
+  printf "  SKIP %-40s (MySQL unreachable)\n" "SCEN-SQL-MESSAGING-MYSQL"
+fi
+
+# Document Pipeline (CS4) — local filesystem, no external infra. The
+# CS4 MVP ships filesystem-only; 3 exec-dependent steps are self-
+# reported as "deferred" in the scenario envelope (still passes).
+test_ep "scen-runtime-doc-pipeline" POST "$BASE/handlers/canary/scenarios/runtime/doc-pipeline" '{}'
+
+# Activity Feed (CS3 / BR5) — Kafka publish → consumer persist → SQL history.
+# Gated on KAFKA_AVAIL (probed earlier in the STREAMS profile).
+if [ "${KAFKA_AVAIL:-0}" = "1" ]; then
+    test_ep "scen-stream-activity-feed" POST "$BASE/streams/canary/scenarios/stream/activity-feed" '{}'
+else
+    printf "  SKIP %-40s (Kafka unreachable)\n" "SCEN-STREAM-ACTIVITY-FEED"
+fi
+
 # ── MCP Tests ────────────────────────────────────────────────
+# MCP session model: initialize returns Mcp-Session-Id; all subsequent
+# methods must send it as a request header (JSON-RPC 2.0 / MCP spec).
 echo ""
 echo "  ── MCP ──"
 
-# Initialize
-MCP_INIT=$(curl -sf -X POST "$BASE/sql/canary/sql/mcp" \
+MCP_EP="$BASE/sql/canary/sql/mcp"
+
+# Initialize — capture session ID from response header, body separately.
+# Use a temp file to split headers from body cleanly (avoids CRLF tail-1 fragility).
+MCP_HDR_FILE=$(mktemp /tmp/mcp-hdr.XXXXXX)
+MCP_INIT=$(curl -sk -X POST "$MCP_EP" \
   -H "Content-Type: application/json" \
+  -D "$MCP_HDR_FILE" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' 2>/dev/null) || MCP_INIT=""
+MCP_SESSION_ID=$(grep -i "^mcp-session-id" "$MCP_HDR_FILE" 2>/dev/null | awk '{print $2}' | tr -d '\r\n')
+rm -f "$MCP_HDR_FILE"
 if echo "$MCP_INIT" | grep -q "rivers-mcp"; then
   printf "  PASS %-40s\n" "mcp-initialize"
   PASS=$((PASS+1))
@@ -412,9 +505,13 @@ else
   FAIL=$((FAIL+1))
 fi
 
+# All subsequent requests carry the session header.
+MCP_SID_HEADER="Mcp-Session-Id: ${MCP_SESSION_ID:-none}"
+
 # Tools list
-MCP_TOOLS=$(curl -sf -X POST "$BASE/sql/canary/sql/mcp" \
+MCP_TOOLS=$(curl -skf -X POST "$MCP_EP" \
   -H "Content-Type: application/json" \
+  -H "$MCP_SID_HEADER" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' 2>/dev/null) || MCP_TOOLS=""
 if echo "$MCP_TOOLS" | grep -q "pg_select"; then
   printf "  PASS %-40s\n" "mcp-tools-list"
@@ -425,8 +522,9 @@ else
 fi
 
 # Method not found
-MCP_404=$(curl -sf -X POST "$BASE/sql/canary/sql/mcp" \
+MCP_404=$(curl -skf -X POST "$MCP_EP" \
   -H "Content-Type: application/json" \
+  -H "$MCP_SID_HEADER" \
   -d '{"jsonrpc":"2.0","id":3,"method":"nonexistent","params":{}}' 2>/dev/null) || MCP_404=""
 if echo "$MCP_404" | grep -q "Method not found"; then
   printf "  PASS %-40s\n" "mcp-method-not-found"
@@ -437,8 +535,9 @@ else
 fi
 
 # Tools call
-MCP_CALL=$(curl -sf -X POST "$BASE/sql/canary/sql/mcp" \
+MCP_CALL=$(curl -skf -X POST "$MCP_EP" \
   -H "Content-Type: application/json" \
+  -H "$MCP_SID_HEADER" \
   -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"pg_select","arguments":{}}}' 2>/dev/null) || MCP_CALL=""
 if echo "$MCP_CALL" | grep -q '"content"'; then
   printf "  PASS %-40s\n" "mcp-tools-call"
