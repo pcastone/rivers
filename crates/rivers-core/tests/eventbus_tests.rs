@@ -227,6 +227,112 @@ async fn emit_tier_awaited_between_handle_and_observe() {
     assert_eq!(result[2], "observe", "Observe should run last");
 }
 
+// ── E2: Wildcard + exact subscriber global priority ordering ───────
+
+/// Regression: a wildcard `Expect` subscriber must run BEFORE an exact
+/// `Emit` subscriber for the same event.
+///
+/// Before E2 the dispatch loop concatenated the (already-sorted) exact
+/// list with the (already-sorted) wildcard list, so wildcards always
+/// dispatched after exact handlers regardless of their priority.
+#[tokio::test]
+async fn wildcard_expect_runs_before_exact_emit() {
+    let bus = EventBus::new();
+    let order = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+    // Exact subscriber at Emit (priority 2)
+    bus.subscribe(
+        "test.global.priority",
+        Arc::new(OrderRecordingHandler { name: "exact-emit", order: order.clone() }),
+        HandlerPriority::Emit,
+    ).await;
+    // Wildcard subscriber at Expect (priority 0) — must run first
+    bus.subscribe(
+        "*",
+        Arc::new(OrderRecordingHandler { name: "wildcard-expect", order: order.clone() }),
+        HandlerPriority::Expect,
+    ).await;
+
+    bus.publish(&test_event("test.global.priority")).await;
+
+    let result = order.lock().await;
+    assert_eq!(result.len(), 2, "both handlers should have run");
+    assert_eq!(result[0], "wildcard-expect", "wildcard Expect must run before exact Emit");
+    assert_eq!(result[1], "exact-emit");
+}
+
+/// A wildcard `Observe` subscriber runs AFTER an exact `Handle` subscriber.
+#[tokio::test]
+async fn wildcard_observe_runs_after_exact_handle() {
+    let bus = EventBus::new();
+    let order = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+    bus.subscribe(
+        "*",
+        Arc::new(OrderRecordingHandler { name: "wildcard-observe", order: order.clone() }),
+        HandlerPriority::Observe,
+    ).await;
+    bus.subscribe(
+        "test.observe.after.handle",
+        Arc::new(OrderRecordingHandler { name: "exact-handle", order: order.clone() }),
+        HandlerPriority::Handle,
+    ).await;
+
+    bus.publish(&test_event("test.observe.after.handle")).await;
+
+    // Allow the spawned Observe handler to complete.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let result = order.lock().await;
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0], "exact-handle", "exact Handle must run before wildcard Observe");
+    assert_eq!(result[1], "wildcard-observe");
+}
+
+/// Same priority, mix of exact + wildcard: tie-break is **insertion order**.
+/// Within a single priority bucket the exact subscribers come first
+/// (because exact is collected before wildcard at dispatch time), then
+/// wildcards. Inside each list, insertion order is preserved by the
+/// stable sort.
+#[tokio::test]
+async fn same_priority_exact_before_wildcard_then_insertion_order() {
+    let bus = EventBus::new();
+    let order = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+    // Insert in interleaved order to prove insertion order is preserved
+    // within each (exact|wildcard) group at the same priority.
+    bus.subscribe(
+        "test.tiebreak",
+        Arc::new(OrderRecordingHandler { name: "exact-1", order: order.clone() }),
+        HandlerPriority::Handle,
+    ).await;
+    bus.subscribe(
+        "*",
+        Arc::new(OrderRecordingHandler { name: "wild-1", order: order.clone() }),
+        HandlerPriority::Handle,
+    ).await;
+    bus.subscribe(
+        "test.tiebreak",
+        Arc::new(OrderRecordingHandler { name: "exact-2", order: order.clone() }),
+        HandlerPriority::Handle,
+    ).await;
+    bus.subscribe(
+        "*",
+        Arc::new(OrderRecordingHandler { name: "wild-2", order: order.clone() }),
+        HandlerPriority::Handle,
+    ).await;
+
+    bus.publish(&test_event("test.tiebreak")).await;
+
+    let result = order.lock().await;
+    assert_eq!(result.len(), 4);
+    // Exact handlers first (in insertion order), then wildcards (in insertion order)
+    assert_eq!(result[0], "exact-1");
+    assert_eq!(result[1], "exact-2");
+    assert_eq!(result[2], "wild-1");
+    assert_eq!(result[3], "wild-2");
+}
+
 #[test]
 fn event_log_level_mapping() {
     assert_eq!(event_log_level(events::DATASOURCE_HEALTH_CHECK_FAILED), LogLevel::Error);

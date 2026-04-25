@@ -248,7 +248,7 @@ impl EventBus {
         // This prevents slow Observe handlers (file I/O) from blocking all publishes.
         let handlers: Vec<(Arc<dyn EventHandler>, HandlerPriority)> = {
             let topics = self.topics.read().await;
-            let mut collected = Vec::new();
+            let mut collected: Vec<(Arc<dyn EventHandler>, HandlerPriority)> = Vec::new();
 
             // Exact topic subscribers
             if let Some(subs) = topics.get(&event.event_type) {
@@ -266,10 +266,15 @@ impl EventBus {
                 }
             }
 
-            // Both exact-topic and wildcard subscriber lists are individually sorted
-            // by priority (maintained by subscribe()). Exact subscribers come first,
-            // wildcards appended after. Since wildcards are typically Observe tier,
-            // the merge order is already correct — no sort needed.
+            // E2: merge exact + wildcard into a single global priority order.
+            //
+            // Each individual list (exact, wildcard) is already sorted by priority
+            // (maintained by `subscribe`), but a wildcard subscriber at e.g. Expect
+            // must still dispatch before an exact subscriber at Emit. A stable sort
+            // by priority gives the correct global ordering and preserves insertion
+            // order within a priority bucket (and within that bucket, exact handlers
+            // come before wildcards because they were collected first).
+            collected.sort_by_key(|(_, p)| *p);
             collected
         }; // read lock dropped here
 
