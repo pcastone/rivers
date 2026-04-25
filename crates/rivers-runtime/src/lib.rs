@@ -35,6 +35,9 @@ pub mod env_override;
 pub mod loader;
 /// Pre-compiled handler source cache (bundle load time — spec §3.4).
 pub mod module_cache;
+/// Pool handle trait — `DataViewExecutor` acquires connections via this trait
+/// without depending on the concrete `riversd::pool::PoolManager` type.
+pub mod pool_handle;
 /// Runtime-constructed DataViews for internal/synthetic endpoints.
 pub mod pseudo_dataview;
 /// JSON-schema system — field types, validation, and driver attributes.
@@ -80,3 +83,6 @@ pub use validate_crossref::validate_crossref;
 pub use validate_existence::validate_existence;
 pub use validate_pipeline::{validate_bundle_full, validate_bundle_live, ValidationConfig, LockBoxChecker, ServiceHealthChecker};
 pub use validate_engine::{EngineConfig, EngineHandles, EngineHandle};
+pub use pool_handle::{
+    PoolHandleSnapshot, PoolManagerHandle, PooledConnection, ReleaseToken, SharedPoolHandle,
+};
