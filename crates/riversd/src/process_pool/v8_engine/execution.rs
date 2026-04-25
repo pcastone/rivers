@@ -33,7 +33,12 @@ fn execute_as_module(
 ) -> Result<(), TaskError> {
     let source_str = v8::String::new(scope, source)
         .ok_or_else(|| TaskError::Internal("failed to create module source string".into()))?;
-    let resource_name = v8::String::new(scope, module_name)
+    // P1-9 / B4.2: V8 stack traces use the script-origin resource name
+    // verbatim. Redact the absolute path to its app-relative form so a
+    // `throw new Error(...)` inside the handler can never leak the host
+    // filesystem layout into HTTP responses or per-app logs.
+    let logical_name = redact_to_app_relative(module_name);
+    let resource_name = v8::String::new(scope, &logical_name)
         .ok_or_else(|| TaskError::Internal("failed to create module name string".into()))?;
 
     let origin = v8::ScriptOrigin::new(
@@ -127,6 +132,67 @@ fn boundary_from_referrer(referrer: &std::path::Path) -> Option<std::path::PathB
     }
 }
 
+/// Redact a host filesystem path to its `{app}/libraries/...` logical form.
+///
+/// Used to scrub absolute paths from V8 script origins, resolve-callback
+/// error messages, and the `MODULE_NOT_REGISTERED` formatter so that HTTP
+/// responses, stack traces, and per-app logs never expose `/Users/...`,
+/// `/opt/rivers/...`, or any other host-specific prefix outside the app
+/// root. Spec: P1-9 (B4).
+///
+/// Algorithm: locate a `libraries` path component; return everything from
+/// the immediately-preceding component (the app directory) onward, joined
+/// by `/`. If no `libraries` segment exists the input is returned unchanged
+/// — the path is already logical, an inline test sentinel, or empty.
+///
+/// Pure / total / no panics. Returns `Cow::Borrowed` for the no-op pass-
+/// through so callers don't pay an allocation when the input is already
+/// logical.
+///
+/// `pub(crate)` so the SQLite path policy (G_R8.2) and other crate sites
+/// can reuse the same redactor without duplicating the algorithm.
+pub(crate) fn redact_to_app_relative(path: &str) -> std::borrow::Cow<'_, str> {
+    if path.is_empty() {
+        return std::borrow::Cow::Borrowed(path);
+    }
+
+    // Walk components in reverse, capturing everything until — and
+    // including — the `libraries` segment plus one more (the app dir).
+    let p = std::path::Path::new(path);
+    let mut captured: Vec<String> = Vec::new();
+    let mut found_libraries = false;
+    let mut took_app_dir = false;
+    for comp in p.components().rev() {
+        let s = comp.as_os_str().to_string_lossy();
+        // Skip pure root markers (`/`) — they're not path segments we care
+        // about and would emit a leading empty component on join.
+        if s.is_empty() || s == "/" || s == "\\" {
+            continue;
+        }
+        let s = s.to_string();
+        if found_libraries {
+            captured.push(s);
+            took_app_dir = true;
+            break;
+        }
+        if s == "libraries" {
+            found_libraries = true;
+        }
+        captured.push(s);
+    }
+
+    if !found_libraries || !took_app_dir {
+        // No `libraries/` segment OR no parent component above it (e.g.
+        // `/libraries/foo.ts`). Either way the input has no app boundary
+        // we can anchor against — return as-is so callers see the
+        // original string unchanged.
+        return std::borrow::Cow::Borrowed(path);
+    }
+
+    captured.reverse();
+    std::borrow::Cow::Owned(captured.join("/"))
+}
+
 /// V8 module resolve callback — spec §3.1–3.6.
 ///
 /// Rules:
@@ -165,8 +231,15 @@ fn resolve_module_callback<'s>(
         None
     };
 
+    // P1-9 / B4.3: redact host paths in the `in {referrer}` line so
+    // resolve-time error messages (raised as JS exceptions and surfaced in
+    // HTTP responses) never expose `/Users/...` or other host prefixes.
     let referrer_line = match referrer_path.as_deref() {
-        Some(p) => format!("\n  in {}", p.display()),
+        Some(p) => {
+            let lossy = p.to_string_lossy();
+            let redacted = redact_to_app_relative(&lossy);
+            format!("\n  in {redacted}")
+        }
         None => String::new(),
     };
 
@@ -206,11 +279,13 @@ fn resolve_module_callback<'s>(
     let abs = match joined.canonicalize() {
         Ok(p) => p,
         Err(e) => {
+            // P1-9 / B4.3: redact referrer in `in {referrer}` line.
+            let redacted_referrer =
+                redact_to_app_relative(&referrer_path.to_string_lossy()).into_owned();
             return throw_resolve_error(
                 scope,
                 format!(
-                    "module resolution failed: cannot resolve \"{spec}\"\n  in {}\n  reason: {e}",
-                    referrer_path.display()
+                    "module resolution failed: cannot resolve \"{spec}\"\n  in {redacted_referrer}\n  reason: {e}"
                 ),
             );
         }
@@ -233,11 +308,13 @@ fn resolve_module_callback<'s>(
         Some(c) => c,
         None => {
             if super::super::module_cache::is_production_strict_armed() {
+                // P1-9 / B4.3: redact referrer in error.
+                let redacted_referrer =
+                    redact_to_app_relative(&referrer_path.to_string_lossy()).into_owned();
                 return throw_resolve_error(
                     scope,
                     format!(
-                        "MODULE_NOT_REGISTERED: cannot resolve \"{spec}\" — no module cache installed\n  in {}\n  hint: nested ES-module imports require a loaded bundle (see rivers-javascript-typescript-spec §3.4)",
-                        referrer_path.display()
+                        "MODULE_NOT_REGISTERED: cannot resolve \"{spec}\" — no module cache installed\n  in {redacted_referrer}\n  hint: nested ES-module imports require a loaded bundle (see rivers-javascript-typescript-spec §3.4)"
                     ),
                 );
             }
@@ -245,23 +322,30 @@ fn resolve_module_callback<'s>(
         }
     };
     let Some(entry) = cache.get(&abs) else {
+        // P1-9 / B4.3: redact every host path in the boundary-violation
+        // error: referrer, resolved-to, and the boundary line itself.
         let boundary = boundary_from_referrer(&referrer_path);
         let boundary_line = boundary
-            .map(|p| format!("\n  boundary: {}", p.display()))
+            .map(|p| format!("\n  boundary: {}", redact_to_app_relative(&p.to_string_lossy())))
             .unwrap_or_default();
+        let redacted_referrer =
+            redact_to_app_relative(&referrer_path.to_string_lossy()).into_owned();
+        let redacted_abs = redact_to_app_relative(&abs.to_string_lossy()).into_owned();
         return throw_resolve_error(
             scope,
             format!(
-                "module resolution failed: \"{spec}\" resolves outside app boundary\n  in {}\n  resolved to: {}{boundary_line}",
-                referrer_path.display(),
-                abs.display()
+                "module resolution failed: \"{spec}\" resolves outside app boundary\n  in {redacted_referrer}\n  resolved to: {redacted_abs}{boundary_line}"
             ),
         );
     };
 
     // Compile a v8::Module from the cached JS.
     let source_str = v8::String::new(scope, &entry.compiled_js)?;
-    let name_str = v8::String::new(scope, &abs.to_string_lossy())?;
+    // P1-9 / B4.2: V8 stack traces use this resource name verbatim.
+    // Redact the absolute path so a runtime exception inside this nested
+    // module reports `{app}/libraries/...`, not the host filesystem path.
+    let logical_name = redact_to_app_relative(&abs.to_string_lossy()).into_owned();
+    let name_str = v8::String::new(scope, &logical_name)?;
     let origin = v8::ScriptOrigin::new(
         scope,
         name_str.into(),
@@ -753,8 +837,11 @@ fn resolve_module_source(ctx: &TaskContext) -> Result<String, TaskError> {
         );
     }
 
-    let source = std::fs::read_to_string(path)
-        .map_err(|e| TaskError::HandlerError(format!("cannot read module '{path}': {e}")))?;
+    let source = std::fs::read_to_string(path).map_err(|e| {
+        // P1-9 / B4.3: redact host path in disk-read failure error.
+        let redacted = redact_to_app_relative(path).into_owned();
+        TaskError::HandlerError(format!("cannot read module '{redacted}': {e}"))
+    })?;
 
     let compiled = if path.ends_with(".ts") || ctx.entrypoint.language == "typescript" {
         compile_typescript(&source, path)?
@@ -955,5 +1042,91 @@ mod frame_format_tests {
         };
         let s = format_frame(&info);
         assert!(s.contains(":0:0"), "unmapped retained 0s: {s}");
+    }
+}
+
+#[cfg(test)]
+mod redact_path_tests {
+    //! P1-9 / B4.1: `redact_to_app_relative` is the foundation for path
+    //! redaction across the V8 engine, the module-cache error formatter, and
+    //! the future SQLite path policy (G_R8.2). These tests pin the contract.
+    use super::redact_to_app_relative;
+
+    #[test]
+    fn macos_workspace_path_redacts_to_app_relative() {
+        // The exact shape of paths in the canary developer environment.
+        let input = "/Users/me/proj/my-app/libraries/handlers/foo.ts";
+        let out = redact_to_app_relative(input);
+        assert_eq!(out, "my-app/libraries/handlers/foo.ts");
+    }
+
+    #[test]
+    fn linux_deploy_path_redacts_to_app_relative() {
+        // Production layout under `/srv/rivers/<app>/libraries/...`.
+        let input = "/srv/rivers/canary/libraries/setup.ts";
+        let out = redact_to_app_relative(input);
+        assert_eq!(out, "canary/libraries/setup.ts");
+    }
+
+    #[test]
+    fn no_libraries_segment_passes_through_unchanged() {
+        // Inline test sources, REPL strings, or any path without a
+        // `libraries/` anchor are returned verbatim — caller already has
+        // the most useful representation.
+        let input = "inline.ts";
+        let out = redact_to_app_relative(input);
+        assert_eq!(out, "inline.ts");
+        // Verify it's the borrowed Cow (no allocation when input passes
+        // through). This pins the perf claim in the doc comment.
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn already_relative_path_passes_through_unchanged() {
+        // If the input is already in `{app}/libraries/...` form (e.g., a
+        // re-redaction during error chaining), the helper must not mangle
+        // it further.
+        let input = "my-app/libraries/handlers/foo.ts";
+        let out = redact_to_app_relative(input);
+        assert_eq!(out, "my-app/libraries/handlers/foo.ts");
+    }
+
+    #[test]
+    fn empty_string_passes_through_unchanged() {
+        // Defensive: helper must never panic. Empty input is a real shape
+        // when V8 reports a missing script-name on a stack frame.
+        let out = redact_to_app_relative("");
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn deep_nesting_preserved_below_app_dir() {
+        // Long subpaths under libraries/ must survive intact — only the
+        // host prefix above the app directory is stripped.
+        let input = "/var/lib/rivers/instances/prod/canary/libraries/handlers/orders/list.ts";
+        let out = redact_to_app_relative(input);
+        assert_eq!(out, "canary/libraries/handlers/orders/list.ts");
+    }
+
+    #[test]
+    fn libraries_at_root_falls_back_to_input() {
+        // `/libraries/foo.ts` has no parent component to use as the app
+        // dir. Returning the input as-is is the safest no-op — mangling
+        // a non-app path could mislead operators reading logs.
+        let input = "/libraries/foo.ts";
+        let out = redact_to_app_relative(input);
+        assert_eq!(out, "/libraries/foo.ts");
+    }
+
+    #[test]
+    fn trailing_slash_does_not_break_walk() {
+        // Edge case: bundle loader sometimes hands us paths with a
+        // trailing slash from directory walks. Walking components in
+        // reverse must still locate the `libraries` anchor.
+        let input = "/Users/me/my-app/libraries/handlers/foo.ts/";
+        let out = redact_to_app_relative(input);
+        // The trailing-slash component is empty and skipped; result is
+        // identical to the no-slash form.
+        assert_eq!(out, "my-app/libraries/handlers/foo.ts");
     }
 }

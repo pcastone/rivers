@@ -269,3 +269,22 @@ Plan correction: task 4.3 said "thread via closure capture (not thread-local)." 
 - 345/345 lib tests + 1 ignored.
 - 11 integration files passing across the changes (broker_supervisor: 3, health: 12, security_pipeline: 2, broker_bridge: 12).
 - One pre-existing failure flagged: `cli_tests::version_string_contains_version` hardcodes 0.50.1 (crate is 0.55.0). Spawned for separate cleanup.
+
+## 2026-04-24 — B4: Redact host paths in V8 errors (P1-9)
+
+### B4 — Path redaction
+- **edit:** `crates/riversd/src/process_pool/v8_engine/execution.rs` — added `pub(crate) fn redact_to_app_relative(path: &str) -> Cow<str>` next to `boundary_from_referrer`. Wired into both `script_origin` constructions (root module in `execute_as_module`, resolved modules in `resolve_module_callback`) so V8 stack frames carry the logical script name. Wired into every `format!` site in `resolve_module_callback` (the `in {referrer}`, `resolved to:`, and `boundary:` lines). Wired into the disk-read fallback `cannot read module` message.
+- **edit:** `crates/riversd/src/process_pool/v8_engine/mod.rs` — re-exported `redact_to_app_relative` as `pub(crate)` so `module_cache::module_not_registered_message` and the future SQLite path policy (G_R8.2) can call the same redactor.
+- **edit:** `crates/riversd/src/process_pool/module_cache.rs` — `module_not_registered_message` now redacts both the `path` and `abs` arguments through the shared helper. Existing pinned-format test (`module_not_registered_message_format_matches_g5_3`) still passes — assertions are substring checks that don't depend on the absolute prefix.
+- **new:** `crates/riversd/tests/path_redaction_tests.rs` — 2 integration tests:
+  - `handler_stack_does_not_leak_host_paths`: dispatches a module-syntax handler that throws; asserts neither the error message nor the stack contains the host prefix above the app, `/Users/`, or `/var/folders/`.
+  - `module_resolution_error_does_not_leak_host_paths`: dispatches a handler that imports a non-existent module; asserts the resolve-callback error is fully redacted and reports `my-app/libraries/handlers/throws.js` as the referrer.
+- **edit:** `execution.rs` — added `redact_path_tests` module with 8 unit tests covering: macOS workspace path, Linux deploy path, no-libraries pass-through (verifying `Cow::Borrowed`), already-relative pass-through, empty string, deep nesting, libraries-at-root edge case, trailing-slash walk.
+
+### Decision (logged in changedecisionlog)
+- Redaction is unconditional (no `cfg!(debug_assertions)` gate). Reasoning: redacted form is more useful for log grep, and security posture must not depend on build mode.
+
+### Tests
+- 8 new unit tests in `redact_path_tests` — all green.
+- 2 new integration tests in `path_redaction_tests.rs` — all green.
+- Re-ran 357 lib tests + 25 v8_bridge + 2 b3_module_cache_strict + 10 task_kind_dispatch — all green, no regressions.

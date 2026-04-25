@@ -68,10 +68,10 @@
 
 **Files:** `crates/riversd/src/process_pool/v8_engine/execution.rs`, `crates/riversd/src/process_pool/module_cache.rs`, `crates/riversd/src/error_response.rs`
 
-- [ ] **B4.1** New helper `redact_to_app_relative(path, app_root)` — emits `{app}/libraries/handlers/foo.ts` form. Lives next to `boundary_from_referrer` from G5.3.
-- [ ] **B4.2** V8 script origins: use logical module ids (`{app}/libraries/handlers/foo.ts`), not absolute filesystem paths.
-- [ ] **B4.3** Pass redactor through compile-error formatting and the resolve-callback messages (touched in G5).
-- [ ] **B4.4** Test: trigger handler error in a production build; assert response body and stack lines do not contain `/Users/`, workspace path, or anything outside the app root.
+- [x] **B4.1** New helper `redact_to_app_relative(path) -> Cow<str>` lives next to `boundary_from_referrer` in `v8_engine/execution.rs`. Reuses the same `libraries`-anchor algorithm as `shorten_app_path` but operates on `&str` and is `pub(crate)` so other crate modules (G_R8.2 SQLite policy) can call it. Returns input unchanged when no `libraries/` segment is present (inline test sources, already-redacted strings, empty inputs).
+- [x] **B4.2** V8 script origins (both root module in `execute_as_module` and resolved modules in `resolve_module_callback`) now register the redacted form as the script resource name. V8 stack traces report `{app}/libraries/handlers/foo.ts`, never `/Users/...`.
+- [x] **B4.3** Resolve-callback messages (`in {referrer}`, `resolved to:`) and `MODULE_NOT_REGISTERED` formatting in `module_cache::module_not_registered_message` now redact through `redact_to_app_relative`. Boundary line in resolve callback still uses `boundary_from_referrer` (path-only) but its display also runs through redaction.
+- [x] **B4.4** New integration test `path_redaction_tests.rs` — dispatches a handler that throws, asserts neither response nor stack contains `/Users/` or workspace prefix. Plus 7 unit tests on `redact_to_app_relative` (multiple input shapes incl. trailing-slash, no-libraries, empty string, already-relative, deep nesting). All green.
 
 ---
 

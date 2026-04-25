@@ -22,6 +22,10 @@ pub(crate) use sourcemap_cache::clear_sourcemap_cache as clear_sourcemap_cache_h
 // Re-export public API used by process_pool/mod.rs and siblings
 pub(crate) use execution::execute_js_task;
 pub(crate) use execution::is_module_syntax;
+// P1-9 / B4.1: shared host-path redaction. Re-exported so module_cache and
+// future SQLite path policy (G_R8.2) can call the same redactor without
+// reaching into v8_engine internals.
+pub(crate) use execution::redact_to_app_relative;
 pub(crate) use init::ensure_v8_initialized;
 pub(crate) use init::DEFAULT_HEAP_LIMIT;
 

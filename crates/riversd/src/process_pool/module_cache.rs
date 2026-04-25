@@ -110,9 +110,14 @@ pub fn module_cache_mode() -> ModuleCacheMode {
 /// without spinning up V8. Mirrors spec §3.4 boundary-check semantics: the
 /// validated cache IS the security boundary.
 pub fn module_not_registered_message(path: &str, abs: &Path) -> String {
+    // P1-9 / B4.3: redact host paths so the operator-facing error stays
+    // useful (path tells you which app + handler) without leaking the host
+    // filesystem layout into HTTP responses or per-app logs.
+    let redacted_path = super::v8_engine::redact_to_app_relative(path).into_owned();
+    let redacted_abs =
+        super::v8_engine::redact_to_app_relative(&abs.to_string_lossy()).into_owned();
     format!(
-        "MODULE_NOT_REGISTERED: \"{path}\" is not in the validated bundle module cache\n  resolved to: {}\n  hint: rebuild + redeploy the bundle, or set RIVERS_DEV_MODULE_CACHE=permissive for dev-mode disk fallback",
-        abs.display()
+        "MODULE_NOT_REGISTERED: \"{redacted_path}\" is not in the validated bundle module cache\n  resolved to: {redacted_abs}\n  hint: rebuild + redeploy the bundle, or set RIVERS_DEV_MODULE_CACHE=permissive for dev-mode disk fallback"
     )
 }
 
