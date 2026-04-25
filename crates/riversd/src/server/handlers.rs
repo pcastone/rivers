@@ -38,48 +38,100 @@ pub(super) async fn health_verbose_handler(
     if let Some(delay) = crate::health::parse_simulate_delay(request.uri().query()) {
         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
     }
-    // Run datasource connectivity probes
+    // D2.3: Read pool snapshots from `PoolManager` instead of opening fresh
+    // connections per probe. The snapshot includes active/idle/max counts
+    // and circuit breaker state — sourced from existing pool bookkeeping
+    // with no I/O. For datasources that don't have a registered pool
+    // (brokers), we surface a `pending` probe so operators can still see
+    // them in `/health/verbose`.
+    let pool_snapshots: Vec<crate::health::PoolSnapshot> = ctx
+        .pool_manager
+        .snapshots()
+        .await
+        .into_iter()
+        .map(|s| crate::health::PoolSnapshot {
+            name: s.datasource_id,
+            // The driver name isn't carried on the snapshot today — leave
+            // blank to avoid lying. Drivers are reflected on the
+            // `datasource_probes` list below for completeness.
+            driver: String::new(),
+            active: s.active_connections as u32,
+            idle: s.idle_connections as u32,
+            max: s.max_size as u32,
+            circuit_state: format!("{:?}", s.circuit_state).to_lowercase(),
+        })
+        .collect();
+
+    // Datasource probes: synthesize a probe entry per registered datasource
+    // from the pool snapshots (status `ok` if circuit is closed/half-open,
+    // `error` if open). For datasources without a pool, fall back to the
+    // legacy direct-connect probe so operators see broker connectivity.
     let datasource_probes = {
         let exec_guard = ctx.dataview_executor.read().await;
         if let Some(ref executor) = *exec_guard {
             let factory = executor.factory().clone();
             let params = executor.datasource_params().clone();
-            drop(exec_guard); // release lock before probing
+            drop(exec_guard); // release lock before any await on the pool
 
             let mut probes = Vec::new();
             for (name, ds_params) in params.iter() {
-                let driver_name = ds_params.options.get("driver")
+                let driver_name = ds_params
+                    .options
+                    .get("driver")
                     .map(|s| s.as_str())
                     .unwrap_or("unknown");
 
-                let start = std::time::Instant::now();
-                let probe = match tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    factory.connect(driver_name, ds_params),
-                ).await {
-                    Ok(Ok(_conn)) => crate::health::DatasourceProbeResult {
+                if let Some(pool) = ctx.pool_manager.get_pool(name).await {
+                    // Pool path: derive status from circuit breaker state.
+                    let snap = pool.snapshot().await;
+                    let (status, error) = match snap.circuit_state {
+                        crate::pool::CircuitState::Closed
+                        | crate::pool::CircuitState::HalfOpen => ("ok".to_string(), None),
+                        crate::pool::CircuitState::Open => (
+                            "error".to_string(),
+                            Some("circuit breaker open".to_string()),
+                        ),
+                    };
+                    probes.push(crate::health::DatasourceProbeResult {
                         name: name.clone(),
                         driver: driver_name.to_string(),
-                        status: "ok".to_string(),
-                        latency_ms: start.elapsed().as_millis() as u64,
-                        error: None,
-                    },
-                    Ok(Err(e)) => crate::health::DatasourceProbeResult {
-                        name: name.clone(),
-                        driver: driver_name.to_string(),
-                        status: "error".to_string(),
-                        latency_ms: start.elapsed().as_millis() as u64,
-                        error: Some(e.to_string()),
-                    },
-                    Err(_) => crate::health::DatasourceProbeResult {
-                        name: name.clone(),
-                        driver: driver_name.to_string(),
-                        status: "error".to_string(),
-                        latency_ms: 5000,
-                        error: Some("probe timeout (5s)".to_string()),
-                    },
-                };
-                probes.push(probe);
+                        status,
+                        latency_ms: snap.avg_wait_ms,
+                        error,
+                    });
+                } else {
+                    // No pool — broker or unknown driver. Probe via factory.
+                    let start = std::time::Instant::now();
+                    let probe = match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        factory.connect(driver_name, ds_params),
+                    )
+                    .await
+                    {
+                        Ok(Ok(_conn)) => crate::health::DatasourceProbeResult {
+                            name: name.clone(),
+                            driver: driver_name.to_string(),
+                            status: "ok".to_string(),
+                            latency_ms: start.elapsed().as_millis() as u64,
+                            error: None,
+                        },
+                        Ok(Err(e)) => crate::health::DatasourceProbeResult {
+                            name: name.clone(),
+                            driver: driver_name.to_string(),
+                            status: "error".to_string(),
+                            latency_ms: start.elapsed().as_millis() as u64,
+                            error: Some(e.to_string()),
+                        },
+                        Err(_) => crate::health::DatasourceProbeResult {
+                            name: name.clone(),
+                            driver: driver_name.to_string(),
+                            status: "error".to_string(),
+                            latency_ms: 5000,
+                            error: Some("probe timeout (5s)".to_string()),
+                        },
+                    };
+                    probes.push(probe);
+                }
             }
             probes.sort_by(|a, b| a.name.cmp(&b.name));
             probes
@@ -111,7 +163,7 @@ pub(super) async fn health_verbose_handler(
         draining: ctx.shutdown.is_draining(),
         inflight_requests: ctx.shutdown.inflight_count() as u64,
         uptime_seconds: ctx.uptime.uptime_seconds(),
-        pool_snapshots: Vec::new(), // populated when pool manager is wired
+        pool_snapshots,
         datasource_probes,
         broker_bridges,
     })

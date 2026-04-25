@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-04-25 — D2: Route DataView execution through ConnectionPool (P0-3)
+
+Closes the second half of the pool-adoption work (D1 landed in `2dfbb7b`).
+DataView calls now reuse pooled connections instead of opening a fresh
+handshake per request.
+
+| File | Decision | Reference | Resolution |
+|------|----------|-----------|------------|
+| `crates/rivers-runtime/src/dataview_engine.rs` | New `ConnectionAcquirer` + `PooledConnection` traits and `AcquireError` enum live in the runtime crate so `DataViewExecutor` can route through a pool without depending on the `riversd` binary crate | code review P0-3 | Optional `acquirer: Option<Arc<dyn ConnectionAcquirer>>` field on the executor; `set_acquirer`/`with_acquirer` setters; legacy direct-connect retained when `None` (warn-logged) so unit tests that build a bare executor don't break |
+| `crates/rivers-runtime/src/dataview_engine.rs` (`execute`) | Pool path: `acquirer.acquire(datasource_id) → guard`, `guard.conn_mut().execute/prepare/execute_prepared(query)`, RAII drop returns the connection. Single checkout for the whole call. `has_pool(id)` predicate routes broker datasources (no pool registered) to the legacy direct-connect+broker-fallback helper | code review P0-3 | Extracted shared `connect_and_execute_or_broker` helper to deduplicate the broker path between the no-pool-registered and no-acquirer-installed branches |
+| `crates/rivers-runtime/src/lib.rs` | Re-export `AcquireError`, `ConnectionAcquirer`, `PooledConnection` | — | Required so `riversd::pool` can `impl rivers_runtime::ConnectionAcquirer for PoolManager` |
+| `crates/riversd/src/pool.rs` | `impl ConnectionAcquirer for PoolManager` via `PoolGuardAdapter` (wraps `PoolGuard`); `map_pool_error` translates `PoolError` → `AcquireError`; new `circuit_state: CircuitState` field on `PoolSnapshot` | code review P0-3, code review P1-1 | Adapter is a one-field newtype; `PoolGuard::conn_mut` is forwarded as-is. Snapshot carries circuit state so `/health/verbose` doesn't need a separate breaker query |
+| `crates/riversd/src/server/context.rs` | New `pool_manager: Arc<PoolManager>` field on `AppContext` (always present, initialized empty) | code review P0-3 | Per task: D2 ownership decision is "manager lives on AppContext, never `None` at runtime; the executor's `Option` is transitional only" |
+| `crates/riversd/src/bundle_loader/load.rs` | After collecting `ds_params` and building the `DriverFactory`, register one `ConnectionPool` per datasource (default `PoolConfig`, `entry_point:ds_name` keying that mirrors the existing `ds_params` scheme). Skip silently for datasources whose driver isn't registered as a `DatabaseDriver` (brokers). After building the executor, `executor.set_acquirer(ctx.pool_manager.clone())` | code review P0-3 | Per-app pool config is a future feature; default `max_size=10`, `idle_timeout=30s`, `max_lifetime=5min` |
+| `crates/riversd/src/bundle_loader/reload.rs` | Reuse the existing `PoolManager` (so warm idle connections survive hot reload). New executor gets the same acquirer wired | code review P0-3 | No pool churn on hot reload — the pool is independent of the DataView registry rebuild |
+| `crates/riversd/src/server/handlers.rs` (`/health/verbose`) | Drop the per-probe `factory.connect(...)`; build `pool_snapshots` from `PoolManager::snapshots()` and per-datasource probe status from each pool's `circuit_state`. Brokers (no pool) still get the legacy direct-probe so operators see them | code review P0-3 | Verbose probe is now zero-handshake under steady state. Brokers continue using the 5s timeout fallback until they have their own pooling story |
+| `crates/riversd/tests/pool_tests.rs` | New `mod d2` with three tests: `d2_4_executor_reuses_pool_connections_for_100_calls` (asserts `connect_count == 1` for 100 sequential calls; ≤ `max_size=4`), `d2_4_pool_snapshot_non_empty_after_first_call` (asserts `idle_connections == 1` after one call returns), `d2_4_direct_connect_fallback_still_works_without_acquirer` (asserts `connect_count == 3` for 3 calls with no acquirer wired) | code review P0-3 | All 33 pool tests + 357 lib tests + 38 test binaries pass; pre-existing `cli_tests::version_string_contains_version` and the runtime-side `bench_3_sqlite_cached_vs_uncached` / `executor_invalidates_cache_after_write` failures remain (DDL-gating issues unrelated to D2) |
+
+**Net effect:** the `Pool` and `Driver` rows in the architecture diagram are
+finally connected on the production DataView path. Pool limits, idle
+reuse, max-lifetime, and circuit breaking now actually apply to user
+traffic — not just to the unit tests that exercise them in isolation.
+
 ## 2026-04-21 — TS pipeline Phase 6 completion: stack-trace remapping
 
 Phase 6 shipped partially in `a301b6b` (source-map generation). This round completes the consumer side — remapping at stack-access time, per-app log routing, and debug-mode response envelope. Closes `processpool-runtime-spec-v2` Open Question #5.

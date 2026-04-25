@@ -651,3 +651,189 @@ fn circuit_breaker_config_defaults() {
     assert_eq!(config.open_timeout_ms, 30_000);
     assert_eq!(config.half_open_max_trials, 1);
 }
+
+// ── D2 — DataViewExecutor pool routing ─────────────────────────────
+
+mod d2 {
+    //! Tests that `DataViewExecutor::execute` routes through
+    //! `PoolManager::acquire` instead of `factory.connect` per call.
+    //!
+    //! D2 plumbs an `Arc<dyn ConnectionAcquirer>` into the executor; this
+    //! module verifies the contract end-to-end: connection reuse under
+    //! load (≤ max_size handshakes for N calls), the pool snapshot
+    //! becomes non-empty after the first call, and the legacy
+    //! direct-connect fallback still works when no acquirer is wired.
+    use super::*;
+    use rivers_runtime::dataview::{DataViewConfig, DataViewParameterConfig};
+    use rivers_runtime::tiered_cache::NoopDataViewCache;
+    use rivers_runtime::{ConnectionAcquirer, DataViewExecutor, DataViewRegistry};
+    use rivers_runtime::rivers_core::DriverFactory;
+
+    /// Helper: a minimal valid `DataViewConfig` pointing at the named datasource.
+    fn dv_config(name: &str, datasource: &str) -> DataViewConfig {
+        DataViewConfig {
+            name: name.to_string(),
+            datasource: datasource.to_string(),
+            query: Some("SELECT 1".to_string()),
+            parameters: Vec::<DataViewParameterConfig>::new(),
+            return_schema: None,
+            invalidates: Vec::new(),
+            validate_result: false,
+            strict_parameters: false,
+            caching: None,
+            get_query: None,
+            post_query: None,
+            put_query: None,
+            delete_query: None,
+            get_schema: None,
+            post_schema: None,
+            put_schema: None,
+            delete_schema: None,
+            get_parameters: Vec::new(),
+            post_parameters: Vec::new(),
+            put_parameters: Vec::new(),
+            delete_parameters: Vec::new(),
+            streaming: false,
+            circuit_breaker_id: None,
+            prepared: false,
+            query_params: HashMap::new(),
+            max_rows: 1000,
+        }
+    }
+
+    /// Build the standard test scaffold:
+    /// - one `MockDriver` registered as `"mock"` in a `DriverFactory`
+    /// - one `ConnectionPool` (max_size = `pool_max`) registered in a `PoolManager`
+    /// - one `DataViewExecutor` with one DataView "dv1" against datasource "ds1"
+    ///
+    /// Returns the executor (with the acquirer installed) and the driver
+    /// (so tests can read `connect_count`).
+    async fn scaffold(
+        pool_max: usize,
+        with_acquirer: bool,
+    ) -> (DataViewExecutor, Arc<MockDriver>, Arc<PoolManager>) {
+        let driver = Arc::new(MockDriver::new());
+
+        // Factory needs the driver registered so the executor can
+        // optionally translate params (we don't, but the lookup happens).
+        let mut factory = DriverFactory::new();
+        factory.register_database_driver(driver.clone() as Arc<dyn DatabaseDriver>);
+        let factory = Arc::new(factory);
+
+        let mut params = test_params();
+        params.options.insert("driver".into(), "mock".into());
+
+        // Pool manager + one pool keyed by "ds1".
+        let pool_manager = Arc::new(PoolManager::new());
+        let pool = Arc::new(ConnectionPool::new(
+            "ds1",
+            PoolConfig {
+                max_size: pool_max,
+                ..PoolConfig::default()
+            },
+            driver.clone() as Arc<dyn DatabaseDriver>,
+            params.clone(),
+            Arc::new(rivers_runtime::rivers_core::EventBus::new()),
+        ));
+        pool_manager.add_pool(pool).await.unwrap();
+
+        // ds_params keyed by "ds1" so executor's lookup matches the pool id.
+        let mut params_map = HashMap::new();
+        params_map.insert("ds1".to_string(), params);
+        let params_arc = Arc::new(params_map);
+
+        let mut registry = DataViewRegistry::new();
+        registry.register(dv_config("dv1", "ds1"));
+
+        let cache = Arc::new(NoopDataViewCache);
+        let mut exec = DataViewExecutor::new(registry, factory, params_arc, cache);
+        if with_acquirer {
+            exec.set_acquirer(pool_manager.clone() as Arc<dyn ConnectionAcquirer>);
+        }
+        (exec, driver, pool_manager)
+    }
+
+    #[tokio::test]
+    async fn d2_4_executor_reuses_pool_connections_for_100_calls() {
+        // 100 sequential DataView calls through the pool must not produce
+        // 100 driver connect handshakes — they must reuse the idle pool.
+        let pool_max = 4;
+        let (exec, driver, pool_manager) = scaffold(pool_max, /*with_acquirer=*/ true).await;
+
+        for i in 0..100 {
+            let resp = exec
+                .execute("dv1", HashMap::new(), "GET", &format!("trace-{i}"), None)
+                .await
+                .expect("execute should succeed");
+            assert!(!resp.cache_hit);
+        }
+
+        // With sequential calls, the very first call creates one connection
+        // and every subsequent call reuses the same idle slot. So
+        // `connect_count` should be exactly 1 — and certainly ≤ pool_max.
+        let connects = driver.connect_count();
+        assert!(
+            connects <= pool_max as u64,
+            "driver connect_count = {connects}, expected ≤ pool_max ({pool_max})"
+        );
+        assert_eq!(
+            connects, 1,
+            "sequential calls should reuse the same pooled connection (got {connects} handshakes)"
+        );
+
+        // And the pool manager should report a non-empty snapshot for "ds1".
+        let snaps = pool_manager.snapshots().await;
+        assert_eq!(snaps.len(), 1, "expected one pool registered");
+        assert_eq!(snaps[0].datasource_id, "ds1");
+        assert_eq!(snaps[0].max_size, pool_max);
+        assert_eq!(snaps[0].checkout_count, 100, "100 checkouts recorded");
+    }
+
+    #[tokio::test]
+    async fn d2_4_pool_snapshot_non_empty_after_first_call() {
+        let (exec, _driver, pool_manager) = scaffold(/*pool_max=*/ 2, true).await;
+
+        // Before any call: no checkouts.
+        let pre = pool_manager.snapshots().await;
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0].checkout_count, 0);
+        assert_eq!(pre[0].active_connections + pre[0].idle_connections, 0);
+
+        // One call.
+        let _ = exec
+            .execute("dv1", HashMap::new(), "GET", "trace", None)
+            .await
+            .unwrap();
+
+        // After the call the connection has been returned to idle, and the
+        // snapshot reflects 1 idle + 1 lifetime checkout.
+        let post = pool_manager.snapshots().await;
+        assert_eq!(post[0].checkout_count, 1);
+        assert_eq!(
+            post[0].idle_connections, 1,
+            "released connection should sit in idle queue"
+        );
+        assert_eq!(
+            post[0].active_connections, 0,
+            "no active connection after the call returns"
+        );
+    }
+
+    #[tokio::test]
+    async fn d2_4_direct_connect_fallback_still_works_without_acquirer() {
+        // Regression guard: the legacy direct-connect path must keep
+        // working for test fixtures and pre-wired call sites.
+        let (exec, driver, _pool_manager) =
+            scaffold(/*pool_max=*/ 4, /*with_acquirer=*/ false).await;
+        assert!(!exec.has_acquirer());
+
+        for _ in 0..3 {
+            exec.execute("dv1", HashMap::new(), "GET", "trace", None)
+                .await
+                .expect("direct-connect path should succeed");
+        }
+
+        // Without the pool, every call opens a fresh connection.
+        assert_eq!(driver.connect_count(), 3, "expected 3 handshakes (no pool reuse)");
+    }
+}

@@ -474,6 +474,8 @@ pub struct PoolSnapshot {
     pub max_size: usize,
     /// Configured minimum idle connections.
     pub min_idle: usize,
+    /// Circuit breaker state at the time of snapshot.
+    pub circuit_state: CircuitState,
 }
 
 // ── PooledConnection ───────────────────────────────────────────────
@@ -686,6 +688,10 @@ impl ConnectionPool {
         };
         let checkouts = self.checkout_count.load(Ordering::Relaxed);
         let total_wait = self.total_wait_ms.load(Ordering::Relaxed);
+        let circuit_state = {
+            let cb = self.circuit_breaker.lock().await;
+            cb.state()
+        };
 
         PoolSnapshot {
             datasource_id: self.datasource_id.clone(),
@@ -700,6 +706,7 @@ impl ConnectionPool {
             },
             max_size: self.config.max_size,
             min_idle: self.config.min_idle,
+            circuit_state,
         }
     }
 
@@ -908,5 +915,58 @@ impl PoolManager {
 impl Default for PoolManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ── ConnectionAcquirer impl (D2) ───────────────────────────────────
+
+/// Adapter so `PoolGuard` satisfies the runtime-crate-local
+/// `rivers_runtime::PooledConnection` trait. The wrapped guard releases
+/// the connection back to its pool when dropped.
+struct PoolGuardAdapter(PoolGuard);
+
+impl rivers_runtime::PooledConnection for PoolGuardAdapter {
+    fn conn_mut(&mut self) -> &mut Box<dyn Connection> {
+        self.0.conn_mut()
+    }
+}
+
+/// Map `PoolError` → `rivers_runtime::AcquireError`. The runtime crate has
+/// its own thin error enum so it doesn't need to depend on `riversd::pool`.
+fn map_pool_error(err: PoolError) -> rivers_runtime::AcquireError {
+    use rivers_runtime::AcquireError;
+    match err {
+        PoolError::CircuitOpen { datasource } => AcquireError::CircuitOpen(datasource),
+        PoolError::Timeout {
+            datasource,
+            timeout_ms,
+        } => AcquireError::Timeout {
+            datasource,
+            timeout_ms,
+        },
+        PoolError::Draining { datasource } => AcquireError::Draining(datasource),
+        PoolError::UnknownDatasource { datasource } => AcquireError::UnknownDatasource(datasource),
+        PoolError::DuplicateDatasource { datasource } => {
+            AcquireError::Other(format!("duplicate datasource '{datasource}'"))
+        }
+        PoolError::Driver(e) => AcquireError::Driver(e.to_string()),
+        PoolError::Config(s) => AcquireError::Other(format!("config: {s}")),
+    }
+}
+
+#[async_trait::async_trait]
+impl rivers_runtime::ConnectionAcquirer for PoolManager {
+    async fn acquire(
+        &self,
+        datasource_id: &str,
+    ) -> Result<Box<dyn rivers_runtime::PooledConnection>, rivers_runtime::AcquireError> {
+        let guard = PoolManager::acquire(self, datasource_id)
+            .await
+            .map_err(map_pool_error)?;
+        Ok(Box::new(PoolGuardAdapter(guard)))
+    }
+
+    async fn has_pool(&self, datasource_id: &str) -> bool {
+        self.get_pool(datasource_id).await.is_some()
     }
 }

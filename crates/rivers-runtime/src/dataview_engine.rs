@@ -14,6 +14,7 @@ use std::time::Instant;
 use rivers_core::DriverFactory;
 use rivers_driver_sdk::broker::{BrokerConsumerConfig, OutboundMessage};
 use rivers_driver_sdk::error::DriverError;
+use rivers_driver_sdk::traits::Connection;
 use rivers_driver_sdk::types::{Query, QueryResult, QueryValue};
 use rivers_driver_sdk::ConnectionParams;
 
@@ -31,6 +32,68 @@ pub enum ExecutionContext {
     ViewRequest,
     /// Application init handler — DDL/admin ops permitted if whitelisted.
     ApplicationInit,
+}
+
+// ── Connection Acquirer (D2) ──────────────────────────────────────
+
+/// Errors returned by `ConnectionAcquirer::acquire`.
+///
+/// This is a slim, runtime-crate-local mirror of `riversd::pool::PoolError`
+/// so `DataViewExecutor` can route through the pool without depending on
+/// the binary crate (`riversd`). Error variants map 1:1 to the underlying
+/// pool error categories.
+#[derive(Debug, thiserror::Error)]
+pub enum AcquireError {
+    /// No pool registered for the requested datasource id.
+    #[error("no pool registered for datasource '{0}'")]
+    UnknownDatasource(String),
+    /// Circuit breaker is open for the datasource.
+    #[error("circuit breaker is open for datasource '{0}'")]
+    CircuitOpen(String),
+    /// Acquire timed out waiting for an available connection.
+    #[error("connection acquire timeout for datasource '{datasource}' ({timeout_ms}ms)")]
+    Timeout {
+        /// Datasource the timeout occurred on.
+        datasource: String,
+        /// Configured timeout that elapsed.
+        timeout_ms: u64,
+    },
+    /// Pool is draining — no new checkouts.
+    #[error("pool is draining for datasource '{0}'")]
+    Draining(String),
+    /// Underlying driver error.
+    #[error("driver error: {0}")]
+    Driver(String),
+    /// Other / opaque pool error (passes through human message).
+    #[error("pool error: {0}")]
+    Other(String),
+}
+
+/// Opaque connection guard — returned from `ConnectionAcquirer::acquire`.
+///
+/// Implementations own a checked-out `Box<dyn Connection>` and arrange for
+/// it to be returned to the underlying pool when dropped. The executor only
+/// needs `conn_mut()` for the duration of one DataView call.
+pub trait PooledConnection: Send {
+    /// Mutable access to the underlying connection.
+    fn conn_mut(&mut self) -> &mut Box<dyn Connection>;
+}
+
+/// Acquire connections from a per-datasource pool.
+///
+/// Implemented by `riversd::pool::PoolManager`. Held as
+/// `Arc<dyn ConnectionAcquirer>` inside `DataViewExecutor` so the runtime
+/// can route through the pool without depending on the binary crate.
+#[async_trait::async_trait]
+pub trait ConnectionAcquirer: Send + Sync {
+    /// Acquire a connection from the named datasource's pool.
+    async fn acquire(&self, datasource_id: &str) -> Result<Box<dyn PooledConnection>, AcquireError>;
+
+    /// Whether a pool is registered for the given datasource id.
+    ///
+    /// The executor uses this to fall back to the direct-connect path for
+    /// broker datasources (which are not registered as pools).
+    async fn has_pool(&self, datasource_id: &str) -> bool;
 }
 
 // ── DataView Errors ───────────────────────────────────────────────
@@ -550,6 +613,15 @@ pub fn build_response(
 
 // ── DataView Executor (X4) ──────────────────────────────────────────
 
+/// Inner outcome of `connect_and_execute_or_broker`: either a normal
+/// driver result, or an already-built `DataViewResponse` for the broker
+/// produce path (which short-circuits cache + max_rows handling).
+enum FactoryOutcome {
+    Query(Result<QueryResult, DriverError>),
+    BrokerResponse(DataViewResponse),
+}
+
+
 /// Execution facade for DataViews — combines registry lookup, parameter
 /// validation, query building, and driver execution in one call.
 ///
@@ -566,10 +638,23 @@ pub struct DataViewExecutor {
     cache: Arc<dyn DataViewCache>,
     /// Optional EventBus for cache invalidation events.
     event_bus: Option<Arc<rivers_core::EventBus>>,
+    /// Optional connection pool router (D2). When `Some`, DataView calls
+    /// route through `ConnectionAcquirer::acquire(datasource_id)` so they
+    /// reuse pooled connections. When `None`, the executor falls back to
+    /// `factory.connect(...)` per call (legacy/test path).
+    ///
+    /// Production wiring (`bundle_loader::load`) always installs an
+    /// acquirer; the `Option` exists so unit tests + the older transactional
+    /// constructor remain callable without wiring a pool.
+    acquirer: Option<Arc<dyn ConnectionAcquirer>>,
 }
 
 impl DataViewExecutor {
     /// Create a new executor with a registry, driver factory, datasource params, and cache.
+    ///
+    /// No `ConnectionAcquirer` is installed; calls to [`Self::execute`] will
+    /// fall back to `factory.connect(...)` per request. Production callers
+    /// should chain [`Self::with_acquirer`] to route through the pool.
     pub fn new(
         registry: DataViewRegistry,
         factory: Arc<DriverFactory>,
@@ -582,7 +667,25 @@ impl DataViewExecutor {
             datasource_params,
             cache,
             event_bus: None,
+            acquirer: None,
         }
+    }
+
+    /// Install a `ConnectionAcquirer` so DataView calls route through the
+    /// per-datasource pool. Returns `self` for builder-style chaining.
+    pub fn with_acquirer(mut self, acquirer: Arc<dyn ConnectionAcquirer>) -> Self {
+        self.acquirer = Some(acquirer);
+        self
+    }
+
+    /// Install a `ConnectionAcquirer` after construction.
+    pub fn set_acquirer(&mut self, acquirer: Arc<dyn ConnectionAcquirer>) {
+        self.acquirer = Some(acquirer);
+    }
+
+    /// Whether a `ConnectionAcquirer` has been installed (testing helper).
+    pub fn has_acquirer(&self) -> bool {
+        self.acquirer.is_some()
     }
 
     /// Find a DataView whose name ends with the given suffix.
@@ -704,7 +807,10 @@ impl DataViewExecutor {
             }
         }
 
-        // Use transaction connection if provided, otherwise connect from pool
+        // Use transaction connection if provided, otherwise route through the
+        // per-datasource pool (D2). Falls back to direct factory.connect when
+        // no acquirer is installed (legacy/test path) — this keeps existing
+        // unit tests that build a bare `DataViewExecutor::new(...)` working.
         let execute_result = if let Some(conn) = txn_conn {
             // Transaction path — use provided connection, skip caching
             if config.prepared && conn.has_prepared(&query.statement) {
@@ -716,28 +822,54 @@ impl DataViewExecutor {
             } else {
                 conn.execute(&query).await
             }
-        } else {
-            // Normal path — connect from factory
-            match self.factory.connect(driver_name, ds_params).await {
-                Ok(mut conn) => {
-                    if config.prepared && conn.has_prepared(&query.statement) {
-                        conn.execute_prepared(&query).await
-                    } else if config.prepared {
-                        conn.prepare(&query.statement).await
-                            .map_err(|e| DataViewError::Driver(format!("prepare: {e}")))?;
-                        conn.execute_prepared(&query).await
-                    } else {
-                        conn.execute(&query).await
+        } else if let Some(ref acquirer) = self.acquirer {
+            // Pool path (D2) — `acquire` resolves the datasource id to a pool
+            // and returns an RAII guard. Single checkout for the whole call;
+            // dropped automatically once `guard` falls out of scope at the
+            // end of the surrounding scope.
+            //
+            // `has_pool` lets us route broker datasources (which have no pool
+            // registered) through the legacy direct-connect path.
+            let datasource_id = config.datasource.as_str();
+            if acquirer.has_pool(datasource_id).await {
+                match acquirer.acquire(datasource_id).await {
+                    Ok(mut guard) => {
+                        let conn = guard.conn_mut();
+                        if config.prepared && conn.has_prepared(&query.statement) {
+                            conn.execute_prepared(&query).await
+                        } else if config.prepared {
+                            conn.prepare(&query.statement).await
+                                .map_err(|e| DataViewError::Driver(format!("prepare: {e}")))?;
+                            conn.execute_prepared(&query).await
+                        } else {
+                            conn.execute(&query).await
+                        }
                     }
+                    Err(e) => return Err(DataViewError::Pool(format!("pool acquire failed: {e}"))),
                 }
-                Err(DriverError::UnknownDriver(_)) => {
-                    // Broker produce path — transactions don't apply to message brokers
-                    let invalidates = config.invalidates.clone();
-                    let response = self.execute_broker_produce(driver_name, ds_params, &query, start, trace_id).await?;
-                    self.run_cache_invalidation(name, &invalidates, trace_id).await;
-                    return Ok(response);
+            } else {
+                // No pool registered → direct-connect path (broker or pre-wired test).
+                match self.connect_and_execute_or_broker(
+                    driver_name, ds_params, &query, config, name, start, trace_id,
+                ).await? {
+                    FactoryOutcome::Query(r) => r,
+                    FactoryOutcome::BrokerResponse(resp) => return Ok(resp),
                 }
-                Err(e) => return Err(DataViewError::Pool(format!("connection failed: {e}"))),
+            }
+        } else {
+            // No acquirer installed — legacy direct-connect path. We log at
+            // WARN once-per-call so it's noticeable in production but doesn't
+            // break test fixtures that drive the executor without a pool.
+            tracing::warn!(
+                dataview = %name,
+                datasource = %config.datasource,
+                "DataViewExecutor has no ConnectionAcquirer installed; falling back to factory.connect (per-call handshake)"
+            );
+            match self.connect_and_execute_or_broker(
+                driver_name, ds_params, &query, config, name, start, trace_id,
+            ).await? {
+                FactoryOutcome::Query(r) => r,
+                FactoryOutcome::BrokerResponse(resp) => return Ok(resp),
             }
         };
 
@@ -775,6 +907,44 @@ impl DataViewExecutor {
         self.run_cache_invalidation(name, &config.invalidates, trace_id).await;
 
         Ok(build_response(Arc::new(query_result), start, false, trace_id.to_string()))
+    }
+
+    /// Helper: factory.connect + execute, with the broker-produce fallback
+    /// preserved (used by both the no-pool-registered branch and the
+    /// no-acquirer-installed branch of `execute`).
+    #[allow(clippy::too_many_arguments)]
+    async fn connect_and_execute_or_broker(
+        &self,
+        driver_name: &str,
+        ds_params: &ConnectionParams,
+        query: &Query,
+        config: &DataViewConfig,
+        name: &str,
+        start: Instant,
+        trace_id: &str,
+    ) -> Result<FactoryOutcome, DataViewError> {
+        match self.factory.connect(driver_name, ds_params).await {
+            Ok(mut conn) => {
+                let r = if config.prepared && conn.has_prepared(&query.statement) {
+                    conn.execute_prepared(query).await
+                } else if config.prepared {
+                    conn.prepare(&query.statement).await
+                        .map_err(|e| DataViewError::Driver(format!("prepare: {e}")))?;
+                    conn.execute_prepared(query).await
+                } else {
+                    conn.execute(query).await
+                };
+                Ok(FactoryOutcome::Query(r))
+            }
+            Err(DriverError::UnknownDriver(_)) => {
+                // Broker produce path — transactions don't apply to message brokers.
+                let invalidates = config.invalidates.clone();
+                let response = self.execute_broker_produce(driver_name, ds_params, query, start, trace_id).await?;
+                self.run_cache_invalidation(name, &invalidates, trace_id).await;
+                Ok(FactoryOutcome::BrokerResponse(response))
+            }
+            Err(e) => Err(DataViewError::Pool(format!("connection failed: {e}"))),
+        }
     }
 
     /// Execute a DDL statement or admin operation (ApplicationInit context only).

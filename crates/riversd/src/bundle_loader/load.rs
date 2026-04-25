@@ -505,6 +505,50 @@ pub async fn load_and_wire_bundle(
 
     let factory = Arc::new(factory);
 
+    // ── D2: Register one ConnectionPool per datasource ────────────────
+    //
+    // Pools key by the same namespaced datasource id used everywhere else
+    // in the loader (`entry_point:ds_name`). Pool config uses defaults
+    // (max_size=10, idle=300s, lifetime=30min) — per-app pool configuration
+    // is a future feature. Brokers (which lack a registered DatabaseDriver)
+    // are skipped silently — the executor falls back to the legacy
+    // direct-connect path for those datasources.
+    for (ds_id, ds_params) in ds_params.iter() {
+        let driver_name = ds_params
+            .options
+            .get("driver")
+            .map(|s| s.as_str())
+            .unwrap_or(ds_id.as_str());
+        let Some(driver) = factory.get_driver(driver_name) else {
+            tracing::debug!(
+                datasource = %ds_id,
+                driver = %driver_name,
+                "skipping pool registration — no DatabaseDriver registered (broker or unknown)"
+            );
+            continue;
+        };
+        let pool = Arc::new(crate::pool::ConnectionPool::new(
+            ds_id.clone(),
+            crate::pool::PoolConfig::default(),
+            driver.clone(),
+            ds_params.clone(),
+            ctx.event_bus.clone(),
+        ));
+        if let Err(e) = ctx.pool_manager.add_pool(pool).await {
+            tracing::warn!(
+                datasource = %ds_id,
+                error = %e,
+                "pool registration failed (continuing with degraded direct-connect path)"
+            );
+        } else {
+            tracing::info!(
+                datasource = %ds_id,
+                driver = %driver_name,
+                "pool registered"
+            );
+        }
+    }
+
     // Build DataView cache — L1 always active, L2 only when StorageEngine available.
     let cache_policy = build_cache_policy_from_bundle(&bundle);
     let mut tiered = rivers_runtime::tiered_cache::TieredDataViewCache::new(cache_policy.clone());
@@ -692,6 +736,9 @@ pub async fn load_and_wire_bundle(
     let ds_params = Arc::new(ds_params);
     let mut executor = DataViewExecutor::new(registry, factory.clone(), ds_params.clone(), cache);
     executor.set_event_bus(ctx.event_bus.clone());
+    // D2: route DataView execution through the per-datasource pool.
+    // The acquirer is the same `PoolManager` we just registered pools on.
+    executor.set_acquirer(ctx.pool_manager.clone() as Arc<dyn rivers_runtime::ConnectionAcquirer>);
     let executor = Arc::new(executor);
     *ctx.dataview_executor.write().await = Some(executor.clone());
     ctx.driver_factory = Some(factory.clone());

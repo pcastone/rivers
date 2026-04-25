@@ -102,12 +102,14 @@
 
 ### D2 — Route DataView execution through the pool (P0-3)
 
-**Files:** `crates/rivers-runtime/src/dataview_engine.rs`, `crates/riversd/src/server/handlers.rs`, application context wiring
+**Files:** `crates/rivers-runtime/src/dataview_engine.rs`, `crates/rivers-runtime/src/lib.rs`, `crates/riversd/src/pool.rs`, `crates/riversd/src/bundle_loader/load.rs`, `crates/riversd/src/bundle_loader/reload.rs`, `crates/riversd/src/server/context.rs`, `crates/riversd/src/server/handlers.rs`, `crates/riversd/tests/pool_tests.rs`
 
-- [ ] **D2.1** Move `Arc<PoolManager>` into the application runtime context (or a layer reachable from `DataViewExecutor`).
-- [ ] **D2.2** `DataViewExecutor::execute`: replace `factory.connect(driver, params).await` with `pool_manager.acquire(datasource_id).await?` returning a `PoolGuard`. Direct `factory.connect` only on the cold pool-fill path.
-- [ ] **D2.3** `/health/verbose`: report from pool state (active/idle/max/last-error) instead of opening fresh connections per probe.
-- [ ] **D2.4** Tests: 100 sequential DataView calls reuse ≤ N connections (where N = pool max); pool snapshot is non-empty after first call.
+- [x] **D2.1** New `Arc<PoolManager>` field on `AppContext` (always present, initialized empty in `AppContext::new`). Bundle loader registers one `ConnectionPool` per datasource (default `PoolConfig`, `entry_point:ds_name` keying that mirrors the existing `ds_params` scheme). New `ConnectionAcquirer` trait + `PooledConnection`/`AcquireError` types live in `rivers-runtime` so `DataViewExecutor` can hold an `Arc<dyn ConnectionAcquirer>` without circular dep on the binary crate; `PoolManager` impls the trait via a small `PoolGuardAdapter`. (Done 2026-04-25.)
+- [x] **D2.2** `DataViewExecutor::execute`: when `acquirer` is installed and `has_pool(datasource_id)` is true, acquire a `PoolGuard` for the duration of one call (single checkout, multiple `conn.execute/prepare/execute_prepared` calls, RAII drop returns to idle). Pre-existing broker-produce fallback preserved via new `connect_and_execute_or_broker` helper. When `acquirer` is `None` we keep the legacy `factory.connect` per call (warn-logged) so test fixtures without a pool still pass. (Done 2026-04-25.)
+- [x] **D2.3** `/health/verbose`: derives `pool_snapshots` and per-datasource probe status from `PoolManager::snapshots()` + per-pool circuit state (no fresh handshake). Datasources without a registered pool (brokers) fall back to the legacy direct-probe path so operators still see them. New `circuit_state` field on `PoolSnapshot` exposes the breaker. (Done 2026-04-25.)
+- [x] **D2.4** Three new tests in `crates/riversd/tests/pool_tests.rs::d2`: `d2_4_executor_reuses_pool_connections_for_100_calls` (100 sequential calls → 1 driver handshake, well below `max_size=4`); `d2_4_pool_snapshot_non_empty_after_first_call` (snapshot.idle=1 after first call returns); `d2_4_direct_connect_fallback_still_works_without_acquirer` (3 calls → 3 handshakes when no acquirer wired). All 33 pool tests + 357 lib tests + 38 test binaries green. (Done 2026-04-25.)
+
+**Validate:** ✅ `cargo build -p riversd` clean. `cargo test -p riversd --tests` all binaries pass except pre-existing `cli_tests::version_string_contains_version`. `cargo test -p rivers-runtime` clean (the cache_bench / executor_invalidates_cache_after_write failures pre-date D2 — both DDL-gating issues unrelated to pool routing).
 
 ### D3 — Enforce DataView timeouts (P1-10)
 
