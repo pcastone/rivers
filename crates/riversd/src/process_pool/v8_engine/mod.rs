@@ -3,6 +3,7 @@
 //! This module contains all code that depends on the `v8` crate.
 //! Gated behind #[cfg(feature = "static-engines")].
 
+mod broker_dispatch;
 mod catalog;
 mod direct_dispatch;
 mod proxy_codegen;

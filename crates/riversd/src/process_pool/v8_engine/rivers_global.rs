@@ -1,5 +1,5 @@
 //! `inject_rivers_global()` -- Rivers.log, Rivers.crypto, Rivers.keystore,
-//! Rivers.env bindings and their callbacks.
+//! Rivers.env, Rivers.db bindings and their callbacks.
 
 use super::super::types::*;
 use super::task_locals::*;
@@ -593,6 +593,48 @@ pub(super) fn inject_rivers_global(
     let direct_key = v8_str(scope, "__directDispatch")?;
     rivers_obj.set(scope, direct_key.into(), direct_dispatch_fn.into());
 
+    // ── Rivers.__brokerPublish -- broker producer dispatch (BR-2026-04-23) ──
+    // Called by broker-proxy codegen; handlers reach it via
+    // `ctx.datasource("<broker>").publish(msg)`. See
+    // bugs/bugreport_2026-04-23.md.
+    let broker_publish_fn = v8::Function::new(
+        scope,
+        super::broker_dispatch::rivers_broker_publish_callback,
+    )
+    .ok_or_else(|| TaskError::Internal("failed to create __brokerPublish".into()))?;
+    let broker_key = v8_str(scope, "__brokerPublish")?;
+    rivers_obj.set(scope, broker_key.into(), broker_publish_fn.into());
+
+    // ── Rivers.db (imperative transaction API — spec §6 alternate form) ──
+    // begin/commit/rollback/batch mirror the ctx.transaction() RAII form
+    // but give handlers explicit control over the transaction boundary.
+    // ctx.dataview() calls inside an open Rivers.db transaction are routed
+    // through the held connection (same TransactionMap as ctx.transaction).
+    let db_obj = v8::Object::new(scope);
+
+    let db_begin_fn = v8::Function::new(scope, db_begin_callback)
+        .ok_or_else(|| TaskError::Internal("failed to create Rivers.db.begin".into()))?;
+    let db_begin_key = v8_str(scope, "begin")?;
+    db_obj.set(scope, db_begin_key.into(), db_begin_fn.into());
+
+    let db_commit_fn = v8::Function::new(scope, db_commit_callback)
+        .ok_or_else(|| TaskError::Internal("failed to create Rivers.db.commit".into()))?;
+    let db_commit_key = v8_str(scope, "commit")?;
+    db_obj.set(scope, db_commit_key.into(), db_commit_fn.into());
+
+    let db_rollback_fn = v8::Function::new(scope, db_rollback_callback)
+        .ok_or_else(|| TaskError::Internal("failed to create Rivers.db.rollback".into()))?;
+    let db_rollback_key = v8_str(scope, "rollback")?;
+    db_obj.set(scope, db_rollback_key.into(), db_rollback_fn.into());
+
+    let db_batch_fn = v8::Function::new(scope, db_batch_callback)
+        .ok_or_else(|| TaskError::Internal("failed to create Rivers.db.batch".into()))?;
+    let db_batch_key = v8_str(scope, "batch")?;
+    db_obj.set(scope, db_batch_key.into(), db_batch_fn.into());
+
+    let db_key = v8_str(scope, "db")?;
+    rivers_obj.set(scope, db_key.into(), db_obj.into());
+
     // ── Rivers.env -- task environment variables (V2) ─────────────
     let env_map = TASK_ENV.with(|e| e.borrow().clone()).unwrap_or_default();
     let env_json = serde_json::to_value(&env_map)
@@ -635,4 +677,322 @@ pub(super) fn inject_rivers_global(
         .ok_or_else(|| TaskError::Internal("failed to run Rivers extras".into()))?;
 
     Ok(())
+}
+
+// ── Rivers.db callback helpers ────────────────────────────────────────────
+
+fn db_throw(scope: &mut v8::HandleScope, message: &str) {
+    if let Some(msg) = v8::String::new(scope, message) {
+        let exc = v8::Exception::error(scope, msg);
+        scope.throw_exception(exc);
+    }
+}
+
+/// `Rivers.db.begin(datasource)` — begin an explicit transaction.
+///
+/// Spec §6: stores the connection in `TASK_TRANSACTION` so subsequent
+/// `ctx.dataview()` calls route through the held connection.
+fn db_begin_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    use std::sync::Arc;
+    use rivers_runtime::rivers_driver_sdk::DriverError;
+
+    let ds_name = args.get(0).to_rust_string_lossy(scope);
+    if ds_name.is_empty() {
+        db_throw(scope, "Rivers.db.begin: datasource name is required");
+        return;
+    }
+
+    // Reject nested transactions (spec §6.2)
+    let already_active = TASK_TRANSACTION.with(|t| t.borrow().is_some());
+    if already_active {
+        db_throw(scope, "TransactionError: nested transactions not supported");
+        return;
+    }
+
+    // Resolve datasource config
+    let resolved = TASK_DS_CONFIGS.with(|c| c.borrow().get(&ds_name).cloned());
+    let resolved = match resolved {
+        Some(r) => r,
+        None => {
+            db_throw(scope, &format!("TransactionError: datasource \"{ds_name}\" not found in task config"));
+            return;
+        }
+    };
+
+    // Get driver factory
+    let factory = TASK_DRIVER_FACTORY.with(|f| f.borrow().clone());
+    let factory = match factory {
+        Some(f) => f,
+        None => {
+            db_throw(scope, "TransactionError: driver factory not available");
+            return;
+        }
+    };
+
+    // Get tokio runtime
+    let rt = match get_rt_handle() {
+        Ok(r) => r,
+        Err(e) => {
+            db_throw(scope, &format!("TransactionError: {e}"));
+            return;
+        }
+    };
+
+    // Connect and begin transaction
+    let txn_map = Arc::new(crate::transaction::TransactionMap::new());
+    let txn_map_ref = txn_map.clone();
+    let ds_for_begin = ds_name.clone();
+    let begin_outcome: Result<(), DriverError> = rt.block_on(async move {
+        let conn = factory.connect(&resolved.driver_name, &resolved.params).await?;
+        txn_map_ref.begin(&ds_for_begin, conn).await
+    });
+
+    match begin_outcome {
+        Ok(()) => {
+            TASK_TRANSACTION.with(|t| {
+                *t.borrow_mut() = Some(TaskTransactionState {
+                    map: txn_map,
+                    datasource: ds_name,
+                });
+            });
+        }
+        Err(e) => {
+            let msg = match &e {
+                DriverError::Unsupported(_) => {
+                    format!("TransactionError: datasource \"{ds_name}\" does not support transactions")
+                }
+                _ => format!("TransactionError: begin failed: {e}"),
+            };
+            db_throw(scope, &msg);
+        }
+    }
+}
+
+/// `Rivers.db.commit(datasource)` — commit the active explicit transaction.
+fn db_commit_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let ds_name = args.get(0).to_rust_string_lossy(scope);
+
+    // Take the transaction state
+    let state = TASK_TRANSACTION.with(|t| t.borrow_mut().take());
+    let state = match state {
+        Some(s) => s,
+        None => {
+            db_throw(scope, "TransactionError: no active transaction to commit");
+            return;
+        }
+    };
+
+    // Validate datasource matches (if caller passed one)
+    if !ds_name.is_empty() && state.datasource != ds_name {
+        let msg = format!(
+            "TransactionError: active transaction is on \"{}\", not \"{ds_name}\"",
+            state.datasource
+        );
+        // Restore state before throwing
+        TASK_TRANSACTION.with(|t| *t.borrow_mut() = Some(state));
+        db_throw(scope, &msg);
+        return;
+    }
+
+    let rt = match get_rt_handle() {
+        Ok(r) => r,
+        Err(e) => {
+            // Restore state so caller can rollback
+            TASK_TRANSACTION.with(|t| *t.borrow_mut() = Some(state));
+            db_throw(scope, &format!("TransactionError: {e}"));
+            return;
+        }
+    };
+
+    let ds = state.datasource.clone();
+    let commit_res = rt.block_on(state.map.commit(&ds));
+    // Connection drops → pool slot released
+
+    if let Err(e) = commit_res {
+        let driver_msg = format!("{e}");
+        // Spec §6 + financial-correctness: stash for TaskError::TransactionCommitFailed upgrade.
+        TASK_COMMIT_FAILED.with(|c| {
+            *c.borrow_mut() = Some((ds.clone(), driver_msg.clone()));
+        });
+        db_throw(
+            scope,
+            &format!("TransactionError: commit failed on datasource '{ds}': {driver_msg}"),
+        );
+    }
+}
+
+/// `Rivers.db.rollback(datasource)` — rollback the active explicit transaction.
+fn db_rollback_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let ds_name = args.get(0).to_rust_string_lossy(scope);
+
+    let state = TASK_TRANSACTION.with(|t| t.borrow_mut().take());
+    let state = match state {
+        Some(s) => s,
+        None => {
+            // No active transaction — silently succeed (idempotent rollback).
+            return;
+        }
+    };
+
+    if !ds_name.is_empty() && state.datasource != ds_name {
+        let msg = format!(
+            "TransactionError: active transaction is on \"{}\", not \"{ds_name}\"",
+            state.datasource
+        );
+        TASK_TRANSACTION.with(|t| *t.borrow_mut() = Some(state));
+        db_throw(scope, &msg);
+        return;
+    }
+
+    let rt = match get_rt_handle() {
+        Ok(r) => r,
+        Err(_) => return, // best-effort
+    };
+
+    let ds = state.datasource.clone();
+    if let Err(e) = rt.block_on(state.map.rollback(&ds)) {
+        tracing::warn!(
+            target: "rivers.handler",
+            datasource = %ds,
+            error = %e,
+            "Rivers.db.rollback: rollback failed"
+        );
+    }
+}
+
+/// `Rivers.db.batch(dataview, [...params])` — execute a DataView once per
+/// param entry and return an array of results.
+///
+/// Routes each execution through the active `TASK_TRANSACTION` connection
+/// (if any) exactly as `ctx.dataview()` does — the TransactionMap
+/// take/return protocol is used per-iteration so the connection is
+/// exclusively held for each call.
+fn db_batch_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use rivers_runtime::rivers_driver_sdk::types::QueryValue;
+
+    let dv_name = args.get(0).to_rust_string_lossy(scope);
+
+    // Parse the params array from arg[1]
+    let params_val = args.get(1);
+    let params_json: Vec<serde_json::Map<String, serde_json::Value>> =
+        if params_val.is_array() || params_val.is_object() {
+            if let Some(json_str) = v8::json::stringify(scope, params_val) {
+                let s = json_str.to_rust_string_lossy(scope);
+                match serde_json::from_str::<serde_json::Value>(&s) {
+                    Ok(serde_json::Value::Array(arr)) => arr
+                        .into_iter()
+                        .filter_map(|v| {
+                            if let serde_json::Value::Object(m) = v { Some(m) } else { None }
+                        })
+                        .collect(),
+                    _ => vec![],
+                }
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+
+    let executor = TASK_DV_EXECUTOR.with(|e| e.borrow().clone());
+    let executor = match executor {
+        Some(e) => e,
+        None => {
+            db_throw(scope, &format!("Rivers.db.batch: no DataViewExecutor available"));
+            return;
+        }
+    };
+
+    // Namespace the dataview name (same logic as ctx_dataview_callback)
+    let namespaced = TASK_DV_NAMESPACE.with(|n| {
+        n.borrow().as_ref()
+            .filter(|ns| !ns.is_empty() && !dv_name.contains(':'))
+            .map(|ns| format!("{ns}:{dv_name}"))
+            .unwrap_or_else(|| dv_name.clone())
+    });
+
+    let trace_id = TASK_TRACE_ID.with(|t| t.borrow().clone()).unwrap_or_default();
+
+    let rt = match get_rt_handle() {
+        Ok(r) => r,
+        Err(e) => {
+            db_throw(scope, &format!("Rivers.db.batch: {e}"));
+            return;
+        }
+    };
+
+    // Execute each param set, routing through the active transaction if present.
+    let results: Vec<serde_json::Value> = {
+        let mut out = Vec::with_capacity(params_json.len());
+        for entry in params_json {
+            let qp: std::collections::HashMap<String, QueryValue> = entry
+                .into_iter()
+                .map(|(k, v)| (k, super::datasource::json_to_query_value(v)))
+                .collect();
+
+            let txn_state: Option<(std::sync::Arc<crate::transaction::TransactionMap>, String)> =
+                TASK_TRANSACTION.with(|t| {
+                    t.borrow().as_ref().map(|s| (s.map.clone(), s.datasource.clone()))
+                });
+
+            let exec_res = rt.block_on(async {
+                if let Some((map, ds)) = txn_state {
+                    if let Some(mut conn) = map.take_connection(&ds).await {
+                        let res = executor
+                            .execute(&namespaced, qp, "GET", &trace_id, Some(&mut conn))
+                            .await;
+                        map.return_connection(&ds, conn).await;
+                        res
+                    } else {
+                        Err(rivers_runtime::dataview_engine::DataViewError::Driver(
+                            format!("transaction connection for '{ds}' unavailable"),
+                        ))
+                    }
+                } else {
+                    executor.execute(&namespaced, qp, "GET", &trace_id, None).await
+                }
+            });
+
+            match exec_res {
+                Ok(response) => {
+                    out.push(serde_json::json!({
+                        "rows": response.query_result.rows,
+                        "affected_rows": response.query_result.affected_rows,
+                        "last_insert_id": response.query_result.last_insert_id,
+                    }));
+                }
+                Err(e) => {
+                    // On any execution error, throw JS exception immediately
+                    let msg = format!("Rivers.db.batch('{}') error: {e}", dv_name);
+                    db_throw(scope, &msg);
+                    return;
+                }
+            }
+        }
+        out
+    };
+
+    // Convert results array to V8
+    let json_str = serde_json::to_string(&results).unwrap_or_else(|_| "[]".into());
+    if let Some(v8_str) = v8::String::new(scope, &json_str) {
+        if let Some(parsed) = v8::json::parse(scope, v8_str.into()) {
+            rv.set(parsed);
+        }
+    }
 }

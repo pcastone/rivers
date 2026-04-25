@@ -7,6 +7,13 @@ name       = "canary-kafka"
 driver     = "kafka"
 host       = "192.168.2.203"
 port       = 9092
+# The kafka plugin's producer binds one topic at connect-time (taken from
+# `database` when no subscriptions exist). The consumer side takes the
+# MessageConsumer view-id as its subscription topic. For produce→consume
+# delivery to work on the same canary-kafka datasource, both sides must
+# resolve to the same topic — so this `database` value matches the
+# MessageConsumer view name (`kafka_consume`).
+database   = "kafka_consume"
 nopassword = true
 
 [data.datasources.canary-redis]
@@ -25,6 +32,106 @@ nopassword = true
 locale                = "en_US"
 seed                  = 0
 max_records_per_query = 50
+
+# CS3 — Activity Feed scenario SQLite events store (spec §6 AF-7).
+[data.datasources.events_db]
+name       = "events_db"
+driver     = "sqlite"
+database   = "canary-streams/data/canary-streams-events.db"
+nopassword = true
+introspect = false
+
+# CS3 — Activity Feed DataViews.
+# events table: id TEXT PK, actor, target_user, event_type, payload,
+#               published_at TEXT (ISO-8601), consumed_at TEXT.
+# AF-4 pagination + date range; AF-3 server-side target_user filter.
+
+[data.dataviews.events_insert]
+name       = "events_insert"
+datasource = "events_db"
+query      = "INSERT INTO events (id, actor, target_user, event_type, payload, published_at, consumed_at) VALUES ($id, $actor, $target_user, $event_type, $payload, $published_at, $consumed_at)"
+
+[[data.dataviews.events_insert.parameters]]
+name = "id"
+type = "string"
+required = true
+[[data.dataviews.events_insert.parameters]]
+name = "actor"
+type = "string"
+required = true
+[[data.dataviews.events_insert.parameters]]
+name = "target_user"
+type = "string"
+required = true
+[[data.dataviews.events_insert.parameters]]
+name = "event_type"
+type = "string"
+required = true
+[[data.dataviews.events_insert.parameters]]
+name = "payload"
+type = "string"
+required = false
+[[data.dataviews.events_insert.parameters]]
+name = "published_at"
+type = "string"
+required = true
+[[data.dataviews.events_insert.parameters]]
+name = "consumed_at"
+type = "string"
+required = false
+
+[data.dataviews.events_for_user]
+name       = "events_for_user"
+datasource = "events_db"
+# Empty-string sentinels for `since` / `until` mean "no filter" —
+# the param binder doesn't accept null for required=false string params
+# so we pass "" from the handler and the SQL treats "" as the no-bound case.
+query      = "SELECT id, actor, target_user, event_type, payload, published_at, consumed_at FROM events WHERE target_user = $target_user AND ($since = '' OR published_at >= $since) AND ($until = '' OR published_at <= $until) ORDER BY published_at ASC LIMIT $limit OFFSET $offset"
+
+[[data.dataviews.events_for_user.parameters]]
+name = "target_user"
+type = "string"
+required = true
+[[data.dataviews.events_for_user.parameters]]
+name = "since"
+type = "string"
+required = false
+[[data.dataviews.events_for_user.parameters]]
+name = "until"
+type = "string"
+required = false
+[[data.dataviews.events_for_user.parameters]]
+name = "limit"
+type = "integer"
+required = false
+default  = 100
+[[data.dataviews.events_for_user.parameters]]
+name = "offset"
+type = "integer"
+required = false
+default  = 0
+
+[data.dataviews.events_cleanup]
+name       = "events_cleanup"
+datasource = "events_db"
+query      = "DELETE FROM events WHERE id LIKE $id_prefix"
+
+[[data.dataviews.events_cleanup.parameters]]
+name = "id_prefix"
+type = "string"
+required = true
+
+# Wipes all events for a given target_user — used in cleanup-before to ensure
+# a clean slate for the activity-feed scenario regardless of prior run debris.
+[data.dataviews.events_cleanup_user]
+name       = "events_cleanup_user"
+datasource = "events_db"
+query      = "DELETE FROM events WHERE target_user = $target_user"
+
+[[data.dataviews.events_cleanup_user.parameters]]
+name = "target_user"
+type = "string"
+required = true
 
 # ─────────────────────────────────────────────
 # DataViews — faker data for streaming and polling
@@ -154,35 +261,95 @@ module     = "libraries/handlers/streaming-rest.ts"
 entrypoint = "streamPoison"
 
 # ─────────────────────────────────────────────
-# Views — Kafka MessageConsumer (disabled — no broker)
+# Views — Kafka MessageConsumer + verify (BR-2026-04-23 re-enabled)
 # ─────────────────────────────────────────────
+# Re-enabled as part of the broker-publish bridge work — handlers can
+# now produce via ctx.datasource("canary-kafka").publish(...), the
+# consumer persists to ctx.store, kafka_verify reads it back.
 
-# [api.views.kafka_consume]
-# view_type = "MessageConsumer"
-# auth      = "none"
-#
-# [api.views.kafka_consume.handler]
-# type       = "codecomponent"
-# language   = "typescript"
-# module     = "libraries/handlers/kafka-consumer.ts"
-# entrypoint = "onMessage"
-# resources  = ["canary-kafka"]
+[api.views.kafka_consume]
+view_type = "MessageConsumer"
+auth      = "none"
 
-# ─────────────────────────────────────────────
-# Views — Kafka verify (disabled — no broker)
-# ─────────────────────────────────────────────
+[api.views.kafka_consume.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/kafka-consumer.ts"
+entrypoint = "onMessage"
+resources  = ["canary-kafka"]
 
-# [api.views.kafka_verify]
-# path      = "/canary/stream/kafka/verify"
-# method    = "GET"
-# view_type = "Rest"
-# auth      = "none"
-#
-# [api.views.kafka_verify.handler]
-# type       = "codecomponent"
-# language   = "typescript"
-# module     = "libraries/handlers/kafka-consumer.ts"
-# entrypoint = "kafkaVerify"
+# BR5 delivery wiring — registers this view with the MessageConsumer
+# registry (which is empty if on_event is absent, producing
+# "consumers:0" in the startup log and silently dropping messages).
+# Topic must match the broker bridge's subscription (view-id derived).
+[api.views.kafka_consume.on_event]
+topic   = "kafka_consume"
+handler = "onMessage"
+
+[api.views.kafka_verify]
+path      = "/canary/stream/kafka/verify"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.kafka_verify.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/kafka-consumer.ts"
+entrypoint = "kafkaVerify"
+
+# ── BR4 — publish-surface atomic tests ─────────────────────────
+
+[api.views.kafka_publish_receipt]
+path      = "/canary/stream/kafka/publish-receipt"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.kafka_publish_receipt.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/broker-publish-tests.ts"
+entrypoint = "kafkaPublishReceipt"
+resources  = ["canary-kafka"]
+
+[api.views.kafka_publish_unknown_ds]
+path      = "/canary/stream/kafka/publish-unknown-ds"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.kafka_publish_unknown_ds.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/broker-publish-tests.ts"
+entrypoint = "kafkaPublishUnknownDatasource"
+
+[api.views.kafka_publish_missing_dest]
+path      = "/canary/stream/kafka/publish-missing-dest"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.kafka_publish_missing_dest.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/broker-publish-tests.ts"
+entrypoint = "kafkaPublishMissingDestination"
+resources  = ["canary-kafka"]
+
+[api.views.kafka_publish_then_consume]
+path      = "/canary/stream/kafka/publish-then-consume"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.kafka_publish_then_consume.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/broker-publish-tests.ts"
+entrypoint = "kafkaPublishThenConsume"
+resources  = ["canary-kafka"]
 
 # ─────────────────────────────────────────────
 # Views — Polling with hash diff
@@ -223,3 +390,34 @@ language   = "typescript"
 module     = "libraries/handlers/poll-handler.ts"
 entrypoint = "pollData"
 dataview   = "poll_data"
+
+# ── Scenario probe (CS1.4) ────────────────────────────────
+# SCENARIO-STREAM-PROBE — validates the scenario-harness.ts envelope
+# shape end-to-end before CS3 Activity Feed scenario is built on it.
+
+[api.views.scenario_probe]
+path      = "/canary/scenarios/stream/probe"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.scenario_probe.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/scenario-probe.ts"
+entrypoint = "scenarioProbe"
+
+# CS3 — Activity Feed scenario orchestrator.
+
+[api.views.scenario_activity_feed]
+path      = "/canary/scenarios/stream/activity-feed"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.scenario_activity_feed.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/scenario-activity-feed.ts"
+entrypoint = "scenarioActivityFeed"
+resources  = ["canary-kafka"]

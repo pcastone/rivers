@@ -36,9 +36,13 @@ default  = 10
 # ─────────────────────────────────────────────
 
 [data.datasources.pg]
-name       = "pg"
-driver     = "postgres"
-nopassword = true
+name               = "pg"
+driver             = "postgres"
+host               = "192.168.2.209"
+port               = 5432
+database           = "rivers"
+username           = "rivers"
+credentials_source = "lockbox://postgres/test"
 
 [data.datasources.sqlite_cross]
 name       = "sqlite_cross"
@@ -47,6 +51,65 @@ nopassword = true
 
 [data.datasources.sqlite_cross.config]
 path = "data/canary-txn.db"
+
+# Filesystem datasource for CS4 Document Pipeline scenario (spec §7 DOC-7).
+# Pattern mirrors canary-filesystem/app.toml — chroot-sandboxed at /tmp;
+# the scenario handler confines its work to a unique subdir.
+[data.datasources.fs_workspace]
+name       = "fs_workspace"
+driver     = "filesystem"
+database   = "/tmp"
+nopassword = true
+
+# CS4.9 — Exec datasource for Document Pipeline steps 8/9/10.
+# DEPLOY-TIME STEP (option B): after `cargo deploy`, the operator runs
+#     riverpackage import-exec wc <deployed-path-to>/libraries/scripts/wc-json.sh
+# and pastes the generated `path` + `sha256` into the commands.wc block
+# below. The sha256 shown here matches the script contents as shipped in
+# the source bundle — re-hashing is only required if the script is
+# modified or the deploy path differs from the source-bundle layout.
+#
+# Exec driver config lives under `.extra` because that's what the
+# datasource-config serde shape accepts as a flat `HashMap<String,String>`
+# of driver-specific options. Nested tables (like `commands.wc`) are
+# encoded as quoted dotted keys — the exec driver's parser splits them
+# (`commands.{name}.{field}`) back into per-command config at connect time.
+# Quoted values because TOML requires quoting for dotted keys.
+[data.datasources.exec_tools]
+name       = "exec_tools"
+driver     = "rivers-exec"
+nopassword = true
+introspect = false
+
+[data.datasources.exec_tools.extra]
+run_as_user                = "nobody"
+working_directory          = "/tmp"
+max_concurrent             = "10"
+"commands.wc.path"         = "/Users/pcastone/Projects/rust/rivers.pub/canary-bundle/canary-handlers/libraries/scripts/wc-json.sh"
+"commands.wc.sha256"       = "1573a43390b7237e583d90fd0ab01e45ced0332dd7fd6aaf47f93b10dc9d7a8f"
+"commands.wc.input_mode"   = "stdin"
+
+# CS4.9 — DataView surface for the scenario handler. Query operation is
+# inferred from the first whitespace-delimited token of `query` (per
+# rivers-driver-sdk types.rs Query::new, spec §2 SHAPE-7), so setting
+# query="query" makes rivers-exec see operation="query" — matching the
+# integration test (crates/rivers-plugin-exec/tests/integration_test.rs).
+# `command` picks the allowlisted command; `args` is JSON written to
+# stdin (per input_mode="stdin" above).
+[data.dataviews.exec_wc]
+name       = "exec_wc"
+datasource = "exec_tools"
+query      = "query"
+
+[[data.dataviews.exec_wc.parameters]]
+name     = "command"
+type     = "string"
+required = true
+
+[[data.dataviews.exec_wc.parameters]]
+name     = "args"
+type     = "json"
+required = false
 
 [data.dataviews.txn_pg_ping]
 name          = "txn_pg_ping"
@@ -742,3 +805,38 @@ type       = "codecomponent"
 language   = "typescript"
 module     = "libraries/handlers/ts-compliance/txn-unsupported.ts"
 entrypoint = "txnUnsupported"
+
+# ── Scenario probe (CS1.4) ────────────────────────────────
+# SCENARIO-RUNTIME-PROBE — validates the scenario-harness.ts envelope
+# shape end-to-end before CS4 Doc Pipeline scenario is built on it.
+
+[api.views.scenario_probe]
+path      = "/canary/scenarios/runtime/probe"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.scenario_probe.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/scenario-probe.ts"
+entrypoint = "scenarioProbe"
+
+# ── CS4 — Document Pipeline scenario endpoint ─────────────────────
+# Spec §7. Hosted in canary-handlers per CS0.1 (2026-04-23 decision).
+# Filesystem ops only; exec-driver-dependent steps (wc, allowlist
+# rejection, exec-side path traversal probe) are marked "deferred"
+# within the handler — CS4 ships a filesystem-scope MVP pending a
+# separate exec-driver wiring task.
+
+[api.views.scenario_doc_pipeline]
+path      = "/canary/scenarios/runtime/doc-pipeline"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.scenario_doc_pipeline.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/scenario-doc-pipeline.ts"
+entrypoint = "scenarioDocPipeline"

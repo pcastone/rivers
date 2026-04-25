@@ -210,6 +210,45 @@ interface DatasourceBuilder {
     withPutSchema(schema: string): DatasourceBuilder;
     withDeleteSchema(schema: string): DatasourceBuilder;
     build(): QueryResult;
+
+    /**
+     * Publish a message to a message-broker datasource (kafka, rabbitmq,
+     * nats, redis-streams). Only available when `name` resolves to a
+     * broker datasource; throws `Error("... not a broker datasource")`
+     * otherwise. BR-2026-04-23.
+     *
+     * @capability broker — driver implements `MessageBrokerDriver`.
+     */
+    publish?(message: OutboundMessage): PublishReceipt;
+}
+
+/**
+ * Broker publish message. Field names mirror the Rust
+ * `rivers-driver-sdk::broker::OutboundMessage` struct verbatim.
+ *
+ * - `destination` — topic (kafka), routing key (rabbitmq), subject (nats),
+ *   stream name (redis-streams). Required, non-empty.
+ * - `payload` — `string` (sent as UTF-8 bytes) OR any JSON-serialisable
+ *   value (auto JSON-stringified to bytes). Required.
+ * - `headers` — driver-specific metadata; all values coerced to strings.
+ * - `key` — partition key (kafka) or routing-key suffix (nats). Optional.
+ * - `reply_to` — NATS request/reply address. Optional.
+ */
+interface OutboundMessage {
+    destination: string;
+    payload: string | object | number | boolean | null;
+    headers?: Record<string, string>;
+    key?: string;
+    reply_to?: string;
+}
+
+/**
+ * Broker publish receipt. Both fields may be `null` — population is
+ * broker-specific (kafka sets both, NATS typically neither).
+ */
+interface PublishReceipt {
+    id: string | null;
+    metadata: string | null;
 }
 
 interface QueryResult {
@@ -271,6 +310,11 @@ export type HandlerFn = (ctx: ViewContext) => void | unknown;
  *                                  held-connection path of ctx.dataview
  *   @capability outbound_http    — view's allow_outbound_http = true;
  *                                  reserved for the future typed fetch API
+ *   @capability broker           — datasource's driver implements
+ *                                  MessageBrokerDriver (kafka, rabbitmq,
+ *                                  nats, redis-streams); ctx.datasource(n)
+ *                                  returns a proxy with .publish(msg).
+ *                                  BR-2026-04-23.
  *
  * Handlers that call a capability-gated surface without the gate enabled
  * will throw at runtime (`Unsupported`, `keystore not configured`, etc.).

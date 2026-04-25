@@ -711,7 +711,18 @@ fn validate_view(
     };
 
     check_unknown_keys(table, VIEW_FIELDS, file, table_path, results);
-    check_required_fields(table, VIEW_REQUIRED, file, table_path, results);
+
+    // MessageConsumer views are event-driven — no HTTP route, so path/method
+    // are forbidden by the runtime validator (see crates/riversd/src/
+    // view_engine/validation.rs). Restrict the required-fields check to the
+    // common view_type + handler pair for those views.
+    let view_type = table.get("view_type").and_then(|v| v.as_str()).unwrap_or("");
+    let required: &[&str] = if view_type == "MessageConsumer" {
+        &["view_type", "handler"]
+    } else {
+        VIEW_REQUIRED
+    };
+    check_required_fields(table, required, file, table_path, results);
 
     // Validate handler sub-table
     if let Some(handler) = table.get("handler") {

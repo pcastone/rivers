@@ -142,7 +142,8 @@ fn flags_with_serve() {
 fn version_string_contains_version() {
     let v = version_string();
     assert!(v.contains("riversd"));
-    assert!(v.contains("0.50.1"));
+    // Version tracks Cargo.toml — pinning a literal here rots every release.
+    assert!(v.contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]

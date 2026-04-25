@@ -91,13 +91,16 @@ impl DriverFactory {
     ///
     /// Per spec §8.1. Returns `DriverError::UnknownDriver` if name is not registered.
     ///
-    /// Each connect runs in an isolated tokio runtime via `spawn_blocking`.
-    /// This ensures cdylib plugin drivers get a reactor (they have their own
-    /// statically-linked tokio that needs its own runtime). Built-in drivers
-    /// are unaffected — the extra runtime is harmless for rlib drivers.
-    /// `catch_unwind` prevents plugin panics from aborting the process
-    /// (panics from cdylib code are "foreign exceptions" that would SIGABRT
-    /// if they cross the FFI boundary uncaught).
+    /// All drivers are statically compiled (cdylib plugin loading is disabled pending
+    /// Plugin ABI v2). The previous `spawn_blocking` + dedicated `Runtime::new()` isolation
+    /// is removed: it caused the tokio background connection task spawned by drivers like
+    /// `PostgresDriver` and `MySQLDriver` to be cancelled the moment the temporary runtime
+    /// was dropped, rendering every returned connection immediately dead
+    /// ("connection closed" / "Tokio 1.x context was found, but it is being shutdown").
+    /// Calling `driver.connect()` directly in the current async context is safe — the
+    /// background task is spawned on the caller's runtime and survives for the connection
+    /// lifetime.  When cdylib plugins are re-enabled (Plugin ABI v2), this isolation
+    /// strategy will need to be revisited.
     pub async fn connect(
         &self,
         driver_name: &str,
@@ -108,31 +111,7 @@ impl DriverFactory {
             .get(driver_name)
             .ok_or_else(|| DriverError::UnknownDriver(driver_name.to_string()))?
             .clone();
-        let params = params.clone();
-
-        // Isolate driver.connect() in a dedicated runtime + catch_unwind.
-        // This prevents cdylib plugin crashes from killing the host process.
-        let result = tokio::task::spawn_blocking(move || {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| DriverError::Connection(format!("runtime: {e}")))?;
-                rt.block_on(async { driver.connect(&params).await })
-            }))
-            .unwrap_or_else(|panic| {
-                let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                    s.clone()
-                } else if let Some(s) = panic.downcast_ref::<&str>() {
-                    s.to_string()
-                } else {
-                    "driver panicked during connect".to_string()
-                };
-                Err(DriverError::Connection(msg))
-            })
-        })
-        .await
-        .unwrap_or_else(|e| Err(DriverError::Connection(format!("connect task failed: {e}"))))?;
-
-        Ok(result)
+        driver.connect(params).await
     }
 
     /// Get a reference to a database driver by name.
