@@ -341,3 +341,10 @@ Plan correction: task 4.3 said "thread via closure capture (not thread-local)." 
 | `docs/review/rivers-keystore-engine.md` | Added the per-crate Tier 1/2/3 review for the application keystore engine | User request to write output to `docs/review/{{crate}}`; app-keystore role/risk list in the request | Report includes 3 Tier 1 findings, 3 Tier 2 findings, 2 Tier 3 findings, repeated-pattern/shared-fix notes, clean areas, coverage gaps, bug-density assessment, and recommended fix order |
 | `todo/tasks.md` | Marked the approved RKE review tasks complete with concise validation notes | AGENTS.md workflow rule 3 | Source/test reads, runtime/CLI/docs reads, security sweeps, validation, report writing, logs, and final whitespace/diff checks are complete |
 | `changedecisionlog.md` | Logged the report path/basis plus the multi-keystore and dynamic-callback cross-crate inclusion decisions | AGENTS.md workflow rule 5 | Decisions are traceable for CB drift detection |
+
+# 2026-04-25 — Pool lifetime accounting fix (CR-P1-1)
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `crates/riversd/src/pool.rs` | Preserve `PoolGuard.created_at` across `Drop` so `max_lifetime_ms` is enforceable. Added `acquire_with_meta` and `try_get_idle_with_meta`; changed `guard()` signature to take `(conn, created_at)`. | `docs/code_review.md` finding P1-1 | Threaded original creation timestamp through guard release path; private `try_get_idle` replaced by `try_get_idle_with_meta` (only internal caller is `acquire_with_meta`). |
+| `crates/riversd/tests/pool_tests.rs` | Added `pool_guard_preserves_created_at_across_drop` regression test; added `connect_count` counter to `MockDriver`. | TDD discipline for CR-P1-1 | Test exercises hold-then-drop with sleep crossing `max_lifetime_ms`; asserts the next acquire creates a new connection rather than reusing the aged one. |

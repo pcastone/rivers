@@ -335,3 +335,12 @@ Earlier misdiagnosis worth noting for the record: the CS0.2 revision (dated earl
 **Decision:** Report the dynamic engine `HOST_KEYSTORE` path as a cross-crate wiring gap, not as a small missing call-site nit.
 **Spec reference:** User request to catch `register_X`/caller-style wiring gaps spanning crates; dynamic build mode is a documented Rivers deployment mode.
 **Resolution:** `set_host_keystore()` has no runtime caller, and the one-shot global shape cannot represent app-scoped or hot-reloaded keystores even if called. The recommended resolution is shared resolver wiring or explicit dynamic-mode capability rejection.
+
+# 2026-04-25 — Pool guard timestamp design
+
+### POOL-CR-P1-1.1 — Thread `(conn, created_at)` tuple from acquire to guard
+
+**File:** `crates/riversd/src/pool.rs`
+**Decision:** Preserve the original connection `created_at` across `PoolGuard::Drop` by threading the timestamp from `ConnectionPool::acquire_with_meta` into `PoolGuard::new(... created_at)` rather than wrapping the entire `PooledConnection` in the guard. Public surface gained `acquire_with_meta` and changed `guard(conn)` to `guard(conn, created_at)`; existing `acquire` is now a thin wrapper that drops the timestamp.
+**Spec reference:** `docs/code_review.md` finding P1-1; `rivers-data-layer-spec.md §5` (max_lifetime semantics).
+**Resolution:** Tuple-threading keeps the existing `take()` semantics untouched and avoids forcing every consumer to deal with a wrapped pooled-connection type. `try_get_idle` was replaced by `try_get_idle_with_meta` (only internal caller is the new `acquire_with_meta`). Regression test `pool_guard_preserves_created_at_across_drop` verifies the connection is evicted after `max_lifetime_ms` even when the drop-time recency would otherwise let it pass `idle_timeout_ms`.

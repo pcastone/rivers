@@ -70,6 +70,12 @@ pub struct PoolGuard {
     notify: Arc<Notify>,
     /// Held connection — returned to idle on drop.
     conn: Option<Box<dyn Connection>>,
+    /// Original creation time — preserved across guard drops so
+    /// `max_lifetime_ms` is enforceable. Per code-review P1-1.
+    created_at: Instant,
+    /// Last-checkout time — used by `idle_timeout_ms` after release.
+    #[allow(dead_code)]
+    last_used: Instant,
 }
 
 impl PoolGuard {
@@ -80,6 +86,7 @@ impl PoolGuard {
         draining: Arc<AtomicBool>,
         idle_return: Arc<StdMutex<VecDeque<PooledConnection>>>,
         notify: Arc<Notify>,
+        created_at: Instant,
     ) -> Self {
         Self {
             active_count,
@@ -87,6 +94,8 @@ impl PoolGuard {
             idle_return,
             notify,
             conn: Some(conn),
+            created_at,
+            last_used: Instant::now(),
         }
     }
 
@@ -121,10 +130,12 @@ impl Drop for PoolGuard {
                 return;
             }
 
-            // Return to the idle_return queue (std::sync::Mutex — safe in Drop).
+            // P1-1: preserve original created_at so max_lifetime_ms triggers.
+            // last_used is reset to now so the freshly-returned connection
+            // gets its full idle_timeout window before eviction.
             let pooled = PooledConnection {
                 conn,
-                created_at: Instant::now(),
+                created_at: self.created_at,
                 last_used: Instant::now(),
             };
             if let Ok(mut queue) = self.idle_return.lock() {
@@ -437,7 +448,7 @@ pub struct ConnectionPool {
     params: ConnectionParams,
     idle: Mutex<VecDeque<PooledConnection>>,
     /// Sync queue for connections returned via `PoolGuard::drop()`.
-    /// Drained into `idle` on the next `try_get_idle()` call.
+    /// Drained into `idle` on the next `try_get_idle_with_meta()` call.
     idle_return: Arc<StdMutex<VecDeque<PooledConnection>>>,
     active_count: Arc<AtomicU64>,
     checkout_count: AtomicU64,
@@ -481,7 +492,23 @@ impl ConnectionPool {
     /// 2. Try to get an idle connection (evicting expired ones)
     /// 3. If none available and under max_size, create a new one
     /// 4. If at max_size, wait up to connection_timeout_ms
+    ///
+    /// Thin wrapper over `acquire_with_meta` that drops the timestamp.
+    /// Prefer `acquire_with_meta` when wrapping the connection in a
+    /// `PoolGuard`, so the original creation time is preserved across
+    /// guard drops (per code-review P1-1).
     pub async fn acquire(&self) -> Result<Box<dyn Connection>, PoolError> {
+        self.acquire_with_meta().await.map(|(c, _)| c)
+    }
+
+    /// Acquire a connection along with its original `created_at`.
+    ///
+    /// The timestamp must be threaded into a `PoolGuard` (see `guard()`)
+    /// so `max_lifetime_ms` is enforceable across release/reacquire
+    /// cycles. Per code-review CR-P1-1.
+    pub async fn acquire_with_meta(
+        &self,
+    ) -> Result<(Box<dyn Connection>, Instant), PoolError> {
         if self.draining.load(Ordering::Relaxed) {
             return Err(PoolError::Draining {
                 datasource: self.datasource_id.clone(),
@@ -502,8 +529,8 @@ impl ConnectionPool {
         let deadline = start + Duration::from_millis(self.config.connection_timeout_ms);
 
         loop {
-            // Try to get an idle connection
-            if let Some(conn) = self.try_get_idle().await {
+            // Try to get an idle connection (with its preserved created_at)
+            if let Some((conn, created_at)) = self.try_get_idle_with_meta().await {
                 let wait_ms = start.elapsed().as_millis() as u64;
                 self.checkout_count.fetch_add(1, Ordering::Relaxed);
                 self.total_wait_ms.fetch_add(wait_ms, Ordering::Relaxed);
@@ -511,7 +538,7 @@ impl ConnectionPool {
 
                 let mut cb = self.circuit_breaker.lock().await;
                 cb.record_success();
-                return Ok(conn);
+                return Ok((conn, created_at));
             }
 
             // Try to create a new connection if under max_size
@@ -527,7 +554,7 @@ impl ConnectionPool {
 
                         let mut cb = self.circuit_breaker.lock().await;
                         cb.record_success();
-                        return Ok(conn);
+                        return Ok((conn, Instant::now()));
                     }
                     Err(e) => {
                         let mut cb = self.circuit_breaker.lock().await;
@@ -599,8 +626,10 @@ impl ConnectionPool {
     /// Try to get a valid idle connection, evicting expired ones.
     ///
     /// Drains any connections returned via `PoolGuard::drop()` (the sync
-    /// `idle_return` queue) into the main idle queue first.
-    async fn try_get_idle(&self) -> Option<Box<dyn Connection>> {
+    /// `idle_return` queue) into the main idle queue first. Returns the
+    /// connection alongside its original `created_at` so callers can
+    /// thread it into a `PoolGuard` (see `acquire_with_meta`).
+    async fn try_get_idle_with_meta(&self) -> Option<(Box<dyn Connection>, Instant)> {
         let mut idle = self.idle.lock().await;
 
         // Drain connections returned synchronously by PoolGuard::drop().
@@ -625,7 +654,7 @@ impl ConnectionPool {
             {
                 continue; // drop idle-timed-out connection
             }
-            return Some(pooled.conn);
+            return Some((pooled.conn, pooled.created_at));
         }
         None
     }
@@ -724,15 +753,22 @@ impl ConnectionPool {
 
     /// Wrap a checked-out connection in a `PoolGuard`.
     ///
+    /// `created_at` should be the connection's original creation time — for
+    /// fresh connections from `create_connection`, pass `Instant::now()`; for
+    /// connections retrieved from idle, pass the stored `created_at` (use
+    /// `acquire_with_meta` to obtain it). Per code-review P1-1, preserving
+    /// this lets `max_lifetime_ms` actually fire after a guard drop.
+    ///
     /// The guard will return the connection to the idle queue on drop,
     /// preserving prepared statement caches.
-    pub fn guard(&self, conn: Box<dyn Connection>) -> PoolGuard {
+    pub fn guard(&self, conn: Box<dyn Connection>, created_at: Instant) -> PoolGuard {
         PoolGuard::new(
             conn,
             Arc::clone(&self.active_count),
             Arc::clone(&self.draining),
             Arc::clone(&self.idle_return),
             Arc::clone(&self.notify),
+            created_at,
         )
     }
 

@@ -2,6 +2,7 @@
 //! pool snapshot, health check, drain.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -46,19 +47,26 @@ impl Connection for MockConnection {
 
 struct MockDriver {
     fail_connect: Mutex<bool>,
+    connect_count: AtomicU64,
 }
 
 impl MockDriver {
     fn new() -> Self {
         Self {
             fail_connect: Mutex::new(false),
+            connect_count: AtomicU64::new(0),
         }
     }
 
     fn failing() -> Self {
         Self {
             fail_connect: Mutex::new(true),
+            connect_count: AtomicU64::new(0),
         }
+    }
+
+    fn connect_count(&self) -> u64 {
+        self.connect_count.load(Ordering::Relaxed)
     }
 }
 
@@ -75,6 +83,7 @@ impl DatabaseDriver for MockDriver {
         if *self.fail_connect.lock().await {
             Err(DriverError::Connection("connection refused".into()))
         } else {
+            self.connect_count.fetch_add(1, Ordering::Relaxed);
             Ok(Box::new(MockConnection { healthy: true }))
         }
     }
@@ -472,4 +481,47 @@ fn circuit_breaker_config_defaults() {
     assert_eq!(config.failure_threshold, 5);
     assert_eq!(config.open_timeout_ms, 30_000);
     assert_eq!(config.half_open_max_trials, 1);
+}
+
+// ── PoolGuard Lifetime Accounting (CR-P1-1) ───────────────────────
+
+#[tokio::test]
+async fn pool_guard_preserves_created_at_across_drop() {
+    use std::time::{Duration, Instant};
+    let event_bus = Arc::new(EventBus::new());
+    let driver = Arc::new(MockDriver::new());
+    let mut cfg = PoolConfig::default();
+    cfg.max_lifetime_ms = 50;
+    cfg.idle_timeout_ms = 60_000;
+    let pool = Arc::new(ConnectionPool::new(
+        "lifetime-ds",
+        cfg,
+        driver.clone(),
+        test_params(),
+        event_bus,
+    ));
+
+    // First acquire creates the connection.
+    let conn = pool.acquire().await.unwrap();
+    let guard = pool.guard(conn, Instant::now());
+
+    // Hold the guard long enough that the original connection has already
+    // exceeded max_lifetime_ms by the time it's released back to idle.
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    drop(guard); // returns to idle via PoolGuard::Drop
+
+    // Tiny sleep so the next acquire is well within the (reset) drop time
+    // window — the bug, if present, would let the connection look "fresh"
+    // and be reused. With the fix, original created_at is preserved and
+    // try_get_idle evicts it.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    // Next acquire should NOT reuse the aged-out connection — it should
+    // create a new one. MockDriver counts connect() calls.
+    let _conn2 = pool.acquire().await.unwrap();
+    assert_eq!(
+        driver.connect_count(),
+        2,
+        "max_lifetime should have evicted the dropped guard's connection"
+    );
 }
