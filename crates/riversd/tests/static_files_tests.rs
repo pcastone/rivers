@@ -7,47 +7,63 @@ use rivers_runtime::rivers_core::config::StaticFilesConfig;
 
 // ── Path Resolution ──────────────────────────────────────────────
 
+/// Canonicalize a path the same way the resolver does (so test assertions
+/// match the canonical form returned by `resolve_static_file_path`).
+fn canonical(p: std::path::PathBuf) -> std::path::PathBuf {
+    std::fs::canonicalize(p).unwrap()
+}
+
 #[tokio::test]
 async fn resolve_empty_path_returns_index() {
     let dir = tempdir_with_files(&[("index.html", "<html></html>")]);
-    let result = resolve_static_file_path(dir.path(), "", "index.html", false).await;
-    assert_eq!(result.unwrap(), dir.path().join("index.html"));
+    let result =
+        resolve_static_file_path(dir.path(), "", "index.html", false, false).await;
+    assert_eq!(result.unwrap(), canonical(dir.path().join("index.html")));
 }
 
 #[tokio::test]
 async fn resolve_slash_returns_index() {
     let dir = tempdir_with_files(&[("index.html", "<html></html>")]);
-    let result = resolve_static_file_path(dir.path(), "/", "index.html", false).await;
-    assert_eq!(result.unwrap(), dir.path().join("index.html"));
+    let result =
+        resolve_static_file_path(dir.path(), "/", "index.html", false, false).await;
+    assert_eq!(result.unwrap(), canonical(dir.path().join("index.html")));
 }
 
 #[tokio::test]
 async fn resolve_normal_file() {
     let dir = tempdir_with_files(&[("style.css", "body {}")]);
-    let result = resolve_static_file_path(dir.path(), "/style.css", "index.html", false).await;
-    assert_eq!(result.unwrap(), dir.path().join("style.css"));
+    let result =
+        resolve_static_file_path(dir.path(), "/style.css", "index.html", false, false).await;
+    assert_eq!(result.unwrap(), canonical(dir.path().join("style.css")));
 }
 
 #[tokio::test]
 async fn resolve_nested_file() {
     let dir = tempdir_with_files(&[("assets/app.js", "console.log('hi')")]);
     let result =
-        resolve_static_file_path(dir.path(), "/assets/app.js", "index.html", false).await;
-    assert_eq!(result.unwrap(), dir.path().join("assets/app.js"));
+        resolve_static_file_path(dir.path(), "/assets/app.js", "index.html", false, false).await;
+    assert_eq!(result.unwrap(), canonical(dir.path().join("assets/app.js")));
 }
 
 #[tokio::test]
 async fn resolve_traversal_rejected() {
     let dir = tempdir_with_files(&[("index.html", "ok")]);
-    let result =
-        resolve_static_file_path(dir.path(), "/../../../etc/passwd", "index.html", false).await;
+    let result = resolve_static_file_path(
+        dir.path(),
+        "/../../../etc/passwd",
+        "index.html",
+        false,
+        false,
+    )
+    .await;
     assert!(result.is_none());
 }
 
 #[tokio::test]
 async fn resolve_double_dot_rejected() {
     let dir = tempdir_with_files(&[("index.html", "ok")]);
-    let result = resolve_static_file_path(dir.path(), "/foo/../../bar", "index.html", false).await;
+    let result =
+        resolve_static_file_path(dir.path(), "/foo/../../bar", "index.html", false, false).await;
     assert!(result.is_none());
 }
 
@@ -55,7 +71,7 @@ async fn resolve_double_dot_rejected() {
 async fn resolve_absolute_root_rejected() {
     let dir = tempdir_with_files(&[("index.html", "ok")]);
     let result =
-        resolve_static_file_path(dir.path(), "//etc/passwd", "index.html", false).await;
+        resolve_static_file_path(dir.path(), "//etc/passwd", "index.html", false, false).await;
     // On Unix, `//etc/passwd` after trim_start_matches('/') becomes "etc/passwd"
     // which resolves to root/etc/passwd — a non-existent file → None
     assert!(result.is_none());
@@ -65,7 +81,8 @@ async fn resolve_absolute_root_rejected() {
 async fn resolve_nonexistent_no_spa_returns_none() {
     let dir = tempdir_with_files(&[("index.html", "ok")]);
     let result =
-        resolve_static_file_path(dir.path(), "/doesnt-exist.js", "index.html", false).await;
+        resolve_static_file_path(dir.path(), "/doesnt-exist.js", "index.html", false, false)
+            .await;
     assert!(result.is_none());
 }
 
@@ -77,23 +94,119 @@ async fn resolve_nonexistent_with_spa_returns_index() {
         "/some/client/route",
         "index.html",
         true, // spa_fallback
+        false,
     )
     .await;
-    assert_eq!(result.unwrap(), dir.path().join("index.html"));
+    assert_eq!(result.unwrap(), canonical(dir.path().join("index.html")));
 }
 
 #[tokio::test]
 async fn resolve_existing_file_with_spa_returns_file_not_index() {
     let dir = tempdir_with_files(&[("index.html", "spa"), ("app.js", "real file")]);
-    let result = resolve_static_file_path(dir.path(), "/app.js", "index.html", true).await;
-    assert_eq!(result.unwrap(), dir.path().join("app.js"));
+    let result =
+        resolve_static_file_path(dir.path(), "/app.js", "index.html", true, false).await;
+    assert_eq!(result.unwrap(), canonical(dir.path().join("app.js")));
 }
 
 #[tokio::test]
 async fn resolve_directory_returns_index_inside() {
     let dir = tempdir_with_files(&[("subdir/index.html", "sub index")]);
-    let result = resolve_static_file_path(dir.path(), "/subdir", "index.html", false).await;
-    assert_eq!(result.unwrap(), dir.path().join("subdir/index.html"));
+    let result =
+        resolve_static_file_path(dir.path(), "/subdir", "index.html", false, false).await;
+    assert_eq!(result.unwrap(), canonical(dir.path().join("subdir/index.html")));
+}
+
+// ── Symlink Handling (F1) ────────────────────────────────────────
+
+/// A symlink inside the static root pointing at a file *outside* the root
+/// must be rejected even when symlinks are allowed — canonicalization
+/// resolves the symlink and the canonical path is no longer under the
+/// canonical root.
+#[tokio::test]
+async fn resolve_symlink_escaping_root_is_rejected() {
+    use std::os::unix::fs::symlink;
+
+    // Outside dir holds the secret target.
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.txt");
+    std::fs::write(&secret, "TOP SECRET").unwrap();
+
+    // Static root contains a symlink "leak" → outside/secret.txt
+    let root = tempfile::tempdir().unwrap();
+    symlink(&secret, root.path().join("leak")).unwrap();
+
+    // With allow_symlinks=false, the symlink itself is rejected.
+    let denied =
+        resolve_static_file_path(root.path(), "/leak", "index.html", false, false).await;
+    assert!(denied.is_none(), "symlink should be rejected when allow_symlinks=false");
+
+    // Even with allow_symlinks=true, the canonical-prefix check rejects it
+    // because the resolved target is outside the canonical root.
+    let allowed =
+        resolve_static_file_path(root.path(), "/leak", "index.html", false, true).await;
+    assert!(
+        allowed.is_none(),
+        "symlink escaping the root must be rejected even when allow_symlinks=true"
+    );
+}
+
+/// A symlink inside the root pointing to another file *inside* the root
+/// is rejected when `allow_symlinks=false` and served when `true`.
+#[tokio::test]
+async fn resolve_symlink_inside_root_respects_allow_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("real.txt");
+    std::fs::write(&real, "hello").unwrap();
+    symlink(&real, root.path().join("alias")).unwrap();
+
+    // Default-deny: symlink rejected.
+    let denied =
+        resolve_static_file_path(root.path(), "/alias", "index.html", false, false).await;
+    assert!(denied.is_none(), "in-root symlink rejected when allow_symlinks=false");
+
+    // Opt-in allow: symlink served, returned path is the canonical target.
+    let allowed =
+        resolve_static_file_path(root.path(), "/alias", "index.html", false, true).await;
+    assert_eq!(allowed.unwrap(), canonical(real));
+}
+
+/// A regular (non-symlink) file inside the root is served regardless of
+/// the `allow_symlinks` flag.
+#[tokio::test]
+async fn resolve_regular_file_unaffected_by_allow_symlinks_flag() {
+    let dir = tempdir_with_files(&[("plain.txt", "plain")]);
+
+    let a =
+        resolve_static_file_path(dir.path(), "/plain.txt", "index.html", false, false).await;
+    let b =
+        resolve_static_file_path(dir.path(), "/plain.txt", "index.html", false, true).await;
+    assert_eq!(a.unwrap(), canonical(dir.path().join("plain.txt")));
+    assert_eq!(b.unwrap(), canonical(dir.path().join("plain.txt")));
+}
+
+/// End-to-end: serve_static_file returns 404 for a symlink that escapes
+/// the static root.
+#[tokio::test]
+async fn serve_returns_404_for_symlink_escaping_root() {
+    use std::os::unix::fs::symlink;
+
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("passwd");
+    std::fs::write(&secret, "root:x:0:0").unwrap();
+
+    let root = tempfile::tempdir().unwrap();
+    symlink(&secret, root.path().join("leak")).unwrap();
+
+    // allow_symlinks=true so the symlink isn't filtered by the
+    // is_symlink check — proves the canonical-prefix check catches the
+    // escape on its own.
+    let mut config = config_for_dir(root.path(), false);
+    config.allow_symlinks = true;
+
+    let response = serve_static_file(&config, "/leak", None).await;
+    assert_eq!(response.status(), 404);
 }
 
 // ── Exclude Paths ────────────────────────────────────────────────
@@ -333,5 +446,6 @@ fn config_for_dir(dir: &Path, spa_fallback: bool) -> StaticFilesConfig {
         spa_fallback,
         max_age: None,
         exclude_paths: vec![],
+        allow_symlinks: false,
     }
 }

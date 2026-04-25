@@ -371,6 +371,21 @@ pub struct StaticFilesConfig {
     /// URL path prefixes excluded from static file serving.
     #[serde(default)]
     pub exclude_paths: Vec<String>,
+
+    /// Allow following symlinks when serving static files (default: `false`).
+    ///
+    /// When `false` (the default), the server canonicalizes each resolved
+    /// file path and rejects any request whose final on-disk path is a
+    /// symlink, or whose canonical path is not contained in the canonical
+    /// root. This protects against symlink-escape attacks where an attacker
+    /// (or a misconfigured deploy) places a symlink inside the static root
+    /// pointing at sensitive files outside it.
+    ///
+    /// Operators who need symlinks (e.g. blue/green deployments where the
+    /// static root itself is a symlink target) can opt in by setting this
+    /// to `true`.
+    #[serde(default)]
+    pub allow_symlinks: bool,
 }
 
 impl Default for StaticFilesConfig {
@@ -382,6 +397,7 @@ impl Default for StaticFilesConfig {
             spa_fallback: false,
             max_age: None,
             exclude_paths: Vec::new(),
+            allow_symlinks: false,
         }
     }
 }

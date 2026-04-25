@@ -19,18 +19,24 @@ use rivers_runtime::rivers_core::config::StaticFilesConfig;
 /// 3. root/normalized exists → return it
 /// 4. Does not exist + spa_fallback → root/index_file
 /// 5. Does not exist + no spa_fallback → None → 404
+///
+/// After step 3/4, the candidate path is canonicalized and verified to be
+/// inside the canonical root (defense against symlink escape — F1). When
+/// `allow_symlinks` is false, any candidate whose final component is a
+/// symlink is also rejected (treated as 404).
 pub async fn resolve_static_file_path(
     root: &Path,
     requested: &str,
     index_file: &str,
     spa_fallback: bool,
+    allow_symlinks: bool,
 ) -> Option<PathBuf> {
     // 1. Empty path → index file
     let cleaned = requested.trim_start_matches('/');
     if cleaned.is_empty() {
         let index_path = root.join(index_file);
         if tokio::fs::metadata(&index_path).await.ok()?.is_file() {
-            return Some(index_path);
+            return verify_inside_root(root, index_path, allow_symlinks).await;
         }
         return None;
     }
@@ -47,7 +53,7 @@ pub async fn resolve_static_file_path(
         }
     }
 
-    // Verify resolved path is still under root
+    // Verify resolved path is still under root (syntactic prefix check)
     if !resolved.starts_with(root) {
         return None;
     }
@@ -55,14 +61,14 @@ pub async fn resolve_static_file_path(
     // 3. File exists and is a regular file → return it
     if let Ok(meta) = tokio::fs::metadata(&resolved).await {
         if meta.is_file() {
-            return Some(resolved);
+            return verify_inside_root(root, resolved, allow_symlinks).await;
         }
         // If it's a directory, try index_file inside it
         if meta.is_dir() {
             let dir_index = resolved.join(index_file);
             if let Ok(m) = tokio::fs::metadata(&dir_index).await {
                 if m.is_file() {
-                    return Some(dir_index);
+                    return verify_inside_root(root, dir_index, allow_symlinks).await;
                 }
             }
         }
@@ -73,13 +79,49 @@ pub async fn resolve_static_file_path(
         let index_path = root.join(index_file);
         if let Ok(m) = tokio::fs::metadata(&index_path).await {
             if m.is_file() {
-                return Some(index_path);
+                return verify_inside_root(root, index_path, allow_symlinks).await;
             }
         }
     }
 
     // 5. Does not exist + no spa_fallback → None
     None
+}
+
+/// Canonicalize the candidate file path and confirm it lives inside the
+/// canonical root. When `allow_symlinks` is false, also reject any candidate
+/// whose final component is a symlink.
+///
+/// Returns `Some(canonical_path)` on success, `None` (→ 404) on any failure
+/// (path missing, canonicalize error, escape, or symlink when disallowed).
+/// Fails closed on every error path — the goal is symlink-escape defense in
+/// depth on top of the existing syntactic guard, so we never serve a file
+/// whose true on-disk identity we couldn't verify.
+async fn verify_inside_root(
+    root: &Path,
+    candidate: PathBuf,
+    allow_symlinks: bool,
+) -> Option<PathBuf> {
+    // Reject final-component symlink up front when not allowed. This is a
+    // best-effort check: a symlink anywhere in the path will also be caught
+    // by the canonicalization comparison below (because the canonical path
+    // will resolve out of root, or to a path that isn't under canonical root).
+    if !allow_symlinks {
+        match tokio::fs::symlink_metadata(&candidate).await {
+            Ok(meta) if meta.file_type().is_symlink() => return None,
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+    }
+
+    let canonical_root = tokio::fs::canonicalize(root).await.ok()?;
+    let canonical_path = tokio::fs::canonicalize(&candidate).await.ok()?;
+
+    if !canonical_path.starts_with(&canonical_root) {
+        return None;
+    }
+
+    Some(canonical_path)
 }
 
 /// Check if a path is in the exclude list.
@@ -154,6 +196,7 @@ pub async fn serve_static_file(
         request_path,
         &config.index_file,
         config.spa_fallback,
+        config.allow_symlinks,
     )
     .await
     {
