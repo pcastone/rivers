@@ -219,6 +219,157 @@ mod tests {
         assert!(result.headers.is_empty());
     }
 
+    // ── F4: handler-result status & header validation ──────────
+
+    #[test]
+    fn test_parse_handler_view_result_rejects_status_999() {
+        let value = serde_json::json!({"status": 999, "body": "nope"});
+        let result = parse_handler_view_result(&value).expect("returns sanitized envelope");
+        assert_eq!(result.status, 500);
+        // Sanitized body explains the failure.
+        assert_eq!(
+            result.body.get("error").and_then(|v| v.as_str()),
+            Some("invalid_handler_response")
+        );
+        assert!(result.headers.is_empty());
+    }
+
+    #[test]
+    fn test_parse_handler_view_result_rejects_status_below_100() {
+        let value = serde_json::json!({"status": 99, "body": "nope"});
+        let result = parse_handler_view_result(&value).expect("returns sanitized envelope");
+        assert_eq!(result.status, 500);
+    }
+
+    #[test]
+    fn test_parse_handler_view_result_rejects_status_zero() {
+        let value = serde_json::json!({"status": 0});
+        let result = parse_handler_view_result(&value).expect("returns sanitized envelope");
+        assert_eq!(result.status, 500);
+    }
+
+    #[test]
+    fn test_parse_handler_view_result_accepts_boundary_statuses() {
+        for s in &[100u64, 200, 404, 500, 599] {
+            let value = serde_json::json!({"status": s});
+            let result = parse_handler_view_result(&value).unwrap();
+            assert_eq!(result.status, *s as u16, "boundary status {} should be accepted", s);
+        }
+    }
+
+    #[test]
+    fn test_parse_handler_view_result_rejects_crlf_in_header_value() {
+        // Classic header-smuggling vector: CRLF in a header value would let
+        // the handler inject a second header (e.g. "Set-Cookie: ...").
+        let value = serde_json::json!({
+            "status": 200,
+            "headers": {"X-Bad": "foo\r\nInjection: yes"},
+            "body": "ok",
+        });
+        let result = parse_handler_view_result(&value).expect("returns sanitized envelope");
+        assert_eq!(result.status, 500);
+        assert_eq!(
+            result.body.get("error").and_then(|v| v.as_str()),
+            Some("invalid_handler_response")
+        );
+        // The original X-Bad header must not have leaked into the response.
+        assert!(result.headers.is_empty());
+    }
+
+    #[test]
+    fn test_parse_handler_view_result_rejects_lf_in_header_value() {
+        let value = serde_json::json!({
+            "status": 200,
+            "headers": {"X-Bad": "foo\nInjection: yes"},
+        });
+        let result = parse_handler_view_result(&value).expect("returns sanitized envelope");
+        assert_eq!(result.status, 500);
+    }
+
+    #[test]
+    fn test_parse_handler_view_result_rejects_nul_in_header_value() {
+        let value = serde_json::json!({
+            "status": 200,
+            "headers": {"X-Bad": "foo\u{0000}bar"},
+        });
+        let result = parse_handler_view_result(&value).expect("returns sanitized envelope");
+        assert_eq!(result.status, 500);
+    }
+
+    #[test]
+    fn test_parse_handler_view_result_rejects_empty_header_name() {
+        let value = serde_json::json!({
+            "status": 200,
+            "headers": {"": "value"},
+        });
+        let result = parse_handler_view_result(&value).expect("returns sanitized envelope");
+        assert_eq!(result.status, 500);
+    }
+
+    #[test]
+    fn test_parse_handler_view_result_rejects_invalid_header_name_chars() {
+        // Spaces and colons are not in the RFC 7230 token grammar.
+        for name in &["X Bad", "X:Bad", "X\nBad", "Bad Header"] {
+            let value = serde_json::json!({
+                "status": 200,
+                "headers": {*name: "value"},
+            });
+            let result = parse_handler_view_result(&value).expect("returns sanitized envelope");
+            assert_eq!(
+                result.status, 500,
+                "header name {:?} should have been rejected",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_handler_view_result_allows_security_headers() {
+        // F4.3: handler-set security headers (CSP, HSTS, etc.) must NOT be
+        // blocked. Apps can set them at will; we only enforce grammar.
+        let value = serde_json::json!({
+            "status": 200,
+            "headers": {
+                "Content-Security-Policy": "default-src 'self'",
+                "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+                "X-Frame-Options": "DENY",
+            },
+            "body": "ok",
+        });
+        let result = parse_handler_view_result(&value).expect("envelope");
+        assert_eq!(result.status, 200);
+        assert_eq!(
+            result.headers.get("Content-Security-Policy").map(String::as_str),
+            Some("default-src 'self'")
+        );
+        assert_eq!(
+            result.headers.get("Strict-Transport-Security").map(String::as_str),
+            Some("max-age=31536000; includeSubDomains")
+        );
+        assert_eq!(
+            result.headers.get("X-Frame-Options").map(String::as_str),
+            Some("DENY")
+        );
+    }
+
+    #[test]
+    fn test_parse_handler_view_result_skips_non_string_header_values() {
+        // Mirrors prior behaviour: non-string values are silently skipped
+        // rather than rejected. (They couldn't possibly be valid anyway.)
+        let value = serde_json::json!({
+            "status": 200,
+            "headers": {
+                "X-Number": 42,
+                "X-Bool": true,
+                "X-Real": "kept",
+            },
+        });
+        let result = parse_handler_view_result(&value).unwrap();
+        assert_eq!(result.status, 200);
+        assert_eq!(result.headers.len(), 1);
+        assert_eq!(result.headers.get("X-Real").map(String::as_str), Some("kept"));
+    }
+
     // ── StoreHandle tests ───────────────────────────────────────
 
     #[test]
