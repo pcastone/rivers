@@ -97,7 +97,24 @@ pub(super) async fn health_verbose_handler(
         draining: ctx.shutdown.is_draining(),
         inflight_requests: ctx.shutdown.inflight_count() as u64,
         uptime_seconds: ctx.uptime.uptime_seconds(),
-        pool_snapshots: Vec::new(), // populated when pool manager is wired
+        pool_snapshots: ctx
+            .pool_manager
+            .snapshots()
+            .await
+            .into_iter()
+            .map(|s| crate::health::PoolSnapshot {
+                name: s.datasource_id,
+                driver: s.driver_name,
+                active: s.active_connections as u32,
+                idle: s.idle_connections as u32,
+                max: s.max_size as u32,
+                circuit_state: match s.circuit_state {
+                    crate::pool::CircuitState::Closed => "closed".to_string(),
+                    crate::pool::CircuitState::Open => "open".to_string(),
+                    crate::pool::CircuitState::HalfOpen => "half-open".to_string(),
+                },
+            })
+            .collect(),
         datasource_probes,
     })
 }

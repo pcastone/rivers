@@ -406,6 +406,8 @@ impl CircuitBreaker {
 pub struct PoolSnapshot {
     /// Identifier of the datasource this snapshot belongs to.
     pub datasource_id: String,
+    /// Driver name powering this pool (e.g. `"postgres"`, `"faker"`).
+    pub driver_name: String,
     /// Number of connections currently checked out.
     pub active_connections: usize,
     /// Number of connections sitting idle in the pool.
@@ -420,6 +422,8 @@ pub struct PoolSnapshot {
     pub max_size: usize,
     /// Configured minimum idle connections.
     pub min_idle: usize,
+    /// Current circuit breaker state.
+    pub circuit_state: CircuitState,
 }
 
 // ── PooledConnection ───────────────────────────────────────────────
@@ -668,9 +672,11 @@ impl ConnectionPool {
         let active = self.active_count.load(Ordering::Relaxed) as usize;
         let checkouts = self.checkout_count.load(Ordering::Relaxed);
         let total_wait = self.total_wait_ms.load(Ordering::Relaxed);
+        let circuit_state = self.circuit_breaker.lock().await.state();
 
         PoolSnapshot {
             datasource_id: self.datasource_id.clone(),
+            driver_name: self.driver.name().to_string(),
             active_connections: active,
             idle_connections: idle_count,
             total_connections: active + idle_count,
@@ -682,6 +688,7 @@ impl ConnectionPool {
             },
             max_size: self.config.max_size,
             min_idle: self.config.min_idle,
+            circuit_state,
         }
     }
 
