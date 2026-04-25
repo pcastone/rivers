@@ -507,7 +507,7 @@ async fn pool_guard_preserves_created_at_across_drop() {
 
     // Hold the guard long enough that the original connection has already
     // exceeded max_lifetime_ms by the time it's released back to idle.
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     drop(guard); // returns to idle via PoolGuard::Drop
 
     // Tiny sleep so the next acquire is well within the (reset) drop time

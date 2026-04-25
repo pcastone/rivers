@@ -73,9 +73,6 @@ pub struct PoolGuard {
     /// Original creation time — preserved across guard drops so
     /// `max_lifetime_ms` is enforceable. Per code-review P1-1.
     created_at: Instant,
-    /// Last-checkout time — used by `idle_timeout_ms` after release.
-    #[allow(dead_code)]
-    last_used: Instant,
 }
 
 impl PoolGuard {
@@ -95,7 +92,6 @@ impl PoolGuard {
             notify,
             conn: Some(conn),
             created_at,
-            last_used: Instant::now(),
         }
     }
 
