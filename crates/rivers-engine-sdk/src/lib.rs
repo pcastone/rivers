@@ -24,6 +24,51 @@ use serde::{Deserialize, Serialize};
 /// Bump when the C-ABI function signatures or callback table changes.
 pub const ENGINE_ABI_VERSION: u32 = 1;
 
+// ── Task Kind ───────────────────────────────────────────────────
+
+/// Categorizes the dispatch site that produced a task. Used by host callbacks
+/// to gate elevated capabilities — e.g. `ctx.ddl()` is only available during
+/// `ApplicationInit`. Serialized as snake_case strings so old engine cdylibs
+/// that miss the field deserialize as `None`, which the receiver MUST treat as
+/// the safest default (`Rest`, no special capabilities).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskKind {
+    /// One-shot init handler, runs once per app at bundle load.
+    /// The only kind that may call `ctx.ddl()`.
+    ApplicationInit,
+    /// Standard REST/GraphQL/WS/SSE/streaming request handler.
+    Rest,
+    /// Event-driven handler dispatched from a broker subscription.
+    MessageConsumer,
+    /// Guard / session-validation lifecycle hook (on_session_valid,
+    /// on_invalid_session, on_failed, etc.) fired from the security pipeline.
+    SecurityHook,
+    /// View-pipeline validation / on_error / session-revalidation hook.
+    ValidationHook,
+    /// Pre-process observer in the view pipeline (fire-and-forget before
+    /// primary execution).
+    PreProcess,
+    /// Post-process observer in the view pipeline (fire-and-forget after
+    /// primary execution).
+    PostProcess,
+}
+
+impl TaskKind {
+    /// Lowercase snake_case name (matches the serde representation).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TaskKind::ApplicationInit => "application_init",
+            TaskKind::Rest => "rest",
+            TaskKind::MessageConsumer => "message_consumer",
+            TaskKind::SecurityHook => "security_hook",
+            TaskKind::ValidationHook => "validation_hook",
+            TaskKind::PreProcess => "pre_process",
+            TaskKind::PostProcess => "post_process",
+        }
+    }
+}
+
 // ── Serialized Task Types ───────────────────────────────────────
 
 /// Serialized task context — pure data that crosses the dylib boundary as JSON.
@@ -68,6 +113,12 @@ pub struct SerializedTaskContext {
     pub prefetched_data: HashMap<String, serde_json::Value>,
     /// Resolved library contents (for module loading).
     pub libs: Vec<SerializedLib>,
+    /// Dispatch-site classification — gates elevated capabilities.
+    /// Optional so old engine cdylibs that don't send it deserialize cleanly;
+    /// receivers MUST treat `None` as `TaskKind::Rest` (the safe default — no
+    /// special capabilities).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_kind: Option<TaskKind>,
 }
 
 /// Serialized handler entrypoint.
@@ -363,6 +414,7 @@ mod tests {
             inline_source: None,
             prefetched_data: HashMap::new(),
             libs: vec![],
+            task_kind: Some(TaskKind::Rest),
         };
 
         let json = serde_json::to_string(&ctx).unwrap();
@@ -370,6 +422,42 @@ mod tests {
         assert_eq!(deserialized.trace_id, "trace-1");
         assert_eq!(deserialized.entrypoint.module, "handler.js");
         assert_eq!(deserialized.args["name"], "test");
+        assert_eq!(deserialized.task_kind, Some(TaskKind::Rest));
+    }
+
+    #[test]
+    fn task_kind_serializes_snake_case() {
+        let json = serde_json::to_string(&TaskKind::ApplicationInit).unwrap();
+        assert_eq!(json, "\"application_init\"");
+        let kind: TaskKind = serde_json::from_str("\"message_consumer\"").unwrap();
+        assert_eq!(kind, TaskKind::MessageConsumer);
+    }
+
+    #[test]
+    fn serialized_task_context_missing_task_kind_deserializes_as_none() {
+        // Old engine cdylibs may emit JSON without the field; we must not break.
+        let json = r#"{
+            "datasource_tokens": {},
+            "dataview_tokens": {},
+            "datasource_configs": {},
+            "http_enabled": false,
+            "env": {},
+            "entrypoint": {"module":"x","function":"f","language":"javascript"},
+            "args": null,
+            "trace_id": "t",
+            "app_id": "a",
+            "node_id": "n",
+            "runtime_env": "dev",
+            "storage_available": false,
+            "store_namespace": null,
+            "lockbox_available": false,
+            "keystore_available": false,
+            "inline_source": null,
+            "prefetched_data": {},
+            "libs": []
+        }"#;
+        let ctx: SerializedTaskContext = serde_json::from_str(json).unwrap();
+        assert!(ctx.task_kind.is_none());
     }
 
     #[test]

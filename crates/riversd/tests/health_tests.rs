@@ -39,6 +39,7 @@ fn verbose_health_serialization() {
             circuit_state: "closed".into(),
         }],
         datasource_probes: vec![],
+        broker_bridges: vec![],
     };
 
     let json = serde_json::to_value(&resp).unwrap();
@@ -47,6 +48,8 @@ fn verbose_health_serialization() {
     assert_eq!(json["uptime_seconds"], 3600);
     assert_eq!(json["pool_snapshots"][0]["name"], "postgres");
     assert_eq!(json["pool_snapshots"][0]["circuit_state"], "closed");
+    // broker_bridges is always present (even if empty) so clients can detect support
+    assert!(json["broker_bridges"].is_array());
 }
 
 // ── UptimeTracker ───────────────────────────────────────────────
@@ -148,6 +151,7 @@ fn verbose_health_includes_probes() {
                 error: Some("timeout".into()),
             },
         ],
+        broker_bridges: vec![],
     };
     let json = serde_json::to_value(&resp).unwrap();
     let probes = json["datasource_probes"].as_array().unwrap();
@@ -156,4 +160,48 @@ fn verbose_health_includes_probes() {
     assert_eq!(probes[0]["status"], "ok");
     assert_eq!(probes[1]["name"], "redis");
     assert_eq!(probes[1]["status"], "error");
+}
+
+// ── P0-4: broker bridge health ──────────────────────────────────
+
+#[test]
+fn verbose_health_serializes_broker_bridges() {
+    use riversd::health::BrokerBridgeHealth;
+
+    let resp = VerboseHealthResponse {
+        status: "ok",
+        service: "riversd".into(),
+        environment: "test".into(),
+        version: "0.1.0".into(),
+        draining: false,
+        inflight_requests: 0,
+        uptime_seconds: 5,
+        pool_snapshots: vec![],
+        datasource_probes: vec![],
+        broker_bridges: vec![
+            BrokerBridgeHealth {
+                datasource: "kafka-events".into(),
+                driver: "kafka".into(),
+                state: "connected",
+                last_error: None,
+                failed_attempts: 0,
+            },
+            BrokerBridgeHealth {
+                datasource: "kafka-degraded".into(),
+                driver: "kafka".into(),
+                state: "disconnected",
+                last_error: Some("No route to host".into()),
+                failed_attempts: 3,
+            },
+        ],
+    };
+    let json = serde_json::to_value(&resp).unwrap();
+    let bridges = json["broker_bridges"].as_array().unwrap();
+    assert_eq!(bridges.len(), 2);
+    assert_eq!(bridges[0]["datasource"], "kafka-events");
+    assert_eq!(bridges[0]["state"], "connected");
+    assert!(bridges[0].get("last_error").is_none(), "last_error omitted when None");
+    assert_eq!(bridges[1]["state"], "disconnected");
+    assert_eq!(bridges[1]["failed_attempts"], 3);
+    assert_eq!(bridges[1]["last_error"], "No route to host");
 }

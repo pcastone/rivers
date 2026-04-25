@@ -18,6 +18,8 @@ fn task_with_fs_datasource(root: &std::path::Path, src: &str) -> TaskContext {
         )
         .args(serde_json::json!({ "_source": src }))
         .trace_id("direct-dispatch".into())
+        .app_id("test-app".into())
+        .task_kind(TaskKind::Rest)
         .build()
         .unwrap()
 }

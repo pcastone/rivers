@@ -35,13 +35,17 @@ pub struct MessageConsumerConfig {
     pub handler_mode: Option<String>,
     /// Auth mode — "none" by default (auto-exempt), but can opt-in to "session".
     pub auth: Option<String>,
+    /// App ID this consumer belongs to — required so dispatched events land in
+    /// the right per-app store namespace and inherit the right capabilities.
+    /// Stamped at registry build time from the bundle's app entry_point.
+    pub app_id: String,
 }
 
 impl MessageConsumerConfig {
     /// Extract MessageConsumer config from an ApiViewConfig.
     ///
     /// Returns None if view_type != "MessageConsumer" or on_event is missing.
-    pub fn from_view(view_id: &str, config: &ApiViewConfig) -> Option<Self> {
+    pub fn from_view(view_id: &str, config: &ApiViewConfig, app_id: &str) -> Option<Self> {
         if config.view_type != "MessageConsumer" {
             return None;
         }
@@ -54,6 +58,7 @@ impl MessageConsumerConfig {
             handler: on_event.handler.clone(),
             handler_mode: on_event.handler_mode.clone(),
             auth: config.auth.clone(),
+            app_id: app_id.to_string(),
         })
     }
 }
@@ -89,12 +94,12 @@ pub struct MessageConsumerRegistry {
 }
 
 impl MessageConsumerRegistry {
-    /// Build registry from all view configs.
-    pub fn from_views(views: &HashMap<String, ApiViewConfig>) -> Self {
+    /// Build registry from all view configs for a given app.
+    pub fn from_views(views: &HashMap<String, ApiViewConfig>, app_id: &str) -> Self {
         let mut consumers = HashMap::new();
 
         for (id, config) in views {
-            if let Some(mc_config) = MessageConsumerConfig::from_view(id, config) {
+            if let Some(mc_config) = MessageConsumerConfig::from_view(id, config, app_id) {
                 consumers.insert(id.clone(), mc_config);
             }
         }
@@ -251,7 +256,11 @@ pub async fn dispatch_message_event(
         .entrypoint(entrypoint)
         .args(args)
         .trace_id(trace_id.to_string());
-    let builder = crate::task_enrichment::enrich(builder, "");
+    let builder = crate::task_enrichment::enrich(
+        builder,
+        &config.app_id,
+        rivers_runtime::process_pool::TaskKind::MessageConsumer,
+    );
     let ctx = builder.build()?;
 
     let result = pool.dispatch("default", ctx).await?;
@@ -314,7 +323,11 @@ impl EventHandler for MessageConsumerHandler {
             .entrypoint(entrypoint)
             .args(args)
             .trace_id(event.trace_id.clone().unwrap_or_default());
-        let builder = crate::task_enrichment::enrich(builder, "");
+        let builder = crate::task_enrichment::enrich(
+            builder,
+            &self.config.app_id,
+            rivers_runtime::process_pool::TaskKind::MessageConsumer,
+        );
         let task_ctx = builder
             .build()
             .map_err(|e| {
@@ -379,6 +392,7 @@ mod tests {
             handler: "order_handler.js".into(),
             handler_mode: None,
             auth: None,
+            app_id: "test-app".into(),
         };
 
         let mut rx = subscribe_consumer(&config, &event_bus).await;
@@ -409,6 +423,7 @@ mod tests {
                 handler: "order_handler.js".into(),
                 handler_mode: None,
                 auth: None,
+                app_id: "test-app".into(),
             },
         );
         views.insert(
@@ -419,6 +434,7 @@ mod tests {
                 handler: "payment_handler.js".into(),
                 handler_mode: Some("onPayment".into()),
                 auth: None,
+                app_id: "test-app".into(),
             },
         );
 
@@ -438,6 +454,7 @@ mod tests {
             handler: "handler.js".into(),
             handler_mode: None,
             auth: None,
+            app_id: "test-app".into(),
         };
         let payload = MessageEventPayload {
             data: serde_json::json!({"key": "value"}),

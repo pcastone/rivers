@@ -10,6 +10,8 @@ pub mod backpressure;
 /// App-level circuit breaker registry for manual DataView traffic control.
 pub mod circuit_breaker;
 pub mod broker_bridge;
+/// Nonblocking supervisor for broker consumers (P0-4).
+pub mod broker_supervisor;
 pub mod bundle_diff;
 pub mod bundle_loader;
 pub mod engine_loader;

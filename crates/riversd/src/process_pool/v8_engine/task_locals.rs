@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::super::types::*;
+use rivers_runtime::process_pool::TaskKind;
 use rivers_runtime::rivers_core::{DriverFactory, StorageEngine};
 use rivers_runtime::DataViewExecutor;
 
@@ -106,6 +107,12 @@ thread_local! {
     /// Human-readable app name for the current task — used for per-app log routing.
     pub(super) static TASK_APP_NAME: RefCell<Option<String>> = RefCell::new(None);
 
+    /// Dispatch-site classification (C1) — gates elevated host capabilities.
+    /// `None` means "no task active". Inside a task it MUST be `Some`. Host
+    /// callbacks like `ctx.ddl()` read this to enforce ApplicationInit-only
+    /// access (B1.2).
+    pub(crate) static TASK_KIND: RefCell<Option<TaskKind>> = RefCell::new(None);
+
     /// Module-identity-hash → absolute source path for the modules compiled
     /// during the current task's execute_as_module call (spec §3.6 V8
     /// resolve callback). Needed because V8's resolve callback signature is
@@ -174,7 +181,33 @@ pub(super) struct TaskLocals;
 
 impl TaskLocals {
     /// Populate every task-scoped thread-local from `ctx` and the captured runtime handle.
-    pub(super) fn set(ctx: &TaskContext, rt_handle: tokio::runtime::Handle) -> Self {
+    ///
+    /// **C1.3:** Rejects empty `app_id` with a hard error. The previous
+    /// behavior — silently substituting `"app:default"` as the store namespace —
+    /// hid a class of bugs where a MessageConsumer's `ctx.store.set("k","v")`
+    /// landed in a different namespace from the same-app HTTP handler. The
+    /// dispatch site is required to plumb the real app_id; if it can't, that
+    /// is a bug at the dispatch site, not something to paper over here.
+    pub(super) fn set(
+        ctx: &TaskContext,
+        rt_handle: tokio::runtime::Handle,
+    ) -> Result<Self, TaskError> {
+        if ctx.app_id.is_empty() {
+            tracing::error!(
+                trace_id = %ctx.trace_id,
+                task_kind = %ctx.task_kind.as_str(),
+                entrypoint_module = %ctx.entrypoint.module,
+                entrypoint_function = %ctx.entrypoint.function,
+                "dispatch rejected: empty app_id (C1)"
+            );
+            return Err(TaskError::Internal(format!(
+                "dispatch rejected: empty app_id (task_kind={}, entrypoint={}::{}, trace_id={})",
+                ctx.task_kind.as_str(),
+                ctx.entrypoint.module,
+                ctx.entrypoint.function,
+                ctx.trace_id,
+            )));
+        }
         RT_HANDLE.with(|h| *h.borrow_mut() = Some(rt_handle));
         TASK_ENV.with(|e| *e.borrow_mut() = Some(ctx.env.clone()));
         TASK_STORE.with(|s| s.borrow_mut().clear());
@@ -182,11 +215,8 @@ impl TaskLocals {
         TASK_APP_NAME.with(|n| *n.borrow_mut() = Some(ctx.app_id.clone()));
         TASK_HTTP_ENABLED.with(|h| *h.borrow_mut() = ctx.http.is_some());
         TASK_STORAGE.with(|s| *s.borrow_mut() = ctx.storage.clone());
-        let store_ns = if ctx.app_id.is_empty() {
-            "app:default".to_string()
-        } else {
-            format!("app:{}", ctx.app_id)
-        };
+        TASK_KIND.with(|k| *k.borrow_mut() = Some(ctx.task_kind));
+        let store_ns = format!("app:{}", ctx.app_id);
         TASK_STORE_NAMESPACE.with(|n| *n.borrow_mut() = Some(store_ns));
         TASK_DRIVER_FACTORY.with(|f| *f.borrow_mut() = ctx.driver_factory.clone());
         TASK_DS_CONFIGS.with(|c| *c.borrow_mut() = ctx.datasource_configs.clone());
@@ -235,7 +265,7 @@ impl TaskLocals {
                 }
             }
         });
-        TaskLocals
+        Ok(TaskLocals)
     }
 }
 
@@ -264,6 +294,7 @@ impl Drop for TaskLocals {
         TASK_LOCKBOX.with(|lb| *lb.borrow_mut() = None);
         TASK_KEYSTORE.with(|ks| *ks.borrow_mut() = None);
         TASK_APP_NAME.with(|n| *n.borrow_mut() = None);
+        TASK_KIND.with(|k| *k.borrow_mut() = None);
         TASK_MODULE_REGISTRY.with(|r| r.borrow_mut().clear());
         TASK_MODULE_NAMESPACE.with(|n| *n.borrow_mut() = None);
         // TASK_TRANSACTION was drained above, before RT_HANDLE was cleared.
@@ -278,11 +309,14 @@ mod direct_datasource_tests {
     use crate::process_pool::{Entrypoint, TaskContextBuilder};
 
     fn task_with_datasources(entries: Vec<(&str, DatasourceToken)>) -> TaskContext {
-        let mut b = TaskContextBuilder::new().entrypoint(Entrypoint {
-            module: "inline".into(),
-            function: "run".into(),
-            language: "javascript".into(),
-        });
+        let mut b = TaskContextBuilder::new()
+            .entrypoint(Entrypoint {
+                module: "inline".into(),
+                function: "run".into(),
+                language: "javascript".into(),
+            })
+            .app_id("test-app".into())
+            .task_kind(TaskKind::Rest);
         for (name, token) in entries {
             b = b.datasource(name.into(), token);
         }
@@ -299,7 +333,7 @@ mod direct_datasource_tests {
             ("db", DatasourceToken::pooled("postgres:db")),
         ]);
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let guard = TaskLocals::set(&ctx, rt.handle().clone());
+        let guard = TaskLocals::set(&ctx, rt.handle().clone()).unwrap();
 
         TASK_DIRECT_DATASOURCES.with(|m| {
             let map = m.borrow();
@@ -321,7 +355,33 @@ mod direct_datasource_tests {
     fn pooled_only_leaves_map_empty() {
         let ctx = task_with_datasources(vec![("db", DatasourceToken::pooled("postgres:db"))]);
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = TaskLocals::set(&ctx, rt.handle().clone());
+        let _guard = TaskLocals::set(&ctx, rt.handle().clone()).unwrap();
         TASK_DIRECT_DATASOURCES.with(|m| assert!(m.borrow().is_empty()));
+    }
+
+    #[test]
+    fn empty_app_id_is_rejected() {
+        // C1.3: building a TaskContext with no app_id and trying to set
+        // TaskLocals must produce a hard TaskError::Internal so the dispatch
+        // does not silently land in the wrong store namespace.
+        let ctx = TaskContextBuilder::new()
+            .entrypoint(Entrypoint {
+                module: "inline".into(),
+                function: "run".into(),
+                language: "javascript".into(),
+            })
+            .task_kind(TaskKind::Rest)
+            .build()
+            .unwrap();
+        // app_id stays empty (no .app_id() call).
+        assert_eq!(ctx.app_id, "");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let res = TaskLocals::set(&ctx, rt.handle().clone());
+        assert!(res.is_err(), "empty app_id must be rejected");
+        let err_msg = res.err().unwrap().to_string();
+        assert!(
+            err_msg.contains("empty app_id"),
+            "error message should mention empty app_id, got: {err_msg}",
+        );
     }
 }

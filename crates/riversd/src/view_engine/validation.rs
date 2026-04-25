@@ -196,7 +196,11 @@ pub async fn execute_on_error_handlers(
             .entrypoint(entrypoint)
             .args(args)
             .trace_id(ctx.trace_id.clone());
-        let builder = crate::task_enrichment::enrich(builder, &ctx.app_id);
+        let builder = crate::task_enrichment::enrich(
+            builder,
+            &ctx.app_id,
+            rivers_runtime::process_pool::TaskKind::ValidationHook,
+        );
         let task_ctx = match builder.build() {
             Ok(c) => c,
             Err(_) => continue,
@@ -230,6 +234,7 @@ pub async fn execute_on_session_valid(
     handler: &HandlerStageConfig,
     session: &serde_json::Value,
     trace_id: &str,
+    app_id: &str,
 ) -> Result<bool, ViewError> {
     let entrypoint = Entrypoint {
         module: handler.module.clone(),
@@ -245,7 +250,11 @@ pub async fn execute_on_session_valid(
         .entrypoint(entrypoint)
         .args(args)
         .trace_id(trace_id.to_string());
-    let builder = crate::task_enrichment::enrich(builder, "");
+    let builder = crate::task_enrichment::enrich(
+        builder,
+        app_id,
+        rivers_runtime::process_pool::TaskKind::ValidationHook,
+    );
     let task_ctx = builder
         .build()
         .map_err(|e| ViewError::Pipeline(format!("session valid context build: {}", e)))?;

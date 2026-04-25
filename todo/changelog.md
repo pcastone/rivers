@@ -243,3 +243,29 @@ Plan correction: task 4.3 said "thread via closure capture (not thread-local)." 
   - `docs/guide/tutorials/datasource-filesystem.md` (new, 197 lines, all 11 ops + chroot + limits + error table).
 - **Tests:** ~85 new tests across driver ops, chroot enforcement, typed-proxy codegen, end-to-end V8 round-trip, and canary handlers. Scoped sweep of touched crates: 706/706 passing (sdk 67, drivers-builtin 140, runtime 187, riversd 312). Pre-existing workspace-level failures in live-infra tests (postgres/mysql/redis at 192.168.2.x) and two broken benches (`cache_bench`, `dataview_engine_tests`) are unrelated to this branch — verified via `git stash` on baseline.
 - **Commits:** 29 commits from `f2c6db5` through `ad8819b` on `feature/filesystem-driver`.
+
+---
+
+## 2026-04-24 — Code-review remediation Phase A (P0-4 + P0-1)
+
+### A1 — Broker consumer supervisor (P0-4)
+- **new:** `crates/riversd/src/broker_supervisor.rs` — `spawn_broker_supervisor`, `BrokerBridgeRegistry`, `SupervisorBackoff`, `BrokerBridgeState` enum.
+- **edit:** `crates/riversd/src/lib.rs` — register module.
+- **edit:** `crates/riversd/src/bundle_loader/wire.rs` — replace `match create_consumer().await { Ok => spawn(bridge.run()), Err => warn }` with `spawn_broker_supervisor(...)` (returns immediately).
+- **edit:** `crates/riversd/src/server/context.rs` — `AppContext.broker_bridge_registry` field.
+- **edit:** `crates/riversd/src/health.rs` — new `BrokerBridgeHealth` type; `VerboseHealthResponse.broker_bridges` field.
+- **edit:** `crates/riversd/src/server/handlers.rs` — populate `broker_bridges` from registry snapshot.
+- **new:** `crates/riversd/tests/broker_supervisor_tests.rs` — 3 tests (spawn-immediate, eventually-ok, empty-healthy).
+- **edit:** `crates/riversd/tests/health_tests.rs` — `verbose_health_serializes_broker_bridges` + struct-literal updates.
+- **Effect:** `riversd` boots even when broker hosts are unreachable. `/health/verbose` reports per-bridge state. Existing `reconnect_ms` config now drives exponential backoff capped at 60s.
+
+### A2 — Protected-view fail-closed (P0-1)
+- **edit:** `crates/riversd/src/security_pipeline.rs` — explicit `session_manager.is_none()` reject before validation block; returns 500.
+- **edit:** `crates/riversd/src/bundle_loader/load.rs` — strengthened AM1.2; extracted `check_protected_views_have_session` helper with 6 unit tests.
+- **new:** `crates/riversd/tests/security_pipeline_tests.rs` — 2 integration tests.
+- **Effect:** misconfig (protected view + missing session manager) now fails at bundle load with a named-view error AND, as defense-in-depth, fails closed at request time with a 500. Public views (auth=none) unaffected.
+
+### Tests
+- 345/345 lib tests + 1 ignored.
+- 11 integration files passing across the changes (broker_supervisor: 3, health: 12, security_pipeline: 2, broker_bridge: 12).
+- One pre-existing failure flagged: `cli_tests::version_string_contains_version` hardcodes 0.50.1 (crate is 0.55.0). Spawned for separate cleanup.

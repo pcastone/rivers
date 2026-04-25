@@ -3,9 +3,18 @@ use std::collections::HashMap;
 use rivers_runtime::rivers_core::config::ProcessPoolConfig;
 use riversd::process_pool::{
     compile_typescript, validate_capabilities, DatasourceToken, DataViewToken, EngineType,
-    Entrypoint, ProcessPool, ProcessPoolManager, TaskContextBuilder, TaskError, V8Config, V8Worker,
-    WasmtimeConfig, WasmtimeWorker,
+    Entrypoint, ProcessPool, ProcessPoolManager, TaskContextBuilder, TaskError, TaskKind,
+    V8Config, V8Worker, WasmtimeConfig, WasmtimeWorker,
 };
+
+/// Helper: a builder with the test app_id and Rest task_kind already wired.
+/// Use this everywhere instead of `TaskContextBuilder::new()` in tests so
+/// the post-C1 builder requirements (app_id + task_kind) are satisfied.
+fn test_builder() -> TaskContextBuilder {
+    TaskContextBuilder::new()
+        .app_id("test-app".to_string())
+        .task_kind(TaskKind::Rest)
+}
 
 // ── Helper ───────────────────────────────────────────────────────
 
@@ -37,7 +46,7 @@ fn builder_requires_entrypoint() {
 
 #[test]
 fn builder_with_entrypoint_succeeds() {
-    let ctx = TaskContextBuilder::new()
+    let ctx = test_builder()
         .entrypoint(test_entrypoint())
         .args(serde_json::json!({"key": "value"}))
         .trace_id("trace-123".to_string())
@@ -50,7 +59,7 @@ fn builder_with_entrypoint_succeeds() {
 
 #[test]
 fn builder_with_capabilities() {
-    let ctx = TaskContextBuilder::new()
+    let ctx = test_builder()
         .entrypoint(test_entrypoint())
         .datasource("db".to_string(), DatasourceToken::pooled("tok_db"))
         .dataview("orders".to_string(), DataViewToken("tok_orders".to_string()))
@@ -67,7 +76,7 @@ fn builder_with_capabilities() {
 
 #[test]
 fn validate_capabilities_passes_when_all_available() {
-    let ctx = TaskContextBuilder::new()
+    let ctx = test_builder()
         .entrypoint(test_entrypoint())
         .datasource("db".to_string(), DatasourceToken::pooled("tok"))
         .dataview("orders".to_string(), DataViewToken("tok".to_string()))
@@ -82,7 +91,7 @@ fn validate_capabilities_passes_when_all_available() {
 
 #[test]
 fn validate_capabilities_fails_on_missing_datasource() {
-    let ctx = TaskContextBuilder::new()
+    let ctx = test_builder()
         .entrypoint(test_entrypoint())
         .datasource("missing_db".to_string(), DatasourceToken::pooled("tok"))
         .build()
@@ -95,7 +104,7 @@ fn validate_capabilities_fails_on_missing_datasource() {
 
 #[test]
 fn validate_capabilities_fails_on_missing_dataview() {
-    let ctx = TaskContextBuilder::new()
+    let ctx = test_builder()
         .entrypoint(test_entrypoint())
         .dataview("missing_view".to_string(), DataViewToken("tok".to_string()))
         .build()
@@ -113,7 +122,7 @@ async fn pool_dispatch_returns_handler_error_for_missing_module() {
     // module file results in HandlerError (cannot read file).
     let pool = ProcessPool::new("test".to_string(), test_config());
 
-    let ctx = TaskContextBuilder::new()
+    let ctx = test_builder()
         .entrypoint(test_entrypoint())
         .build()
         .unwrap();
@@ -176,7 +185,7 @@ async fn manager_creates_named_pools() {
 async fn manager_dispatch_to_unknown_pool_fails() {
     let manager = ProcessPoolManager::from_config(&HashMap::new());
 
-    let ctx = TaskContextBuilder::new()
+    let ctx = test_builder()
         .entrypoint(test_entrypoint())
         .build()
         .unwrap();
@@ -192,7 +201,7 @@ async fn manager_dispatch_to_default_pool() {
     // module file results in HandlerError (cannot read file).
     let manager = ProcessPoolManager::from_config(&HashMap::new());
 
-    let ctx = TaskContextBuilder::new()
+    let ctx = test_builder()
         .entrypoint(test_entrypoint())
         .build()
         .unwrap();
@@ -513,7 +522,7 @@ async fn dispatch_js_from_disk_file() {
 
     let manager = ProcessPoolManager::from_config(&HashMap::new());
 
-    let ctx = TaskContextBuilder::new()
+    let ctx = test_builder()
         .entrypoint(Entrypoint {
             module: js_path.to_string_lossy().into(),
             function: "onRequest".into(),
@@ -544,7 +553,7 @@ async fn dispatch_js_with_args_through_pool() {
 
     let manager = ProcessPoolManager::from_config(&HashMap::new());
 
-    let ctx = TaskContextBuilder::new()
+    let ctx = test_builder()
         .entrypoint(Entrypoint {
             module: js_path.to_string_lossy().into(),
             function: "handler".into(),
@@ -573,7 +582,7 @@ async fn dispatch_js_error_propagates_through_pool() {
 
     let manager = ProcessPoolManager::from_config(&HashMap::new());
 
-    let ctx = TaskContextBuilder::new()
+    let ctx = test_builder()
         .entrypoint(Entrypoint {
             module: js_path.to_string_lossy().into(),
             function: "handler".into(),
@@ -607,7 +616,7 @@ async fn dispatch_wasm_through_pool() {
     });
     let manager = ProcessPoolManager::from_config(&config);
 
-    let ctx = TaskContextBuilder::new()
+    let ctx = test_builder()
         .entrypoint(Entrypoint {
             module: wasm_path.to_string_lossy().into(),
             function: "handler".into(),
@@ -639,7 +648,7 @@ async fn dispatch_async_js_through_pool() {
 
     let manager = ProcessPoolManager::from_config(&HashMap::new());
 
-    let ctx = TaskContextBuilder::new()
+    let ctx = test_builder()
         .entrypoint(Entrypoint {
             module: js_path.to_string_lossy().into(),
             function: "handler".into(),

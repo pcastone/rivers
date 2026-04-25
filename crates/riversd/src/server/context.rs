@@ -152,6 +152,10 @@ pub struct AppContext {
     pub failed_apps: Arc<std::sync::RwLock<HashMap<String, String>>>,
     /// Circuit breaker registry — app-level manual DataView traffic control.
     pub circuit_breaker_registry: Arc<crate::circuit_breaker::BreakerRegistry>,
+    /// Broker bridge registry — per-broker connection state, separate from
+    /// process readiness. Populated by the broker supervisor; surfaced via
+    /// `/health/verbose`. See `broker_supervisor` and code review P0-4.
+    pub broker_bridge_registry: crate::broker_supervisor::BrokerBridgeRegistry,
 }
 
 impl AppContext {
@@ -187,6 +191,7 @@ impl AppContext {
             shutdown_tx: None,
             failed_apps: Arc::new(std::sync::RwLock::new(HashMap::new())),
             circuit_breaker_registry: Arc::new(crate::circuit_breaker::BreakerRegistry::new()),
+            broker_bridge_registry: crate::broker_supervisor::BrokerBridgeRegistry::new(),
         }
     }
 }

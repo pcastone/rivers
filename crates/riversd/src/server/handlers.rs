@@ -89,6 +89,20 @@ pub(super) async fn health_verbose_handler(
         }
     };
 
+    let broker_bridges = ctx
+        .broker_bridge_registry
+        .snapshot()
+        .await
+        .into_iter()
+        .map(|s| crate::health::BrokerBridgeHealth {
+            datasource: s.datasource,
+            driver: s.driver,
+            state: s.state.as_str(),
+            last_error: s.last_error,
+            failed_attempts: s.failed_attempts,
+        })
+        .collect();
+
     Json(crate::health::VerboseHealthResponse {
         status: "ok",
         service: "riversd".to_string(),
@@ -99,6 +113,7 @@ pub(super) async fn health_verbose_handler(
         uptime_seconds: ctx.uptime.uptime_seconds(),
         pool_snapshots: Vec::new(), // populated when pool manager is wired
         datasource_probes,
+        broker_bridges,
     })
 }
 

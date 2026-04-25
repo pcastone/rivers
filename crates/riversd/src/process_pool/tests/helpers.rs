@@ -11,6 +11,8 @@ pub(super) fn make_js_task(source: &str, function: &str) -> TaskContext {
         })
         .args(serde_json::json!({ "_source": source }))
         .trace_id("test-trace".into())
+        .app_id("test-app".into())
+        .task_kind(TaskKind::Rest)
         .build()
         .unwrap()
 }
@@ -26,6 +28,8 @@ pub(super) fn make_http_js_task(source: &str, function: &str) -> TaskContext {
         .http(HttpToken)
         .args(serde_json::json!({ "_source": source }))
         .trace_id("test-http".into())
+        .app_id("test-app".into())
+        .task_kind(TaskKind::Rest)
         .build()
         .unwrap()
 }

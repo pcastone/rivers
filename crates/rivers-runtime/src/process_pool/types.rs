@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use crate::rivers_core::{DriverFactory, StorageEngine};
 use crate::DataViewExecutor;
 
+pub use crate::rivers_engine_sdk::TaskKind;
+
 // ── Opaque Tokens ────────────────────────────────────────────────
 
 /// Opaque handle to a datasource — the isolate never holds a real connection.
@@ -154,6 +156,9 @@ pub struct TaskContext {
     /// Unlocked application keystore for encrypt/decrypt (App Keystore feature).
     #[cfg(feature = "keystore")]
     pub keystore: Option<Arc<rivers_keystore_engine::AppKeystore>>,
+    /// Dispatch-site classification — gates elevated capabilities (e.g. ctx.ddl).
+    /// Required: every dispatch site MUST set this via `TaskContextBuilder::task_kind()`.
+    pub task_kind: TaskKind,
 }
 
 impl std::fmt::Debug for TaskContext {

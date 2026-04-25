@@ -206,6 +206,7 @@ pub async fn run_streaming_generator(
     config: &StreamingConfig,
     sender: mpsc::Sender<StreamChunk>,
     trace_id: &str,
+    app_id: &str,
 ) -> Result<(), StreamingError> {
     let timeout = tokio::time::Duration::from_millis(config.stream_timeout_ms);
     let format_str = match config.format {
@@ -235,7 +236,11 @@ pub async fn run_streaming_generator(
                 .entrypoint(entrypoint.clone())
                 .args(args)
                 .trace_id(format!("{}-{}", trace_id, iteration));
-            let builder = crate::task_enrichment::enrich(builder, "");
+            let builder = crate::task_enrichment::enrich(
+                builder,
+                app_id,
+                rivers_runtime::process_pool::TaskKind::Rest,
+            );
             let ctx = builder
                 .build()
                 .map_err(|e| StreamingError::GeneratorError(e.to_string()))?;
@@ -427,7 +432,7 @@ mod tests {
         let (sender, _receiver) = mpsc::channel(16);
 
         let result =
-            run_streaming_generator(&pool, &entrypoint, &config, sender, "trace-1").await;
+            run_streaming_generator(&pool, &entrypoint, &config, sender, "trace-1", "test-app").await;
         assert!(result.is_err());
         // Now that JS engine is live, missing file produces GeneratorError
         assert!(
@@ -455,7 +460,7 @@ mod tests {
         let (sender, _receiver) = mpsc::channel(16);
 
         let result =
-            run_streaming_generator(&pool, &entrypoint, &config, sender, "trace-1").await;
+            run_streaming_generator(&pool, &entrypoint, &config, sender, "trace-1", "test-app").await;
         // Either timeout, generator error, or engine unavailable — all valid
         assert!(result.is_err());
     }
@@ -571,7 +576,7 @@ mod tests {
         let config = StreamingConfig { format: StreamingFormat::Ndjson, stream_timeout_ms: 10000 };
         let (sender, mut receiver) = mpsc::channel(16);
 
-        let result = run_streaming_generator(&pool, &entrypoint, &config, sender, "ay1-test").await;
+        let result = run_streaming_generator(&pool, &entrypoint, &config, sender, "ay1-test", "test-app").await;
         assert!(result.is_ok(), "generator should complete: {:?}", result.err());
 
         // Collect all chunks
@@ -604,7 +609,7 @@ mod tests {
         let config = StreamingConfig::default();
         let (sender, mut receiver) = mpsc::channel(16);
 
-        let result = run_streaming_generator(&pool, &entrypoint, &config, sender, "ay1-done").await;
+        let result = run_streaming_generator(&pool, &entrypoint, &config, sender, "ay1-done", "test-app").await;
         assert!(result.is_ok());
 
         // No chunks should have been sent
@@ -639,7 +644,7 @@ mod tests {
         let config = StreamingConfig { format: StreamingFormat::Ndjson, stream_timeout_ms: 10000 };
         let (sender, mut receiver) = mpsc::channel(16);
 
-        let result = run_streaming_generator(&pool, &entrypoint, &config, sender, "ay1-state").await;
+        let result = run_streaming_generator(&pool, &entrypoint, &config, sender, "ay1-state", "test-app").await;
         assert!(result.is_ok());
 
         let mut chunks = Vec::new();
@@ -678,7 +683,7 @@ mod tests {
         // Drop receiver immediately to simulate disconnect
         drop(receiver);
 
-        let result = run_streaming_generator(&pool, &entrypoint, &config, sender, "ay1-dc").await;
+        let result = run_streaming_generator(&pool, &entrypoint, &config, sender, "ay1-dc", "test-app").await;
         assert!(
             matches!(result, Err(StreamingError::ClientDisconnected)),
             "expected ClientDisconnected, got: {:?}",

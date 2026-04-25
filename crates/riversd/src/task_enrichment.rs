@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, RwLock};
 
-use rivers_runtime::process_pool::TaskContextBuilder;
+use rivers_runtime::process_pool::{TaskContextBuilder, TaskKind};
 use rivers_runtime::rivers_core::{DriverFactory, StorageEngine};
 use rivers_runtime::DataViewExecutor;
 
@@ -75,7 +75,17 @@ pub fn app_id_from_qualified_name(name: &str) -> &str {
 /// Enrich a TaskContextBuilder with all capabilities available from shared state.
 ///
 /// New capabilities wired here automatically become available to every dispatch site.
-pub fn enrich(mut builder: TaskContextBuilder, app_id: &str) -> TaskContextBuilder {
+///
+/// **C1.2:** Every caller MUST pass an explicit `task_kind` so host capability
+/// gates (e.g. `ctx.ddl()` ApplicationInit-only) work correctly. The compiler
+/// is the todo list — adding a new dispatch site without a `task_kind` won't
+/// build.
+pub fn enrich(
+    mut builder: TaskContextBuilder,
+    app_id: &str,
+    task_kind: TaskKind,
+) -> TaskContextBuilder {
+    builder = builder.task_kind(task_kind);
     if !app_id.is_empty() {
         builder = builder.app_id(app_id.into());
     }
@@ -220,6 +230,7 @@ mod tests {
                 .args(serde_json::json!({"ok": true}))
                 .trace_id("trace-1".to_string()),
             "test-app",
+            TaskKind::Rest,
         )
         .build()
         .unwrap();

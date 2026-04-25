@@ -68,7 +68,7 @@ async fn au1_execute_js_file_from_disk() {
             language: "javascript".into(),
         })
         .args(serde_json::json!({"name": "disk-test"}))
-        .trace_id("au1".into())
+        .trace_id("au1".into()).app_id("test-app".into())
         .build()
         .unwrap();
 

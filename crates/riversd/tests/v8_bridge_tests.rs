@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use rivers_runtime::rivers_core::config::ProcessPoolConfig;
 use riversd::process_pool::{
-    Entrypoint, ProcessPoolManager, TaskContextBuilder, TaskError,
+    Entrypoint, ProcessPoolManager, TaskContextBuilder, TaskError, TaskKind,
 };
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -41,6 +41,7 @@ async fn eval_js(code: &str) -> serde_json::Value {
         .app_id("test-app-uuid".into())
         .node_id("test-node-1".into())
         .runtime_env("test".into())
+        .task_kind(TaskKind::Rest)
         .build()
         .unwrap();
     let result = mgr.dispatch("default", ctx).await.unwrap();
@@ -62,6 +63,7 @@ async fn eval_js_with_request(code: &str, request: serde_json::Value) -> serde_j
         .app_id("test-app-uuid".into())
         .node_id("test-node-1".into())
         .runtime_env("test".into())
+        .task_kind(TaskKind::Rest)
         .build()
         .unwrap();
     let result = mgr.dispatch("default", ctx).await.unwrap();
@@ -302,6 +304,8 @@ async fn v8_timeout_terminates_infinite_loop() {
         })
         .args(serde_json::json!({}))
         .trace_id("timeout-test".into())
+        .app_id("test-app".into())
+        .task_kind(TaskKind::Rest)
         .build()
         .unwrap();
 
@@ -337,6 +341,8 @@ async fn v8_heap_limit_does_not_crash_process() {
         })
         .args(serde_json::json!({}))
         .trace_id("heap-test".into())
+        .app_id("test-app".into())
+        .task_kind(TaskKind::Rest)
         .build()
         .unwrap();
 

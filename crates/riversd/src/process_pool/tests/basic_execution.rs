@@ -36,7 +36,7 @@ async fn execute_reads_args() {
             "_source": "function handler(ctx) { return { got: __args.name }; }",
             "name": "alice"
         }))
-        .trace_id("test-trace".into())
+        .trace_id("test-trace".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -183,7 +183,7 @@ async fn execute_ctx_has_app_metadata() {
         .args(serde_json::json!({
             "_source": "function handler(ctx) { return { app: ctx.app_id, node: ctx.node_id, env: ctx.env }; }"
         }))
-        .trace_id("t1".into())
+        .trace_id("t1".into()).app_id("test-app".into())
         .app_id("my-app".into())
         .node_id("node-1".into())
         .runtime_env("prod".into())

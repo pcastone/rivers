@@ -455,8 +455,39 @@ fn ctx_ddl_callback(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    // B1.2: ctx.ddl() is ONLY available during ApplicationInit. Reading
+    // TASK_KIND first is critical — letting REST/MessageConsumer/etc. handlers
+    // call ctx.ddl() lets a request handler issue `DROP TABLE users` (P0).
+    let task_kind = super::task_locals::TASK_KIND.with(|k| *k.borrow());
+    match task_kind {
+        Some(rivers_runtime::process_pool::TaskKind::ApplicationInit) => {
+            // Allowed.
+        }
+        other => {
+            throw_js_error(
+                scope,
+                &format!(
+                    "ctx.ddl() is only available during application initialization (got task_kind={:?})",
+                    other
+                ),
+            );
+            return;
+        }
+    }
+
     let datasource = args.get(0).to_rust_string_lossy(scope);
     let statement = args.get(1).to_rust_string_lossy(scope);
+
+    // B1.2: app_id must be present (TaskLocals::set already rejects empty
+    // app_id, but we double-check here so a future regression in TaskLocals
+    // doesn't silently re-open this path).
+    let app_id_present = super::task_locals::TASK_APP_NAME.with(|n| {
+        n.borrow().as_deref().map(|s| !s.is_empty()).unwrap_or(false)
+    });
+    if !app_id_present {
+        throw_js_error(scope, "ctx.ddl(): app_id is required");
+        return;
+    }
 
     // Get DriverFactory and DataViewExecutor from task locals
     let factory = TASK_DRIVER_FACTORY.with(|f| f.borrow().clone());

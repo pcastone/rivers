@@ -801,6 +801,23 @@ fn ddl_callback(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    // B1.2: ApplicationInit-only gate. Anything else (including a missing
+    // task_kind from an old caller) gets rejected. Same security posture as
+    // the static-engine path in riversd::process_pool::v8_engine::context.
+    let task_kind = crate::task_context::TASK_KIND.with(|k| *k.borrow());
+    if task_kind != Some(rivers_engine_sdk::TaskKind::ApplicationInit) {
+        let msg = v8_str(
+            scope,
+            &format!(
+                "ctx.ddl() is only available during application initialization (got task_kind={:?})",
+                task_kind
+            ),
+        );
+        let exception = v8::Exception::error(scope, msg);
+        scope.throw_exception(exception);
+        return;
+    }
+
     let datasource = args.get(0).to_rust_string_lossy(scope);
     let statement = args.get(1).to_rust_string_lossy(scope);
 

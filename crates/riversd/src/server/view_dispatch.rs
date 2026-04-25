@@ -233,7 +233,7 @@ async fn view_dispatch_handler(
 
     // ── Streaming REST dispatch ──
     if is_streaming {
-        return execute_streaming_rest_view(&ctx, parsed, &config, &trace_id).await;
+        return execute_streaming_rest_view(&ctx, parsed, &config, &trace_id, &matched.app_id).await;
     }
 
     // ── Standard REST dispatch ──
@@ -257,6 +257,7 @@ async fn view_dispatch_handler(
         &method,
         &trace_id,
         guard_view_path.as_deref(),
+        &manifest_app_id,
     ).await;
     let session_id = match security {
         Ok(outcome) => {
@@ -368,6 +369,7 @@ async fn view_dispatch_handler(
                         let pool = ctx.pool.clone();
                         let hook = hook.clone();
                         let trace = trace_id.clone();
+                        let app_id_owned = manifest_app_id.clone();
                         tokio::spawn(async move {
                             let entrypoint = crate::process_pool::Entrypoint {
                                 module: hook.module.clone(),
@@ -379,7 +381,11 @@ async fn view_dispatch_handler(
                                 .entrypoint(entrypoint)
                                 .args(args)
                                 .trace_id(trace);
-                            let builder = crate::task_enrichment::enrich(builder, "");
+                            let builder = crate::task_enrichment::enrich(
+                                builder,
+                                &app_id_owned,
+                                rivers_runtime::process_pool::TaskKind::SecurityHook,
+                            );
                             if let Ok(task_ctx) = builder.build() {
                                 let _ = pool.dispatch("default", task_ctx).await;
                             }

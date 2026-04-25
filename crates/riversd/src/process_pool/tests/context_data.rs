@@ -222,7 +222,7 @@ async fn x3_store_with_storage_engine_round_trip() {
                 return { stored: val };
             }"#
         }))
-        .trace_id("x3-test".into())
+        .trace_id("x3-test".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -248,7 +248,7 @@ async fn x3_store_with_storage_engine_del() {
                 return { deleted: val === null };
             }"#
         }))
-        .trace_id("x3-del".into())
+        .trace_id("x3-del".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -273,7 +273,7 @@ async fn x3_store_with_ttl() {
                 return { has_value: val !== null };
             }"#
         }))
-        .trace_id("x3-ttl".into())
+        .trace_id("x3-ttl".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -301,7 +301,7 @@ async fn x3_store_reserved_prefix_with_engine() {
                 }
             }"#
         }))
-        .trace_id("x3-reserved".into())
+        .trace_id("x3-reserved".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -371,7 +371,7 @@ async fn x4_dataview_prefetch_returns_data() {
                 return ctx.dataview("contacts");
             }"#
         }))
-        .trace_id("x4-prefetch".into())
+        .trace_id("x4-prefetch".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -453,7 +453,7 @@ async fn x7_datasource_build_without_query_throws() {
                 }
             }"#
         }))
-        .trace_id("x7-no-query".into())
+        .trace_id("x7-no-query".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -496,7 +496,7 @@ async fn x7_datasource_build_no_factory_throws() {
                 }
             }"#
         }))
-        .trace_id("x7-no-factory".into())
+        .trace_id("x7-no-factory".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -567,7 +567,7 @@ async fn x7_datasource_build_with_faker_driver() {
                 return { has_rows: result.rows !== undefined, row_count: result.rows.length };
             }"#
         }))
-        .trace_id("x7-faker".into())
+        .trace_id("x7-faker".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -656,7 +656,7 @@ async fn x4_dataview_executor_end_to_end() {
                 return { has_rows: result.rows !== undefined, row_count: result.rows.length };
             }"#
         }))
-        .trace_id("x4-executor".into())
+        .trace_id("x4-executor".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -696,7 +696,7 @@ async fn x4_dataview_executor_not_found_throws() {
                 }
             }"#
         }))
-        .trace_id("x4-notfound".into())
+        .trace_id("x4-notfound".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -738,7 +738,7 @@ async fn x4_dataview_prefetch_takes_priority_over_executor() {
                 return { from_prefetch: result[0].name === "pre-fetched" };
             }"#
         }))
-        .trace_id("x4-priority".into())
+        .trace_id("x4-priority".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -821,7 +821,7 @@ async fn au13_ctx_dataview_dynamic_with_executor() {
                 return { has_data: data !== null, type: typeof data };
             }"#
         }))
-        .trace_id("au13".into())
+        .trace_id("au13".into()).app_id("test-app".into())
         .build()
         .unwrap();
 

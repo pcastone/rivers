@@ -184,7 +184,7 @@ mod tests {
         };
         let session = serde_json::json!({"user_id": "u-1"});
 
-        let result = execute_on_session_valid(&pool, &handler, &session, "trace-1").await;
+        let result = execute_on_session_valid(&pool, &handler, &session, "trace-1", "test-app").await;
         // Should fail because the engine is unavailable
         assert!(result.is_err());
     }

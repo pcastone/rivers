@@ -183,6 +183,7 @@ pub(super) async fn execute_streaming_rest_view(
     _parsed: crate::view_engine::ParsedRequest,
     config: &rivers_runtime::view::ApiViewConfig,
     trace_id: &str,
+    app_id: &str,
 ) -> axum::response::Response {
     use crate::streaming::{StreamingConfig, StreamingFormat, StreamChunk, run_streaming_generator, poison_chunk_ndjson, poison_chunk_sse};
     use crate::process_pool::Entrypoint;
@@ -221,6 +222,7 @@ pub(super) async fn execute_streaming_rest_view(
     // Spawn generator task — owns chunk_tx, drops it when done
     let pool = ctx.pool.clone();
     let trace_owned = trace_id.to_string();
+    let app_id_owned = app_id.to_string();
     let gen_handle = tokio::spawn(async move {
         run_streaming_generator(
             &pool,
@@ -228,6 +230,7 @@ pub(super) async fn execute_streaming_rest_view(
             &streaming_config,
             chunk_tx,
             &trace_owned,
+            &app_id_owned,
         )
         .await
     });
@@ -272,6 +275,7 @@ pub(super) async fn execute_ws_view(
     let view_id = matched.view_id.clone();
     let trace_id = uuid::Uuid::new_v4().to_string();
     let config = matched.config.clone();
+    let app_id = matched.app_id.clone();
 
     // Extract WebSocketUpgrade from the request parts (before body consumption)
     let (mut parts, _body) = request.into_parts();
@@ -293,7 +297,7 @@ pub(super) async fn execute_ws_view(
     let ctx_clone = ctx.clone();
     ws_upgrade
         .on_upgrade(move |socket| {
-            handle_ws_connection(ctx_clone, socket, view_id, config, ws_mode, trace_id)
+            handle_ws_connection(ctx_clone, socket, view_id, config, ws_mode, trace_id, app_id)
         })
         .into_response()
 }
@@ -309,6 +313,7 @@ async fn handle_ws_connection(
     config: rivers_runtime::view::ApiViewConfig,
     ws_mode: crate::websocket::WebSocketMode,
     trace_id: String,
+    app_id: String,
 ) {
     use axum::extract::ws::Message;
     use crate::websocket::{
@@ -344,6 +349,7 @@ async fn handle_ws_connection(
                 None,
                 None,
                 &trace_id,
+                &app_id,
             )
             .await
             {
@@ -441,6 +447,7 @@ async fn handle_ws_connection(
                                 Some(&message_val),
                                 None,
                                 &trace_id,
+                                &app_id,
                             ).await {
                                 Ok(reply) if !reply.is_null() => {
                                     let reply_str = serde_json::to_string(&reply).unwrap_or_default();
@@ -465,6 +472,7 @@ async fn handle_ws_connection(
                                 &message_val,
                                 &conn_id,
                                 &trace_id,
+                                &app_id,
                             )
                             .await
                             {
@@ -532,6 +540,7 @@ async fn handle_ws_connection(
                 None,
                 None,
                 &trace_id,
+                &app_id,
             )
             .await
             {

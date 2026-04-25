@@ -84,7 +84,10 @@ pub async fn execute_poll_tick_inmemory(
         DiffStrategy::ChangeDetect => {
             // Dispatch to CodeComponent for custom diff when pool is available
             if let Some(pool) = pool {
-                dispatch_change_detect(pool, previous_state.as_deref(), &current_data).await
+                // view_id is qualified as "app_id:view" — extract app_id so the
+                // change_detect handler runs in the right per-app namespace.
+                let app_id = crate::task_enrichment::app_id_from_qualified_name(view_id);
+                dispatch_change_detect(pool, previous_state.as_deref(), &current_data, app_id).await
             } else {
                 // Fallback to hash diff without pool
                 previous_state
@@ -110,6 +113,7 @@ async fn dispatch_change_detect(
     pool: &ProcessPoolManager,
     prev_hash: Option<&str>,
     current_data: &serde_json::Value,
+    app_id: &str,
 ) -> bool {
     use crate::process_pool::{Entrypoint, TaskContextBuilder};
 
@@ -130,7 +134,13 @@ async fn dispatch_change_detect(
         .entrypoint(entrypoint)
         .args(args)
         .trace_id("change_detect".to_string());
-    let builder = crate::task_enrichment::enrich(builder, "");
+    // Polling change_detect runs the user's diff logic for a polling view —
+    // semantically just a callback for that view, hence Rest.
+    let builder = crate::task_enrichment::enrich(
+        builder,
+        app_id,
+        rivers_runtime::process_pool::TaskKind::Rest,
+    );
     let task_ctx = match builder.build() {
         Ok(ctx) => ctx,
         Err(_) => {

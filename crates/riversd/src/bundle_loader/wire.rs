@@ -112,32 +112,31 @@ pub(crate) async fn wire_streaming_and_events(
                         subscriptions,
                     };
 
-                    match broker_driver.create_consumer(params, &broker_config).await {
-                        Ok(consumer) => {
-                            let bridge = crate::broker_bridge::BrokerConsumerBridge::new(
-                                consumer,
-                                ctx.event_bus.clone(),
-                                failure_policy,
-                                &ds.name,
-                                reconnect_ms,
-                                shutdown_rx.clone(),
-                            );
-                            tokio::spawn(bridge.run());
-                            broker_bridge_count += 1;
-                            tracing::info!(
-                                datasource = %ds.name,
-                                driver = %ds.driver,
-                                "broker bridge started"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                datasource = %ds.name,
-                                error = %e,
-                                "broker consumer creation failed — bridge not started"
-                            );
-                        }
-                    }
+                    // Nonblocking: spawn supervisor that owns connect+retry+run.
+                    // wire_streaming_and_events returns immediately so HTTP
+                    // listener bind isn't gated on broker reachability.
+                    // See code review P0-4 / todo/tasks.md A1.1.
+                    let backoff = crate::broker_supervisor::SupervisorBackoff::from_reconnect_ms(
+                        reconnect_ms,
+                    );
+                    crate::broker_supervisor::spawn_broker_supervisor(
+                        broker_driver.clone(),
+                        params.clone(),
+                        broker_config,
+                        failure_policy,
+                        ctx.event_bus.clone(),
+                        ds.name.clone(),
+                        ds.driver.clone(),
+                        backoff,
+                        ctx.broker_bridge_registry.clone(),
+                        shutdown_rx.clone(),
+                    );
+                    broker_bridge_count += 1;
+                    tracing::info!(
+                        datasource = %ds.name,
+                        driver = %ds.driver,
+                        "broker supervisor spawned (nonblocking)"
+                    );
                 }
             }
         }
@@ -145,6 +144,7 @@ pub(crate) async fn wire_streaming_and_events(
         // AL2.3: Build MessageConsumerRegistry and subscribe handlers
         let mc_registry = crate::message_consumer::MessageConsumerRegistry::from_views(
             &app.config.api.views,
+            entry_point,
         );
         if !mc_registry.is_empty() {
             consumer_count += mc_registry.len();
@@ -172,6 +172,9 @@ pub(crate) async fn wire_streaming_and_events(
         let mut ds_handler_count = 0usize;
 
         for app in &bundle.apps {
+            let app_entry_point = app.manifest.entry_point.as_deref()
+                .unwrap_or(&app.manifest.app_name)
+                .to_string();
             for ds in app.config.data.datasources.values() {
                 if let Some(ref handlers) = ds.event_handlers {
                     // on_connection_failed → DatasourceCircuitOpened + DatasourceHealthCheckFailed
@@ -181,6 +184,7 @@ pub(crate) async fn wire_streaming_and_events(
                             module: handler_ref.module.clone(),
                             entrypoint: handler_ref.entrypoint.clone(),
                             pool: ctx.pool.clone(),
+                            app_id: app_entry_point.clone(),
                         });
                         ctx.event_bus
                             .subscribe(events::DATASOURCE_CIRCUIT_OPENED.to_string(), handler.clone(), HandlerPriority::Handle)
@@ -204,6 +208,7 @@ pub(crate) async fn wire_streaming_and_events(
                             module: handler_ref.module.clone(),
                             entrypoint: handler_ref.entrypoint.clone(),
                             pool: ctx.pool.clone(),
+                            app_id: app_entry_point.clone(),
                         });
                         ctx.event_bus
                             .subscribe(events::CONNECTION_POOL_EXHAUSTED.to_string(), handler, HandlerPriority::Handle)

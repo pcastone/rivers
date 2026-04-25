@@ -126,7 +126,11 @@ pub async fn execute_rest_view(
                     .entrypoint(entrypoint)
                     .args(args)
                     .trace_id(ctx.trace_id.clone());
-                let builder = crate::task_enrichment::enrich(builder, &ctx.app_id);
+                let builder = crate::task_enrichment::enrich(
+                    builder,
+                    &ctx.app_id,
+                    rivers_runtime::process_pool::TaskKind::PreProcess,
+                );
                 let task_ctx = builder
                     .build()
                     .map_err(|e| ViewError::Pipeline(format!("pre_process build: {e}")))?;
@@ -214,7 +218,11 @@ pub async fn execute_rest_view(
                             }
                         }
                     }
-                    let builder = crate::task_enrichment::enrich(builder, &ctx.app_id);
+                    let builder = crate::task_enrichment::enrich(
+                        builder,
+                        &ctx.app_id,
+                        rivers_runtime::process_pool::TaskKind::Rest,
+                    );
                     let task_ctx = builder
                         .build()
                         .map_err(|e| ViewError::Handler(format!("codecomponent build: {e}")))?;
@@ -281,7 +289,11 @@ pub async fn execute_rest_view(
                     .entrypoint(entrypoint)
                     .args(args)
                     .trace_id(ctx.trace_id.clone());
-                let builder = crate::task_enrichment::enrich(builder, &ctx.app_id);
+                let builder = crate::task_enrichment::enrich(
+                    builder,
+                    &ctx.app_id,
+                    rivers_runtime::process_pool::TaskKind::Rest,
+                );
                 let task_ctx = builder
                     .build()
                     .map_err(|e| ViewError::Pipeline(format!("handler build: {e}")))?;
@@ -319,7 +331,11 @@ pub async fn execute_rest_view(
                     .entrypoint(entrypoint)
                     .args(args)
                     .trace_id(ctx.trace_id.clone());
-                let builder = crate::task_enrichment::enrich(builder, &ctx.app_id);
+                let builder = crate::task_enrichment::enrich(
+                    builder,
+                    &ctx.app_id,
+                    rivers_runtime::process_pool::TaskKind::PostProcess,
+                );
                 let task_ctx = builder
                     .build()
                     .map_err(|e| ViewError::Pipeline(format!("post_process build: {e}")))?;

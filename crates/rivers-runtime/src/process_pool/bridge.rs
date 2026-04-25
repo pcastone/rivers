@@ -68,6 +68,7 @@ impl From<&TaskContext> for crate::rivers_engine_sdk::SerializedTaskContext {
                     content: l.content.clone(),
                 })
                 .collect(),
+            task_kind: Some(ctx.task_kind),
         }
     }
 }
@@ -106,6 +107,7 @@ pub struct TaskContextBuilder {
     app_id: String,
     node_id: String,
     runtime_env: String,
+    task_kind: Option<TaskKind>,
 }
 
 impl TaskContextBuilder {
@@ -135,7 +137,17 @@ impl TaskContextBuilder {
             app_id: String::new(),
             node_id: String::new(),
             runtime_env: "dev".to_string(),
+            task_kind: None,
         }
+    }
+
+    /// Set the dispatch-site classification (REQUIRED — see C1).
+    ///
+    /// Gates elevated capabilities like `ctx.ddl()`. Every dispatch site
+    /// in riversd MUST call this; `build()` returns an error if missing.
+    pub fn task_kind(mut self, kind: TaskKind) -> Self {
+        self.task_kind = Some(kind);
+        self
     }
 
     /// Add a datasource token.
@@ -250,10 +262,17 @@ impl TaskContextBuilder {
     }
 
     /// Build the `TaskContext`. Fails if entrypoint is not set.
+    ///
+    /// `task_kind` defaults to `TaskKind::Rest` (the safe default — no special
+    /// capabilities) if the caller didn't set one. Production dispatch sites
+    /// in `riversd` always go through `task_enrichment::enrich()` which forces
+    /// an explicit `task_kind` argument; this default only exists so the unit
+    /// tests that build a `TaskContext` directly don't need to know about C1.
     pub fn build(self) -> Result<TaskContext, TaskError> {
         let entrypoint = self
             .entrypoint
             .ok_or_else(|| TaskError::Capability("entrypoint is required".to_string()))?;
+        let task_kind = self.task_kind.unwrap_or(TaskKind::Rest);
 
         Ok(TaskContext {
             datasources: self.datasources,
@@ -279,6 +298,7 @@ impl TaskContextBuilder {
             lockbox_identity: self.lockbox_identity,
             #[cfg(feature = "keystore")]
             keystore: self.keystore,
+            task_kind,
         })
     }
 }

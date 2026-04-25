@@ -62,6 +62,29 @@ pub struct VerboseHealthResponse {
     pub pool_snapshots: Vec<PoolSnapshot>,
     /// Per-datasource connectivity probe results.
     pub datasource_probes: Vec<DatasourceProbeResult>,
+    /// Per-broker bridge connection states. Empty when no broker datasources
+    /// are configured. Surfaces broker readiness independently of process
+    /// readiness — see code review P0-4.
+    pub broker_bridges: Vec<BrokerBridgeHealth>,
+}
+
+/// Broker bridge state surfaced via `/health/verbose`.
+///
+/// Mirrors `broker_supervisor::BrokerBridgeStatus` but uses string state
+/// for stable JSON output.
+#[derive(Debug, Clone, Serialize)]
+pub struct BrokerBridgeHealth {
+    /// Datasource name.
+    pub datasource: String,
+    /// Broker driver name (e.g. `kafka`).
+    pub driver: String,
+    /// Connection state: `pending` | `connecting` | `connected` | `disconnected` | `stopped`.
+    pub state: &'static str,
+    /// Most recent error string, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// Consecutive failed connect attempts since last success.
+    pub failed_attempts: u32,
 }
 
 /// Result of a per-datasource connectivity probe.

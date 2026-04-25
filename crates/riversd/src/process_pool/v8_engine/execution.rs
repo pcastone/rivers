@@ -338,7 +338,11 @@ pub(crate) async fn execute_js_task(
         // Set all task-scoped thread-locals and arm automatic cleanup.
         // TaskLocals::set populates every thread-local; its Drop impl clears
         // every one -- impossible to add a setup without a matching teardown.
-        let _locals = TaskLocals::set(&ctx, rt_handle);
+        // C1.3: returns Err on empty app_id; the dispatch is rejected cleanly.
+        let _locals = match TaskLocals::set(&ctx, rt_handle) {
+            Ok(g) => g,
+            Err(e) => return Err(e),
+        };
 
         let start = Instant::now();
 
