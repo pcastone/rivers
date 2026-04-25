@@ -76,7 +76,15 @@
 
 ## P0 — Production blockers
 
-- [ ] **CR-P0-3 / P1-1 — Wire DataView through PoolManager and fix lifetime accounting.**
+- [x] **CR-P0-3 / P1-1 — Wire DataView through PoolManager and fix lifetime accounting.**
+  Done 2026-04-25 on `feature/dataview-pool-integration` (commits 69ac58b → 3ca9aa2).
+  Pool registered per datasource at bundle load; DataView execute and execute_ddl
+  acquire from pool; PoolGuard preserves created_at; ReleaseToken made async to
+  guarantee in-line reuse; verbose health populated. Integration tests verify
+  perfect reuse (1 connection for 50 calls) and max_lifetime eviction. Canary
+  regression deferred to a separate session. See plan:
+  `docs/superpowers/plans/2026-04-25-dataview-pool-integration.md`. Follow-up:
+  CR-P0-3.follow (host_ddl_execute pool routing).
   Replace direct `factory.connect(...)` in `crates/rivers-runtime/src/dataview_engine.rs:721` with a pool acquire via `PoolManager` (see `crates/riversd/src/pool.rs`). In the same change, fix `PoolGuard::drop` (`pool.rs:113-137`) so `created_at` is preserved across release rather than reset to `Instant::now()` at line 127 — otherwise `max_lifetime` never fires.
   Validation:
   - DataView execute path no longer calls `DriverFactory::connect` directly (grep confirms).
@@ -84,6 +92,20 @@
   - Add a test that a connection older than `max_lifetime` is evicted on next acquire.
   - Verbose health endpoint reports a non-empty pool snapshot for the active datasource.
   - Canary suite still passes 135/135.
+
+- [ ] **CR-P0-3.follow — Route `host_ddl_execute` through `DataViewExecutor::execute_ddl`.**
+  Discovered during 2026-04-25 implementation: the production DDL path in
+  `crates/riversd/src/engine_loader/host_callbacks.rs::host_ddl_execute` calls
+  `factory.connect` directly, bypassing the `DataViewExecutor::execute_ddl` path
+  that Task 7 wired through the pool. Result: init-handler `ctx.ddl()` calls do
+  not benefit from pool accounting or the Gate 3 whitelist enforcement that lives
+  inside `execute_ddl`. Either:
+    1. Move `host_ddl_execute` to call `executor.execute_ddl(...)`, or
+    2. Move pool acquisition + Gate 3 into a shared helper called from both sites.
+  Validation:
+  - Init-handler DDL calls show up in `verbose /health` `pool_snapshots`.
+  - Negative test: init-handler `ctx.ddl()` against a database NOT in `ddl_whitelist` fails.
+  - Existing `ddl_pipeline_tests` still pass.
 
 - [ ] **CR-P0-2 — Gate `ctx.ddl()` to ApplicationInit task kind.**
   In `crates/riversd/src/process_pool/v8_engine/context.rs:497-575` (`ctx_ddl_callback`), reject calls unless the current `SerializedTaskContext` has `task_kind == ApplicationInit` and a bound `app_id` + `datasource_id`. Throw a JS `Error` ("ctx.ddl is only available during application init") rather than silently no-op.
