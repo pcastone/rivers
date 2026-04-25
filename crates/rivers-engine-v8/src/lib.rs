@@ -239,6 +239,7 @@ mod tests {
             inline_source: Some(source.into()),
             prefetched_data: HashMap::new(),
             libs: vec![],
+            task_kind: None,
         }
     }
 

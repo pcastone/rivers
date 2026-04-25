@@ -29,7 +29,7 @@ async fn wasmtime_engine_missing_module_returns_error() {
             language: "wasm".into(),
         })
         .args(serde_json::json!({}))
-        .trace_id("t1".into())
+        .trace_id("t1".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = pool.dispatch(ctx).await;
@@ -299,7 +299,7 @@ async fn wasmtime_missing_module_returns_error() {
             language: "wasm".into(),
         })
         .args(serde_json::json!({}))
-        .trace_id("t1".into())
+        .trace_id("t1".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_wasm_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0, None).await;
@@ -319,7 +319,7 @@ async fn dispatch_routes_wasm_to_wasmtime() {
             language: "wasm".into(),
         })
         .args(serde_json::json!({}))
-        .trace_id("t1".into())
+        .trace_id("t1".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = dispatch_task("wasmtime", ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, 0, None, None).await;
@@ -438,7 +438,7 @@ async fn x6_wasm_execution_with_memory_limit() {
             language: "wasm".into(),
         })
         .args(serde_json::json!({}))
-        .trace_id("x6-mem".into())
+        .trace_id("x6-mem".into()).app_id("test-app".into())
         .build()
         .unwrap();
 
@@ -473,7 +473,7 @@ async fn x6_wasm_fuel_exhaustion_returns_timeout() {
             language: "wasm".into(),
         })
         .args(serde_json::json!({}))
-        .trace_id("x6-timeout".into())
+        .trace_id("x6-timeout".into()).app_id("test-app".into())
         .build()
         .unwrap();
 
@@ -505,7 +505,7 @@ async fn x6_wasm_dispatch_through_pool() {
             language: "wasm".into(),
         })
         .args(serde_json::json!({}))
-        .trace_id("x6-pool".into())
+        .trace_id("x6-pool".into()).app_id("test-app".into())
         .build()
         .unwrap();
 
@@ -540,7 +540,7 @@ async fn au9_wasm_computation() {
             language: "wasm".into(),
         })
         .args(serde_json::json!({}))
-        .trace_id("au9".into())
+        .trace_id("au9".into()).app_id("test-app".into())
         .build()
         .unwrap();
 
@@ -572,7 +572,7 @@ async fn au10_wasm_multiple_exports() {
             language: "wasm".into(),
         })
         .args(serde_json::json!({}))
-        .trace_id("au10".into())
+        .trace_id("au10".into()).app_id("test-app".into())
         .build()
         .unwrap();
 

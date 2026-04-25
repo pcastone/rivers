@@ -23,6 +23,48 @@ fn execute_module_syntax_detected() {
     assert!(is_module_syntax("export default function handler(ctx) {}"));
 }
 
+/// G_R5: comments and string literals must not flip the script→module
+/// switch. The previous `source.contains("export ")` heuristic regressed
+/// classic-script handlers whose body merely mentioned `export` or
+/// `import` in a comment or string.
+#[test]
+fn module_syntax_ignores_comments_and_strings() {
+    // Line comment that mentions "export the thing" — pure script.
+    assert!(
+        !is_module_syntax("// export the thing\nfunction handler(ctx) { return 1; }"),
+        "line comment containing 'export' must not trigger module mode"
+    );
+    // Block comment.
+    assert!(
+        !is_module_syntax("/* import { foo } from 'bar' */\nfunction h(){}"),
+        "block comment containing 'import' must not trigger module mode"
+    );
+    // Multi-line block comment.
+    assert!(
+        !is_module_syntax("/*\n  export\n  import\n*/\nfunction h(){}"),
+        "multi-line block comment must not trigger module mode"
+    );
+    // String literal with `import foo` inside.
+    assert!(
+        !is_module_syntax("const s = \"import foo\"; function h(){ return s; }"),
+        "string literal containing 'import' must not trigger module mode"
+    );
+    assert!(
+        !is_module_syntax("const s = 'export foo'; function h(){ return s; }"),
+        "single-quoted string containing 'export' must not trigger module mode"
+    );
+    // Real export still detected.
+    assert!(
+        is_module_syntax("// classic comment\nexport function handler(ctx) { return 1; }"),
+        "real 'export function' after a comment must trigger module mode"
+    );
+    // Real import still detected.
+    assert!(
+        is_module_syntax("import { foo } from './bar.ts';\nfunction handler(){}"),
+        "real top-of-file import must trigger module mode"
+    );
+}
+
 #[tokio::test]
 async fn execute_async_with_promise_chain() {
     let ctx = make_js_task(
@@ -68,7 +110,7 @@ async fn au1_execute_js_file_from_disk() {
             language: "javascript".into(),
         })
         .args(serde_json::json!({"name": "disk-test"}))
-        .trace_id("au1".into())
+        .trace_id("au1".into()).app_id("test-app".into())
         .build()
         .unwrap();
 

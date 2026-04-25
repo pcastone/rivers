@@ -106,6 +106,12 @@ impl DatabaseDriver for MysqlDriver {
         Ok(Box::new(MysqlConnection { conn }))
     }
 
+    fn needs_isolated_runtime(&self) -> bool {
+        // Built-in drivers can run on the host's tokio runtime — no need
+        // for the per-call isolated runtime that plugin cdylibs require.
+        false
+    }
+
     fn supports_transactions(&self) -> bool {
         true
     }
@@ -760,5 +766,46 @@ mod tests {
         let result = query_value_to_mysql(&QueryValue::Array(arr.clone()));
         let expected = mysql_async::Value::from(serde_json::to_string(&arr).unwrap());
         assert_eq!(result, expected);
+    }
+
+    // -- G_R7.1: per-datasource shared pool key --
+
+    fn params_for(host: &str, port: u16, user: &str, db: &str) -> ConnectionParams {
+        ConnectionParams {
+            host: host.into(),
+            port,
+            database: db.into(),
+            username: user.into(),
+            password: "x".into(),
+            options: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn pool_key_distinguishes_datasources() {
+        let a = pool_key(&params_for("h1", 3306, "u", "db1"));
+        let b = pool_key(&params_for("h1", 3306, "u", "db2"));
+        let c = pool_key(&params_for("h2", 3306, "u", "db1"));
+        let d = pool_key(&params_for("h1", 3307, "u", "db1"));
+        let e = pool_key(&params_for("h1", 3306, "v", "db1"));
+        assert_ne!(a, b, "different db must yield different key");
+        assert_ne!(a, c, "different host must yield different key");
+        assert_ne!(a, d, "different port must yield different key");
+        assert_ne!(a, e, "different user must yield different key");
+    }
+
+    #[test]
+    fn pool_key_stable_for_same_params() {
+        let a = pool_key(&params_for("h1", 3306, "u", "db1"));
+        let b = pool_key(&params_for("h1", 3306, "u", "db1"));
+        assert_eq!(a, b, "same params must produce same key");
+    }
+
+    #[test]
+    fn driver_does_not_need_isolated_runtime() {
+        // G_R7.2: built-in driver returns false → DriverFactory runs
+        // connect() on the active runtime instead of spawning a fresh one.
+        let driver = MysqlDriver;
+        assert!(!DatabaseDriver::needs_isolated_runtime(&driver));
     }
 }

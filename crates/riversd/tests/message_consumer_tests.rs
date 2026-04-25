@@ -58,11 +58,11 @@ fn consumer_view(topic: &str, handler: &str) -> ApiViewConfig {
 #[test]
 fn config_from_valid_consumer_view() {
     let view = consumer_view("orders.new", "onNewOrder");
-    let config = MessageConsumerConfig::from_view("canary-streams", "order_consumer", &view);
+    let config = MessageConsumerConfig::from_view("order_consumer", &view, "test-app");
     assert!(config.is_some());
     let config = config.unwrap();
     assert_eq!(config.view_id, "order_consumer");
-    assert_eq!(config.entry_point, "canary-streams");
+    assert_eq!(config.entry_point, "test-app");
     assert_eq!(config.topic, "orders.new");
     assert_eq!(config.handler, "onNewOrder");
 }
@@ -71,14 +71,14 @@ fn config_from_valid_consumer_view() {
 fn config_returns_none_for_non_consumer() {
     let mut view = consumer_view("t", "h");
     view.view_type = "Rest".to_string();
-    assert!(MessageConsumerConfig::from_view("app", "v", &view).is_none());
+    assert!(MessageConsumerConfig::from_view("v", &view, "test-app").is_none());
 }
 
 #[test]
 fn config_returns_none_without_on_event() {
     let mut view = consumer_view("t", "h");
     view.on_event = None;
-    assert!(MessageConsumerConfig::from_view("app", "v", &view).is_none());
+    assert!(MessageConsumerConfig::from_view("v", &view, "test-app").is_none());
 }
 
 // ── MessageConsumerRegistry ─────────────────────────────────────
@@ -95,7 +95,7 @@ fn registry_from_mixed_views() {
     rest.path = Some("/api/test".to_string());
     views.insert("rest_view".to_string(), rest);
 
-    let registry = MessageConsumerRegistry::from_views("canary-streams", &views);
+    let registry = MessageConsumerRegistry::from_views(&views, "test-app");
     assert_eq!(registry.len(), 2);
     assert!(!registry.is_empty());
     assert!(registry.get("consumer1").is_some());
@@ -104,7 +104,7 @@ fn registry_from_mixed_views() {
     // Every MC config in the registry carries the app's entry point —
     // code-review §5 fix so the downstream `ctx.store` namespace is
     // the owning app, not `app:default`.
-    assert_eq!(registry.get("consumer1").unwrap().entry_point, "canary-streams");
+    assert_eq!(registry.get("consumer1").unwrap().entry_point, "test-app");
 }
 
 #[test]
@@ -113,7 +113,7 @@ fn registry_topics() {
     views.insert("c1".to_string(), consumer_view("orders.new", "h1"));
     views.insert("c2".to_string(), consumer_view("payments.done", "h2"));
 
-    let registry = MessageConsumerRegistry::from_views("canary-streams", &views);
+    let registry = MessageConsumerRegistry::from_views(&views, "test-app");
     let topics = registry.topics();
     assert_eq!(topics.len(), 2);
     assert!(topics.contains(&"orders.new".to_string()));
@@ -122,7 +122,7 @@ fn registry_topics() {
 
 #[test]
 fn registry_empty() {
-    let registry = MessageConsumerRegistry::from_views("canary-streams", &HashMap::new());
+    let registry = MessageConsumerRegistry::from_views(&HashMap::new(), "test-app");
     assert!(registry.is_empty());
     assert_eq!(registry.len(), 0);
 }

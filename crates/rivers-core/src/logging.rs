@@ -89,8 +89,9 @@ impl LogHandler {
     /// For simplicity, we subscribe to a single "*" topic and the
     /// EventBus publish path also publishes to "*".
     pub async fn register(self: Arc<Self>, bus: &EventBus) {
-        // Subscribe to the wildcard topic that receives all events
-        bus.subscribe("*", self, HandlerPriority::Observe).await;
+        // Subscribe to the wildcard topic that receives all events.
+        // Permanent (lives for the lifetime of the bus) — use subscribe_static.
+        bus.subscribe_static("*", self, HandlerPriority::Observe).await;
     }
 
     /// Check if an event's log level passes the min_level filter.

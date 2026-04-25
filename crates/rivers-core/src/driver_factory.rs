@@ -99,8 +99,10 @@ impl DriverFactory {
     /// ("connection closed" / "Tokio 1.x context was found, but it is being shutdown").
     /// Calling `driver.connect()` directly in the current async context is safe — the
     /// background task is spawned on the caller's runtime and survives for the connection
-    /// lifetime.  When cdylib plugins are re-enabled (Plugin ABI v2), this isolation
-    /// strategy will need to be revisited.
+    /// lifetime. When cdylib plugins are re-enabled (Plugin ABI v2), the
+    /// `DatabaseDriver::needs_isolated_runtime()` trait method (still present, default
+    /// `false`) is the intended hook for re-introducing per-driver isolation — see
+    /// G_R7.2 in `todo/tasks.md`.
     pub async fn connect(
         &self,
         driver_name: &str,
@@ -435,6 +437,88 @@ mod tests {
         factory.register_database_driver(Arc::new(crate::drivers::FakerDriver::new()));
         assert_eq!(factory.driver_names(), vec!["faker"]);
     }
+
+    // ── G_R7.2: built-in vs plugin runtime policy ──
+
+    /// Test driver that flips its `needs_isolated_runtime` flag and records
+    /// which runtime path executed `connect()`.
+    struct PolicyTestDriver {
+        isolated: bool,
+        observed_runtime_id: Arc<std::sync::Mutex<Option<u64>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DatabaseDriver for PolicyTestDriver {
+        fn name(&self) -> &str { "policy-test" }
+        async fn connect(
+            &self,
+            _params: &ConnectionParams,
+        ) -> Result<Box<dyn Connection>, DriverError> {
+            // Capture the current Tokio runtime id so the test can compare.
+            let id = tokio::runtime::Handle::current().id();
+            // Handle's id is opaque; encode via debug.
+            let observed: u64 = {
+                let s = format!("{id:?}");
+                // Hash to a stable u64 for comparison.
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                s.hash(&mut h);
+                h.finish()
+            };
+            *self.observed_runtime_id.lock().unwrap() = Some(observed);
+            // Return a dummy error — we only care about routing.
+            Err(DriverError::Connection("policy probe".into()))
+        }
+        fn needs_isolated_runtime(&self) -> bool {
+            self.isolated
+        }
+    }
+
+    fn test_params() -> ConnectionParams {
+        ConnectionParams {
+            host: "localhost".into(),
+            port: 0,
+            database: "x".into(),
+            username: "u".into(),
+            password: "p".into(),
+            options: std::collections::HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn builtin_driver_runs_on_active_runtime() {
+        // When `needs_isolated_runtime()` is false, the host runtime is reused.
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let mut factory = DriverFactory::new();
+        factory.register_database_driver(Arc::new(PolicyTestDriver {
+            isolated: false,
+            observed_runtime_id: observed.clone(),
+        }));
+        let _ = factory.connect("policy-test", &test_params()).await;
+
+        let host_id = {
+            let id = tokio::runtime::Handle::current().id();
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            format!("{id:?}").hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(
+            *observed.lock().unwrap(),
+            Some(host_id),
+            "built-in driver should observe the host runtime"
+        );
+    }
+
+    // NOTE (G_R7.2 deferred): an earlier version of this branch enforced
+    // a separate isolated runtime for drivers that returned
+    // `needs_isolated_runtime() = true`. Main's canary 135/135 fix removed
+    // that branch in `connect()` (the per-call `Runtime::new()` was killing
+    // pooled connections in postgres/mysql). The trait method still exists
+    // with default `false`, but `connect()` no longer consults it. When
+    // cdylib plugin loading is re-enabled (Plugin ABI v2), reintroduce the
+    // isolated-runtime branch + a `plugin_driver_runs_on_isolated_runtime`
+    // test pinning the behavior.
 
     #[test]
     fn test_plugin_load_failed_event_on_bad_directory() {

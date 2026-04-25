@@ -45,6 +45,10 @@ pub struct MessageConsumerConfig {
     pub handler_mode: Option<String>,
     /// Auth mode — "none" by default (auto-exempt), but can opt-in to "session".
     pub auth: Option<String>,
+    /// App ID this consumer belongs to — required so dispatched events land in
+    /// the right per-app store namespace and inherit the right capabilities.
+    /// Stamped at registry build time from the bundle's app entry_point.
+    pub app_id: String,
 }
 
 impl MessageConsumerConfig {
@@ -52,14 +56,11 @@ impl MessageConsumerConfig {
     ///
     /// Returns None if view_type != "MessageConsumer" or on_event is missing.
     ///
-    /// `entry_point` must be the owning app's entry point so downstream
+    /// `app_id` must be the owning app's identifier so downstream
     /// task enrichment uses the correct `ctx.store` / keystore / dataview
-    /// namespace. See code-review §5 (`docs/canary_codereivew.md`).
-    pub fn from_view(
-        entry_point: &str,
-        view_id: &str,
-        config: &ApiViewConfig,
-    ) -> Option<Self> {
+    /// namespace. (Both branches independently fixed this — see C1.4 in
+    /// `todo/tasks.md` and code-review §5 in `docs/canary_codereivew.md`.)
+    pub fn from_view(view_id: &str, config: &ApiViewConfig, app_id: &str) -> Option<Self> {
         if config.view_type != "MessageConsumer" {
             return None;
         }
@@ -77,13 +78,19 @@ impl MessageConsumerConfig {
 
         Some(Self {
             view_id: view_id.to_string(),
-            entry_point: entry_point.to_string(),
+            // entry_point and app_id carry the same value in the post-merge
+            // model (both branches converged on app_entry_point as the
+            // unifying identity). entry_point stays for downstream consumers
+            // that look it up for `_dv_namespace`; app_id is the canonical
+            // C1 enrichment field.
+            entry_point: app_id.to_string(),
             topic: on_event.topic.clone(),
             handler: on_event.handler.clone(),
             module,
             language,
             handler_mode: on_event.handler_mode.clone(),
             auth: config.auth.clone(),
+            app_id: app_id.to_string(),
         })
     }
 }
@@ -119,21 +126,12 @@ pub struct MessageConsumerRegistry {
 }
 
 impl MessageConsumerRegistry {
-    /// Build registry from all view configs.
-    ///
-    /// `entry_point` is threaded into every `MessageConsumerConfig` so the
-    /// downstream handler dispatch enriches the task with the correct
-    /// `app_id` (see code-review §5).
-    pub fn from_views(
-        entry_point: &str,
-        views: &HashMap<String, ApiViewConfig>,
-    ) -> Self {
+    /// Build registry from all view configs for a given app.
+    pub fn from_views(views: &HashMap<String, ApiViewConfig>, app_id: &str) -> Self {
         let mut consumers = HashMap::new();
 
         for (id, config) in views {
-            if let Some(mc_config) =
-                MessageConsumerConfig::from_view(entry_point, id, config)
-            {
+            if let Some(mc_config) = MessageConsumerConfig::from_view(id, config, app_id) {
                 consumers.insert(id.clone(), mc_config);
             }
         }
@@ -229,8 +227,9 @@ pub async fn subscribe_consumer(
         sender: tx,
     });
 
+    // Permanent broker bridge subscription wired at bundle load (G_R2.1).
     event_bus
-        .subscribe(
+        .subscribe_static(
             config.topic.clone(),
             handler,
             HandlerPriority::Handle,
@@ -290,7 +289,11 @@ pub async fn dispatch_message_event(
         .entrypoint(entrypoint)
         .args(args)
         .trace_id(trace_id.to_string());
-    let builder = crate::task_enrichment::enrich(builder, &config.entry_point);
+    let builder = crate::task_enrichment::enrich(
+        builder,
+        &config.app_id,
+        rivers_runtime::process_pool::TaskKind::MessageConsumer,
+    );
     let ctx = builder.build()?;
 
     let result = pool.dispatch("default", ctx).await?;
@@ -313,8 +316,9 @@ pub async fn subscribe_message_consumers(
             config: consumer.clone(),
             pool: pool.clone(),
         };
+        // Permanent MessageConsumer wiring (G_R2.1).
         event_bus
-            .subscribe(
+            .subscribe_static(
                 consumer.topic.clone(),
                 Arc::new(handler),
                 HandlerPriority::Handle,
@@ -370,7 +374,11 @@ impl EventHandler for MessageConsumerHandler {
             .entrypoint(entrypoint)
             .args(args)
             .trace_id(event.trace_id.clone().unwrap_or_default());
-        let builder = crate::task_enrichment::enrich(builder, &self.config.entry_point);
+        let builder = crate::task_enrichment::enrich(
+            builder,
+            &self.config.app_id,
+            rivers_runtime::process_pool::TaskKind::MessageConsumer,
+        );
         let task_ctx = builder
             .build()
             .map_err(|e| {
@@ -436,6 +444,7 @@ mod tests {
             handler: "order_handler.js".into(),
             handler_mode: None,
             auth: None,
+            app_id: "test-app".into(),
         };
 
         let mut rx = subscribe_consumer(&config, &event_bus).await;
@@ -467,6 +476,7 @@ mod tests {
                 handler: "order_handler.js".into(),
                 handler_mode: None,
                 auth: None,
+                app_id: "test-app".into(),
             },
         );
         views.insert(
@@ -478,6 +488,7 @@ mod tests {
                 handler: "payment_handler.js".into(),
                 handler_mode: Some("onPayment".into()),
                 auth: None,
+                app_id: "test-app".into(),
             },
         );
 
@@ -498,6 +509,7 @@ mod tests {
             handler: "handler.js".into(),
             handler_mode: None,
             auth: None,
+            app_id: "test-app".into(),
         };
         let payload = MessageEventPayload {
             data: serde_json::json!({"key": "value"}),

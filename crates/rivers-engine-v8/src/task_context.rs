@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use rivers_engine_sdk::SerializedTaskContext;
+use rivers_engine_sdk::{SerializedTaskContext, TaskKind};
 
 // ── Per-Task Thread-Locals ──────────────────────────────────────
 
@@ -34,6 +34,9 @@ thread_local! {
 
     /// Runtime env.
     pub(crate) static TASK_RUNTIME_ENV: RefCell<Option<String>> = RefCell::new(None);
+
+    /// Dispatch-site classification — gates ctx.ddl() and similar capabilities.
+    pub(crate) static TASK_KIND: RefCell<Option<TaskKind>> = RefCell::new(None);
 }
 
 /// Set up thread-locals from a serialized task context.
@@ -46,6 +49,7 @@ pub(crate) fn setup_task_locals(ctx: &SerializedTaskContext) {
     TASK_APP_ID.with(|a| *a.borrow_mut() = Some(ctx.app_id.clone()));
     TASK_NODE_ID.with(|n| *n.borrow_mut() = Some(ctx.node_id.clone()));
     TASK_RUNTIME_ENV.with(|r| *r.borrow_mut() = Some(ctx.runtime_env.clone()));
+    TASK_KIND.with(|k| *k.borrow_mut() = ctx.task_kind);
 }
 
 /// Clear thread-locals after task execution.
@@ -58,4 +62,5 @@ pub(crate) fn clear_task_locals() {
     TASK_APP_ID.with(|a| *a.borrow_mut() = None);
     TASK_NODE_ID.with(|n| *n.borrow_mut() = None);
     TASK_RUNTIME_ENV.with(|r| *r.borrow_mut() = None);
+    TASK_KIND.with(|k| *k.borrow_mut() = None);
 }

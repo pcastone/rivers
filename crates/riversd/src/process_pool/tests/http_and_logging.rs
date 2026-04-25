@@ -79,7 +79,7 @@ async fn execute_rivers_http_methods_exist() {
                 };
             }"#
         }))
-        .trace_id("test-http-methods".into())
+        .trace_id("test-http-methods".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -121,7 +121,7 @@ async fn execute_rivers_env_available() {
         }))
         .env_var("DATABASE_URL".into(), "postgres://localhost/test".into())
         .env_var("PORT".into(), "8080".into())
-        .trace_id("t1".into())
+        .trace_id("t1".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -221,7 +221,7 @@ async fn x2_rivers_http_present_with_http_token() {
                 };
             }"#
         }))
-        .trace_id("test-http-gating".into())
+        .trace_id("test-http-gating".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();

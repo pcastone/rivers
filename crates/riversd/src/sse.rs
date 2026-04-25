@@ -327,6 +327,7 @@ pub async fn run_sse_push_loop(
     mut event_rx: broadcast::Receiver<Event>,
     sender: mpsc::Sender<SseEvent>,
     trace_id: &str,
+    app_id: &str,
 ) -> Result<(), StreamingError> {
     let tick_duration = if tick_interval_ms > 0 {
         Some(tokio::time::Duration::from_millis(tick_interval_ms))
@@ -407,7 +408,11 @@ pub async fn run_sse_push_loop(
             .entrypoint(entrypoint.clone())
             .args(args)
             .trace_id(trace_id.to_string());
-        let builder = crate::task_enrichment::enrich(builder, "");
+        let builder = crate::task_enrichment::enrich(
+            builder,
+            app_id,
+            rivers_runtime::process_pool::TaskKind::Rest,
+        );
         let ctx = builder
             .build()
             .map_err(|e| StreamingError::GeneratorError(e.to_string()))?;
@@ -635,6 +640,7 @@ mod tests {
             event_rx,
             sender,
             "trace-1",
+            "test-app",
         )
         .await;
 
@@ -715,6 +721,7 @@ mod tests {
             event_rx,
             sender,
             "trace-1",
+            "test-app",
         )
         .await;
 

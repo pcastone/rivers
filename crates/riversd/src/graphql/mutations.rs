@@ -150,7 +150,12 @@ pub(super) fn build_mutation_type_with_pool(
                             "view_id": view_id,
                         }))
                         .trace_id(trace_id);
-                    let builder = crate::task_enrichment::enrich(builder, "");
+                    let app_id = crate::task_enrichment::app_id_from_qualified_name(&view_id);
+                    let builder = crate::task_enrichment::enrich(
+                        builder,
+                        app_id,
+                        rivers_runtime::process_pool::TaskKind::Rest,
+                    );
                     let task_ctx = builder
                         .build()
                         .map_err(|e| async_graphql::Error::new(e.to_string()))?;

@@ -103,6 +103,9 @@ impl DatabaseDriver for InfluxDriver {
             }))
         }
     }
+
+    /// G_R7.2: cdylib plugin runs connect() in an isolated runtime.
+    fn needs_isolated_runtime(&self) -> bool { true }
 }
 
 #[cfg(test)]

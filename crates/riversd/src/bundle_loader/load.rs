@@ -127,6 +127,11 @@ pub async fn load_and_wire_bundle(
             "bundle: module cache populated"
         );
         crate::process_pool::module_cache::install_module_cache(module_cache);
+        // B3 / P1-8: arm production-strict cache enforcement now that the
+        // validated bundle's modules are installed. Subsequent V8 dispatches
+        // that miss the cache will hard-fail unless the operator opted into
+        // dev-mode via `RIVERS_DEV_MODULE_CACHE=permissive`.
+        crate::process_pool::module_cache::arm_production_strict();
     }
 
     let mut registry = rivers_runtime::DataViewRegistry::new();
@@ -505,6 +510,50 @@ pub async fn load_and_wire_bundle(
 
     let factory = Arc::new(factory);
 
+    // ── D2: Register one ConnectionPool per datasource ────────────────
+    //
+    // Pools key by the same namespaced datasource id used everywhere else
+    // in the loader (`entry_point:ds_name`). Pool config uses defaults
+    // (max_size=10, idle=300s, lifetime=30min) — per-app pool configuration
+    // is a future feature. Brokers (which lack a registered DatabaseDriver)
+    // are skipped silently — the executor falls back to the legacy
+    // direct-connect path for those datasources.
+    for (ds_id, ds_params) in ds_params.iter() {
+        let driver_name = ds_params
+            .options
+            .get("driver")
+            .map(|s| s.as_str())
+            .unwrap_or(ds_id.as_str());
+        let Some(driver) = factory.get_driver(driver_name) else {
+            tracing::debug!(
+                datasource = %ds_id,
+                driver = %driver_name,
+                "skipping pool registration — no DatabaseDriver registered (broker or unknown)"
+            );
+            continue;
+        };
+        let pool = Arc::new(crate::pool::ConnectionPool::new(
+            ds_id.clone(),
+            crate::pool::PoolConfig::default(),
+            driver.clone(),
+            ds_params.clone(),
+            ctx.event_bus.clone(),
+        ));
+        if let Err(e) = ctx.pool_manager.add_pool(pool).await {
+            tracing::warn!(
+                datasource = %ds_id,
+                error = %e,
+                "pool registration failed (continuing with degraded direct-connect path)"
+            );
+        } else {
+            tracing::info!(
+                datasource = %ds_id,
+                driver = %driver_name,
+                "pool registered"
+            );
+        }
+    }
+
     // Build DataView cache — L1 always active, L2 only when StorageEngine available.
     let cache_policy = build_cache_policy_from_bundle(&bundle);
     let mut tiered = rivers_runtime::tiered_cache::TieredDataViewCache::new(cache_policy.clone());
@@ -692,6 +741,9 @@ pub async fn load_and_wire_bundle(
     let ds_params = Arc::new(ds_params);
     let mut executor = DataViewExecutor::new(registry, factory.clone(), ds_params.clone(), cache);
     executor.set_event_bus(ctx.event_bus.clone());
+    // D2: route DataView execution through the per-datasource pool.
+    // The acquirer is the same `PoolManager` we just registered pools on.
+    executor.set_acquirer(ctx.pool_manager.clone() as Arc<dyn rivers_runtime::ConnectionAcquirer>);
     let executor = Arc::new(executor);
     *ctx.dataview_executor.write().await = Some(executor.clone());
     ctx.driver_factory = Some(factory.clone());
@@ -867,14 +919,16 @@ pub async fn load_and_wire_bundle(
             }
         }
 
-        // AM1.2: If any view has auth != "none" and no StorageEngine, reject
-        let has_protected = all_views.values().any(|v| {
-            !crate::guard::is_public_view(v)
-        });
-        if has_protected && ctx.storage_engine.is_none() {
-            return Err(ServerError::Config(
-                "protected views require [storage_engine] to be configured".into(),
-            ));
+        // AM1.2 (P0-1 / A2.2): If any view has auth != "none", a session
+        // manager must be configured. session_manager initializes only when
+        // storage_engine is present, so this check also catches the missing-
+        // storage case while making the actual security boundary explicit.
+        if let Err(e) = check_protected_views_have_session(
+            &all_views,
+            ctx.session_manager.is_some(),
+            ctx.storage_engine.is_some(),
+        ) {
+            return Err(ServerError::Config(e));
         }
 
         // AM1.3: Detect guard view — at most one allowed
@@ -959,7 +1013,12 @@ async fn dispatch_init_handler(
         .trace_id(format!("init-{}", entry_point));
 
     // Wire shared capabilities (storage, driver_factory, lockbox, keystore)
-    let builder = crate::task_enrichment::enrich(builder, entry_point);
+    // C1.2: ApplicationInit is the ONLY task_kind that may call ctx.ddl().
+    let builder = crate::task_enrichment::enrich(
+        builder,
+        entry_point,
+        rivers_runtime::process_pool::TaskKind::ApplicationInit,
+    );
 
     // Override dataview_executor with the exact instance passed in — the global
     // shared state may not be synced yet during initial bundle load.
@@ -993,5 +1052,125 @@ fn resolve_handler_module(
     if let rivers_runtime::view::HandlerConfig::Codecomponent { module, .. } = handler {
         let resolved = app_dir.join(&*module);
         *module = resolved.to_string_lossy().to_string();
+    }
+}
+
+/// **P0-1 / A2.2**: validate that a bundle declaring any non-public view
+/// has a session manager (and therefore storage engine) configured.
+///
+/// Returns `Ok(())` if the bundle is safe to load; `Err(message)` otherwise.
+/// Error message names the offending view and the missing dependency.
+///
+/// Extracted as a free function so the rule is unit-testable without staging
+/// a disk bundle and full lifecycle.
+fn check_protected_views_have_session(
+    views: &HashMap<String, rivers_runtime::view::ApiViewConfig>,
+    has_session_manager: bool,
+    has_storage_engine: bool,
+) -> Result<(), String> {
+    let protected_view_id = views
+        .iter()
+        .find(|(_, v)| !crate::guard::is_public_view(v))
+        .map(|(id, _)| id.clone());
+
+    let Some(view_id) = protected_view_id else {
+        return Ok(());
+    };
+
+    if has_session_manager {
+        return Ok(());
+    }
+
+    let reason = if !has_storage_engine {
+        "no storage engine configured"
+    } else {
+        "session manager not initialized"
+    };
+    Err(format!(
+        "protected view '{view_id}' requires session management ({reason}); \
+         either set auth=\"none\" or configure [storage_engine] and [security.session]"
+    ))
+}
+
+#[cfg(test)]
+mod check_protected_views_tests {
+    use super::*;
+    use rivers_runtime::view::ApiViewConfig;
+
+    fn view_json(value: serde_json::Value) -> ApiViewConfig {
+        serde_json::from_value(value).expect("valid ApiViewConfig")
+    }
+
+    fn protected() -> ApiViewConfig {
+        view_json(serde_json::json!({
+            "view_type": "Rest",
+            "path": "/api/protected",
+            "method": "GET",
+            "handler": { "type": "dataview", "dataview": "noop" }
+        }))
+    }
+
+    fn public_auth_none() -> ApiViewConfig {
+        view_json(serde_json::json!({
+            "view_type": "Rest",
+            "path": "/api/public",
+            "method": "GET",
+            "auth": "none",
+            "handler": { "type": "dataview", "dataview": "noop" }
+        }))
+    }
+
+    #[test]
+    fn rejects_protected_view_when_session_manager_missing() {
+        let mut views = HashMap::new();
+        views.insert("protected_view".to_string(), protected());
+        let err = check_protected_views_have_session(&views, false, false)
+            .expect_err("must reject");
+        assert!(err.contains("protected_view"), "names offending view: {err}");
+        assert!(err.contains("no storage engine"), "blames missing storage: {err}");
+    }
+
+    #[test]
+    fn rejects_with_storage_present_but_session_missing() {
+        let mut views = HashMap::new();
+        views.insert("v".to_string(), protected());
+        let err = check_protected_views_have_session(&views, false, true)
+            .expect_err("must reject");
+        assert!(err.contains("session manager not initialized"), "{err}");
+    }
+
+    #[test]
+    fn allows_protected_view_when_session_manager_present() {
+        let mut views = HashMap::new();
+        views.insert("v".to_string(), protected());
+        check_protected_views_have_session(&views, true, true)
+            .expect("ok when session manager present");
+    }
+
+    #[test]
+    fn allows_public_views_with_no_session_manager() {
+        let mut views = HashMap::new();
+        views.insert("p".to_string(), public_auth_none());
+        check_protected_views_have_session(&views, false, false)
+            .expect("auth=none requires no session");
+    }
+
+    #[test]
+    fn allows_empty_view_set() {
+        let views = HashMap::new();
+        check_protected_views_have_session(&views, false, false)
+            .expect("nothing to protect");
+    }
+
+    #[test]
+    fn rejects_when_mixed_views_include_one_protected() {
+        let mut views = HashMap::new();
+        views.insert("p".to_string(), public_auth_none());
+        views.insert("admin".to_string(), protected());
+        let err = check_protected_views_have_session(&views, false, false)
+            .expect_err("one protected view is enough");
+        // The first protected view found is named (HashMap order isn't stable
+        // but only "admin" is protected, so it must be that one).
+        assert!(err.contains("admin"), "{err}");
     }
 }

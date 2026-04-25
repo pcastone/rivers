@@ -94,7 +94,7 @@ async fn exec_driver_base_test_no_params() {
                 };
             }"#
         }))
-        .trace_id("exec-base".into())
+        .trace_id("exec-base".into()).app_id("test-app".into()).task_kind(TaskKind::Rest)
         .build()
         .unwrap();
 
@@ -156,7 +156,7 @@ echo "{\"received\":$INPUT,\"processed\":true}"
                 };
             }"#
         }))
-        .trace_id("exec-params".into())
+        .trace_id("exec-params".into()).app_id("test-app".into()).task_kind(TaskKind::Rest)
         .build()
         .unwrap();
 
@@ -232,7 +232,7 @@ echo "{\"domain\":\"$1\",\"type\":\"$2\",\"resolved\":true}"
                 };
             }"#
         }))
-        .trace_id("exec-args".into())
+        .trace_id("exec-args".into()).app_id("test-app".into()).task_kind(TaskKind::Rest)
         .build()
         .unwrap();
 
@@ -286,7 +286,7 @@ async fn exec_driver_error_propagation() {
                 }
             }"#
         }))
-        .trace_id("exec-error".into())
+        .trace_id("exec-error".into()).app_id("test-app".into()).task_kind(TaskKind::Rest)
         .build()
         .unwrap();
 
@@ -316,6 +316,7 @@ fn make_ks_task(source: &str, function: &str, ks: std::sync::Arc<rivers_keystore
         .args(serde_json::json!({ "_source": source }))
         .trace_id("ks-test".into())
         .app_id("test-app".into())
+        .task_kind(TaskKind::Rest)
         .keystore(ks)
         .build()
         .unwrap()

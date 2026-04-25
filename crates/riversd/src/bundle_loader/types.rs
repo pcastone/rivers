@@ -53,6 +53,9 @@ pub(crate) struct DatasourceEventBusHandler {
     pub(crate) module: String,
     pub(crate) entrypoint: String,
     pub(crate) pool: Arc<crate::process_pool::ProcessPoolManager>,
+    /// App that owns this datasource — needed so the event handler dispatch
+    /// inherits the right per-app capabilities (store namespace, etc.).
+    pub(crate) app_id: String,
 }
 
 #[async_trait::async_trait]
@@ -79,7 +82,11 @@ impl rivers_runtime::rivers_core::eventbus::EventHandler for DatasourceEventBusH
             .entrypoint(entrypoint)
             .args(args)
             .trace_id(event.trace_id.clone().unwrap_or_default());
-        let builder = crate::task_enrichment::enrich(builder, "");
+        let builder = crate::task_enrichment::enrich(
+            builder,
+            &self.app_id,
+            rivers_runtime::process_pool::TaskKind::MessageConsumer,
+        );
         let task_ctx = builder
             .build()
             .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;

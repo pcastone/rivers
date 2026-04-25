@@ -41,12 +41,15 @@ impl DatabaseDriver for PostgresDriver {
         &self,
         params: &ConnectionParams,
     ) -> Result<Box<dyn Connection>, DriverError> {
-        let conn_string = format!(
-            "host={} port={} user={} password={} dbname={}",
-            params.host, params.port, params.username, params.password, params.database
-        );
+        // Use tokio_postgres::Config builder rather than string interpolation:
+        // each setter properly escapes/encodes the value, so spaces, quotes,
+        // `=`, `&`, and `'` in credentials cannot break parsing or smuggle
+        // additional connection options (e.g. injection of `sslmode=disable`
+        // via a crafted password).
+        let pg_config = build_pg_config(params);
 
-        let (client, connection) = tokio_postgres::connect(&conn_string, tokio_postgres::NoTls)
+        let (client, connection) = pg_config
+            .connect(tokio_postgres::NoTls)
             .await
             .map_err(|e| DriverError::Connection(format!("postgres connect: {e}")))?;
 
@@ -364,6 +367,22 @@ impl Connection for PostgresConnection {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Build a `tokio_postgres::Config` from `ConnectionParams`.
+///
+/// Each value is set via the typed builder API so that spaces, quotes, `=`,
+/// `&`, and `'` characters in credentials cannot break parsing or be used to
+/// inject additional connection options.
+fn build_pg_config(params: &ConnectionParams) -> tokio_postgres::Config {
+    let mut config = tokio_postgres::Config::new();
+    config
+        .host(&params.host)
+        .port(params.port)
+        .user(&params.username)
+        .password(&params.password)
+        .dbname(&params.database);
+    config
+}
+
 /// Build a positional parameter list from named parameters.
 ///
 /// Keys are sorted alphabetically. The DataView engine uses zero-padded
@@ -677,5 +696,127 @@ mod tests {
         let data = serde_json::json!({"age": 200});
         let err = driver.validate(&data, &schema, ValidationDirection::Input).unwrap_err();
         assert!(matches!(err, ValidationError::ConstraintViolation { .. }));
+    }
+
+    // ── F3: connection-config builder ────────────────────────────
+    //
+    // Regression: prior code interpolated host/user/password/dbname into a
+    // libpq-style key=value string. Special characters in the password (e.g.
+    // a space, `'`, `=`, `&`) could break parsing or smuggle additional
+    // options. The builder API escapes/encodes each field, so any UTF-8
+    // string is safe.
+
+    use rivers_driver_sdk::ConnectionParams;
+
+    fn params_with_password(password: &str) -> ConnectionParams {
+        ConnectionParams {
+            host: "localhost".into(),
+            port: 5432,
+            database: "rivers".into(),
+            username: "rivers".into(),
+            password: password.into(),
+            options: HashMap::new(),
+        }
+    }
+
+    fn params_with_database(database: &str) -> ConnectionParams {
+        ConnectionParams {
+            host: "192.168.2.209".into(),
+            port: 5432,
+            database: database.into(),
+            username: "rivers".into(),
+            password: "rivers_test".into(),
+            options: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn build_pg_config_handles_password_with_spaces() {
+        let p = params_with_password("a password with spaces");
+        let cfg = super::build_pg_config(&p);
+        assert_eq!(cfg.get_password(), Some("a password with spaces".as_bytes()));
+        assert_eq!(cfg.get_user(), Some("rivers"));
+        assert_eq!(cfg.get_dbname(), Some("rivers"));
+    }
+
+    #[test]
+    fn build_pg_config_handles_password_with_special_chars() {
+        // All of these would have broken or altered the old key=value string.
+        for pw in &[
+            "p'ass=word",
+            "p\"a&ss=word",
+            "p ass'wo=rd",
+            "weird & dangerous=' value",
+            "trailing-backslash\\",
+            "unicode-éñ-密码",
+        ] {
+            let p = params_with_password(pw);
+            let cfg = super::build_pg_config(&p);
+            assert_eq!(
+                cfg.get_password(),
+                Some(pw.as_bytes()),
+                "password roundtrip failed for {:?}",
+                pw
+            );
+        }
+    }
+
+    #[test]
+    fn build_pg_config_handles_database_with_special_chars() {
+        for db in &["db with space", "db'name", "db=other", "weird&db"] {
+            let p = params_with_database(db);
+            let cfg = super::build_pg_config(&p);
+            assert_eq!(cfg.get_dbname(), Some(*db), "dbname roundtrip failed for {:?}", db);
+        }
+    }
+
+    #[test]
+    fn build_pg_config_password_cannot_inject_options() {
+        // Pre-fix, this password would expand to:
+        //   host=... password=secret sslmode=disable user=... dbname=...
+        // which would silently disable TLS in TLS-aware deployments.
+        let p = params_with_password("secret sslmode=disable");
+        let cfg = super::build_pg_config(&p);
+        // The full password (including the would-be injection) is taken verbatim.
+        assert_eq!(
+            cfg.get_password(),
+            Some("secret sslmode=disable".as_bytes())
+        );
+        // And we did not accidentally set ssl_mode from the password contents.
+        // tokio_postgres defaults to SslMode::Prefer; assert it wasn't changed
+        // to SslMode::Disable by the injection.
+        assert_ne!(cfg.get_ssl_mode(), tokio_postgres::config::SslMode::Disable);
+    }
+
+    /// Live PostgreSQL connection test (gated behind PG_AVAILABLE=1).
+    ///
+    /// Asserts that a password containing spaces and special characters
+    /// can actually authenticate against a real cluster. Requires the test
+    /// cluster at 192.168.2.209 with `rivers/rivers_test` credentials.
+    ///
+    /// Note: this test connects with the real (non-special-char) password
+    /// configured on the cluster; the builder-roundtrip tests above cover
+    /// the special-char escaping. We just verify that the new connect path
+    /// still produces a working connection end-to-end.
+    #[tokio::test]
+    async fn build_pg_config_live_connect() {
+        if std::env::var("PG_AVAILABLE").ok().as_deref() != Some("1") {
+            println!("skipping: PG_AVAILABLE != 1");
+            return;
+        }
+        let driver = PostgresDriver;
+        let params = ConnectionParams {
+            host: "192.168.2.209".into(),
+            port: 5432,
+            database: "rivers".into(),
+            username: "rivers".into(),
+            password: "rivers_test".into(),
+            options: HashMap::new(),
+        };
+        let mut conn = driver
+            .connect(&params)
+            .await
+            .expect("live postgres connect");
+        conn.ping().await.expect("live postgres ping");
     }
 }

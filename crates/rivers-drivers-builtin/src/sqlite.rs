@@ -8,6 +8,7 @@
 //! - Type mapping: INTEGER -> i64, REAL -> f64, TEXT -> String, BLOB -> hex, NULL -> Null
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,6 +18,230 @@ use rivers_driver_sdk::{
     Query, QueryResult, QueryValue, SchemaDefinition, SchemaSyntaxError, ValidationDirection,
     ValidationError,
 };
+
+// ── G_R8: SQLite path policy ────────────────────────────────────────
+//
+// Two operator-controlled knobs governed by environment variables, mirrored
+// after the B2 / B3 / F2 OnceLock pattern (see `process_pool::v8_config`):
+//
+//   * `RIVERS_SQLITE_ALLOWED_ROOT` (path; unset = no restriction). When set,
+//     any non-`:memory:` database path that resolves outside the configured
+//     root is rejected with a clear `DriverError::Connection`. Prevents a
+//     misconfigured `database = "/etc/passwd"` from creating SQLite files in
+//     arbitrary locations.
+//   * `RIVERS_SQLITE_CREATE_PARENT_DIRS` (`1` = allow auto-mkdir; default
+//     `0`). The previous implementation called `std::fs::create_dir_all`
+//     unconditionally, which masked typos and let SQLite scribble nested
+//     directory trees wherever the path pointed. With the new default,
+//     missing parent directories produce a clear connect error.
+
+const RIVERS_SQLITE_ALLOWED_ROOT_ENV: &str = "RIVERS_SQLITE_ALLOWED_ROOT";
+const RIVERS_SQLITE_CREATE_PARENT_DIRS_ENV: &str = "RIVERS_SQLITE_CREATE_PARENT_DIRS";
+
+/// Resolve the active allowed-root for SQLite database paths. Reads the env
+/// var exactly once via `OnceLock` so toggling mid-process has no effect —
+/// operators must set it before riversd starts. Test helpers may bypass via
+/// the override hook below.
+fn allowed_root() -> Option<PathBuf> {
+    if let Some(test_override) = test_override_allowed_root() {
+        return test_override;
+    }
+    static CACHED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            std::env::var(RIVERS_SQLITE_ALLOWED_ROOT_ENV)
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+        })
+        .clone()
+}
+
+/// Whether the driver may auto-create missing parent directories. Default
+/// is `false` — set `RIVERS_SQLITE_CREATE_PARENT_DIRS=1` to opt in.
+fn create_parent_dirs() -> bool {
+    if let Some(test_override) = test_override_create_parent_dirs() {
+        return test_override;
+    }
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var(RIVERS_SQLITE_CREATE_PARENT_DIRS_ENV)
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    static SQLITE_ALLOWED_ROOT_OVERRIDE: std::cell::RefCell<Option<Option<PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+    static SQLITE_CREATE_PARENT_DIRS_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn test_override_allowed_root() -> Option<Option<PathBuf>> {
+    SQLITE_ALLOWED_ROOT_OVERRIDE.with(|c| c.borrow().clone())
+}
+
+#[cfg(not(test))]
+fn test_override_allowed_root() -> Option<Option<PathBuf>> {
+    None
+}
+
+#[cfg(test)]
+fn test_override_create_parent_dirs() -> Option<bool> {
+    SQLITE_CREATE_PARENT_DIRS_OVERRIDE.with(|c| c.get())
+}
+
+#[cfg(not(test))]
+fn test_override_create_parent_dirs() -> Option<bool> {
+    None
+}
+
+/// Test-only RAII guard for the allowed-root override. `None` means
+/// "no restriction" (matches an unset env var); `Some(path)` restricts.
+#[cfg(test)]
+pub(crate) struct SqliteAllowedRootOverride;
+
+#[cfg(test)]
+impl SqliteAllowedRootOverride {
+    pub(crate) fn new(root: Option<PathBuf>) -> Self {
+        SQLITE_ALLOWED_ROOT_OVERRIDE.with(|c| *c.borrow_mut() = Some(root));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for SqliteAllowedRootOverride {
+    fn drop(&mut self) {
+        SQLITE_ALLOWED_ROOT_OVERRIDE.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+/// Test-only RAII guard for the create-parent-dirs override.
+#[cfg(test)]
+pub(crate) struct SqliteCreateParentDirsOverride;
+
+#[cfg(test)]
+impl SqliteCreateParentDirsOverride {
+    pub(crate) fn new(enabled: bool) -> Self {
+        SQLITE_CREATE_PARENT_DIRS_OVERRIDE.with(|c| c.set(Some(enabled)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for SqliteCreateParentDirsOverride {
+    fn drop(&mut self) {
+        SQLITE_CREATE_PARENT_DIRS_OVERRIDE.with(|c| c.set(None));
+    }
+}
+
+/// Redact a SQLite database path for log lines.
+///
+/// G_R8.2: the previous `db_path = %path` log emitted the full host
+/// absolute path, leaking deployment-internal directory structure. This
+/// helper produces a stable, redacted label suitable for production logs:
+///
+/// * `:memory:` → returned verbatim.
+/// * Anything containing `/libraries/` → reported as
+///   `<libraries>/<rest-after-libraries>` (mirrors the B4 redaction style
+///   used by the V8 module loader, but inlined here because
+///   `rivers-drivers-builtin` cannot depend on `riversd`).
+/// * Anything else → `<path>/<basename>`.
+fn redact_db_path(path: &str) -> String {
+    if path == ":memory:" {
+        return path.to_string();
+    }
+    if let Some(idx) = path.find("/libraries/") {
+        let tail = &path[idx + "/libraries/".len()..];
+        return format!("<libraries>/{tail}");
+    }
+    let basename = Path::new(path)
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "<unnamed>".into());
+    format!("<path>/{basename}")
+}
+
+/// Validate a candidate SQLite path against the configured allowed root and
+/// the auto-mkdir policy. Returns `Ok(())` if the path is acceptable, or a
+/// `DriverError::Connection` describing the violation.
+fn check_sqlite_path(path: &str) -> Result<(), DriverError> {
+    if path == ":memory:" {
+        return Ok(());
+    }
+    let candidate = Path::new(path);
+
+    // Allowed-root check.
+    if let Some(root) = allowed_root() {
+        // Canonicalize the root (it must exist if it's been configured).
+        let root_canon = root.canonicalize().unwrap_or(root.clone());
+        // The candidate file may not exist yet, so canonicalize the parent
+        // directory and append the basename. This resolves macOS symlinks
+        // like `/var/folders/...` → `/private/var/folders/...` so a
+        // tempdir-rooted candidate matches a tempdir-rooted root.
+        let candidate_abs = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(candidate))
+                .unwrap_or_else(|_| candidate.to_path_buf())
+        };
+        let candidate_canon = match (candidate_abs.parent(), candidate_abs.file_name()) {
+            (Some(parent), Some(file)) if parent.exists() => {
+                parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf()).join(file)
+            }
+            _ => normalise_path(&candidate_abs),
+        };
+        if !candidate_canon.starts_with(&root_canon) {
+            return Err(DriverError::Connection(format!(
+                "sqlite: path '{}' is outside allowed root '{}' (set RIVERS_SQLITE_ALLOWED_ROOT to widen)",
+                redact_db_path(path),
+                root_canon.display()
+            )));
+        }
+    }
+
+    // Parent-dir policy.
+    if let Some(parent) = candidate.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            if create_parent_dirs() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    DriverError::Connection(format!(
+                        "sqlite: failed to create parent directory for '{}': {e}",
+                        redact_db_path(path)
+                    ))
+                })?;
+            } else {
+                return Err(DriverError::Connection(format!(
+                    "sqlite: parent directory does not exist for '{}' (set RIVERS_SQLITE_CREATE_PARENT_DIRS=1 to auto-create)",
+                    redact_db_path(path)
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Lexically normalise a path: collapse `.` and `..` components without
+/// hitting the filesystem. Used by the allowed-root check because the
+/// candidate file does not exist yet.
+fn normalise_path(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
 
 /// Supported field types for the SQLite driver.
 const SQLITE_TYPES: &[&str] = &[
@@ -68,26 +293,28 @@ impl DatabaseDriver for SqliteDriver {
             ));
         };
 
+        // G_R8.2: log the redacted path, never the host-absolute string.
         tracing::info!(
             target: "rivers.sqlite",
-            db_path = %path,
+            db_path = %redact_db_path(&path),
             from_field = if !params.database.is_empty() { "database" } else { "host" },
             "sqlite: opening connection"
         );
 
-        // Create parent directories if they don't exist (skip for :memory:)
-        if path != ":memory:" {
-            if let Some(parent) = std::path::Path::new(&path).parent() {
-                if !parent.as_os_str().is_empty() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-            }
-        }
+        // G_R8.1 + G_R8.3: enforce the allowed-root and parent-dir policies
+        // before opening. `:memory:` short-circuits inside `check_sqlite_path`.
+        check_sqlite_path(&path)?;
 
         // Open connection on a blocking thread since rusqlite is synchronous.
         let conn = tokio::task::spawn_blocking(move || -> Result<rusqlite::Connection, DriverError> {
             let conn = rusqlite::Connection::open(&path)
-                .map_err(|e| DriverError::Connection(format!("sqlite open '{}': {}", path, e)))?;
+                .map_err(|e| {
+                    DriverError::Connection(format!(
+                        "sqlite open '{}': {}",
+                        redact_db_path(&path),
+                        e
+                    ))
+                })?;
 
             // WAL mode for concurrent read performance (§3.4).
             conn.pragma_update(None, "journal_mode", "WAL")
@@ -742,6 +969,11 @@ mod tests {
 
     #[tokio::test]
     async fn connect_creates_parent_directories() {
+        // G_R8.3: parent-dir auto-creation is now opt-in. Without the
+        // override the test below (`connect_errors_on_missing_parent_dir`)
+        // proves the new default — we keep this happy-path coverage by
+        // setting the override.
+        let _create_guard = SqliteCreateParentDirsOverride::new(true);
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("nested/deep/dir/test.db");
         let driver = SqliteDriver::new();
@@ -751,6 +983,110 @@ mod tests {
         conn.ddl_execute(&q("CREATE TABLE t (id INTEGER PRIMARY KEY)", vec![])).await.unwrap();
 
         assert!(db_path.exists(), "SQLite file should exist in nested directory");
+    }
+
+    /// G_R8.3: by default, missing parent directories MUST cause connect()
+    /// to fail with a clear message. The previous implementation called
+    /// `std::fs::create_dir_all` unconditionally, which masked
+    /// misconfigured database paths and let SQLite scribble files into
+    /// arbitrary locations (e.g., the daemon's CWD).
+    #[tokio::test]
+    async fn connect_errors_on_missing_parent_dir_by_default() {
+        // Explicitly disable the override; default behaviour is "no auto-mkdir".
+        let _create_guard = SqliteCreateParentDirsOverride::new(false);
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("nonexistent/deep/path/test.db");
+        let driver = SqliteDriver::new();
+        let params = make_params("", db_path.to_str().unwrap());
+
+        match driver.connect(&params).await {
+            Err(DriverError::Connection(msg)) => {
+                assert!(
+                    msg.contains("parent directory does not exist"),
+                    "expected parent-dir error, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected DriverError::Connection, got {other:?}"),
+            Ok(_) => panic!("connect should fail when parent dir is missing and auto-mkdir is off"),
+        }
+        assert!(!db_path.exists(), "no file should have been created");
+    }
+
+    /// G_R8.1: when `RIVERS_SQLITE_ALLOWED_ROOT` is set, paths outside the
+    /// root MUST be rejected with a clear error.
+    #[tokio::test]
+    async fn connect_rejects_path_outside_allowed_root() {
+        let allowed = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let _root_guard = SqliteAllowedRootOverride::new(Some(
+            allowed.path().to_path_buf(),
+        ));
+        let _create_guard = SqliteCreateParentDirsOverride::new(true);
+
+        let db_path = outside.path().join("escape.db");
+        let driver = SqliteDriver::new();
+        let params = make_params("", db_path.to_str().unwrap());
+
+        match driver.connect(&params).await {
+            Err(DriverError::Connection(msg)) => {
+                assert!(
+                    msg.contains("outside allowed root"),
+                    "expected allowed-root error, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected DriverError::Connection, got {other:?}"),
+            Ok(_) => panic!("connect should fail when path escapes allowed root"),
+        }
+    }
+
+    /// G_R8.1: paths inside the allowed root succeed.
+    #[tokio::test]
+    async fn connect_accepts_path_inside_allowed_root() {
+        let allowed = tempfile::tempdir().unwrap();
+        let _root_guard = SqliteAllowedRootOverride::new(Some(
+            allowed.path().to_path_buf(),
+        ));
+        let _create_guard = SqliteCreateParentDirsOverride::new(true);
+
+        let db_path = allowed.path().join("inside.db");
+        let driver = SqliteDriver::new();
+        let params = make_params("", db_path.to_str().unwrap());
+
+        let mut conn = driver.connect(&params).await.unwrap();
+        conn.ddl_execute(&q("CREATE TABLE t (id INTEGER PRIMARY KEY)", vec![])).await.unwrap();
+        assert!(db_path.exists());
+    }
+
+    /// G_R8.1: `:memory:` is always allowed regardless of the configured
+    /// allowed root.
+    #[tokio::test]
+    async fn connect_memory_db_bypasses_allowed_root() {
+        let allowed = tempfile::tempdir().unwrap();
+        let _root_guard = SqliteAllowedRootOverride::new(Some(
+            allowed.path().to_path_buf(),
+        ));
+
+        let driver = SqliteDriver::new();
+        let params = make_params("", ":memory:");
+        let _conn = driver.connect(&params).await.expect(":memory: should always be allowed");
+    }
+
+    /// G_R8.2: the path-redaction helper produces a stable label that hides
+    /// host-specific prefixes. Anything containing `/libraries/` is reported
+    /// relative to that anchor; otherwise the basename is returned.
+    #[test]
+    fn redact_db_path_hides_host_prefix() {
+        assert_eq!(
+            redact_db_path("/Users/alice/work/myapp/libraries/data/app.db"),
+            "<libraries>/data/app.db"
+        );
+        assert_eq!(
+            redact_db_path("/var/lib/rivers/instance/libraries/x.db"),
+            "<libraries>/x.db"
+        );
+        // No /libraries/ anchor — fall back to basename only.
+        assert_eq!(redact_db_path("/srv/data/random.db"), "<path>/random.db");
+        assert_eq!(redact_db_path(":memory:"), ":memory:");
     }
 
     #[tokio::test]

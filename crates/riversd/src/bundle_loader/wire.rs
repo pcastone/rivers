@@ -128,27 +128,37 @@ pub(crate) async fn wire_streaming_and_events(
                         subscriptions,
                     };
 
-                    // Code-review §1 fix: bridge startup is now supervisor-owned.
-                    // `create_consumer` runs inside the spawned supervisor, NOT
-                    // awaited inline here, so one unreachable broker cannot
-                    // hang bundle load. The supervisor retries with bounded
-                    // backoff until shutdown.
-                    let spec = crate::broker_bridge::BrokerBridgeSpec {
-                        driver: broker_driver.clone(),
-                        params: params.clone(),
-                        broker_config,
-                        event_bus: ctx.event_bus.clone(),
-                        failure_policy,
-                        datasource_name: ds.name.clone(),
+                    // Nonblocking: spawn supervisor that owns connect+retry+run.
+                    // wire_streaming_and_events returns immediately so HTTP
+                    // listener bind isn't gated on broker reachability.
+                    // See code review P0-4 / todo/tasks.md A1.1.
+                    //
+                    // Both branches independently added a non-blocking broker
+                    // startup fix (this branch's `broker_supervisor` module vs
+                    // main's `broker_bridge::BrokerBridgeSpec`/`run_with_retry`).
+                    // Keeping this branch's version because it surfaces per-bridge
+                    // state to `/health/verbose` via `BrokerBridgeRegistry` and
+                    // has integration tests under `tests/broker_supervisor_tests.rs`.
+                    let backoff = crate::broker_supervisor::SupervisorBackoff::from_reconnect_ms(
                         reconnect_ms,
-                        shutdown_rx: shutdown_rx.clone(),
-                    };
-                    tokio::spawn(crate::broker_bridge::run_with_retry(spec));
+                    );
+                    crate::broker_supervisor::spawn_broker_supervisor(
+                        broker_driver.clone(),
+                        params.clone(),
+                        broker_config,
+                        failure_policy,
+                        ctx.event_bus.clone(),
+                        ds.name.clone(),
+                        ds.driver.clone(),
+                        backoff,
+                        ctx.broker_bridge_registry.clone(),
+                        shutdown_rx.clone(),
+                    );
                     broker_bridge_count += 1;
                     tracing::info!(
                         datasource = %ds.name,
                         driver = %ds.driver,
-                        "broker bridge supervisor spawned (lazy consumer init)"
+                        "broker supervisor spawned (nonblocking)"
                     );
                 }
             }
@@ -159,8 +169,8 @@ pub(crate) async fn wire_streaming_and_events(
         // the owning app's identity — code-review §5 fix (empty app_id →
         // ctx.store hit `app:default` instead of the owning app's namespace).
         let mc_registry = crate::message_consumer::MessageConsumerRegistry::from_views(
-            entry_point,
             &app.config.api.views,
+            entry_point,
         );
         if !mc_registry.is_empty() {
             consumer_count += mc_registry.len();
@@ -188,6 +198,9 @@ pub(crate) async fn wire_streaming_and_events(
         let mut ds_handler_count = 0usize;
 
         for app in &bundle.apps {
+            let app_entry_point = app.manifest.entry_point.as_deref()
+                .unwrap_or(&app.manifest.app_name)
+                .to_string();
             for ds in app.config.data.datasources.values() {
                 if let Some(ref handlers) = ds.event_handlers {
                     // on_connection_failed → DatasourceCircuitOpened + DatasourceHealthCheckFailed
@@ -197,12 +210,14 @@ pub(crate) async fn wire_streaming_and_events(
                             module: handler_ref.module.clone(),
                             entrypoint: handler_ref.entrypoint.clone(),
                             pool: ctx.pool.clone(),
+                            app_id: app_entry_point.clone(),
                         });
+                        // Permanent: lives for the bundle's lifetime — subscribe_static (G_R2.1).
                         ctx.event_bus
-                            .subscribe(events::DATASOURCE_CIRCUIT_OPENED.to_string(), handler.clone(), HandlerPriority::Handle)
+                            .subscribe_static(events::DATASOURCE_CIRCUIT_OPENED.to_string(), handler.clone(), HandlerPriority::Handle)
                             .await;
                         ctx.event_bus
-                            .subscribe(events::DATASOURCE_HEALTH_CHECK_FAILED.to_string(), handler, HandlerPriority::Handle)
+                            .subscribe_static(events::DATASOURCE_HEALTH_CHECK_FAILED.to_string(), handler, HandlerPriority::Handle)
                             .await;
                         ds_handler_count += 1;
                         tracing::info!(
@@ -220,9 +235,11 @@ pub(crate) async fn wire_streaming_and_events(
                             module: handler_ref.module.clone(),
                             entrypoint: handler_ref.entrypoint.clone(),
                             pool: ctx.pool.clone(),
+                            app_id: app_entry_point.clone(),
                         });
+                        // Permanent: lives for the bundle's lifetime — subscribe_static (G_R2.1).
                         ctx.event_bus
-                            .subscribe(events::CONNECTION_POOL_EXHAUSTED.to_string(), handler, HandlerPriority::Handle)
+                            .subscribe_static(events::CONNECTION_POOL_EXHAUSTED.to_string(), handler, HandlerPriority::Handle)
                             .await;
                         ds_handler_count += 1;
                         tracing::info!(
@@ -273,7 +290,8 @@ pub(crate) async fn wire_streaming_and_events(
                             channel: ch,
                             view_id: qualified_id.clone(),
                         });
-                        ctx.event_bus.subscribe(
+                        // Permanent SSE trigger subscription (G_R2.1).
+                        ctx.event_bus.subscribe_static(
                             event_name.clone(),
                             handler,
                             rivers_runtime::rivers_core::eventbus::HandlerPriority::Handle,

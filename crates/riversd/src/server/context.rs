@@ -145,6 +145,11 @@ pub struct AppContext {
     pub graphql_schema: Arc<tokio::sync::RwLock<Option<async_graphql::dynamic::Schema>>>,
     /// DriverFactory — shared with host callbacks for cdylib engine access.
     pub driver_factory: Option<Arc<rivers_runtime::rivers_core::DriverFactory>>,
+    /// Per-datasource connection pool manager. Always present (initialized
+    /// empty in `AppContext::new`); `bundle_loader::load` registers one
+    /// pool per datasource. `DataViewExecutor` and `/health/verbose` route
+    /// through this manager.
+    pub pool_manager: Arc<crate::pool::PoolManager>,
     /// Shutdown sender — triggers graceful shutdown when sent `true`.
     pub shutdown_tx: Option<Arc<tokio::sync::watch::Sender<bool>>>,
     /// Apps that failed to load — keyed by entry_point path prefix (e.g., "/canary-fleet/nosql"),
@@ -152,6 +157,10 @@ pub struct AppContext {
     pub failed_apps: Arc<std::sync::RwLock<HashMap<String, String>>>,
     /// Circuit breaker registry — app-level manual DataView traffic control.
     pub circuit_breaker_registry: Arc<crate::circuit_breaker::BreakerRegistry>,
+    /// Broker bridge registry — per-broker connection state, separate from
+    /// process readiness. Populated by the broker supervisor; surfaced via
+    /// `/health/verbose`. See `broker_supervisor` and code review P0-4.
+    pub broker_bridge_registry: crate::broker_supervisor::BrokerBridgeRegistry,
 }
 
 impl AppContext {
@@ -184,9 +193,11 @@ impl AppContext {
             ws_manager: Arc::new(WebSocketRouteManager::new()),
             graphql_schema: Arc::new(tokio::sync::RwLock::new(None)),
             driver_factory: None,
+            pool_manager: Arc::new(crate::pool::PoolManager::new()),
             shutdown_tx: None,
             failed_apps: Arc::new(std::sync::RwLock::new(HashMap::new())),
             circuit_breaker_registry: Arc::new(crate::circuit_breaker::BreakerRegistry::new()),
+            broker_bridge_registry: crate::broker_supervisor::BrokerBridgeRegistry::new(),
         }
     }
 }

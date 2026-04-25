@@ -187,12 +187,104 @@ pub trait EventHandler: Send + Sync {
 
 // ── Subscription ────────────────────────────────────────────────────
 
+/// Monotonically-increasing identifier for live subscriptions.
+///
+/// Used by [`SubscriptionHandle`] to locate and remove its entry in the
+/// topic list when dropped.
+type SubscriptionId = u64;
+
 struct Subscription {
+    id: SubscriptionId,
     handler: Arc<dyn EventHandler>,
     priority: HandlerPriority,
 }
 
+/// RAII handle for an EventBus subscription.
+///
+/// Per G_R2.1 (P2-2): subscriptions registered through [`EventBus::subscribe`]
+/// are removed automatically when the returned handle is dropped, preventing
+/// the leak of stale handlers when their owning component goes away.
+///
+/// For permanent subscriptions registered at startup (LogHandler, broker
+/// bridges, datasource event handlers), use [`EventBus::subscribe_static`]
+/// instead — it does not return a handle and the registration lasts for the
+/// lifetime of the bus.
+#[must_use = "dropping the SubscriptionHandle immediately unregisters the subscription"]
+pub struct SubscriptionHandle {
+    topic: String,
+    id: SubscriptionId,
+    bus: std::sync::Weak<EventBusInner>,
+}
+
+impl SubscriptionHandle {
+    /// Detach the handle without removing the subscription.
+    ///
+    /// Equivalent to `subscribe_static` after the fact: the subscription
+    /// lives for the rest of the bus's lifetime. Use this only when you
+    /// are certain the subscription is permanent.
+    pub fn forget(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for SubscriptionHandle {
+    fn drop(&mut self) {
+        let Some(inner) = self.bus.upgrade() else {
+            return; // Bus already dropped; nothing to remove.
+        };
+        let topic = std::mem::take(&mut self.topic);
+        let id = self.id;
+        // Spawn a task to remove the subscription. We are in Drop so we
+        // cannot await; use try_write fast path then fall back to spawn.
+        if let Ok(mut topics) = inner.topics.try_write() {
+            remove_subscription_locked(&mut topics, &topic, id);
+            #[cfg(feature = "metrics")]
+            update_subscriber_metrics_locked(&topics);
+            return;
+        }
+        // Fall back: spawn a task on the current runtime.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let mut topics = inner.topics.write().await;
+                remove_subscription_locked(&mut topics, &topic, id);
+                #[cfg(feature = "metrics")]
+                update_subscriber_metrics_locked(&topics);
+            });
+        }
+    }
+}
+
+fn remove_subscription_locked(
+    topics: &mut HashMap<String, Vec<Subscription>>,
+    topic: &str,
+    id: SubscriptionId,
+) {
+    if let Some(subs) = topics.get_mut(topic) {
+        subs.retain(|s| s.id != id);
+        if subs.is_empty() {
+            topics.remove(topic);
+        }
+    }
+}
+
+#[cfg(feature = "metrics")]
+fn update_subscriber_metrics_locked(topics: &HashMap<String, Vec<Subscription>>) {
+    let total: usize = topics.values().map(|v| v.len()).sum();
+    metrics::gauge!("rivers_eventbus_subscribers", "kind" => "total").set(total as f64);
+}
+
 // ── EventBus ────────────────────────────────────────────────────────
+
+/// Inner shared state for the EventBus, held behind an [`Arc`] so
+/// [`SubscriptionHandle`] can keep a `Weak` reference for drop-time cleanup.
+struct EventBusInner {
+    topics: RwLock<HashMap<String, Vec<Subscription>>>,
+    next_id: std::sync::atomic::AtomicU64,
+    /// Per G_R2.2: cap on the number of receivers attached to a forwarder
+    /// created by [`EventBus::subscribe_broadcast`]. Exceeding this triggers
+    /// a warning at publish time so leaks surface in logs.
+    max_broadcast_subscribers: usize,
+}
 
 /// In-process pub/sub EventBus with priority-tiered dispatch.
 ///
@@ -203,34 +295,97 @@ struct Subscription {
 ///   2. All Handle handlers — awaited sequentially
 ///   3. All Emit handlers — awaited sequentially
 ///   4. All Observe handlers — spawned as tokio tasks (fire-and-forget)
+///
+/// ### Subscription lifecycle (G_R2)
+///
+/// - [`subscribe`](Self::subscribe) returns a [`SubscriptionHandle`] that
+///   removes the subscription on drop. Callers MUST keep the handle alive
+///   for as long as the subscription is wanted.
+/// - [`subscribe_static`](Self::subscribe_static) is for permanent
+///   subscriptions installed at startup (e.g. logging, broker bridges).
+///   It does not return a handle and never removes the subscription.
 pub struct EventBus {
-    topics: Arc<RwLock<HashMap<String, Vec<Subscription>>>>,
+    inner: Arc<EventBusInner>,
 }
+
+/// Default cap on broadcast forwarder receivers (per G_R2.2).
+pub const DEFAULT_MAX_BROADCAST_SUBSCRIBERS: usize = 1000;
 
 impl EventBus {
     /// Create a new empty EventBus.
     pub fn new() -> Self {
+        Self::with_max_broadcast_subscribers(DEFAULT_MAX_BROADCAST_SUBSCRIBERS)
+    }
+
+    /// Create a new EventBus with a custom broadcast subscriber cap.
+    pub fn with_max_broadcast_subscribers(max: usize) -> Self {
         Self {
-            topics: Arc::new(RwLock::new(HashMap::new())),
+            inner: Arc::new(EventBusInner {
+                topics: RwLock::new(HashMap::new()),
+                next_id: std::sync::atomic::AtomicU64::new(1),
+                max_broadcast_subscribers: max,
+            }),
         }
     }
 
-    /// Subscribe a handler to a topic at the given priority.
+    /// Subscribe a handler that lives for as long as the returned
+    /// [`SubscriptionHandle`].
+    ///
+    /// Drop the handle to remove the subscription. Use
+    /// [`subscribe_static`](Self::subscribe_static) for permanent
+    /// startup-time wiring (it never unregisters).
     pub async fn subscribe(
         &self,
         topic: impl Into<String>,
         handler: Arc<dyn EventHandler>,
         priority: HandlerPriority,
+    ) -> SubscriptionHandle {
+        let topic_str = topic.into();
+        let id = self.insert_subscription(&topic_str, handler, priority).await;
+        SubscriptionHandle {
+            topic: topic_str,
+            id,
+            bus: Arc::downgrade(&self.inner),
+        }
+    }
+
+    /// Permanent subscription — does NOT return a handle, never unregisters.
+    ///
+    /// Per G_R2.1: use this for startup-time wiring (logging, broker
+    /// bridges, datasource event subscribers) where the subscription should
+    /// last for the lifetime of the EventBus.
+    pub async fn subscribe_static(
+        &self,
+        topic: impl Into<String>,
+        handler: Arc<dyn EventHandler>,
+        priority: HandlerPriority,
     ) {
-        let topic = topic.into();
-        let mut topics = self.topics.write().await;
-        let subs = topics.entry(topic).or_default();
+        let topic_str = topic.into();
+        let _ = self.insert_subscription(&topic_str, handler, priority).await;
+    }
+
+    async fn insert_subscription(
+        &self,
+        topic: &str,
+        handler: Arc<dyn EventHandler>,
+        priority: HandlerPriority,
+    ) -> SubscriptionId {
+        let id = self
+            .inner
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut topics = self.inner.topics.write().await;
+        let subs = topics.entry(topic.to_string()).or_default();
         subs.push(Subscription {
+            id,
             handler,
             priority,
         });
         // Keep sorted by priority so dispatch order is deterministic
         subs.sort_by_key(|s| s.priority);
+        #[cfg(feature = "metrics")]
+        update_subscriber_metrics_locked(&topics);
+        id
     }
 
     /// Publish an event to all subscribers of its `event_type`.
@@ -244,11 +399,14 @@ impl EventBus {
     /// Errors from Expect/Handle/Emit handlers are collected and returned.
     /// Errors from Observe handlers are logged via tracing.
     pub async fn publish(&self, event: &Event) -> Vec<EventBusError> {
+        #[cfg(feature = "metrics")]
+        let _dispatch_start = std::time::Instant::now();
+
         // Collect subscribers under read lock, then drop lock before dispatching.
         // This prevents slow Observe handlers (file I/O) from blocking all publishes.
         let handlers: Vec<(Arc<dyn EventHandler>, HandlerPriority)> = {
-            let topics = self.topics.read().await;
-            let mut collected = Vec::new();
+            let topics = self.inner.topics.read().await;
+            let mut collected: Vec<(Arc<dyn EventHandler>, HandlerPriority)> = Vec::new();
 
             // Exact topic subscribers
             if let Some(subs) = topics.get(&event.event_type) {
@@ -266,10 +424,15 @@ impl EventBus {
                 }
             }
 
-            // Both exact-topic and wildcard subscriber lists are individually sorted
-            // by priority (maintained by subscribe()). Exact subscribers come first,
-            // wildcards appended after. Since wildcards are typically Observe tier,
-            // the merge order is already correct — no sort needed.
+            // E2: merge exact + wildcard into a single global priority order.
+            //
+            // Each individual list (exact, wildcard) is already sorted by priority
+            // (maintained by `subscribe`), but a wildcard subscriber at e.g. Expect
+            // must still dispatch before an exact subscriber at Emit. A stable sort
+            // by priority gives the correct global ordering and preserves insertion
+            // order within a priority bucket (and within that bucket, exact handlers
+            // come before wildcards because they were collected first).
+            collected.sort_by_key(|(_, p)| *p);
             collected
         }; // read lock dropped here
 
@@ -309,6 +472,16 @@ impl EventBus {
             }
         }
 
+        #[cfg(feature = "metrics")]
+        {
+            let elapsed = _dispatch_start.elapsed().as_secs_f64();
+            metrics::histogram!(
+                "rivers_eventbus_dispatch_seconds",
+                "event" => event.event_type.clone()
+            )
+            .record(elapsed);
+        }
+
         errors
     }
 
@@ -317,26 +490,38 @@ impl EventBus {
     /// Returns a `broadcast::Sender<Event>` — callers use `sender.subscribe()`
     /// to get a `Receiver` that yields events from this topic as a stream.
     /// Used by GraphQL subscriptions to bridge EventBus → async stream.
+    ///
+    /// G_R2.2: the forwarder is registered as a permanent (`subscribe_static`)
+    /// subscription and warns when the receiver count exceeds
+    /// `max_broadcast_subscribers` (default
+    /// [`DEFAULT_MAX_BROADCAST_SUBSCRIBERS`]).
     pub async fn subscribe_broadcast(
         &self,
         topic: impl Into<String>,
         capacity: usize,
     ) -> tokio::sync::broadcast::Sender<crate::event::Event> {
+        let topic_str = topic.into();
         let (sender, _) = tokio::sync::broadcast::channel(capacity);
-        let forwarder = Arc::new(BroadcastForwarder { sender: sender.clone() });
-        self.subscribe(topic, forwarder, HandlerPriority::Handle).await;
+        let forwarder = Arc::new(BroadcastForwarder {
+            sender: sender.clone(),
+            topic: topic_str.clone(),
+            max_subscribers: self.inner.max_broadcast_subscribers,
+        });
+        // Broadcast forwarders are permanent — no handle returned.
+        self.subscribe_static(topic_str, forwarder, HandlerPriority::Handle)
+            .await;
         sender
     }
 
     /// Return the number of subscribers for a given topic.
     pub async fn subscriber_count(&self, topic: &str) -> usize {
-        let topics = self.topics.read().await;
+        let topics = self.inner.topics.read().await;
         topics.get(topic).map_or(0, |s| s.len())
     }
 
     /// Return all registered topic names.
     pub async fn topics(&self) -> Vec<String> {
-        let topics = self.topics.read().await;
+        let topics = self.inner.topics.read().await;
         topics.keys().cloned().collect()
     }
 }
@@ -365,11 +550,32 @@ pub struct EventBusError {
 /// Created by `subscribe_broadcast()` for GraphQL subscription bridging.
 struct BroadcastForwarder {
     sender: tokio::sync::broadcast::Sender<crate::event::Event>,
+    topic: String,
+    max_subscribers: usize,
 }
 
 #[async_trait]
 impl EventHandler for BroadcastForwarder {
     async fn handle(&self, event: &crate::event::Event) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // G_R2.2: warn (and emit metric) when the receiver count exceeds the
+        // configured cap. We do not drop receivers — that would surprise
+        // existing GraphQL subscribers — but a leak should be visible.
+        let receivers = self.sender.receiver_count();
+        if receivers > self.max_subscribers {
+            tracing::warn!(
+                target: "rivers.eventbus",
+                topic = %self.topic,
+                receivers,
+                max = self.max_subscribers,
+                "broadcast forwarder exceeds max_broadcast_subscribers — possible subscription leak"
+            );
+            #[cfg(feature = "metrics")]
+            metrics::gauge!(
+                "rivers_eventbus_subscribers",
+                "kind" => "broadcast_overflow"
+            )
+            .set(receivers as f64);
+        }
         let _ = self.sender.send(event.clone());
         Ok(())
     }

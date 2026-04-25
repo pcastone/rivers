@@ -74,6 +74,10 @@ impl DatabaseDriver for ElasticsearchDriver {
             password: params.password.clone(),
         }))
     }
+
+    /// G_R7.2: cdylib plugins ship their own statically-linked tokio
+    /// runtime — connect() runs inside an isolated host runtime.
+    fn needs_isolated_runtime(&self) -> bool { true }
 }
 
 // ── Connection ─────────────────────────────────────────────────────────

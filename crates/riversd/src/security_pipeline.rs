@@ -34,6 +34,7 @@ pub async fn run_security_pipeline(
     method: &str,
     trace_id: &str,
     guard_view_path: Option<&str>,
+    app_id: &str,
 ) -> Result<SecurityOutcome, axum::response::Response> {
     let mut session: Option<serde_json::Value> = None;
     let mut clear_session_cookie = false;
@@ -48,6 +49,24 @@ pub async fn run_security_pipeline(
 
     // ── Step 2: Session validation for protected views ──────
     if !crate::guard::is_public_view(config) {
+        // P0-1 fail-closed: a protected view MUST have a session manager.
+        // If `session_manager` is None (misconfig), the original code silently
+        // skipped validation and let the request through. Now we reject.
+        if ctx.session_manager.is_none() {
+            tracing::error!(
+                trace_id = %trace_id,
+                view_type = %config.view_type,
+                method = %method,
+                "protected view dispatched without session_manager configured \u{2014} rejecting (fail-closed)"
+            );
+            return Err(
+                error_response::internal_error(
+                    "session manager not configured; protected view cannot be served"
+                )
+                .with_trace_id(trace_id.to_string())
+                .into_axum_response()
+            );
+        }
         if let Some(ref mgr) = ctx.session_manager {
             match &session_id {
                 Some(sid) => {
@@ -62,6 +81,7 @@ pub async fn run_security_pipeline(
                                     let hook = hook.clone();
                                     let session_clone = session.clone();
                                     let trace = trace_id.to_string();
+                                    let app_id_owned = app_id.to_string();
                                     tokio::spawn(async move {
                                         let entrypoint = crate::process_pool::Entrypoint {
                                             module: hook.module.clone(),
@@ -73,7 +93,11 @@ pub async fn run_security_pipeline(
                                             .entrypoint(entrypoint)
                                             .args(args)
                                             .trace_id(trace);
-                                        let builder = crate::task_enrichment::enrich(builder, "");
+                                        let builder = crate::task_enrichment::enrich(
+                                            builder,
+                                            &app_id_owned,
+                                            rivers_runtime::process_pool::TaskKind::SecurityHook,
+                                        );
                                         if let Ok(task_ctx) = builder.build() {
                                             let _ = pool.dispatch("default", task_ctx).await;
                                         }
@@ -91,6 +115,7 @@ pub async fn run_security_pipeline(
                                     let hook = hook.clone();
                                     let trace = trace_id.to_string();
                                     let sid_clone = sid.clone();
+                                    let app_id_owned = app_id.to_string();
                                     tokio::spawn(async move {
                                         let entrypoint = crate::process_pool::Entrypoint {
                                             module: hook.module.clone(),
@@ -102,7 +127,11 @@ pub async fn run_security_pipeline(
                                             .entrypoint(entrypoint)
                                             .args(args)
                                             .trace_id(trace);
-                                        let builder = crate::task_enrichment::enrich(builder, "");
+                                        let builder = crate::task_enrichment::enrich(
+                                            builder,
+                                            &app_id_owned,
+                                            rivers_runtime::process_pool::TaskKind::SecurityHook,
+                                        );
                                         if let Ok(task_ctx) = builder.build() {
                                             let _ = pool.dispatch("default", task_ctx).await;
                                         }

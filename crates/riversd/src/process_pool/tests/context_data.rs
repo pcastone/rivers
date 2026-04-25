@@ -2,7 +2,7 @@
 //! `ctx.datasource().build()`, DataViewExecutor.
 
 use super::*;
-use super::helpers::make_js_task;
+use super::helpers::{make_js_task, make_js_task_with_storage};
 
 // ── P3: Host Function Binding Tests ──────────────────────────
 
@@ -110,7 +110,7 @@ async fn execute_store_native_reserved_prefix_rejected() {
 
 #[tokio::test]
 async fn execute_store_native_crud() {
-    let ctx = make_js_task(
+    let ctx = make_js_task_with_storage(
         r#"function handler(ctx) {
             ctx.store.set("user:1", { name: "alice", age: 30 });
             var val = ctx.store.get("user:1");
@@ -128,8 +128,10 @@ async fn execute_store_native_crud() {
 
 #[tokio::test]
 async fn execute_ctx_store_get_set_del() {
-    // In-memory per-task store: set, get, del all work within a single handler
-    let ctx = make_js_task(
+    // In-memory per-task store: set, get, del all work within a single handler.
+    // B2 (P1-5): a StorageEngine must be configured — the silent in-memory
+    // fallback was removed.
+    let ctx = make_js_task_with_storage(
         r#"function handler(ctx) {
             ctx.store.set("mykey", { count: 42 });
             var val = ctx.store.get("mykey");
@@ -146,7 +148,7 @@ async fn execute_ctx_store_get_set_del() {
 
 #[tokio::test]
 async fn execute_ctx_store_get_missing_returns_null() {
-    let ctx = make_js_task(
+    let ctx = make_js_task_with_storage(
         r#"function handler(ctx) {
             var val = ctx.store.get("nonexistent");
             return { val: val };
@@ -159,7 +161,7 @@ async fn execute_ctx_store_get_missing_returns_null() {
 
 #[tokio::test]
 async fn execute_ctx_store_overwrite() {
-    let ctx = make_js_task(
+    let ctx = make_js_task_with_storage(
         r#"function handler(ctx) {
             ctx.store.set("k", "first");
             ctx.store.set("k", "second");
@@ -222,7 +224,7 @@ async fn x3_store_with_storage_engine_round_trip() {
                 return { stored: val };
             }"#
         }))
-        .trace_id("x3-test".into())
+        .trace_id("x3-test".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -248,7 +250,7 @@ async fn x3_store_with_storage_engine_del() {
                 return { deleted: val === null };
             }"#
         }))
-        .trace_id("x3-del".into())
+        .trace_id("x3-del".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -273,7 +275,7 @@ async fn x3_store_with_ttl() {
                 return { has_value: val !== null };
             }"#
         }))
-        .trace_id("x3-ttl".into())
+        .trace_id("x3-ttl".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -301,7 +303,7 @@ async fn x3_store_reserved_prefix_with_engine() {
                 }
             }"#
         }))
-        .trace_id("x3-reserved".into())
+        .trace_id("x3-reserved".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -341,17 +343,29 @@ async fn x3_store_persists_across_engine() {
 }
 
 #[tokio::test]
-async fn x3_store_fallback_without_engine() {
-    // Without a StorageEngine, should still work via in-memory TASK_STORE
+async fn b2_store_throws_without_engine() {
+    // B2 (P1-5): without a configured StorageEngine, ctx.store.set must throw
+    // a JS exception instead of silently buffering into the in-memory
+    // TASK_STORE map. (The previous test x3_store_fallback_without_engine
+    // asserted the silent fallback that B2 explicitly removes.)
     let ctx = make_js_task(
         r#"function handler(ctx) {
-            ctx.store.set("fallback", { n: 99 });
-            return ctx.store.get("fallback");
+            var threw = false;
+            var msg = null;
+            try { ctx.store.set("fallback", { n: 99 }); }
+            catch(e) { threw = true; msg = String(e.message || e); }
+            return { threw: threw, msg: msg };
         }"#,
         "handler",
     );
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
-    assert_eq!(result.value["n"], 99);
+    assert_eq!(result.value["threw"], true,
+        "B2: ctx.store.set must throw when no StorageEngine is configured");
+    let msg = result.value["msg"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("no StorageEngine configured"),
+        "B2: error message should explain root cause, got: {msg}"
+    );
 }
 
 // ── X4: ctx.dataview Pre-fetch Tests ────────────────────────
@@ -371,7 +385,7 @@ async fn x4_dataview_prefetch_returns_data() {
                 return ctx.dataview("contacts");
             }"#
         }))
-        .trace_id("x4-prefetch".into())
+        .trace_id("x4-prefetch".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -453,7 +467,7 @@ async fn x7_datasource_build_without_query_throws() {
                 }
             }"#
         }))
-        .trace_id("x7-no-query".into())
+        .trace_id("x7-no-query".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -496,7 +510,7 @@ async fn x7_datasource_build_no_factory_throws() {
                 }
             }"#
         }))
-        .trace_id("x7-no-factory".into())
+        .trace_id("x7-no-factory".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -567,7 +581,7 @@ async fn x7_datasource_build_with_faker_driver() {
                 return { has_rows: result.rows !== undefined, row_count: result.rows.length };
             }"#
         }))
-        .trace_id("x7-faker".into())
+        .trace_id("x7-faker".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -656,7 +670,7 @@ async fn x4_dataview_executor_end_to_end() {
                 return { has_rows: result.rows !== undefined, row_count: result.rows.length };
             }"#
         }))
-        .trace_id("x4-executor".into())
+        .trace_id("x4-executor".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -696,7 +710,7 @@ async fn x4_dataview_executor_not_found_throws() {
                 }
             }"#
         }))
-        .trace_id("x4-notfound".into())
+        .trace_id("x4-notfound".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -738,7 +752,7 @@ async fn x4_dataview_prefetch_takes_priority_over_executor() {
                 return { from_prefetch: result[0].name === "pre-fetched" };
             }"#
         }))
-        .trace_id("x4-priority".into())
+        .trace_id("x4-priority".into()).app_id("test-app".into())
         .build()
         .unwrap();
     let result = execute_js_task(ctx, 5000, 0, DEFAULT_HEAP_LIMIT, 0.8, None).await.unwrap();
@@ -749,7 +763,7 @@ async fn x4_dataview_prefetch_takes_priority_over_executor() {
 
 #[tokio::test]
 async fn au8_store_complex_objects() {
-    let ctx = make_js_task(
+    let ctx = make_js_task_with_storage(
         r#"function handler(ctx) {
             ctx.store.set("config", { nested: { deep: [1, 2, 3] }, flag: true });
             var loaded = ctx.store.get("config");
@@ -821,7 +835,7 @@ async fn au13_ctx_dataview_dynamic_with_executor() {
                 return { has_data: data !== null, type: typeof data };
             }"#
         }))
-        .trace_id("au13".into())
+        .trace_id("au13".into()).app_id("test-app".into())
         .build()
         .unwrap();
 

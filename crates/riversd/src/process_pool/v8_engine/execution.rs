@@ -33,7 +33,12 @@ fn execute_as_module(
 ) -> Result<(), TaskError> {
     let source_str = v8::String::new(scope, source)
         .ok_or_else(|| TaskError::Internal("failed to create module source string".into()))?;
-    let resource_name = v8::String::new(scope, module_name)
+    // P1-9 / B4.2: V8 stack traces use the script-origin resource name
+    // verbatim. Redact the absolute path to its app-relative form so a
+    // `throw new Error(...)` inside the handler can never leak the host
+    // filesystem layout into HTTP responses or per-app logs.
+    let logical_name = redact_to_app_relative(module_name);
+    let resource_name = v8::String::new(scope, &logical_name)
         .ok_or_else(|| TaskError::Internal("failed to create module name string".into()))?;
 
     let origin = v8::ScriptOrigin::new(
@@ -127,6 +132,67 @@ fn boundary_from_referrer(referrer: &std::path::Path) -> Option<std::path::PathB
     }
 }
 
+/// Redact a host filesystem path to its `{app}/libraries/...` logical form.
+///
+/// Used to scrub absolute paths from V8 script origins, resolve-callback
+/// error messages, and the `MODULE_NOT_REGISTERED` formatter so that HTTP
+/// responses, stack traces, and per-app logs never expose `/Users/...`,
+/// `/opt/rivers/...`, or any other host-specific prefix outside the app
+/// root. Spec: P1-9 (B4).
+///
+/// Algorithm: locate a `libraries` path component; return everything from
+/// the immediately-preceding component (the app directory) onward, joined
+/// by `/`. If no `libraries` segment exists the input is returned unchanged
+/// — the path is already logical, an inline test sentinel, or empty.
+///
+/// Pure / total / no panics. Returns `Cow::Borrowed` for the no-op pass-
+/// through so callers don't pay an allocation when the input is already
+/// logical.
+///
+/// `pub(crate)` so the SQLite path policy (G_R8.2) and other crate sites
+/// can reuse the same redactor without duplicating the algorithm.
+pub(crate) fn redact_to_app_relative(path: &str) -> std::borrow::Cow<'_, str> {
+    if path.is_empty() {
+        return std::borrow::Cow::Borrowed(path);
+    }
+
+    // Walk components in reverse, capturing everything until — and
+    // including — the `libraries` segment plus one more (the app dir).
+    let p = std::path::Path::new(path);
+    let mut captured: Vec<String> = Vec::new();
+    let mut found_libraries = false;
+    let mut took_app_dir = false;
+    for comp in p.components().rev() {
+        let s = comp.as_os_str().to_string_lossy();
+        // Skip pure root markers (`/`) — they're not path segments we care
+        // about and would emit a leading empty component on join.
+        if s.is_empty() || s == "/" || s == "\\" {
+            continue;
+        }
+        let s = s.to_string();
+        if found_libraries {
+            captured.push(s);
+            took_app_dir = true;
+            break;
+        }
+        if s == "libraries" {
+            found_libraries = true;
+        }
+        captured.push(s);
+    }
+
+    if !found_libraries || !took_app_dir {
+        // No `libraries/` segment OR no parent component above it (e.g.
+        // `/libraries/foo.ts`). Either way the input has no app boundary
+        // we can anchor against — return as-is so callers see the
+        // original string unchanged.
+        return std::borrow::Cow::Borrowed(path);
+    }
+
+    captured.reverse();
+    std::borrow::Cow::Owned(captured.join("/"))
+}
+
 /// V8 module resolve callback — spec §3.1–3.6.
 ///
 /// Rules:
@@ -165,8 +231,15 @@ fn resolve_module_callback<'s>(
         None
     };
 
+    // P1-9 / B4.3: redact host paths in the `in {referrer}` line so
+    // resolve-time error messages (raised as JS exceptions and surfaced in
+    // HTTP responses) never expose `/Users/...` or other host prefixes.
     let referrer_line = match referrer_path.as_deref() {
-        Some(p) => format!("\n  in {}", p.display()),
+        Some(p) => {
+            let lossy = p.to_string_lossy();
+            let redacted = redact_to_app_relative(&lossy);
+            format!("\n  in {redacted}")
+        }
         None => String::new(),
     };
 
@@ -206,11 +279,13 @@ fn resolve_module_callback<'s>(
     let abs = match joined.canonicalize() {
         Ok(p) => p,
         Err(e) => {
+            // P1-9 / B4.3: redact referrer in `in {referrer}` line.
+            let redacted_referrer =
+                redact_to_app_relative(&referrer_path.to_string_lossy()).into_owned();
             return throw_resolve_error(
                 scope,
                 format!(
-                    "module resolution failed: cannot resolve \"{spec}\"\n  in {}\n  reason: {e}",
-                    referrer_path.display()
+                    "module resolution failed: cannot resolve \"{spec}\"\n  in {redacted_referrer}\n  reason: {e}"
                 ),
             );
         }
@@ -222,25 +297,55 @@ fn resolve_module_callback<'s>(
     //     in {referrer}
     //     resolved to: {abs}
     //     boundary: {app}/libraries/
-    let cache = super::super::module_cache::get_module_cache()?;
+    //
+    // B3 / P1-8: when no cache is installed at all (in-process test before
+    // any bundle load) and production-strict is armed, surface that as a
+    // clear thrown exception instead of returning None silently — V8 treats
+    // a None return with no thrown exception as a generic resolution failure
+    // that's hard to debug. When NOT armed (in-process tests with ad-hoc
+    // dispatch), preserve the historic silent-None behaviour.
+    let cache = match super::super::module_cache::get_module_cache() {
+        Some(c) => c,
+        None => {
+            if super::super::module_cache::is_production_strict_armed() {
+                // P1-9 / B4.3: redact referrer in error.
+                let redacted_referrer =
+                    redact_to_app_relative(&referrer_path.to_string_lossy()).into_owned();
+                return throw_resolve_error(
+                    scope,
+                    format!(
+                        "MODULE_NOT_REGISTERED: cannot resolve \"{spec}\" — no module cache installed\n  in {redacted_referrer}\n  hint: nested ES-module imports require a loaded bundle (see rivers-javascript-typescript-spec §3.4)"
+                    ),
+                );
+            }
+            return None;
+        }
+    };
     let Some(entry) = cache.get(&abs) else {
+        // P1-9 / B4.3: redact every host path in the boundary-violation
+        // error: referrer, resolved-to, and the boundary line itself.
         let boundary = boundary_from_referrer(&referrer_path);
         let boundary_line = boundary
-            .map(|p| format!("\n  boundary: {}", p.display()))
+            .map(|p| format!("\n  boundary: {}", redact_to_app_relative(&p.to_string_lossy())))
             .unwrap_or_default();
+        let redacted_referrer =
+            redact_to_app_relative(&referrer_path.to_string_lossy()).into_owned();
+        let redacted_abs = redact_to_app_relative(&abs.to_string_lossy()).into_owned();
         return throw_resolve_error(
             scope,
             format!(
-                "module resolution failed: \"{spec}\" resolves outside app boundary\n  in {}\n  resolved to: {}{boundary_line}",
-                referrer_path.display(),
-                abs.display()
+                "module resolution failed: \"{spec}\" resolves outside app boundary\n  in {redacted_referrer}\n  resolved to: {redacted_abs}{boundary_line}"
             ),
         );
     };
 
     // Compile a v8::Module from the cached JS.
     let source_str = v8::String::new(scope, &entry.compiled_js)?;
-    let name_str = v8::String::new(scope, &abs.to_string_lossy())?;
+    // P1-9 / B4.2: V8 stack traces use this resource name verbatim.
+    // Redact the absolute path so a runtime exception inside this nested
+    // module reports `{app}/libraries/...`, not the host filesystem path.
+    let logical_name = redact_to_app_relative(&abs.to_string_lossy()).into_owned();
+    let name_str = v8::String::new(scope, &logical_name)?;
     let origin = v8::ScriptOrigin::new(
         scope,
         name_str.into(),
@@ -268,28 +373,135 @@ fn resolve_module_callback<'s>(
 
 /// Detect if source uses ES module syntax.
 ///
-/// Checks for `export` or `import` keywords at statement boundaries.
+/// G_R5: the previous implementation used `source.contains("export ")` /
+/// `source.contains("import ")` which incorrectly tripped on comments and
+/// string literals — e.g. `// export the thing` or `const s = "import foo"`
+/// would route a classic-script handler down the module path and fail with
+/// a confusing compile error. The fix walks the source and skips line
+/// comments, block comments, and single/double/template string literals
+/// before checking for `import`/`export` keywords at token boundaries
+/// (preceded by start-of-input or whitespace).
+///
+/// This is still a heuristic — full ES module classification would require
+/// invoking the SWC parser, which is the source of truth for production
+/// compilation (`compile_typescript_with_imports` already returns a list of
+/// imports). At the V8 entry-point we operate on the post-compile JS where
+/// the cache no longer remembers the parser verdict, so a comment-aware
+/// scanner is the smallest change that closes the regression.
 pub(crate) fn is_module_syntax(source: &str) -> bool {
-    source.contains("export ") || source.contains("export\n")
-        || source.contains("import ") || source.contains("import\n")
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    let n = bytes.len();
+    // Track whether the previous emitted character was whitespace or
+    // start-of-input — a keyword only counts at a statement boundary.
+    let mut prev_is_boundary = true;
+
+    while i < n {
+        let b = bytes[i];
+
+        // Line comment: //...\n
+        if b == b'/' && i + 1 < n && bytes[i + 1] == b'/' {
+            i += 2;
+            while i < n && bytes[i] != b'\n' {
+                i += 1;
+            }
+            // The newline (or EOF) after a comment is a boundary.
+            prev_is_boundary = true;
+            continue;
+        }
+
+        // Block comment: /* ... */
+        if b == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < n && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            // Skip past the closing */ if found.
+            if i + 1 < n {
+                i += 2;
+            } else {
+                i = n;
+            }
+            prev_is_boundary = true;
+            continue;
+        }
+
+        // String literals — skip until the matching unescaped quote.
+        if b == b'"' || b == b'\'' || b == b'`' {
+            let quote = b;
+            i += 1;
+            while i < n {
+                let c = bytes[i];
+                if c == b'\\' && i + 1 < n {
+                    i += 2;
+                    continue;
+                }
+                if c == quote {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            // After a string literal, an `export` or `import` would still
+            // need its own boundary; conservatively reset to non-boundary.
+            prev_is_boundary = false;
+            continue;
+        }
+
+        // Keyword check at token boundary.
+        if prev_is_boundary {
+            // `export` followed by whitespace or non-identifier byte.
+            if i + 6 <= n && &bytes[i..i + 6] == b"export" {
+                if i + 6 == n || !is_ident_byte(bytes[i + 6]) {
+                    return true;
+                }
+            }
+            if i + 6 <= n && &bytes[i..i + 6] == b"import" {
+                if i + 6 == n || !is_ident_byte(bytes[i + 6]) {
+                    return true;
+                }
+            }
+        }
+
+        prev_is_boundary = b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' || b == b';' || b == b'{' || b == b'}';
+        i += 1;
+    }
+    false
+}
+
+/// True for bytes that may form part of a JS identifier (post-keyword check).
+#[inline]
+fn is_ident_byte(b: u8) -> bool {
+    b == b'_' || b == b'$' || b.is_ascii_alphanumeric()
 }
 
 /// If the return value is a Promise, resolve it by pumping the microtask queue.
 ///
 /// Async handler functions return a Promise. This resolves the promise
-/// synchronously by repeatedly pumping the V8 microtask queue until
-/// the promise settles or a maximum iteration count is reached.
+/// synchronously by repeatedly pumping the V8 microtask queue until the
+/// promise settles or the configured task deadline elapses.
+///
+/// G_R6 (P2-6): the loop is deadline-driven, not tick-bounded — a fast
+/// promise that resolves in 1 ms exits immediately, while a hung promise
+/// is bounded by `timeout_ms`. On timeout the error message names the
+/// handler entrypoint and the elapsed budget so operators can pinpoint
+/// the offending handler without grepping logs for context.
 fn resolve_promise_if_needed(
     scope: &mut v8::HandleScope<'_>,
     value: v8::Local<v8::Value>,
+    timeout_ms: u64,
+    deadline: Instant,
+    function_name: &str,
 ) -> Result<serde_json::Value, TaskError> {
     if value.is_promise() {
         let promise = v8::Local::<v8::Promise>::try_from(value)
             .map_err(|_| TaskError::Internal("promise cast failed".into()))?;
 
-        // Pump microtasks until the promise settles, with a bound to prevent infinite spinning
-        let max_ticks = 10_000;
-        for _ in 0..max_ticks {
+        // Deadline-driven pump. Microtask checkpoints are cheap; we spin
+        // through them until either the promise settles or the deadline
+        // passes. Yielding the OS thread between checks avoids burning a
+        // full core while waiting for callbacks scheduled on other tasks.
+        loop {
             scope.perform_microtask_checkpoint();
             match promise.state() {
                 v8::PromiseState::Fulfilled => {
@@ -300,13 +512,22 @@ fn resolve_promise_if_needed(
                     let rejection = promise.result(scope);
                     let msg = rejection.to_rust_string_lossy(scope);
                     return Err(TaskError::HandlerError(format!(
-                        "async handler rejected: {msg}"
+                        "async handler '{function_name}' rejected: {msg}"
                     )));
                 }
-                v8::PromiseState::Pending => continue,
+                v8::PromiseState::Pending => {
+                    if Instant::now() >= deadline {
+                        return Err(TaskError::HandlerError(format!(
+                            "async handler '{function_name}' promise still pending after timeout: {timeout_ms}ms"
+                        )));
+                    }
+                    // Yield the OS thread so any callbacks driven by
+                    // other tokio tasks (e.g. ctx.fetch awaiters) can
+                    // make progress before we re-check.
+                    std::thread::yield_now();
+                }
             }
         }
-        return Err(TaskError::Timeout(0));
     }
     // Not a promise -- convert directly
     v8_to_json(scope, value)
@@ -338,7 +559,11 @@ pub(crate) async fn execute_js_task(
         // Set all task-scoped thread-locals and arm automatic cleanup.
         // TaskLocals::set populates every thread-local; its Drop impl clears
         // every one -- impossible to add a setup without a matching teardown.
-        let _locals = TaskLocals::set(&ctx, rt_handle);
+        // C1.3: returns Err on empty app_id; the dispatch is rejected cleanly.
+        let _locals = match TaskLocals::set(&ctx, rt_handle) {
+            Ok(g) => g,
+            Err(e) => return Err(e),
+        };
 
         let start = Instant::now();
 
@@ -427,8 +652,17 @@ pub(crate) async fn execute_js_task(
                 })?;
             }
 
-            // Call the entrypoint function (returns JSON via TryCatch)
-            let return_value = call_entrypoint(&mut scope, &ctx.entrypoint.function);
+            // Call the entrypoint function (returns JSON via TryCatch).
+            // G_R6: thread the configured deadline + timeout into the call so
+            // promise-pump (resolve_promise_if_needed) bounds itself by the
+            // task budget rather than a fixed tick count.
+            let deadline = start + std::time::Duration::from_millis(timeout_ms);
+            let return_value = call_entrypoint(
+                &mut scope,
+                &ctx.entrypoint.function,
+                timeout_ms,
+                deadline,
+            );
 
             // Handle timeout detected during entrypoint call
             let return_value = match return_value {
@@ -565,6 +799,8 @@ pub(crate) async fn execute_js_task(
 fn call_entrypoint(
     scope: &mut v8::ContextScope<'_, v8::HandleScope<'_>>,
     function_name: &str,
+    timeout_ms: u64,
+    deadline: Instant,
 ) -> Result<serde_json::Value, TaskError> {
     // Spec §4: module-mode entrypoint lookup on the module namespace.
     // Classic-script mode falls through to the existing global-scope path.
@@ -610,7 +846,13 @@ fn call_entrypoint(
         Some(result) => {
             // T4: If the return value is a Promise (async function), resolve it
             if result.is_promise() {
-                return resolve_promise_if_needed(tc_scope, result);
+                return resolve_promise_if_needed(
+                    tc_scope,
+                    result,
+                    timeout_ms,
+                    deadline,
+                    function_name,
+                );
             }
             // Convert to JSON inside the TryCatch scope
             if result.is_undefined() || result.is_null() {
@@ -664,15 +906,23 @@ fn call_entrypoint(
 /// bundle load time into the process-global `BundleModuleCache`. This
 /// function performs a cache lookup — not a live compilation.
 ///
-/// Two fallback paths remain:
+/// Cache-miss policy (B3 / P1-8):
+/// - **Production** (default): if a cache is installed and the entry-point
+///   module is not in it, return a `MODULE_NOT_REGISTERED` error and refuse
+///   to fall through to disk. The validated cache IS the security boundary
+///   — modules outside it never execute.
+/// - **Development** (opt-in via `RIVERS_DEV_MODULE_CACHE=permissive`):
+///   cache miss falls through to disk read + live compile with a warn log,
+///   so operators can iterate on `libraries/` files without a bundle reload.
+///
+/// Two paths bypass the cache entirely (always allowed):
 ///
 /// 1. `ctx.args["_source"]` — tests and dynamic-dispatch callers may inject
 ///    source inline without a disk file. TypeScript is compiled on the fly
 ///    via `compile_typescript()`; JS is used verbatim.
-/// 2. Cache miss on `ctx.entrypoint.module` — read from disk and compile.
-///    This is a defence-in-depth path for modules that exist on disk but
-///    weren't walked (e.g., legacy handlers outside `libraries/`). Logged
-///    so we can detect and fix such cases.
+/// 2. No cache installed (pre-bundle-load, in-process tests) — disk read
+///    with a debug log. Once a bundle loads and installs the cache, every
+///    dispatch must hit it (production) or get a warn (development).
 fn resolve_module_source(ctx: &TaskContext) -> Result<String, TaskError> {
     if let Some(source) = ctx.args.get("_source").and_then(|v| v.as_str()) {
         if ctx.entrypoint.language == "typescript" {
@@ -691,15 +941,40 @@ fn resolve_module_source(ctx: &TaskContext) -> Result<String, TaskError> {
         if let Some(entry) = cache.get(&abs) {
             return Ok(entry.compiled_js.clone());
         }
+
+        // B3 / P1-8: production-strict only fires once the bundle loader has
+        // armed it. In-process tests that install ad-hoc caches directly never
+        // trip this branch and keep their `js_file()`-style disk fallback.
+        if super::super::module_cache::is_production_strict_armed() {
+            let mode = super::super::module_cache::module_cache_mode();
+            if mode == super::super::module_cache::ModuleCacheMode::Production {
+                return Err(TaskError::HandlerError(
+                    super::super::module_cache::module_not_registered_message(path, &abs),
+                ));
+            }
+            tracing::warn!(
+                module = %path,
+                "RIVERS_DEV_MODULE_CACHE=permissive: module cache miss, falling back to disk + live compile (DO NOT USE IN PRODUCTION)"
+            );
+        } else {
+            tracing::debug!(
+                module = %path,
+                "module cache miss (production-strict not armed) — reading source from disk"
+            );
+        }
+    } else {
+        // Pre-bundle-load (e.g., in-process unit tests). No cache to consult.
+        tracing::debug!(
+            module = %path,
+            "module cache not installed — reading source from disk"
+        );
     }
 
-    // Fallback — on-disk read + live compile. Should be rare after Phase 2.
-    tracing::debug!(
-        module = %path,
-        "module cache miss — falling back to disk + live compile"
-    );
-    let source = std::fs::read_to_string(path)
-        .map_err(|e| TaskError::HandlerError(format!("cannot read module '{path}': {e}")))?;
+    let source = std::fs::read_to_string(path).map_err(|e| {
+        // P1-9 / B4.3: redact host path in disk-read failure error.
+        let redacted = redact_to_app_relative(path).into_owned();
+        TaskError::HandlerError(format!("cannot read module '{redacted}': {e}"))
+    })?;
 
     let compiled = if path.ends_with(".ts") || ctx.entrypoint.language == "typescript" {
         compile_typescript(&source, path)?
@@ -900,5 +1175,91 @@ mod frame_format_tests {
         };
         let s = format_frame(&info);
         assert!(s.contains(":0:0"), "unmapped retained 0s: {s}");
+    }
+}
+
+#[cfg(test)]
+mod redact_path_tests {
+    //! P1-9 / B4.1: `redact_to_app_relative` is the foundation for path
+    //! redaction across the V8 engine, the module-cache error formatter, and
+    //! the future SQLite path policy (G_R8.2). These tests pin the contract.
+    use super::redact_to_app_relative;
+
+    #[test]
+    fn macos_workspace_path_redacts_to_app_relative() {
+        // The exact shape of paths in the canary developer environment.
+        let input = "/Users/me/proj/my-app/libraries/handlers/foo.ts";
+        let out = redact_to_app_relative(input);
+        assert_eq!(out, "my-app/libraries/handlers/foo.ts");
+    }
+
+    #[test]
+    fn linux_deploy_path_redacts_to_app_relative() {
+        // Production layout under `/srv/rivers/<app>/libraries/...`.
+        let input = "/srv/rivers/canary/libraries/setup.ts";
+        let out = redact_to_app_relative(input);
+        assert_eq!(out, "canary/libraries/setup.ts");
+    }
+
+    #[test]
+    fn no_libraries_segment_passes_through_unchanged() {
+        // Inline test sources, REPL strings, or any path without a
+        // `libraries/` anchor are returned verbatim — caller already has
+        // the most useful representation.
+        let input = "inline.ts";
+        let out = redact_to_app_relative(input);
+        assert_eq!(out, "inline.ts");
+        // Verify it's the borrowed Cow (no allocation when input passes
+        // through). This pins the perf claim in the doc comment.
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn already_relative_path_passes_through_unchanged() {
+        // If the input is already in `{app}/libraries/...` form (e.g., a
+        // re-redaction during error chaining), the helper must not mangle
+        // it further.
+        let input = "my-app/libraries/handlers/foo.ts";
+        let out = redact_to_app_relative(input);
+        assert_eq!(out, "my-app/libraries/handlers/foo.ts");
+    }
+
+    #[test]
+    fn empty_string_passes_through_unchanged() {
+        // Defensive: helper must never panic. Empty input is a real shape
+        // when V8 reports a missing script-name on a stack frame.
+        let out = redact_to_app_relative("");
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn deep_nesting_preserved_below_app_dir() {
+        // Long subpaths under libraries/ must survive intact — only the
+        // host prefix above the app directory is stripped.
+        let input = "/var/lib/rivers/instances/prod/canary/libraries/handlers/orders/list.ts";
+        let out = redact_to_app_relative(input);
+        assert_eq!(out, "canary/libraries/handlers/orders/list.ts");
+    }
+
+    #[test]
+    fn libraries_at_root_falls_back_to_input() {
+        // `/libraries/foo.ts` has no parent component to use as the app
+        // dir. Returning the input as-is is the safest no-op — mangling
+        // a non-app path could mislead operators reading logs.
+        let input = "/libraries/foo.ts";
+        let out = redact_to_app_relative(input);
+        assert_eq!(out, "/libraries/foo.ts");
+    }
+
+    #[test]
+    fn trailing_slash_does_not_break_walk() {
+        // Edge case: bundle loader sometimes hands us paths with a
+        // trailing slash from directory walks. Walking components in
+        // reverse must still locate the `libraries` anchor.
+        let input = "/Users/me/my-app/libraries/handlers/foo.ts/";
+        let out = redact_to_app_relative(input);
+        // The trailing-slash component is empty and skipped; result is
+        // identical to the no-slash form.
+        assert_eq!(out, "my-app/libraries/handlers/foo.ts");
     }
 }

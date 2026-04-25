@@ -218,6 +218,30 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 **Spec reference:** `docs/arch/rivers-javascript-typescript-spec.md §5.1` (source maps always on).
 **Resolution:** Spec §5 is Phase 6 work in the plan. Phase 1's scope is the drop-in only. When Phase 6 lands we replace `to_code_default` with a manual `Emitter` + source-map-generating `JsWriter` and store the map in `CompiledModule.source_map` (defined in Phase 2). No behaviour regression during Phase 1–5 because stack traces currently report compiled-JS positions and will continue to.
 
+---
+
+## Code-review remediation (P0-4 / P0-1)
+
+### Broker consumer supervisor — nonblocking startup with bounded backoff
+
+**Files:** `crates/riversd/src/broker_supervisor.rs` (new), `crates/riversd/src/bundle_loader/wire.rs`, `crates/riversd/src/server/context.rs`, `crates/riversd/src/health.rs`
+**Decision:** Move `MessageBrokerDriver::create_consumer().await` out of `wire_streaming_and_events` and into a dedicated supervisor task spawned via `tokio::spawn`. Wiring returns immediately; HTTP listener bind is independent of broker reachability. State surfaced through a new `BrokerBridgeRegistry` on `AppContext`.
+**Source reference:** `docs/code_review.md` finding P0-4.
+**Resolution:** The Kafka driver's blocking work (rskafka client setup + partition discovery) is fully contained inside `create_consumer`; once the consumer exists, the bridge is already async-capable. Moving the await into the supervisor means no driver-side change is required, and any future broker driver inherits the same nonblocking guarantee. Backoff is exponential doubling capped at 60s (`SupervisorBackoff`), seeded by the existing `[data.datasources.<name>.consumer].reconnect_ms` config — operators have one knob, the cap protects against runaway delays under sustained outage. Health endpoint adds `broker_bridges: Vec<BrokerBridgeHealth>` so degraded brokers are visible separately from process readiness.
+
+### Protected-view fail-closed gate (security_pipeline + bundle-load validation)
+
+**Files:** `crates/riversd/src/security_pipeline.rs`, `crates/riversd/src/bundle_loader/load.rs`
+**Decision:** (a) `run_security_pipeline` rejects with `500 Internal Server Error` when a non-public view is dispatched and `ctx.session_manager.is_none()`. (b) Bundle load (`load_and_wire_bundle`, AM1.2) refuses bundles that declare any non-public view when no session manager is available — strengthens the existing storage-engine check to name the actual security boundary.
+**Source reference:** `docs/code_review.md` finding P0-1.
+**Resolution:** Two-layer defense. The runtime check is the authoritative security boundary because it's evaluated for every dispatch, even when configs hot-reload mid-flight. The bundle-load check is defense-in-depth — it catches the misconfig at deploy time so operators don't discover it via a 500 in prod. The validation predicate was extracted into `check_protected_views_have_session(views, has_session_manager, has_storage_engine) -> Result<(), String>` so it can be unit-tested without staging a disk bundle; six unit tests cover the truth table. The error message names the offending view and explains the missing dependency (storage vs session manager) so operators get an actionable hint.
+
+### Host path redaction is unconditional (B4 / P1-9)
+
+**Files:** `crates/riversd/src/process_pool/v8_engine/execution.rs` (new helper `redact_to_app_relative`), `crates/riversd/src/process_pool/v8_engine/mod.rs` (re-export), `crates/riversd/src/process_pool/module_cache.rs` (`module_not_registered_message` uses redactor).
+**Decision:** Path redaction in V8 script origins, resolve-callback errors, and `MODULE_NOT_REGISTERED` formatting is applied unconditionally — same in debug and release builds. Helper is `pub(crate)` so the future SQLite path policy (G_R8.2) can reuse it.
+**Source reference:** `docs/code_review.md` finding P1-9; `todo/tasks.md` task B4 (controller-resolved decision).
+**Resolution:** Two reasons not to gate on `cfg!(debug_assertions)`: (1) the redacted form (`{app}/libraries/handlers/foo.ts`) is more useful than absolute paths for log grep across hosts and deployments — even local devs benefit; (2) the security posture must not depend on build mode, otherwise a misconfigured staging build with debug assertions on becomes a leak vector. The existing debug-mode `details.stack` field in `error_response::map_view_error` is unaffected — debug builds CAN show stacks per spec, and B4 just guarantees those stacks are redacted at the source. Algorithm is the same `libraries`-anchor walk used by the older `shorten_app_path` in `v8_config.rs`, but operates on `&str` and returns `Cow` to avoid allocation when no redaction is needed (inline test sources, already-redacted strings, empty inputs). 8 unit tests pin the contract; 2 integration tests in `path_redaction_tests.rs` dispatch real handlers and assert no `/Users/`, `/var/folders/`, or workspace prefix appears in the response or stack.
 ## 2026-04-23 — Canary Scenarios
 
 ### CS0.1 — Document Pipeline scenario hosted in `canary-handlers`

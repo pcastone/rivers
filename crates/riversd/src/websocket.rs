@@ -463,6 +463,7 @@ pub async fn execute_ws_on_stream(
     message: &serde_json::Value,
     connection_id: &ConnectionId,
     trace_id: &str,
+    app_id: &str,
 ) -> Result<Option<serde_json::Value>, TaskError> {
     let args = serde_json::json!({
         "message": message,
@@ -473,7 +474,11 @@ pub async fn execute_ws_on_stream(
         .entrypoint(entrypoint.clone())
         .args(args)
         .trace_id(trace_id.to_string());
-    let builder = crate::task_enrichment::enrich(builder, "");
+    let builder = crate::task_enrichment::enrich(
+        builder,
+        app_id,
+        rivers_runtime::process_pool::TaskKind::Rest,
+    );
     let ctx = builder.build()?;
 
     let result = pool.dispatch("default", ctx).await?;
@@ -497,6 +502,7 @@ pub async fn dispatch_ws_lifecycle(
     message: Option<&serde_json::Value>,
     session: Option<&serde_json::Value>,
     trace_id: &str,
+    app_id: &str,
 ) -> Result<serde_json::Value, TaskError> {
     let entrypoint = Entrypoint {
         module: hook_module.to_string(),
@@ -517,7 +523,11 @@ pub async fn dispatch_ws_lifecycle(
         .entrypoint(entrypoint)
         .args(args)
         .trace_id(trace_id.to_string());
-    let builder = crate::task_enrichment::enrich(builder, "");
+    let builder = crate::task_enrichment::enrich(
+        builder,
+        app_id,
+        rivers_runtime::process_pool::TaskKind::Rest,
+    );
     let task_ctx = builder.build()?;
 
     let result = pool.dispatch("default", task_ctx).await?;
@@ -656,7 +666,7 @@ mod tests {
         let conn_id = ConnectionId("conn-1".to_string());
 
         let result =
-            execute_ws_on_stream(&pool, &entrypoint, &message, &conn_id, "trace-1").await;
+            execute_ws_on_stream(&pool, &entrypoint, &message, &conn_id, "trace-1", "test-app").await;
         // Should fail with EngineUnavailable
         assert!(result.is_err());
     }
@@ -674,6 +684,7 @@ mod tests {
             None,
             Some(&serde_json::json!({"user_id": "u-1"})),
             "trace-ws-1",
+            "test-app",
         )
         .await;
         // Engine unavailable — expected in stub mode
@@ -692,6 +703,7 @@ mod tests {
             Some(&msg),
             None,
             "trace-ws-2",
+            "test-app",
         )
         .await;
         assert!(result.is_err());
@@ -708,6 +720,7 @@ mod tests {
             None,
             None,
             "trace-ws-3",
+            "test-app",
         )
         .await;
         assert!(result.is_err());

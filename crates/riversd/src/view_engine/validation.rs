@@ -196,7 +196,11 @@ pub async fn execute_on_error_handlers(
             .entrypoint(entrypoint)
             .args(args)
             .trace_id(ctx.trace_id.clone());
-        let builder = crate::task_enrichment::enrich(builder, &ctx.app_id);
+        let builder = crate::task_enrichment::enrich(
+            builder,
+            &ctx.app_id,
+            rivers_runtime::process_pool::TaskKind::ValidationHook,
+        );
         let task_ctx = match builder.build() {
             Ok(c) => c,
             Err(_) => continue,
@@ -230,6 +234,7 @@ pub async fn execute_on_session_valid(
     handler: &HandlerStageConfig,
     session: &serde_json::Value,
     trace_id: &str,
+    app_id: &str,
 ) -> Result<bool, ViewError> {
     let entrypoint = Entrypoint {
         module: handler.module.clone(),
@@ -245,7 +250,11 @@ pub async fn execute_on_session_valid(
         .entrypoint(entrypoint)
         .args(args)
         .trace_id(trace_id.to_string());
-    let builder = crate::task_enrichment::enrich(builder, "");
+    let builder = crate::task_enrichment::enrich(
+        builder,
+        app_id,
+        rivers_runtime::process_pool::TaskKind::ValidationHook,
+    );
     let task_ctx = builder
         .build()
         .map_err(|e| ViewError::Pipeline(format!("session valid context build: {}", e)))?;
@@ -266,27 +275,112 @@ pub async fn execute_on_session_valid(
 /// Parse a handler result value as a ViewResult envelope.
 ///
 /// Handlers may return `{ "status": 200, "headers": {...}, "body": ... }`.
+///
+/// **Validation (F4 / P1-12):**
+/// - `status` must be in 100..=599 (HTTP RFC 7231). Out-of-range or
+///   non-numeric values produce a 500 error envelope rather than being
+///   propagated to the client.
+/// - Header names and values are validated via
+///   `http::HeaderName::from_bytes` / `http::HeaderValue::from_bytes`,
+///   which already enforce RFC 7230 token/field-value grammar. This
+///   blocks header smuggling via CR/LF/NUL in handler-supplied values
+///   and rejects empty or otherwise illegal header names.
+/// - The controller decision (F4.3) is to *not* block apps from setting
+///   security headers (CSP, HSTS, etc.) — only the on-the-wire grammar
+///   is enforced.
 pub(super) fn parse_handler_view_result(value: &serde_json::Value) -> Option<ViewResult> {
-    let status = value.get("status")?.as_u64()? as u16;
+    // Require a status field at all (preserves prior behaviour of returning
+    // None when the handler didn't return a ViewResult envelope).
+    let raw_status = value.get("status")?;
+
+    // Validate status is an integer in 100..=599. Anything else is a handler
+    // bug — fail closed with a 500 envelope so clients see a sane response
+    // instead of a malformed one.
+    let status = match raw_status.as_u64() {
+        Some(n) if (100..=599).contains(&n) => n as u16,
+        _ => {
+            tracing::warn!(
+                target: "rivers.view",
+                "handler returned invalid status {:?}; substituting 500",
+                raw_status
+            );
+            return Some(invalid_handler_response(format!(
+                "handler returned invalid HTTP status: {raw_status}"
+            )));
+        }
+    };
+
     let body = value
         .get("body")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    let headers = value
-        .get("headers")
-        .and_then(|h| h.as_object())
-        .map(|obj| {
-            obj.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
-        })
-        .unwrap_or_default();
+
+    // Validate every header (name + value) via the http crate's parsers.
+    // Any rejection is a handler bug — fail closed with 500 rather than
+    // silently dropping the offending header (which could mask injection
+    // attempts).
+    let mut headers: HashMap<String, String> = HashMap::new();
+    if let Some(obj) = value.get("headers").and_then(|h| h.as_object()) {
+        for (k, v) in obj {
+            // Only string values are supported. Non-strings (numbers,
+            // booleans, objects) are silently skipped — same behaviour as
+            // the pre-fix code, which only kept `as_str()` matches.
+            let Some(value_str) = v.as_str() else {
+                continue;
+            };
+
+            // Validate header name (RFC 7230 token grammar — alphanumeric
+            // plus !#$%&'*+-.^_`|~). `from_bytes` rejects empty names too.
+            if http::HeaderName::from_bytes(k.as_bytes()).is_err() {
+                tracing::warn!(
+                    target: "rivers.view",
+                    "handler returned invalid header name {:?}; rejecting response",
+                    k
+                );
+                return Some(invalid_handler_response(format!(
+                    "handler returned invalid header name: {k:?}"
+                )));
+            }
+
+            // Validate header value: rejects CR (\r), LF (\n), NUL (\0),
+            // and other control bytes that could enable response
+            // splitting or header smuggling.
+            if http::HeaderValue::from_bytes(value_str.as_bytes()).is_err() {
+                tracing::warn!(
+                    target: "rivers.view",
+                    "handler returned invalid header value for {:?}; rejecting response",
+                    k
+                );
+                return Some(invalid_handler_response(format!(
+                    "handler returned invalid header value for {k:?}"
+                )));
+            }
+
+            headers.insert(k.clone(), value_str.to_string());
+        }
+    }
 
     Some(ViewResult {
         status,
         headers,
         body,
     })
+}
+
+/// Build a sanitized 500 response envelope for handler-validation failures.
+///
+/// We deliberately echo the validation reason in the body (handler bugs
+/// are diagnostic surface, not user input) but never propagate the
+/// offending header value or status into the response headers.
+fn invalid_handler_response(reason: String) -> ViewResult {
+    ViewResult {
+        status: 500,
+        headers: HashMap::new(),
+        body: serde_json::json!({
+            "error": "invalid_handler_response",
+            "message": reason,
+        }),
+    }
 }
 
 // ── Request-Time Schema Validation ───────────────────────────────

@@ -6,10 +6,12 @@
 //! No server, no HTTP, no cluster. Pure V8 isolate with real injection paths.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use rivers_runtime::rivers_core::config::ProcessPoolConfig;
+use rivers_runtime::rivers_core::storage::{InMemoryStorageEngine, StorageEngine};
 use riversd::process_pool::{
-    Entrypoint, ProcessPoolManager, TaskContextBuilder, TaskError,
+    Entrypoint, ProcessPoolManager, TaskContextBuilder, TaskError, TaskKind,
 };
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -41,6 +43,35 @@ async fn eval_js(code: &str) -> serde_json::Value {
         .app_id("test-app-uuid".into())
         .node_id("test-node-1".into())
         .runtime_env("test".into())
+        .task_kind(TaskKind::Rest)
+        .build()
+        .unwrap();
+    let result = mgr.dispatch("default", ctx).await.unwrap();
+    let _ = std::fs::remove_file(&path);
+    result.value
+}
+
+/// Like `eval_js` but attaches an `InMemoryStorageEngine` so `ctx.store.*`
+/// callbacks have a configured backend. Required for the B2 (no silent
+/// fallback) world: `ctx.store.set` without a storage engine throws unless
+/// `RIVERS_DEV_NO_STORAGE=1` is set.
+async fn eval_js_with_storage(code: &str) -> serde_json::Value {
+    let path = js_file("eval_store", &format!("function handler(ctx) {{ {code} }}"));
+    let mgr = manager();
+    let storage: Arc<dyn StorageEngine> = Arc::new(InMemoryStorageEngine::new());
+    let ctx = TaskContextBuilder::new()
+        .entrypoint(Entrypoint {
+            module: path.to_string_lossy().into(),
+            function: "handler".into(),
+            language: "javascript".into(),
+        })
+        .args(serde_json::json!({}))
+        .trace_id("bridge-store-test".into())
+        .app_id("test-app-uuid".into())
+        .node_id("test-node-1".into())
+        .runtime_env("test".into())
+        .task_kind(TaskKind::Rest)
+        .storage(storage)
         .build()
         .unwrap();
     let result = mgr.dispatch("default", ctx).await.unwrap();
@@ -62,6 +93,7 @@ async fn eval_js_with_request(code: &str, request: serde_json::Value) -> serde_j
         .app_id("test-app-uuid".into())
         .node_id("test-node-1".into())
         .runtime_env("test".into())
+        .task_kind(TaskKind::Rest)
         .build()
         .unwrap();
     let result = mgr.dispatch("default", ctx).await.unwrap();
@@ -302,6 +334,8 @@ async fn v8_timeout_terminates_infinite_loop() {
         })
         .args(serde_json::json!({}))
         .trace_id("timeout-test".into())
+        .app_id("test-app".into())
+        .task_kind(TaskKind::Rest)
         .build()
         .unwrap();
 
@@ -337,6 +371,8 @@ async fn v8_heap_limit_does_not_crash_process() {
         })
         .args(serde_json::json!({}))
         .trace_id("heap-test".into())
+        .app_id("test-app".into())
+        .task_kind(TaskKind::Rest)
         .build()
         .unwrap();
 
@@ -351,7 +387,7 @@ async fn v8_heap_limit_does_not_crash_process() {
 
 #[tokio::test]
 async fn ctx_store_set_get_del() {
-    let v = eval_js(r#"
+    let v = eval_js_with_storage(r#"
         var key = "bridge-test-" + Date.now();
         ctx.store.set(key, "hello");
         var got = ctx.store.get(key);
@@ -363,10 +399,12 @@ async fn ctx_store_set_get_del() {
     assert_eq!(v["deleted"], true);
 }
 
-/// Store must reject reserved namespace prefixes.
+/// Store must reject reserved namespace prefixes. Reserved-prefix check fires
+/// before the storage check, so this exercises the precedence as well as the
+/// prefix list.
 #[tokio::test]
 async fn ctx_store_rejects_reserved_prefixes() {
-    let v = eval_js(r#"
+    let v = eval_js_with_storage(r#"
         var prefixes = ["session:", "csrf:", "cache:", "raft:", "rivers:"];
         var blocked = 0;
         for (var i = 0; i < prefixes.length; i++) {
@@ -376,4 +414,81 @@ async fn ctx_store_rejects_reserved_prefixes() {
         ctx.resdata = { blocked: blocked, total: prefixes.length };
     "#).await;
     assert_eq!(v["blocked"], v["total"], "not all reserved prefixes blocked");
+}
+
+// ── B2 (P1-5): no silent TASK_STORE fallback ────────────────────
+//
+// Pre-B2, ctx.store.{set,get,del} silently fell back to a process-wide
+// in-memory map when the configured StorageEngine was unavailable (or simply
+// not configured). That made `ctx.store.set` appear to succeed even though
+// the configured backend (Redis, etc.) had never accepted the write. After
+// B2, the callbacks must throw a JS exception unless the dev escape hatch
+// (`RIVERS_DEV_NO_STORAGE=1`, read once at module load) is set.
+
+/// `ctx.store.set` without a configured StorageEngine must throw a JS
+/// exception, not silently buffer into TASK_STORE. The handler observes the
+/// failure and reports it back via ctx.resdata.
+#[tokio::test]
+async fn b2_ctx_store_set_without_storage_throws() {
+    // eval_js() builds a TaskContext without .storage(...) so TASK_STORAGE
+    // is None for this dispatch. RIVERS_DEV_NO_STORAGE is unset in CI.
+    let v = eval_js(r#"
+        var threw = false;
+        var msg = null;
+        try {
+            ctx.store.set("b2-key", "value");
+        } catch(e) {
+            threw = true;
+            msg = String(e.message || e);
+        }
+        ctx.resdata = { threw: threw, msg: msg };
+    "#).await;
+    assert_eq!(v["threw"], true, "B2: ctx.store.set must throw when no StorageEngine is configured");
+    let msg = v["msg"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("no StorageEngine configured") && msg.contains("RIVERS_DEV_NO_STORAGE"),
+        "B2: error message must point operators at the env var escape hatch, got: {msg}"
+    );
+}
+
+/// Same expectation for `ctx.store.get`.
+#[tokio::test]
+async fn b2_ctx_store_get_without_storage_throws() {
+    let v = eval_js(r#"
+        var threw = false;
+        try { ctx.store.get("b2-missing"); } catch(e) { threw = true; }
+        ctx.resdata = { threw: threw };
+    "#).await;
+    assert_eq!(v["threw"], true, "B2: ctx.store.get must throw when no StorageEngine is configured");
+}
+
+/// Same expectation for `ctx.store.del`.
+#[tokio::test]
+async fn b2_ctx_store_del_without_storage_throws() {
+    let v = eval_js(r#"
+        var threw = false;
+        try { ctx.store.del("b2-missing"); } catch(e) { threw = true; }
+        ctx.resdata = { threw: threw };
+    "#).await;
+    assert_eq!(v["threw"], true, "B2: ctx.store.del must throw when no StorageEngine is configured");
+}
+
+/// With a StorageEngine wired up the callbacks must NOT throw — only the
+/// no-engine path is gated. This is the regression check that B2 didn't
+/// over-correct and break normal operation.
+#[tokio::test]
+async fn b2_ctx_store_with_storage_does_not_throw() {
+    let v = eval_js_with_storage(r#"
+        var threw = false;
+        try {
+            ctx.store.set("b2-ok", { v: 1 });
+            var got = ctx.store.get("b2-ok");
+            ctx.store.del("b2-ok");
+            ctx.resdata = { threw: false, got: got };
+        } catch(e) {
+            ctx.resdata = { threw: true, msg: String(e.message || e) };
+        }
+    "#).await;
+    assert_eq!(v["threw"], false, "B2: with storage configured, ctx.store.* must succeed");
+    assert_eq!(v["got"]["v"], 1);
 }

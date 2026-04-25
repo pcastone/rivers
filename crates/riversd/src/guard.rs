@@ -59,6 +59,7 @@ pub async fn execute_guard_handler(
     request: &ParsedRequest,
     session: Option<&serde_json::Value>,
     trace_id: &str,
+    app_id: &str,
 ) -> Result<GuardResult, GuardError> {
     let args = serde_json::json!({
         "request": {
@@ -76,7 +77,11 @@ pub async fn execute_guard_handler(
         .entrypoint(entrypoint.clone())
         .args(args)
         .trace_id(trace_id.to_string());
-    let builder = crate::task_enrichment::enrich(builder, "");
+    let builder = crate::task_enrichment::enrich(
+        builder,
+        app_id,
+        rivers_runtime::process_pool::TaskKind::SecurityHook,
+    );
     let ctx = builder
         .build()
         .map_err(|e| GuardError::DispatchError(e))?;
@@ -147,6 +152,7 @@ pub async fn execute_guard_on_failed(
     entrypoint: &Entrypoint,
     error: &str,
     trace_id: &str,
+    app_id: &str,
 ) -> Result<Option<String>, GuardError> {
     let args = serde_json::json!({
         "error": error,
@@ -156,7 +162,11 @@ pub async fn execute_guard_on_failed(
         .entrypoint(entrypoint.clone())
         .args(args)
         .trace_id(trace_id.to_string());
-    let builder = crate::task_enrichment::enrich(builder, "");
+    let builder = crate::task_enrichment::enrich(
+        builder,
+        app_id,
+        rivers_runtime::process_pool::TaskKind::SecurityHook,
+    );
     let ctx = builder
         .build()
         .map_err(|e| GuardError::DispatchError(e))?;
@@ -329,7 +339,7 @@ mod tests {
             language: "javascript".to_string(),
         };
         let request = ParsedRequest::new("POST", "/auth/login");
-        let result = execute_guard_handler(&pool, &entrypoint, &request, None, "trace-1").await;
+        let result = execute_guard_handler(&pool, &entrypoint, &request, None, "trace-1", "test-app").await;
         // Should fail with EngineUnavailable since stub workers are used
         assert!(result.is_err());
     }
@@ -399,7 +409,7 @@ mod tests {
             function: "on_failed".to_string(),
             language: "javascript".to_string(),
         };
-        let result = execute_guard_on_failed(&pool, &entrypoint, "some error", "trace-1").await;
+        let result = execute_guard_on_failed(&pool, &entrypoint, "some error", "trace-1", "test-app").await;
         assert!(result.is_err());
     }
 }

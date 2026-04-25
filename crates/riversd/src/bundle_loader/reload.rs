@@ -111,9 +111,11 @@ pub async fn rebuild_views_and_dataviews(
         }
     };
 
-    // Build new executor
+    // Build new executor — reuse the same `PoolManager` so existing pools
+    // (and their warm idle connections) survive hot reload. D2.
     let mut executor = DataViewExecutor::new(registry, factory, ds_params, cache);
     executor.set_event_bus(ctx.event_bus.clone());
+    executor.set_acquirer(ctx.pool_manager.clone() as Arc<dyn rivers_runtime::ConnectionAcquirer>);
     *ctx.dataview_executor.write().await = Some(Arc::new(executor));
 
     // Rebuild view router

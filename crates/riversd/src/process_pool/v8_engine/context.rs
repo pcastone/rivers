@@ -309,17 +309,58 @@ fn bootstrap_direct_proxies(
 
 /// Reserved key prefixes for the task store. Keys starting with these
 /// prefixes are reserved for system use and rejected with an error.
-const STORE_RESERVED_PREFIXES: &[&str] = &["session:", "csrf:", "cache:", "raft:", "rivers:"];
+///
+/// G_R3: this list previously lived inline in v8_engine and drifted from the
+/// canonical core list (`rivers-core-config::storage::RESERVED_PREFIXES`) —
+/// the V8 list omitted `poll:` and core omitted `raft:`, so a handler could
+/// scribble over Raft consensus state via the StorageEngine namespace path
+/// or over poll state via `ctx.store`. Both perspectives now consume the
+/// single source of truth.
+use rivers_runtime::rivers_core::storage::RESERVED_PREFIXES as STORE_RESERVED_PREFIXES;
 
 /// Check if a store key uses a reserved namespace prefix.
 fn store_key_is_reserved(key: &str) -> bool {
     STORE_RESERVED_PREFIXES.iter().any(|p| key.starts_with(p))
 }
 
+/// Development-mode escape hatch for `ctx.store.*` callbacks (B2).
+///
+/// When set to `1`, missing or failing `StorageEngine` backends silently fall
+/// back to a process-wide in-memory `TASK_STORE` map. This was the original
+/// behaviour but it masks production data loss (e.g. Redis down) by reporting
+/// `ctx.store.set` as success while the configured backend never received the
+/// write. Production deployments must leave this unset so callbacks throw a
+/// JS exception when the backend is unavailable.
+///
+/// Read once at first access via `OnceLock` so toggling the env var mid-process
+/// has no effect — engines and tests that need the dev-mode behaviour must set
+/// `RIVERS_DEV_NO_STORAGE=1` before any V8 task dispatches.
+const RIVERS_DEV_NO_STORAGE_ENV: &str = "RIVERS_DEV_NO_STORAGE";
+
+fn dev_no_storage_mode() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var(RIVERS_DEV_NO_STORAGE_ENV)
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
+/// Throw a `ctx.store` failure as a JS exception so the handler observes the
+/// loss instead of silently falling back to in-memory storage.
+fn throw_store_error(scope: &mut v8::HandleScope, message: &str) {
+    let msg = v8_str_safe(scope, message);
+    let exception = v8::Exception::error(scope, msg);
+    scope.throw_exception(exception);
+}
+
 /// Native V8 callback for `ctx.store.get(key)`.
 ///
-/// X3: If a StorageEngine is available, reads via async bridge with namespace.
-/// Falls back to `TASK_STORE` in-memory HashMap if no engine is injected.
+/// X3: If a StorageEngine is configured (`TASK_STORAGE` is `Some`), reads via
+/// the async bridge with namespace and propagates backend errors as JS
+/// exceptions. B2 (P1-5): no silent fallback to `TASK_STORE` — that masked
+/// data loss when the backend was unavailable. The in-memory map is only used
+/// when (a) no engine is configured AND (b) `RIVERS_DEV_NO_STORAGE=1` is set.
 /// Throws if the key uses a reserved prefix.
 ///
 /// V8 callback -- short constant strings, unwrap is safe.
@@ -337,39 +378,55 @@ fn ctx_store_get_callback(
         return;
     }
 
-    // X3: Try real StorageEngine first
+    // X3: StorageEngine path — propagate failures as JS exceptions (B2).
     let storage = TASK_STORAGE.with(|s| s.borrow().clone());
     if let Some(engine) = storage {
         let namespace = TASK_STORE_NAMESPACE.with(|n| n.borrow().clone()).unwrap_or_default();
-        match get_rt_handle() {
-            Ok(rt) => {
-                match rt.block_on(engine.get(&namespace, &key)) {
-                    Ok(Some(bytes)) => {
-                        let json_str = String::from_utf8(bytes).unwrap_or_else(|_| "null".into());
-                        let v8_str = v8_str_safe(scope, &json_str);
-                        if let Some(parsed) = v8::json::parse(scope, v8_str.into()) {
-                            rv.set(parsed);
-                        } else {
-                            rv.set(v8::null(scope).into());
-                        }
-                        return;
-                    }
-                    Ok(None) => {
-                        rv.set(v8::null(scope).into());
-                        return;
-                    }
-                    Err(e) => {
-                        tracing::warn!(target: "rivers.store", "StorageEngine get failed: {e}, falling back to in-memory");
-                    }
+        let rt = match get_rt_handle() {
+            Ok(rt) => rt,
+            Err(e) => {
+                throw_store_error(
+                    scope,
+                    &format!("ctx.store.get('{key}'): tokio runtime unavailable: {e}"),
+                );
+                return;
+            }
+        };
+        match rt.block_on(engine.get(&namespace, &key)) {
+            Ok(Some(bytes)) => {
+                let json_str = String::from_utf8(bytes).unwrap_or_else(|_| "null".into());
+                let v8_str = v8_str_safe(scope, &json_str);
+                if let Some(parsed) = v8::json::parse(scope, v8_str.into()) {
+                    rv.set(parsed);
+                } else {
+                    rv.set(v8::null(scope).into());
                 }
             }
-            Err(_) => {
-                tracing::warn!(target: "rivers.store", "no runtime handle for StorageEngine, falling back to in-memory");
+            Ok(None) => {
+                rv.set(v8::null(scope).into());
+            }
+            Err(e) => {
+                throw_store_error(
+                    scope,
+                    &format!("ctx.store.get('{key}'): backend error: {e}"),
+                );
             }
         }
+        return;
     }
 
-    // Fallback: in-memory TASK_STORE
+    // No StorageEngine configured. Production must throw; dev mode may use
+    // the in-memory TASK_STORE escape hatch (B2.2).
+    if !dev_no_storage_mode() {
+        throw_store_error(
+            scope,
+            &format!(
+                "ctx.store.get('{key}'): no StorageEngine configured (set RIVERS_DEV_NO_STORAGE=1 to allow in-memory fallback)"
+            ),
+        );
+        return;
+    }
+
     let value = TASK_STORE.with(|s| s.borrow().get(&key).cloned());
     match value {
         Some(v) => {
@@ -387,8 +444,12 @@ fn ctx_store_get_callback(
 
 /// Native V8 callback for `ctx.store.set(key, value, ttl?)`.
 ///
-/// X3: If a StorageEngine is available, writes via async bridge with namespace and TTL.
-/// Falls back to `TASK_STORE` in-memory HashMap if no engine is injected.
+/// X3: If a StorageEngine is configured (`TASK_STORAGE` is `Some`), writes via
+/// the async bridge with namespace and TTL and propagates backend errors as JS
+/// exceptions. B2 (P1-5): no silent fallback to `TASK_STORE` — that previously
+/// reported success to the JS handler while the configured backend (Redis,
+/// etc.) had never accepted the write. The in-memory map is only used when
+/// (a) no engine is configured AND (b) `RIVERS_DEV_NO_STORAGE=1` is set.
 /// Throws if the key uses a reserved prefix.
 ///
 /// V8 callback -- short constant strings, unwrap is safe.
@@ -426,31 +487,62 @@ fn ctx_store_set_callback(
         }
     };
 
-    // X3: Try real StorageEngine first
+    // X3: StorageEngine path — propagate failures as JS exceptions (B2).
     let storage = TASK_STORAGE.with(|s| s.borrow().clone());
     if let Some(engine) = storage {
         let namespace = TASK_STORE_NAMESPACE.with(|n| n.borrow().clone()).unwrap_or_default();
-        if let Ok(rt) = get_rt_handle() {
-            let bytes: Bytes = serde_json::to_vec(&json_value).unwrap_or_else(|_| b"null".to_vec());
-            if let Err(e) = rt.block_on(engine.set(&namespace, &key, bytes, ttl_ms)) {
-                tracing::warn!(target: "rivers.store", "StorageEngine set failed: {e}, falling back to in-memory");
-            } else {
-                // Also update in-memory store for same-task reads
-                TASK_STORE.with(|s| s.borrow_mut().insert(key, json_value));
+        let rt = match get_rt_handle() {
+            Ok(rt) => rt,
+            Err(e) => {
+                throw_store_error(
+                    scope,
+                    &format!("ctx.store.set('{key}'): tokio runtime unavailable: {e}"),
+                );
                 return;
             }
+        };
+        let bytes: Bytes = serde_json::to_vec(&json_value).unwrap_or_else(|_| b"null".to_vec());
+        match rt.block_on(engine.set(&namespace, &key, bytes, ttl_ms)) {
+            Ok(()) => {
+                // Mirror the write into TASK_STORE so same-task reads stay
+                // cheap. Best-effort — the authoritative copy is in the
+                // configured backend.
+                TASK_STORE.with(|s| s.borrow_mut().insert(key, json_value));
+            }
+            Err(e) => {
+                throw_store_error(
+                    scope,
+                    &format!("ctx.store.set('{key}'): backend error: {e}"),
+                );
+            }
         }
+        return;
     }
 
-    // Fallback: in-memory TASK_STORE
+    // No StorageEngine configured. Production must throw; dev mode may use
+    // the in-memory TASK_STORE escape hatch (B2.2).
+    if !dev_no_storage_mode() {
+        throw_store_error(
+            scope,
+            &format!(
+                "ctx.store.set('{key}'): no StorageEngine configured (set RIVERS_DEV_NO_STORAGE=1 to allow in-memory fallback)"
+            ),
+        );
+        return;
+    }
+
     TASK_STORE.with(|s| s.borrow_mut().insert(key, json_value));
 }
 
 /// Native V8 callback for `ctx.store.del(key)`.
 ///
-/// X3: If a StorageEngine is available, deletes via async bridge with namespace.
-/// Falls back to `TASK_STORE` in-memory HashMap if no engine is injected.
-/// Throws if the key uses a reserved prefix.
+/// X3: If a StorageEngine is configured (`TASK_STORAGE` is `Some`), deletes
+/// via the async bridge with namespace and propagates backend errors as JS
+/// exceptions. B2 (P1-5): no silent fallback to `TASK_STORE` — that masked
+/// orphaned data when the configured backend was unavailable. The in-memory
+/// map is only used when (a) no engine is configured AND (b)
+/// `RIVERS_DEV_NO_STORAGE=1` is set. Throws if the key uses a reserved
+/// prefix.
 ///
 /// V8 callback -- short constant strings, unwrap is safe.
 fn ctx_store_del_callback(
@@ -467,21 +559,46 @@ fn ctx_store_del_callback(
         return;
     }
 
-    // X3: Try real StorageEngine first
+    // X3: StorageEngine path — propagate failures as JS exceptions (B2).
     let storage = TASK_STORAGE.with(|s| s.borrow().clone());
     if let Some(engine) = storage {
         let namespace = TASK_STORE_NAMESPACE.with(|n| n.borrow().clone()).unwrap_or_default();
-        if let Ok(rt) = get_rt_handle() {
-            if let Err(e) = rt.block_on(engine.delete(&namespace, &key)) {
-                tracing::warn!(target: "rivers.store", "StorageEngine del failed: {e}, falling back to in-memory");
-            } else {
-                TASK_STORE.with(|s| s.borrow_mut().remove(&key));
+        let rt = match get_rt_handle() {
+            Ok(rt) => rt,
+            Err(e) => {
+                throw_store_error(
+                    scope,
+                    &format!("ctx.store.del('{key}'): tokio runtime unavailable: {e}"),
+                );
                 return;
             }
+        };
+        match rt.block_on(engine.delete(&namespace, &key)) {
+            Ok(()) => {
+                TASK_STORE.with(|s| s.borrow_mut().remove(&key));
+            }
+            Err(e) => {
+                throw_store_error(
+                    scope,
+                    &format!("ctx.store.del('{key}'): backend error: {e}"),
+                );
+            }
         }
+        return;
     }
 
-    // Fallback: in-memory TASK_STORE
+    // No StorageEngine configured. Production must throw; dev mode may use
+    // the in-memory TASK_STORE escape hatch (B2.2).
+    if !dev_no_storage_mode() {
+        throw_store_error(
+            scope,
+            &format!(
+                "ctx.store.del('{key}'): no StorageEngine configured (set RIVERS_DEV_NO_STORAGE=1 to allow in-memory fallback)"
+            ),
+        );
+        return;
+    }
+
     TASK_STORE.with(|s| s.borrow_mut().remove(&key));
 }
 
@@ -499,8 +616,39 @@ fn ctx_ddl_callback(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    // B1.2: ctx.ddl() is ONLY available during ApplicationInit. Reading
+    // TASK_KIND first is critical — letting REST/MessageConsumer/etc. handlers
+    // call ctx.ddl() lets a request handler issue `DROP TABLE users` (P0).
+    let task_kind = super::task_locals::TASK_KIND.with(|k| *k.borrow());
+    match task_kind {
+        Some(rivers_runtime::process_pool::TaskKind::ApplicationInit) => {
+            // Allowed.
+        }
+        other => {
+            throw_js_error(
+                scope,
+                &format!(
+                    "ctx.ddl() is only available during application initialization (got task_kind={:?})",
+                    other
+                ),
+            );
+            return;
+        }
+    }
+
     let datasource = args.get(0).to_rust_string_lossy(scope);
     let statement = args.get(1).to_rust_string_lossy(scope);
+
+    // B1.2: app_id must be present (TaskLocals::set already rejects empty
+    // app_id, but we double-check here so a future regression in TaskLocals
+    // doesn't silently re-open this path).
+    let app_id_present = super::task_locals::TASK_APP_NAME.with(|n| {
+        n.borrow().as_deref().map(|s| !s.is_empty()).unwrap_or(false)
+    });
+    if !app_id_present {
+        throw_js_error(scope, "ctx.ddl(): app_id is required");
+        return;
+    }
 
     // Get DriverFactory and DataViewExecutor from task locals
     let factory = TASK_DRIVER_FACTORY.with(|f| f.borrow().clone());
@@ -929,4 +1077,26 @@ fn ctx_dataview_callback(
     let msg = v8_str_safe(scope, &err_msg);
     let exception = v8::Exception::error(scope, msg);
     scope.throw_exception(exception);
+}
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// G_R3: the V8 `ctx.store` reserved-prefix check now consumes the
+    /// canonical list from `rivers-core-config::storage::RESERVED_PREFIXES`.
+    /// Both `poll:` (was missing in V8 before) and `raft:` (was missing in
+    /// core before) MUST be reserved from the V8 perspective.
+    #[test]
+    fn reserved_prefixes_match_canonical_list() {
+        assert!(store_key_is_reserved("session:abc"));
+        assert!(store_key_is_reserved("csrf:token"));
+        assert!(store_key_is_reserved("cache:dataview"));
+        assert!(store_key_is_reserved("rivers:node"));
+        assert!(store_key_is_reserved("poll:foo"), "V8 must see poll: as reserved");
+        assert!(store_key_is_reserved("raft:foo"), "V8 must see raft: as reserved");
+        assert!(!store_key_is_reserved("user:data"));
+    }
 }

@@ -13,6 +13,7 @@ drivers = ["rivers-drivers-builtin"]
 storage-backends = ["rivers-storage-backends"]
 lockbox = ["rivers-lockbox-engine"]
 tls = ["rcgen", "sha2", "time", "rustls", "x509-parser"]
+metrics = ["dep:metrics"]
 
 [dependencies]
 serde = { workspace = true }
@@ -39,6 +40,7 @@ rivers-driver-sdk = { path = "../rivers-driver-sdk" }
 rivers-drivers-builtin = { path = "../rivers-drivers-builtin", optional = true, default-features = false }
 rivers-storage-backends = { path = "../rivers-storage-backends", optional = true }
 rivers-lockbox-engine = { path = "../rivers-lockbox-engine", optional = true }
+metrics = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

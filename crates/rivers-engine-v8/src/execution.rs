@@ -801,6 +801,38 @@ fn ddl_callback(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    // B1.2: ApplicationInit-only gate. Anything else (including a missing
+    // task_kind from an old caller) gets rejected. Same security posture as
+    // the static-engine path in riversd::process_pool::v8_engine::context.
+    let task_kind = crate::task_context::TASK_KIND.with(|k| *k.borrow());
+    if task_kind != Some(rivers_engine_sdk::TaskKind::ApplicationInit) {
+        let msg = v8_str(
+            scope,
+            &format!(
+                "ctx.ddl() is only available during application initialization (got task_kind={:?})",
+                task_kind
+            ),
+        );
+        let exception = v8::Exception::error(scope, msg);
+        scope.throw_exception(exception);
+        return;
+    }
+
+    // B1.2 belt-and-suspenders (mirrors static path): require non-empty app_id
+    // even though the upstream task_kind=ApplicationInit gate already implies
+    // a valid init dispatch. Defense-in-depth — if any future regression
+    // weakens TASK_KIND, this remains the last barrier.
+    let app_id = TASK_APP_ID.with(|a| a.borrow().clone()).unwrap_or_default();
+    if app_id.is_empty() {
+        let msg = v8_str(
+            scope,
+            "ctx.ddl() requires a non-empty app_id (dispatch identity missing)",
+        );
+        let exception = v8::Exception::error(scope, msg);
+        scope.throw_exception(exception);
+        return;
+    }
+
     let datasource = args.get(0).to_rust_string_lossy(scope);
     let statement = args.get(1).to_rust_string_lossy(scope);
 
@@ -810,11 +842,6 @@ fn ddl_callback(
         scope.throw_exception(exception);
         return;
     }
-
-    // Get app_id from task-local
-    let app_id = TASK_APP_ID.with(|a| {
-        a.borrow().clone().unwrap_or_else(|| "unknown".to_string())
-    });
 
     if let Some(callbacks) = HOST_CALLBACKS.get() {
         if let Some(ddl_fn) = callbacks.ddl_execute {

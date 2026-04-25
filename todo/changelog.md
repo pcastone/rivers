@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-04-25 — D2: Route DataView execution through ConnectionPool (P0-3)
+
+Closes the second half of the pool-adoption work (D1 landed in `2dfbb7b`).
+DataView calls now reuse pooled connections instead of opening a fresh
+handshake per request.
+
+| File | Decision | Reference | Resolution |
+|------|----------|-----------|------------|
+| `crates/rivers-runtime/src/dataview_engine.rs` | New `ConnectionAcquirer` + `PooledConnection` traits and `AcquireError` enum live in the runtime crate so `DataViewExecutor` can route through a pool without depending on the `riversd` binary crate | code review P0-3 | Optional `acquirer: Option<Arc<dyn ConnectionAcquirer>>` field on the executor; `set_acquirer`/`with_acquirer` setters; legacy direct-connect retained when `None` (warn-logged) so unit tests that build a bare executor don't break |
+| `crates/rivers-runtime/src/dataview_engine.rs` (`execute`) | Pool path: `acquirer.acquire(datasource_id) → guard`, `guard.conn_mut().execute/prepare/execute_prepared(query)`, RAII drop returns the connection. Single checkout for the whole call. `has_pool(id)` predicate routes broker datasources (no pool registered) to the legacy direct-connect+broker-fallback helper | code review P0-3 | Extracted shared `connect_and_execute_or_broker` helper to deduplicate the broker path between the no-pool-registered and no-acquirer-installed branches |
+| `crates/rivers-runtime/src/lib.rs` | Re-export `AcquireError`, `ConnectionAcquirer`, `PooledConnection` | — | Required so `riversd::pool` can `impl rivers_runtime::ConnectionAcquirer for PoolManager` |
+| `crates/riversd/src/pool.rs` | `impl ConnectionAcquirer for PoolManager` via `PoolGuardAdapter` (wraps `PoolGuard`); `map_pool_error` translates `PoolError` → `AcquireError`; new `circuit_state: CircuitState` field on `PoolSnapshot` | code review P0-3, code review P1-1 | Adapter is a one-field newtype; `PoolGuard::conn_mut` is forwarded as-is. Snapshot carries circuit state so `/health/verbose` doesn't need a separate breaker query |
+| `crates/riversd/src/server/context.rs` | New `pool_manager: Arc<PoolManager>` field on `AppContext` (always present, initialized empty) | code review P0-3 | Per task: D2 ownership decision is "manager lives on AppContext, never `None` at runtime; the executor's `Option` is transitional only" |
+| `crates/riversd/src/bundle_loader/load.rs` | After collecting `ds_params` and building the `DriverFactory`, register one `ConnectionPool` per datasource (default `PoolConfig`, `entry_point:ds_name` keying that mirrors the existing `ds_params` scheme). Skip silently for datasources whose driver isn't registered as a `DatabaseDriver` (brokers). After building the executor, `executor.set_acquirer(ctx.pool_manager.clone())` | code review P0-3 | Per-app pool config is a future feature; default `max_size=10`, `idle_timeout=30s`, `max_lifetime=5min` |
+| `crates/riversd/src/bundle_loader/reload.rs` | Reuse the existing `PoolManager` (so warm idle connections survive hot reload). New executor gets the same acquirer wired | code review P0-3 | No pool churn on hot reload — the pool is independent of the DataView registry rebuild |
+| `crates/riversd/src/server/handlers.rs` (`/health/verbose`) | Drop the per-probe `factory.connect(...)`; build `pool_snapshots` from `PoolManager::snapshots()` and per-datasource probe status from each pool's `circuit_state`. Brokers (no pool) still get the legacy direct-probe so operators see them | code review P0-3 | Verbose probe is now zero-handshake under steady state. Brokers continue using the 5s timeout fallback until they have their own pooling story |
+| `crates/riversd/tests/pool_tests.rs` | New `mod d2` with three tests: `d2_4_executor_reuses_pool_connections_for_100_calls` (asserts `connect_count == 1` for 100 sequential calls; ≤ `max_size=4`), `d2_4_pool_snapshot_non_empty_after_first_call` (asserts `idle_connections == 1` after one call returns), `d2_4_direct_connect_fallback_still_works_without_acquirer` (asserts `connect_count == 3` for 3 calls with no acquirer wired) | code review P0-3 | All 33 pool tests + 357 lib tests + 38 test binaries pass; pre-existing `cli_tests::version_string_contains_version` and the runtime-side `bench_3_sqlite_cached_vs_uncached` / `executor_invalidates_cache_after_write` failures remain (DDL-gating issues unrelated to D2) |
+
+**Net effect:** the `Pool` and `Driver` rows in the architecture diagram are
+finally connected on the production DataView path. Pool limits, idle
+reuse, max-lifetime, and circuit breaking now actually apply to user
+traffic — not just to the unit tests that exercise them in isolation.
 ## 2026-04-24 — Canary 135/135 final push
 
 | File | Summary | Reference | Resolution |
@@ -311,6 +333,51 @@ Plan correction: task 4.3 said "thread via closure capture (not thread-local)." 
   - `docs/guide/tutorials/datasource-filesystem.md` (new, 197 lines, all 11 ops + chroot + limits + error table).
 - **Tests:** ~85 new tests across driver ops, chroot enforcement, typed-proxy codegen, end-to-end V8 round-trip, and canary handlers. Scoped sweep of touched crates: 706/706 passing (sdk 67, drivers-builtin 140, runtime 187, riversd 312). Pre-existing workspace-level failures in live-infra tests (postgres/mysql/redis at 192.168.2.x) and two broken benches (`cache_bench`, `dataview_engine_tests`) are unrelated to this branch — verified via `git stash` on baseline.
 - **Commits:** 29 commits from `f2c6db5` through `ad8819b` on `feature/filesystem-driver`.
+
+---
+
+## 2026-04-24 — Code-review remediation Phase A (P0-4 + P0-1)
+
+### A1 — Broker consumer supervisor (P0-4)
+- **new:** `crates/riversd/src/broker_supervisor.rs` — `spawn_broker_supervisor`, `BrokerBridgeRegistry`, `SupervisorBackoff`, `BrokerBridgeState` enum.
+- **edit:** `crates/riversd/src/lib.rs` — register module.
+- **edit:** `crates/riversd/src/bundle_loader/wire.rs` — replace `match create_consumer().await { Ok => spawn(bridge.run()), Err => warn }` with `spawn_broker_supervisor(...)` (returns immediately).
+- **edit:** `crates/riversd/src/server/context.rs` — `AppContext.broker_bridge_registry` field.
+- **edit:** `crates/riversd/src/health.rs` — new `BrokerBridgeHealth` type; `VerboseHealthResponse.broker_bridges` field.
+- **edit:** `crates/riversd/src/server/handlers.rs` — populate `broker_bridges` from registry snapshot.
+- **new:** `crates/riversd/tests/broker_supervisor_tests.rs` — 3 tests (spawn-immediate, eventually-ok, empty-healthy).
+- **edit:** `crates/riversd/tests/health_tests.rs` — `verbose_health_serializes_broker_bridges` + struct-literal updates.
+- **Effect:** `riversd` boots even when broker hosts are unreachable. `/health/verbose` reports per-bridge state. Existing `reconnect_ms` config now drives exponential backoff capped at 60s.
+
+### A2 — Protected-view fail-closed (P0-1)
+- **edit:** `crates/riversd/src/security_pipeline.rs` — explicit `session_manager.is_none()` reject before validation block; returns 500.
+- **edit:** `crates/riversd/src/bundle_loader/load.rs` — strengthened AM1.2; extracted `check_protected_views_have_session` helper with 6 unit tests.
+- **new:** `crates/riversd/tests/security_pipeline_tests.rs` — 2 integration tests.
+- **Effect:** misconfig (protected view + missing session manager) now fails at bundle load with a named-view error AND, as defense-in-depth, fails closed at request time with a 500. Public views (auth=none) unaffected.
+
+### Tests
+- 345/345 lib tests + 1 ignored.
+- 11 integration files passing across the changes (broker_supervisor: 3, health: 12, security_pipeline: 2, broker_bridge: 12).
+- One pre-existing failure flagged: `cli_tests::version_string_contains_version` hardcodes 0.50.1 (crate is 0.55.0). Spawned for separate cleanup.
+
+## 2026-04-24 — B4: Redact host paths in V8 errors (P1-9)
+
+### B4 — Path redaction
+- **edit:** `crates/riversd/src/process_pool/v8_engine/execution.rs` — added `pub(crate) fn redact_to_app_relative(path: &str) -> Cow<str>` next to `boundary_from_referrer`. Wired into both `script_origin` constructions (root module in `execute_as_module`, resolved modules in `resolve_module_callback`) so V8 stack frames carry the logical script name. Wired into every `format!` site in `resolve_module_callback` (the `in {referrer}`, `resolved to:`, and `boundary:` lines). Wired into the disk-read fallback `cannot read module` message.
+- **edit:** `crates/riversd/src/process_pool/v8_engine/mod.rs` — re-exported `redact_to_app_relative` as `pub(crate)` so `module_cache::module_not_registered_message` and the future SQLite path policy (G_R8.2) can call the same redactor.
+- **edit:** `crates/riversd/src/process_pool/module_cache.rs` — `module_not_registered_message` now redacts both the `path` and `abs` arguments through the shared helper. Existing pinned-format test (`module_not_registered_message_format_matches_g5_3`) still passes — assertions are substring checks that don't depend on the absolute prefix.
+- **new:** `crates/riversd/tests/path_redaction_tests.rs` — 2 integration tests:
+  - `handler_stack_does_not_leak_host_paths`: dispatches a module-syntax handler that throws; asserts neither the error message nor the stack contains the host prefix above the app, `/Users/`, or `/var/folders/`.
+  - `module_resolution_error_does_not_leak_host_paths`: dispatches a handler that imports a non-existent module; asserts the resolve-callback error is fully redacted and reports `my-app/libraries/handlers/throws.js` as the referrer.
+- **edit:** `execution.rs` — added `redact_path_tests` module with 8 unit tests covering: macOS workspace path, Linux deploy path, no-libraries pass-through (verifying `Cow::Borrowed`), already-relative pass-through, empty string, deep nesting, libraries-at-root edge case, trailing-slash walk.
+
+### Decision (logged in changedecisionlog)
+- Redaction is unconditional (no `cfg!(debug_assertions)` gate). Reasoning: redacted form is more useful for log grep, and security posture must not depend on build mode.
+
+### Tests
+- 8 new unit tests in `redact_path_tests` — all green.
+- 2 new integration tests in `path_redaction_tests.rs` — all green.
+- Re-ran 357 lib tests + 25 v8_bridge + 2 b3_module_cache_strict + 10 task_kind_dispatch — all green, no regressions.
 # 2026-04-24 — Review consolidation planning
 
 | File | Summary | Reference | Resolution |

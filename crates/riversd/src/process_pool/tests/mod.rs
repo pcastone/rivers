@@ -15,3 +15,4 @@ mod wasm_and_workers;
 mod integration;
 mod exec_and_keystore;
 mod direct_dispatch;
+mod swc_compile_timeout;

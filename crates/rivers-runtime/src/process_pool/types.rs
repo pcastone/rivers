@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use crate::rivers_core::{DriverFactory, StorageEngine};
 use crate::DataViewExecutor;
 
+pub use crate::rivers_engine_sdk::TaskKind;
+
 // ── Opaque Tokens ────────────────────────────────────────────────
 
 /// Opaque handle to a datasource — the isolate never holds a real connection.
@@ -186,6 +188,9 @@ pub struct TaskContext {
     /// Unlocked application keystore for encrypt/decrypt (App Keystore feature).
     #[cfg(feature = "keystore")]
     pub keystore: Option<Arc<rivers_keystore_engine::AppKeystore>>,
+    /// Dispatch-site classification — gates elevated capabilities (e.g. ctx.ddl).
+    /// Required: every dispatch site MUST set this via `TaskContextBuilder::task_kind()`.
+    pub task_kind: TaskKind,
 }
 
 impl std::fmt::Debug for TaskContext {
@@ -266,6 +271,23 @@ pub enum TaskError {
         datasource: String,
         /// Driver-layer error message from `commit_transaction`.
         message: String,
+    },
+
+    /// SWC TypeScript compilation exceeded its per-module wall-clock budget.
+    /// Spec / F2 (P1-7): `compile_typescript_with_imports_timeout` wraps each
+    /// per-file compile so pathological TS (deep nested generics, runaway
+    /// macro expansion, etc.) cannot hang `populate_module_cache` at
+    /// bundle-load time. Distinct from `Timeout(u64)` (which is the V8
+    /// per-task CPU limit) so callers can distinguish "compiler hung" from
+    /// "handler hung". `module` is sanitized via `redact_to_app_relative`.
+    #[error("typescript compile timeout in {module} after {timeout_ms}ms")]
+    CompileTimeout {
+        /// Redacted (app-relative) module path. Never contains host
+        /// filesystem prefixes — safe to surface in HTTP responses + logs.
+        module: String,
+        /// The wall-clock budget (ms) that was exceeded. Matches whatever
+        /// `RIVERS_SWC_COMPILE_TIMEOUT_MS` resolved to (or the 5000ms default).
+        timeout_ms: u64,
     },
 
     /// Required capability (datasource, DataView, HTTP) not available.

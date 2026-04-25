@@ -61,6 +61,9 @@ impl DatabaseDriver for CassandraDriver {
     fn param_style(&self) -> rivers_driver_sdk::ParamStyle {
         rivers_driver_sdk::ParamStyle::ColonNamed
     }
+    /// G_R7.2: cdylib plugins ship their own statically-linked tokio
+    /// runtime — the host must isolate connect() in a fresh runtime.
+    fn needs_isolated_runtime(&self) -> bool { true }
 }
 
 // ── Connection ─────────────────────────────────────────────────────────
