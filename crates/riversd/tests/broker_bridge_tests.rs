@@ -186,7 +186,7 @@ async fn bridge_processes_single_message() {
     let event_bus = Arc::new(EventBus::new());
     let (collector, collected) = EventCollector::new();
     event_bus
-        .subscribe(
+        .subscribe_static(
             events::BROKER_MESSAGE_RECEIVED,
             Arc::new(collector),
             HandlerPriority::Handle,
@@ -263,7 +263,7 @@ async fn bridge_failure_policy_drop() {
 
     // Register a failing handler so processing fails
     event_bus
-        .subscribe(
+        .subscribe_static(
             events::BROKER_MESSAGE_RECEIVED,
             Arc::new(FailingHandler),
             HandlerPriority::Expect,
@@ -305,7 +305,7 @@ async fn bridge_failure_policy_requeue() {
     let event_bus = Arc::new(EventBus::new());
 
     event_bus
-        .subscribe(
+        .subscribe_static(
             events::BROKER_MESSAGE_RECEIVED,
             Arc::new(FailingHandler),
             HandlerPriority::Expect,
@@ -347,7 +347,7 @@ async fn bridge_failure_policy_dead_letter() {
     let event_bus = Arc::new(EventBus::new());
 
     event_bus
-        .subscribe(
+        .subscribe_static(
             events::BROKER_MESSAGE_RECEIVED,
             Arc::new(FailingHandler),
             HandlerPriority::Expect,
@@ -389,7 +389,7 @@ async fn bridge_failure_policy_redirect() {
     let event_bus = Arc::new(EventBus::new());
 
     event_bus
-        .subscribe(
+        .subscribe_static(
             events::BROKER_MESSAGE_RECEIVED,
             Arc::new(FailingHandler),
             HandlerPriority::Expect,
@@ -431,7 +431,7 @@ async fn bridge_consumer_lag_detection() {
 
     let (collector, collected) = EventCollector::new();
     event_bus
-        .subscribe(
+        .subscribe_static(
             events::CONSUMER_LAG_DETECTED,
             Arc::new(collector),
             HandlerPriority::Handle,
@@ -474,7 +474,7 @@ async fn bridge_reconnection_on_error() {
 
     let (collector, collected) = EventCollector::new();
     event_bus
-        .subscribe(
+        .subscribe_static(
             events::BROKER_CONSUMER_ERROR,
             Arc::new(collector),
             HandlerPriority::Handle,
@@ -515,14 +515,14 @@ async fn bridge_publishes_start_and_stop_events() {
     let (stop_collector, stop_events) = EventCollector::new();
 
     event_bus
-        .subscribe(
+        .subscribe_static(
             events::BROKER_CONSUMER_STARTED,
             Arc::new(start_collector),
             HandlerPriority::Handle,
         )
         .await;
     event_bus
-        .subscribe(
+        .subscribe_static(
             events::BROKER_CONSUMER_STOPPED,
             Arc::new(stop_collector),
             HandlerPriority::Handle,

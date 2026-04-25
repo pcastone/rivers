@@ -1,6 +1,8 @@
 //! View pipeline — parameter mapping, execution, and response serialization.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use rivers_runtime::view::{ApiViewConfig, HandlerConfig};
 
@@ -8,6 +10,70 @@ use crate::process_pool::{Entrypoint, ProcessPoolManager, TaskContextBuilder};
 
 use super::types::{ViewContext, ViewError, ViewResult};
 use super::validation::{execute_on_error_handlers, parse_handler_view_result};
+
+/// Default per-observer dispatch cap (G_R4.1, P2-4).
+///
+/// Pre/post-process observer handlers are awaited so the spec contract
+/// (`Rivers.observer.before/after` is non-`spawn`'d) holds, but if a
+/// misbehaving handler hangs we MUST NOT extend request latency. The
+/// dispatch is wrapped in `tokio::time::timeout(OBSERVER_TIMEOUT, ...)`
+/// — on elapsed we log a warning and continue. Configurable via
+/// `RIVERS_OBSERVER_TIMEOUT_MS`.
+const DEFAULT_OBSERVER_TIMEOUT_MS: u64 = 200;
+
+fn observer_timeout() -> Duration {
+    static CACHED: OnceLock<Duration> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let ms = std::env::var("RIVERS_OBSERVER_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_OBSERVER_TIMEOUT_MS);
+        Duration::from_millis(ms)
+    })
+}
+
+/// Dispatch a pre/post-process observer with the configured cap (G_R4.2).
+///
+/// Returns immediately on timeout — the request must NOT block longer than
+/// the cap. A timeout is logged at WARN level; the dispatched task is
+/// allowed to continue running in the background (the ProcessPool watchdog
+/// owns its CPU budget).
+async fn dispatch_observer(
+    pool: &ProcessPoolManager,
+    task_ctx: rivers_runtime::process_pool::TaskContext,
+    stage: &'static str,
+    trace_id: &str,
+    module: &str,
+    entrypoint: &str,
+) {
+    let timeout = observer_timeout();
+    let fut = pool.dispatch("default", task_ctx);
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(
+                target: "rivers.view",
+                stage,
+                trace_id = %trace_id,
+                module = %module,
+                entrypoint = %entrypoint,
+                error = %e,
+                "observer dispatch returned error (request continues)"
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                target: "rivers.view",
+                stage,
+                trace_id = %trace_id,
+                module = %module,
+                entrypoint = %entrypoint,
+                timeout_ms = timeout.as_millis() as u64,
+                "observer exceeded timeout cap (request not delayed)"
+            );
+        }
+    }
+}
 
 // ── Parameter Mapping ────────────────────────────────────────────
 
@@ -107,7 +173,11 @@ pub async fn execute_rest_view(
     executor: Option<&rivers_runtime::DataViewExecutor>,
 ) -> Result<ViewResult, ViewError> {
     let inner = async {
-        // ── Pre_process (observer, fire-and-forget) ─────────────────
+        // ── Pre_process (observer, awaited-with-timeout per G_R4) ────
+        // Spec contract: pre/post-process observers are awaited (so handlers
+        // have a chance to mutate ctx.data before/after the primary stage)
+        // but each dispatch is bounded by `RIVERS_OBSERVER_TIMEOUT_MS`
+        // (default 200ms) so a slow observer cannot extend request latency.
         if let (Some(pool), Some(ref handlers)) = (pool, &config.event_handlers) {
             for handler in &handlers.pre_process {
                 let entrypoint = Entrypoint {
@@ -134,8 +204,15 @@ pub async fn execute_rest_view(
                 let task_ctx = builder
                     .build()
                     .map_err(|e| ViewError::Pipeline(format!("pre_process build: {e}")))?;
-                // Fire and forget — pre_process is observer
-                let _ = pool.dispatch("default", task_ctx).await;
+                dispatch_observer(
+                    pool,
+                    task_ctx,
+                    "pre_process",
+                    &ctx.trace_id,
+                    &handler.module,
+                    &handler.entrypoint,
+                )
+                .await;
             }
         }
 
@@ -312,7 +389,7 @@ pub async fn execute_rest_view(
             }
         }
 
-        // ── Post_process (observer, fire-and-forget) ────────────────
+        // ── Post_process (observer, awaited-with-timeout per G_R4) ──
         if let (Some(pool), Some(ref handlers)) = (pool, &config.event_handlers) {
             for handler in &handlers.post_process {
                 let entrypoint = Entrypoint {
@@ -339,8 +416,15 @@ pub async fn execute_rest_view(
                 let task_ctx = builder
                     .build()
                     .map_err(|e| ViewError::Pipeline(format!("post_process build: {e}")))?;
-                // Fire and forget — post_process is observer
-                let _ = pool.dispatch("default", task_ctx).await;
+                dispatch_observer(
+                    pool,
+                    task_ctx,
+                    "post_process",
+                    &ctx.trace_id,
+                    &handler.module,
+                    &handler.entrypoint,
+                )
+                .await;
             }
         }
 

@@ -524,3 +524,90 @@ fn validate_views_multiple_errors() {
     let errors = validate_views(&views, &[]);
     assert!(errors.len() >= 2);
 }
+
+// ── G_R4 (P2-4): observer dispatch is bounded by RIVERS_OBSERVER_TIMEOUT_MS ──
+//
+// A slow pre_process observer (sleep 500ms) MUST NOT extend request latency
+// past the configured cap (~250ms here). The dispatch is awaited but capped
+// via tokio::time::timeout — on elapsed we log a warning and continue.
+
+#[tokio::test]
+async fn slow_observer_does_not_extend_request_latency() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use rivers_runtime::view::{HandlerStageConfig, ViewEventHandlers};
+    use rivers_runtime::rivers_core::storage::{InMemoryStorageEngine, StorageEngine};
+    use riversd::process_pool::{ProcessPoolManager};
+
+    // Tighten cap for the test.
+    std::env::set_var("RIVERS_OBSERVER_TIMEOUT_MS", "200");
+    // OnceLock may have been initialized by an earlier test in this binary;
+    // accept either the env value or the default 200ms — both gate the
+    // observer well below the 500ms sleep.
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("rivers_g_r4_slow_{id}.js"));
+    std::fs::write(
+        &path,
+        r#"
+        function slowObserver(ctx) {
+            // Busy-loop for ~500ms of real time. setTimeout is not available
+            // inside the Rivers V8 isolate, so we burn CPU instead — this
+            // genuinely blocks the spawn_blocking worker for the duration.
+            const start = Date.now();
+            while (Date.now() - start < 500) {
+                // intentionally empty
+            }
+            return null;
+        }
+        function fastHandler(ctx) {
+            return { ok: true };
+        }
+        "#,
+    )
+    .unwrap();
+
+    let mut config = codecomponent_view("GET", "/api/slow");
+    // Override entrypoint to fastHandler (codecomponent_view uses "onRequest").
+    config.handler = HandlerConfig::Codecomponent {
+        language: "javascript".into(),
+        module: path.to_string_lossy().into(),
+        entrypoint: "fastHandler".into(),
+        resources: vec![],
+    };
+    config.event_handlers = Some(ViewEventHandlers {
+        pre_process: vec![HandlerStageConfig {
+            module: path.to_string_lossy().into(),
+            entrypoint: "slowObserver".into(),
+            key: None,
+            on_failure: None,
+        }],
+        handlers: vec![],
+        post_process: vec![],
+        on_error: vec![],
+    });
+
+    let req = ParsedRequest::new("GET", "/api/slow");
+    let mut ctx = ViewContext::new(
+        req,
+        "trace-g-r4".into(),
+        "test-app".into(),
+        String::new(),
+        String::new(),
+        String::new(),
+    );
+
+    let mgr = ProcessPoolManager::from_config(&HashMap::new());
+    let _storage: std::sync::Arc<dyn StorageEngine> = std::sync::Arc::new(InMemoryStorageEngine::new());
+
+    let start = std::time::Instant::now();
+    let result = execute_rest_view(&mut ctx, &config, Some(&mgr), None).await;
+    let elapsed = start.elapsed();
+    let _ = std::fs::remove_file(&path);
+
+    assert!(result.is_ok(), "request should succeed despite slow observer: {result:?}");
+    assert!(
+        elapsed < std::time::Duration::from_millis(450),
+        "observer cap not enforced: request took {elapsed:?}"
+    );
+}
