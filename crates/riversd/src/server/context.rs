@@ -100,6 +100,9 @@ pub struct AppContext {
     pub uptime: Arc<UptimeTracker>,
     /// ProcessPool for CodeComponent execution.
     pub pool: Arc<ProcessPoolManager>,
+    /// Connection pool manager — one ConnectionPool per database datasource.
+    /// Per data-layer-spec §5; populated at bundle load (Task 5).
+    pub pool_manager: Arc<crate::pool::PoolManager>,
     /// View router built from deployed app configs.
     pub view_router: Arc<tokio::sync::RwLock<Option<crate::view_engine::ViewRouter>>>,
     /// DataView executor for resolving DataView queries.
@@ -160,11 +163,13 @@ impl AppContext {
         let pool = Arc::new(ProcessPoolManager::from_config(
             &config.runtime.process_pools,
         ));
+        let pool_manager = Arc::new(crate::pool::PoolManager::new());
         Self {
             config,
             shutdown,
             uptime: Arc::new(UptimeTracker::new()),
             pool,
+            pool_manager,
             view_router: Arc::new(tokio::sync::RwLock::new(None)),
             dataview_executor: Arc::new(tokio::sync::RwLock::new(None)),
             deployment_manager: Arc::new(DeploymentManager::new()),
