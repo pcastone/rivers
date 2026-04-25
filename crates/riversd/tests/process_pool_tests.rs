@@ -664,3 +664,105 @@ async fn dispatch_async_js_through_pool() {
 
     let _ = std::fs::remove_file(&js_path);
 }
+
+// ── G_R6 (P2-6): promise resolution honours configured task timeout ──
+
+/// A handler that awaits a real promise resolves cleanly under a generous
+/// task timeout. Pre-G_R6 this also worked, but only because the 10_000-tick
+/// upper bound happened to be enough; we lock in the deadline-based path.
+#[tokio::test]
+async fn async_handler_resolves_under_generous_timeout() {
+    let dir = std::env::temp_dir();
+    let js_path = dir.join("g_r6_async_resolves.js");
+    std::fs::write(
+        &js_path,
+        r#"async function handler(ctx) {
+            // Multi-step promise chain — each await schedules a microtask.
+            var a = await Promise.resolve(1);
+            var b = await Promise.resolve(2);
+            var c = await Promise.resolve(3);
+            return { sum: a + b + c };
+        }"#,
+    ).unwrap();
+
+    let mut config = test_config();
+    config.task_timeout_ms = 1000;
+    let pool = ProcessPool::new("g_r6_pool".to_string(), config);
+    let mut pools = HashMap::new();
+    pools.insert("g_r6_pool".to_string(), pool);
+
+    let manager = ProcessPoolManager::from_config(&HashMap::new());
+    // Spin a fresh manager so we can configure timeout.
+    let _ = manager;
+
+    let mut cfg_map = HashMap::new();
+    cfg_map.insert(
+        "default".to_string(),
+        ProcessPoolConfig { task_timeout_ms: 1000, ..Default::default() },
+    );
+    let manager = ProcessPoolManager::from_config(&cfg_map);
+
+    let ctx = test_builder()
+        .entrypoint(Entrypoint {
+            module: js_path.to_string_lossy().into(),
+            function: "handler".into(),
+            language: "javascript".into(),
+        })
+        .args(serde_json::json!({}))
+        .trace_id("g-r6-fast".into())
+        .build()
+        .unwrap();
+
+    let result = manager.dispatch("default", ctx).await.unwrap();
+    assert_eq!(result.value["sum"], 6);
+    let _ = std::fs::remove_file(&js_path);
+}
+
+/// A handler whose promise NEVER settles (no microtask will ever transition
+/// it from Pending → Fulfilled/Rejected) used to spin the pump for 10_000
+/// ticks then return `Timeout(0)`. With G_R6 it returns a `HandlerError`
+/// whose message names the entrypoint and the configured timeout in ms.
+#[tokio::test]
+async fn pending_promise_returns_clear_timeout_error_with_entrypoint() {
+    let dir = std::env::temp_dir();
+    let js_path = dir.join("g_r6_pending.js");
+    std::fs::write(
+        &js_path,
+        r#"function neverResolves(ctx) {
+            // Construct a promise that never settles — no resolver is captured.
+            return new Promise(function(_resolve, _reject) {});
+        }"#,
+    ).unwrap();
+
+    let mut cfg_map = HashMap::new();
+    cfg_map.insert(
+        "default".to_string(),
+        ProcessPoolConfig { task_timeout_ms: 50, ..Default::default() },
+    );
+    let manager = ProcessPoolManager::from_config(&cfg_map);
+
+    let ctx = test_builder()
+        .entrypoint(Entrypoint {
+            module: js_path.to_string_lossy().into(),
+            function: "neverResolves".into(),
+            language: "javascript".into(),
+        })
+        .args(serde_json::json!({}))
+        .trace_id("g-r6-pending".into())
+        .build()
+        .unwrap();
+
+    let err = manager.dispatch("default", ctx).await.unwrap_err();
+    let msg = format!("{err:?}");
+    let _ = std::fs::remove_file(&js_path);
+    // Must mention both the configured timeout and the entrypoint name so
+    // operators can pinpoint the offending handler.
+    assert!(
+        msg.contains("neverResolves"),
+        "error must name the entrypoint: {msg}"
+    );
+    assert!(
+        msg.contains("50ms") || msg.contains("timeout: 50"),
+        "error must include timeout value: {msg}"
+    );
+}

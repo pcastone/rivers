@@ -478,19 +478,30 @@ fn is_ident_byte(b: u8) -> bool {
 /// If the return value is a Promise, resolve it by pumping the microtask queue.
 ///
 /// Async handler functions return a Promise. This resolves the promise
-/// synchronously by repeatedly pumping the V8 microtask queue until
-/// the promise settles or a maximum iteration count is reached.
+/// synchronously by repeatedly pumping the V8 microtask queue until the
+/// promise settles or the configured task deadline elapses.
+///
+/// G_R6 (P2-6): the loop is deadline-driven, not tick-bounded — a fast
+/// promise that resolves in 1 ms exits immediately, while a hung promise
+/// is bounded by `timeout_ms`. On timeout the error message names the
+/// handler entrypoint and the elapsed budget so operators can pinpoint
+/// the offending handler without grepping logs for context.
 fn resolve_promise_if_needed(
     scope: &mut v8::HandleScope<'_>,
     value: v8::Local<v8::Value>,
+    timeout_ms: u64,
+    deadline: Instant,
+    function_name: &str,
 ) -> Result<serde_json::Value, TaskError> {
     if value.is_promise() {
         let promise = v8::Local::<v8::Promise>::try_from(value)
             .map_err(|_| TaskError::Internal("promise cast failed".into()))?;
 
-        // Pump microtasks until the promise settles, with a bound to prevent infinite spinning
-        let max_ticks = 10_000;
-        for _ in 0..max_ticks {
+        // Deadline-driven pump. Microtask checkpoints are cheap; we spin
+        // through them until either the promise settles or the deadline
+        // passes. Yielding the OS thread between checks avoids burning a
+        // full core while waiting for callbacks scheduled on other tasks.
+        loop {
             scope.perform_microtask_checkpoint();
             match promise.state() {
                 v8::PromiseState::Fulfilled => {
@@ -501,13 +512,22 @@ fn resolve_promise_if_needed(
                     let rejection = promise.result(scope);
                     let msg = rejection.to_rust_string_lossy(scope);
                     return Err(TaskError::HandlerError(format!(
-                        "async handler rejected: {msg}"
+                        "async handler '{function_name}' rejected: {msg}"
                     )));
                 }
-                v8::PromiseState::Pending => continue,
+                v8::PromiseState::Pending => {
+                    if Instant::now() >= deadline {
+                        return Err(TaskError::HandlerError(format!(
+                            "async handler '{function_name}' promise still pending after timeout: {timeout_ms}ms"
+                        )));
+                    }
+                    // Yield the OS thread so any callbacks driven by
+                    // other tokio tasks (e.g. ctx.fetch awaiters) can
+                    // make progress before we re-check.
+                    std::thread::yield_now();
+                }
             }
         }
-        return Err(TaskError::Timeout(0));
     }
     // Not a promise -- convert directly
     v8_to_json(scope, value)
@@ -632,8 +652,17 @@ pub(crate) async fn execute_js_task(
                 })?;
             }
 
-            // Call the entrypoint function (returns JSON via TryCatch)
-            let return_value = call_entrypoint(&mut scope, &ctx.entrypoint.function);
+            // Call the entrypoint function (returns JSON via TryCatch).
+            // G_R6: thread the configured deadline + timeout into the call so
+            // promise-pump (resolve_promise_if_needed) bounds itself by the
+            // task budget rather than a fixed tick count.
+            let deadline = start + std::time::Duration::from_millis(timeout_ms);
+            let return_value = call_entrypoint(
+                &mut scope,
+                &ctx.entrypoint.function,
+                timeout_ms,
+                deadline,
+            );
 
             // Handle timeout detected during entrypoint call
             let return_value = match return_value {
@@ -770,6 +799,8 @@ pub(crate) async fn execute_js_task(
 fn call_entrypoint(
     scope: &mut v8::ContextScope<'_, v8::HandleScope<'_>>,
     function_name: &str,
+    timeout_ms: u64,
+    deadline: Instant,
 ) -> Result<serde_json::Value, TaskError> {
     // Spec §4: module-mode entrypoint lookup on the module namespace.
     // Classic-script mode falls through to the existing global-scope path.
@@ -815,7 +846,13 @@ fn call_entrypoint(
         Some(result) => {
             // T4: If the return value is a Promise (async function), resolve it
             if result.is_promise() {
-                return resolve_promise_if_needed(tc_scope, result);
+                return resolve_promise_if_needed(
+                    tc_scope,
+                    result,
+                    timeout_ms,
+                    deadline,
+                    function_name,
+                );
             }
             // Convert to JSON inside the TryCatch scope
             if result.is_undefined() || result.is_null() {
