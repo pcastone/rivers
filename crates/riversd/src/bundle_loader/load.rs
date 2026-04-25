@@ -757,6 +757,9 @@ pub async fn load_and_wire_bundle(
     let ds_params = Arc::new(ds_params);
     let mut executor = DataViewExecutor::new(registry, factory.clone(), ds_params.clone(), cache);
     executor.set_event_bus(ctx.event_bus.clone());
+    executor.set_pool_manager(
+        Arc::clone(&ctx.pool_manager) as rivers_runtime::pool_handle::SharedPoolHandle,
+    );
     let executor = Arc::new(executor);
     *ctx.dataview_executor.write().await = Some(executor.clone());
     ctx.driver_factory = Some(factory.clone());

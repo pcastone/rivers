@@ -566,6 +566,9 @@ pub struct DataViewExecutor {
     cache: Arc<dyn DataViewCache>,
     /// Optional EventBus for cache invalidation events.
     event_bus: Option<Arc<rivers_core::EventBus>>,
+    /// Optional pool manager — when set, execute() acquires from the pool
+    /// instead of calling factory.connect() directly. Per code-review P0-3.
+    pool_manager: Option<crate::pool_handle::SharedPoolHandle>,
 }
 
 impl DataViewExecutor {
@@ -582,6 +585,7 @@ impl DataViewExecutor {
             datasource_params,
             cache,
             event_bus: None,
+            pool_manager: None,
         }
     }
 
@@ -607,6 +611,13 @@ impl DataViewExecutor {
     /// Set the EventBus for cache invalidation events.
     pub fn set_event_bus(&mut self, event_bus: Arc<rivers_core::EventBus>) {
         self.event_bus = Some(event_bus);
+    }
+
+    /// Inject a pool manager handle so execute() acquires from the pool.
+    /// When unset (the default), execute() falls back to direct factory.connect.
+    /// Per docs/code_review.md P0-3.
+    pub fn set_pool_manager(&mut self, pool: crate::pool_handle::SharedPoolHandle) {
+        self.pool_manager = Some(pool);
     }
 
     /// Execute a named DataView with the given parameters.
@@ -717,27 +728,62 @@ impl DataViewExecutor {
                 conn.execute(&query).await
             }
         } else {
-            // Normal path — connect from factory
-            match self.factory.connect(driver_name, ds_params).await {
-                Ok(mut conn) => {
-                    if config.prepared && conn.has_prepared(&query.statement) {
-                        conn.execute_prepared(&query).await
-                    } else if config.prepared {
-                        conn.prepare(&query.statement).await
-                            .map_err(|e| DataViewError::Driver(format!("prepare: {e}")))?;
-                        conn.execute_prepared(&query).await
-                    } else {
-                        conn.execute(&query).await
+            // Normal path — try the pool first (P0-3). The pool returns None for
+            // broker datasources (no DatabaseDriver registered) — fall through to
+            // the existing factory.connect → UnknownDriver → execute_broker_produce
+            // path, which is the only way broker produce currently dispatches.
+            let pool_acquire = match &self.pool_manager {
+                Some(pm) => pm
+                    .acquire(&config.datasource)
+                    .await
+                    .map_err(|e| DataViewError::Pool(format!("pool acquire failed: {e}")))?,
+                None => None,
+            };
+
+            if let Some(pooled) = pool_acquire {
+                // Connection came from the pool. Always release back, even on
+                // error — the pool decides whether to recycle or discard via
+                // its own health policy. Note: we destructure here so we can
+                // use `&mut pooled.conn` while still owning `pooled.release_token`
+                // by value.
+                let crate::pool_handle::PooledConnection { mut conn, release_token } = pooled;
+                let result = if config.prepared && conn.has_prepared(&query.statement) {
+                    conn.execute_prepared(&query).await
+                } else if config.prepared {
+                    match conn.prepare(&query.statement).await {
+                        Ok(()) => conn.execute_prepared(&query).await,
+                        Err(e) => Err(e),
                     }
+                } else {
+                    conn.execute(&query).await
+                };
+                // Release after the operation completes (success or failure).
+                release_token.release(conn);
+                result
+            } else {
+                // No pool for this datasource — preserve the existing broker
+                // fallthrough semantics exactly.
+                match self.factory.connect(driver_name, ds_params).await {
+                    Ok(mut conn) => {
+                        if config.prepared && conn.has_prepared(&query.statement) {
+                            conn.execute_prepared(&query).await
+                        } else if config.prepared {
+                            conn.prepare(&query.statement).await
+                                .map_err(|e| DataViewError::Driver(format!("prepare: {e}")))?;
+                            conn.execute_prepared(&query).await
+                        } else {
+                            conn.execute(&query).await
+                        }
+                    }
+                    Err(DriverError::UnknownDriver(_)) => {
+                        // Broker produce path — transactions don't apply to message brokers
+                        let invalidates = config.invalidates.clone();
+                        let response = self.execute_broker_produce(driver_name, ds_params, &query, start, trace_id).await?;
+                        self.run_cache_invalidation(name, &invalidates, trace_id).await;
+                        return Ok(response);
+                    }
+                    Err(e) => return Err(DataViewError::Pool(format!("connection failed: {e}"))),
                 }
-                Err(DriverError::UnknownDriver(_)) => {
-                    // Broker produce path — transactions don't apply to message brokers
-                    let invalidates = config.invalidates.clone();
-                    let response = self.execute_broker_produce(driver_name, ds_params, &query, start, trace_id).await?;
-                    self.run_cache_invalidation(name, &invalidates, trace_id).await;
-                    return Ok(response);
-                }
-                Err(e) => return Err(DataViewError::Pool(format!("connection failed: {e}"))),
             }
         };
 
