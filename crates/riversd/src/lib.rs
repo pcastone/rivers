@@ -27,6 +27,7 @@ pub mod message_consumer;
 pub mod middleware;
 pub mod polling;
 pub mod pool;
+mod pool_handle_impl;
 pub mod process_pool;
 pub mod rate_limit;
 pub mod runtime;

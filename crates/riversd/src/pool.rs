@@ -823,6 +823,42 @@ impl PoolManager {
         pools.push(pool);
     }
 
+    /// Get or create a pool for a datasource.
+    ///
+    /// If a pool with `datasource_id` already exists, returns the existing
+    /// pool unchanged (config/driver args are ignored). Otherwise creates,
+    /// registers, and returns a fresh pool. Idempotent — safe to call on
+    /// every bundle load / hot reload.
+    pub async fn ensure_pool(
+        &self,
+        datasource_id: &str,
+        config: PoolConfig,
+        driver: Arc<dyn DatabaseDriver>,
+        params: ConnectionParams,
+        event_bus: Arc<EventBus>,
+    ) -> Arc<ConnectionPool> {
+        {
+            let pools = self.pools.read().await;
+            if let Some(p) = pools.iter().find(|p| p.datasource_id() == datasource_id) {
+                return Arc::clone(p);
+            }
+        }
+        let mut pools = self.pools.write().await;
+        // Re-check after acquiring write lock to avoid race.
+        if let Some(p) = pools.iter().find(|p| p.datasource_id() == datasource_id) {
+            return Arc::clone(p);
+        }
+        let pool = Arc::new(ConnectionPool::new(
+            datasource_id.to_string(),
+            config,
+            driver,
+            params,
+            event_bus,
+        ));
+        pools.push(Arc::clone(&pool));
+        pool
+    }
+
     /// Get a pool by datasource ID.
     pub async fn get_pool(&self, datasource_id: &str) -> Option<Arc<ConnectionPool>> {
         let pools = self.pools.read().await;

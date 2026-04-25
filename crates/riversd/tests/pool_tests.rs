@@ -525,3 +525,22 @@ async fn pool_guard_preserves_created_at_across_drop() {
         "max_lifetime should have evicted the dropped guard's connection"
     );
 }
+
+// ── PoolManager::ensure_pool Idempotency (CR-P0-3) ────────────────
+
+#[tokio::test]
+async fn pool_manager_ensure_pool_is_idempotent() {
+    let event_bus = Arc::new(EventBus::new());
+    let driver: Arc<dyn DatabaseDriver> = Arc::new(MockDriver::new());
+    let manager = PoolManager::new();
+
+    let p1 = manager
+        .ensure_pool("ds-a", PoolConfig::default(), driver.clone(), test_params(), event_bus.clone())
+        .await;
+    let p2 = manager
+        .ensure_pool("ds-a", PoolConfig::default(), driver.clone(), test_params(), event_bus.clone())
+        .await;
+
+    assert!(Arc::ptr_eq(&p1, &p2), "ensure_pool must return the existing pool on second call");
+    assert_eq!(manager.snapshots().await.len(), 1);
+}
