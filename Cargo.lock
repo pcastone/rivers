@@ -5525,6 +5525,7 @@ dependencies = [
  "chrono",
  "hex",
  "libloading",
+ "metrics",
  "rcgen",
  "rivers-core-config",
  "rivers-driver-sdk",

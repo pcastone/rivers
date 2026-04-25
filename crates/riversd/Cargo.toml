@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = ["static-engines", "static-plugins", "static-builtin-drivers", "metrics"]
-metrics = ["dep:metrics-exporter-prometheus"]
+metrics = ["dep:metrics-exporter-prometheus", "rivers-runtime/metrics"]
 static-engines = ["v8", "wasmtime", "bcrypt", "hmac", "base64"]
 static-builtin-drivers = ["rivers-runtime/drivers"]
 static-plugins = [

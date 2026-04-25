@@ -64,7 +64,7 @@ async fn publish_to_subscribed_handler() {
     let bus = EventBus::new();
     let count = Arc::new(AtomicU32::new(0));
 
-    bus.subscribe(
+    bus.subscribe_static(
         events::REQUEST_COMPLETED,
         Arc::new(CountingHandler { name: "counter", count: count.clone() }),
         HandlerPriority::Handle,
@@ -90,12 +90,12 @@ async fn multiple_subscribers_all_invoked() {
     let c1 = Arc::new(AtomicU32::new(0));
     let c2 = Arc::new(AtomicU32::new(0));
 
-    bus.subscribe(
+    bus.subscribe_static(
         events::DATAVIEW_EXECUTED,
         Arc::new(CountingHandler { name: "h1", count: c1.clone() }),
         HandlerPriority::Handle,
     ).await;
-    bus.subscribe(
+    bus.subscribe_static(
         events::DATAVIEW_EXECUTED,
         Arc::new(CountingHandler { name: "h2", count: c2.clone() }),
         HandlerPriority::Handle,
@@ -112,12 +112,12 @@ async fn priority_ordering_expect_before_handle() {
     let order = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
     // Subscribe Handle first, then Expect — Expect should still run first
-    bus.subscribe(
+    bus.subscribe_static(
         "test.order",
         Arc::new(OrderRecordingHandler { name: "handle", order: order.clone() }),
         HandlerPriority::Handle,
     ).await;
-    bus.subscribe(
+    bus.subscribe_static(
         "test.order",
         Arc::new(OrderRecordingHandler { name: "expect", order: order.clone() }),
         HandlerPriority::Expect,
@@ -134,7 +134,7 @@ async fn observe_handlers_fire_and_forget() {
     let bus = EventBus::new();
     let count = Arc::new(AtomicU32::new(0));
 
-    bus.subscribe(
+    bus.subscribe_static(
         "test.observe",
         Arc::new(CountingHandler { name: "observer", count: count.clone() }),
         HandlerPriority::Observe,
@@ -151,7 +151,7 @@ async fn observe_handlers_fire_and_forget() {
 async fn failing_expect_handler_returns_error() {
     let bus = EventBus::new();
 
-    bus.subscribe(
+    bus.subscribe_static(
         "test.fail",
         Arc::new(FailingHandler),
         HandlerPriority::Expect,
@@ -167,7 +167,7 @@ async fn failing_expect_handler_returns_error() {
 async fn failing_observe_handler_does_not_return_error() {
     let bus = EventBus::new();
 
-    bus.subscribe(
+    bus.subscribe_static(
         "test.observe.fail",
         Arc::new(FailingHandler),
         HandlerPriority::Observe,
@@ -184,7 +184,7 @@ async fn subscriber_count() {
     assert_eq!(bus.subscriber_count("test.count").await, 0);
 
     let count = Arc::new(AtomicU32::new(0));
-    bus.subscribe(
+    bus.subscribe_static(
         "test.count",
         Arc::new(CountingHandler { name: "h", count }),
         HandlerPriority::Handle,
@@ -198,17 +198,17 @@ async fn emit_tier_awaited_between_handle_and_observe() {
     let order = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
     // Subscribe in reverse priority order to confirm sorting works
-    bus.subscribe(
+    bus.subscribe_static(
         "test.emit",
         Arc::new(OrderRecordingHandler { name: "observe", order: order.clone() }),
         HandlerPriority::Observe,
     ).await;
-    bus.subscribe(
+    bus.subscribe_static(
         "test.emit",
         Arc::new(OrderRecordingHandler { name: "emit", order: order.clone() }),
         HandlerPriority::Emit,
     ).await;
-    bus.subscribe(
+    bus.subscribe_static(
         "test.emit",
         Arc::new(OrderRecordingHandler { name: "handle", order: order.clone() }),
         HandlerPriority::Handle,
@@ -241,13 +241,13 @@ async fn wildcard_expect_runs_before_exact_emit() {
     let order = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
     // Exact subscriber at Emit (priority 2)
-    bus.subscribe(
+    bus.subscribe_static(
         "test.global.priority",
         Arc::new(OrderRecordingHandler { name: "exact-emit", order: order.clone() }),
         HandlerPriority::Emit,
     ).await;
     // Wildcard subscriber at Expect (priority 0) — must run first
-    bus.subscribe(
+    bus.subscribe_static(
         "*",
         Arc::new(OrderRecordingHandler { name: "wildcard-expect", order: order.clone() }),
         HandlerPriority::Expect,
@@ -267,12 +267,12 @@ async fn wildcard_observe_runs_after_exact_handle() {
     let bus = EventBus::new();
     let order = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
-    bus.subscribe(
+    bus.subscribe_static(
         "*",
         Arc::new(OrderRecordingHandler { name: "wildcard-observe", order: order.clone() }),
         HandlerPriority::Observe,
     ).await;
-    bus.subscribe(
+    bus.subscribe_static(
         "test.observe.after.handle",
         Arc::new(OrderRecordingHandler { name: "exact-handle", order: order.clone() }),
         HandlerPriority::Handle,
@@ -301,22 +301,22 @@ async fn same_priority_exact_before_wildcard_then_insertion_order() {
 
     // Insert in interleaved order to prove insertion order is preserved
     // within each (exact|wildcard) group at the same priority.
-    bus.subscribe(
+    bus.subscribe_static(
         "test.tiebreak",
         Arc::new(OrderRecordingHandler { name: "exact-1", order: order.clone() }),
         HandlerPriority::Handle,
     ).await;
-    bus.subscribe(
+    bus.subscribe_static(
         "*",
         Arc::new(OrderRecordingHandler { name: "wild-1", order: order.clone() }),
         HandlerPriority::Handle,
     ).await;
-    bus.subscribe(
+    bus.subscribe_static(
         "test.tiebreak",
         Arc::new(OrderRecordingHandler { name: "exact-2", order: order.clone() }),
         HandlerPriority::Handle,
     ).await;
-    bus.subscribe(
+    bus.subscribe_static(
         "*",
         Arc::new(OrderRecordingHandler { name: "wild-2", order: order.clone() }),
         HandlerPriority::Handle,
@@ -348,4 +348,85 @@ fn event_log_level_mapping() {
     assert_eq!(event_log_level(events::REQUEST_COMPLETED), LogLevel::Info);
     assert_eq!(event_log_level(events::DATAVIEW_EXECUTED), LogLevel::Info);
     assert_eq!(event_log_level(events::WEBSOCKET_CONNECTED), LogLevel::Info);
+}
+
+// ── G_R2: SubscriptionHandle lifecycle ─────────────────────────────
+
+#[tokio::test]
+async fn dropping_subscription_handle_removes_subscription() {
+    let bus = EventBus::new();
+    let count = Arc::new(AtomicU32::new(0));
+
+    {
+        let handle = bus
+            .subscribe(
+                "test.handle.drop",
+                Arc::new(CountingHandler { name: "h", count: count.clone() }),
+                HandlerPriority::Handle,
+            )
+            .await;
+        bus.publish(&test_event("test.handle.drop")).await;
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert_eq!(bus.subscriber_count("test.handle.drop").await, 1);
+        drop(handle);
+        // Drop schedules removal — give the runtime a tick.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(bus.subscriber_count("test.handle.drop").await, 0);
+    bus.publish(&test_event("test.handle.drop")).await;
+    assert_eq!(count.load(Ordering::SeqCst), 1, "handler must not fire after drop");
+}
+
+#[tokio::test]
+async fn forget_keeps_subscription_alive() {
+    let bus = EventBus::new();
+    let count = Arc::new(AtomicU32::new(0));
+
+    let handle = bus
+        .subscribe(
+            "test.forget",
+            Arc::new(CountingHandler { name: "h", count: count.clone() }),
+            HandlerPriority::Handle,
+        )
+        .await;
+    handle.forget();
+
+    bus.publish(&test_event("test.forget")).await;
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    assert_eq!(bus.subscriber_count("test.forget").await, 1);
+}
+
+#[tokio::test]
+async fn subscribe_static_never_unregisters() {
+    let bus = EventBus::new();
+    let count = Arc::new(AtomicU32::new(0));
+
+    bus.subscribe_static(
+        "test.static",
+        Arc::new(CountingHandler { name: "h", count: count.clone() }),
+        HandlerPriority::Handle,
+    )
+    .await;
+
+    assert_eq!(bus.subscriber_count("test.static").await, 1);
+    bus.publish(&test_event("test.static")).await;
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn broadcast_forwarder_warns_when_exceeding_max_subscribers() {
+    let bus = EventBus::with_max_broadcast_subscribers(2);
+    let sender = bus.subscribe_broadcast("test.broadcast.cap", 16).await;
+
+    // Attach 3 receivers — exceeds the cap of 2.
+    let _r1 = sender.subscribe();
+    let _r2 = sender.subscribe();
+    let _r3 = sender.subscribe();
+
+    // Publish should not fail; warning is logged.
+    let errors = bus.publish(&test_event("test.broadcast.cap")).await;
+    assert!(errors.is_empty());
+    assert_eq!(sender.receiver_count(), 3);
 }

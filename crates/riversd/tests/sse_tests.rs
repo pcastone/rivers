@@ -220,7 +220,7 @@ async fn trigger_event_flow_eventbus_to_sse_channel() {
 
     // Subscribe handler to EventBus
     let handler = Arc::new(TestTriggerHandler { channel: channel.clone() });
-    event_bus.subscribe("OrderCreated", handler, HandlerPriority::Handle).await;
+    let _sub = event_bus.subscribe("OrderCreated", handler, HandlerPriority::Handle).await;
 
     // Subscribe a client to the SSE channel
     let mut rx = channel.subscribe().unwrap();

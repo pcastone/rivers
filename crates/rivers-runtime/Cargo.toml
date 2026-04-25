@@ -18,6 +18,7 @@ storage-backends = ["rivers-core/storage-backends"]
 lockbox = ["rivers-core/lockbox"]
 tls = ["rivers-core/tls"]
 keystore = ["rivers-keystore-engine"]
+metrics = ["rivers-core/metrics"]
 full = ["drivers", "storage-backends", "lockbox", "tls", "keystore"]
 
 [dependencies]

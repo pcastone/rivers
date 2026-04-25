@@ -195,8 +195,9 @@ pub async fn subscribe_consumer(
         sender: tx,
     });
 
+    // Permanent broker bridge subscription wired at bundle load (G_R2.1).
     event_bus
-        .subscribe(
+        .subscribe_static(
             config.topic.clone(),
             handler,
             HandlerPriority::Handle,
@@ -283,8 +284,9 @@ pub async fn subscribe_message_consumers(
             config: consumer.clone(),
             pool: pool.clone(),
         };
+        // Permanent MessageConsumer wiring (G_R2.1).
         event_bus
-            .subscribe(
+            .subscribe_static(
                 consumer.topic.clone(),
                 Arc::new(handler),
                 HandlerPriority::Handle,

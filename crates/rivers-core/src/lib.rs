@@ -46,7 +46,10 @@ pub use rivers_core_config::{
 pub use driver_factory::{DriverFactory, DriverRegistrar, EventNotifier};
 #[cfg(feature = "drivers")]
 pub use drivers::register_builtin_drivers;
-pub use eventbus::{EventBus, EventHandler, GossipConfig, GossipMessage, HandlerPriority};
+pub use eventbus::{
+    EventBus, EventHandler, GossipConfig, GossipMessage, HandlerPriority, SubscriptionHandle,
+    DEFAULT_MAX_BROADCAST_SUBSCRIBERS,
+};
 #[cfg(feature = "lockbox")]
 pub use lockbox::LockBoxResolver;
 pub use logging::LogHandler;

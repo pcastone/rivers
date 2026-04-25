@@ -186,11 +186,12 @@ pub(crate) async fn wire_streaming_and_events(
                             pool: ctx.pool.clone(),
                             app_id: app_entry_point.clone(),
                         });
+                        // Permanent: lives for the bundle's lifetime — subscribe_static (G_R2.1).
                         ctx.event_bus
-                            .subscribe(events::DATASOURCE_CIRCUIT_OPENED.to_string(), handler.clone(), HandlerPriority::Handle)
+                            .subscribe_static(events::DATASOURCE_CIRCUIT_OPENED.to_string(), handler.clone(), HandlerPriority::Handle)
                             .await;
                         ctx.event_bus
-                            .subscribe(events::DATASOURCE_HEALTH_CHECK_FAILED.to_string(), handler, HandlerPriority::Handle)
+                            .subscribe_static(events::DATASOURCE_HEALTH_CHECK_FAILED.to_string(), handler, HandlerPriority::Handle)
                             .await;
                         ds_handler_count += 1;
                         tracing::info!(
@@ -210,8 +211,9 @@ pub(crate) async fn wire_streaming_and_events(
                             pool: ctx.pool.clone(),
                             app_id: app_entry_point.clone(),
                         });
+                        // Permanent: lives for the bundle's lifetime — subscribe_static (G_R2.1).
                         ctx.event_bus
-                            .subscribe(events::CONNECTION_POOL_EXHAUSTED.to_string(), handler, HandlerPriority::Handle)
+                            .subscribe_static(events::CONNECTION_POOL_EXHAUSTED.to_string(), handler, HandlerPriority::Handle)
                             .await;
                         ds_handler_count += 1;
                         tracing::info!(
@@ -262,7 +264,8 @@ pub(crate) async fn wire_streaming_and_events(
                             channel: ch,
                             view_id: qualified_id.clone(),
                         });
-                        ctx.event_bus.subscribe(
+                        // Permanent SSE trigger subscription (G_R2.1).
+                        ctx.event_bus.subscribe_static(
                             event_name.clone(),
                             handler,
                             rivers_runtime::rivers_core::eventbus::HandlerPriority::Handle,
