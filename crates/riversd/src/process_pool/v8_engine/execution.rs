@@ -373,10 +373,106 @@ fn resolve_module_callback<'s>(
 
 /// Detect if source uses ES module syntax.
 ///
-/// Checks for `export` or `import` keywords at statement boundaries.
+/// G_R5: the previous implementation used `source.contains("export ")` /
+/// `source.contains("import ")` which incorrectly tripped on comments and
+/// string literals — e.g. `// export the thing` or `const s = "import foo"`
+/// would route a classic-script handler down the module path and fail with
+/// a confusing compile error. The fix walks the source and skips line
+/// comments, block comments, and single/double/template string literals
+/// before checking for `import`/`export` keywords at token boundaries
+/// (preceded by start-of-input or whitespace).
+///
+/// This is still a heuristic — full ES module classification would require
+/// invoking the SWC parser, which is the source of truth for production
+/// compilation (`compile_typescript_with_imports` already returns a list of
+/// imports). At the V8 entry-point we operate on the post-compile JS where
+/// the cache no longer remembers the parser verdict, so a comment-aware
+/// scanner is the smallest change that closes the regression.
 pub(crate) fn is_module_syntax(source: &str) -> bool {
-    source.contains("export ") || source.contains("export\n")
-        || source.contains("import ") || source.contains("import\n")
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    let n = bytes.len();
+    // Track whether the previous emitted character was whitespace or
+    // start-of-input — a keyword only counts at a statement boundary.
+    let mut prev_is_boundary = true;
+
+    while i < n {
+        let b = bytes[i];
+
+        // Line comment: //...\n
+        if b == b'/' && i + 1 < n && bytes[i + 1] == b'/' {
+            i += 2;
+            while i < n && bytes[i] != b'\n' {
+                i += 1;
+            }
+            // The newline (or EOF) after a comment is a boundary.
+            prev_is_boundary = true;
+            continue;
+        }
+
+        // Block comment: /* ... */
+        if b == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < n && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            // Skip past the closing */ if found.
+            if i + 1 < n {
+                i += 2;
+            } else {
+                i = n;
+            }
+            prev_is_boundary = true;
+            continue;
+        }
+
+        // String literals — skip until the matching unescaped quote.
+        if b == b'"' || b == b'\'' || b == b'`' {
+            let quote = b;
+            i += 1;
+            while i < n {
+                let c = bytes[i];
+                if c == b'\\' && i + 1 < n {
+                    i += 2;
+                    continue;
+                }
+                if c == quote {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            // After a string literal, an `export` or `import` would still
+            // need its own boundary; conservatively reset to non-boundary.
+            prev_is_boundary = false;
+            continue;
+        }
+
+        // Keyword check at token boundary.
+        if prev_is_boundary {
+            // `export` followed by whitespace or non-identifier byte.
+            if i + 6 <= n && &bytes[i..i + 6] == b"export" {
+                if i + 6 == n || !is_ident_byte(bytes[i + 6]) {
+                    return true;
+                }
+            }
+            if i + 6 <= n && &bytes[i..i + 6] == b"import" {
+                if i + 6 == n || !is_ident_byte(bytes[i + 6]) {
+                    return true;
+                }
+            }
+        }
+
+        prev_is_boundary = b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' || b == b';' || b == b'{' || b == b'}';
+        i += 1;
+    }
+    false
+}
+
+/// True for bytes that may form part of a JS identifier (post-keyword check).
+#[inline]
+fn is_ident_byte(b: u8) -> bool {
+    b == b'_' || b == b'$' || b.is_ascii_alphanumeric()
 }
 
 /// If the return value is a Promise, resolve it by pumping the microtask queue.
