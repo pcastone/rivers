@@ -222,7 +222,28 @@ fn resolve_module_callback<'s>(
     //     in {referrer}
     //     resolved to: {abs}
     //     boundary: {app}/libraries/
-    let cache = super::super::module_cache::get_module_cache()?;
+    //
+    // B3 / P1-8: when no cache is installed at all (in-process test before
+    // any bundle load) and production-strict is armed, surface that as a
+    // clear thrown exception instead of returning None silently — V8 treats
+    // a None return with no thrown exception as a generic resolution failure
+    // that's hard to debug. When NOT armed (in-process tests with ad-hoc
+    // dispatch), preserve the historic silent-None behaviour.
+    let cache = match super::super::module_cache::get_module_cache() {
+        Some(c) => c,
+        None => {
+            if super::super::module_cache::is_production_strict_armed() {
+                return throw_resolve_error(
+                    scope,
+                    format!(
+                        "MODULE_NOT_REGISTERED: cannot resolve \"{spec}\" — no module cache installed\n  in {}\n  hint: nested ES-module imports require a loaded bundle (see rivers-javascript-typescript-spec §3.4)",
+                        referrer_path.display()
+                    ),
+                );
+            }
+            return None;
+        }
+    };
     let Some(entry) = cache.get(&abs) else {
         let boundary = boundary_from_referrer(&referrer_path);
         let boundary_line = boundary
@@ -668,15 +689,23 @@ fn call_entrypoint(
 /// bundle load time into the process-global `BundleModuleCache`. This
 /// function performs a cache lookup — not a live compilation.
 ///
-/// Two fallback paths remain:
+/// Cache-miss policy (B3 / P1-8):
+/// - **Production** (default): if a cache is installed and the entry-point
+///   module is not in it, return a `MODULE_NOT_REGISTERED` error and refuse
+///   to fall through to disk. The validated cache IS the security boundary
+///   — modules outside it never execute.
+/// - **Development** (opt-in via `RIVERS_DEV_MODULE_CACHE=permissive`):
+///   cache miss falls through to disk read + live compile with a warn log,
+///   so operators can iterate on `libraries/` files without a bundle reload.
+///
+/// Two paths bypass the cache entirely (always allowed):
 ///
 /// 1. `ctx.args["_source"]` — tests and dynamic-dispatch callers may inject
 ///    source inline without a disk file. TypeScript is compiled on the fly
 ///    via `compile_typescript()`; JS is used verbatim.
-/// 2. Cache miss on `ctx.entrypoint.module` — read from disk and compile.
-///    This is a defence-in-depth path for modules that exist on disk but
-///    weren't walked (e.g., legacy handlers outside `libraries/`). Logged
-///    so we can detect and fix such cases.
+/// 2. No cache installed (pre-bundle-load, in-process tests) — disk read
+///    with a debug log. Once a bundle loads and installs the cache, every
+///    dispatch must hit it (production) or get a warn (development).
 fn resolve_module_source(ctx: &TaskContext) -> Result<String, TaskError> {
     if let Some(source) = ctx.args.get("_source").and_then(|v| v.as_str()) {
         if ctx.entrypoint.language == "typescript" {
@@ -695,13 +724,35 @@ fn resolve_module_source(ctx: &TaskContext) -> Result<String, TaskError> {
         if let Some(entry) = cache.get(&abs) {
             return Ok(entry.compiled_js.clone());
         }
+
+        // B3 / P1-8: production-strict only fires once the bundle loader has
+        // armed it. In-process tests that install ad-hoc caches directly never
+        // trip this branch and keep their `js_file()`-style disk fallback.
+        if super::super::module_cache::is_production_strict_armed() {
+            let mode = super::super::module_cache::module_cache_mode();
+            if mode == super::super::module_cache::ModuleCacheMode::Production {
+                return Err(TaskError::HandlerError(
+                    super::super::module_cache::module_not_registered_message(path, &abs),
+                ));
+            }
+            tracing::warn!(
+                module = %path,
+                "RIVERS_DEV_MODULE_CACHE=permissive: module cache miss, falling back to disk + live compile (DO NOT USE IN PRODUCTION)"
+            );
+        } else {
+            tracing::debug!(
+                module = %path,
+                "module cache miss (production-strict not armed) — reading source from disk"
+            );
+        }
+    } else {
+        // Pre-bundle-load (e.g., in-process unit tests). No cache to consult.
+        tracing::debug!(
+            module = %path,
+            "module cache not installed — reading source from disk"
+        );
     }
 
-    // Fallback — on-disk read + live compile. Should be rare after Phase 2.
-    tracing::debug!(
-        module = %path,
-        "module cache miss — falling back to disk + live compile"
-    );
     let source = std::fs::read_to_string(path)
         .map_err(|e| TaskError::HandlerError(format!("cannot read module '{path}': {e}")))?;
 

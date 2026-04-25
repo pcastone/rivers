@@ -123,6 +123,11 @@ pub async fn load_and_wire_bundle(
         "bundle: module cache populated"
     );
     crate::process_pool::module_cache::install_module_cache(module_cache);
+    // B3 / P1-8: arm production-strict cache enforcement now that the
+    // validated bundle's modules are installed. Subsequent V8 dispatches that
+    // miss the cache will hard-fail unless the operator opted into dev-mode
+    // via `RIVERS_DEV_MODULE_CACHE=permissive`.
+    crate::process_pool::module_cache::arm_production_strict();
 
     let mut registry = rivers_runtime::DataViewRegistry::new();
     let mut ds_params: HashMap<String, rivers_runtime::rivers_driver_sdk::ConnectionParams> = HashMap::new();

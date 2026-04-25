@@ -31,6 +31,91 @@ use super::v8_config::compile_typescript_with_imports;
 /// on hot reload.
 static MODULE_CACHE: OnceCell<RwLock<Arc<BundleModuleCache>>> = OnceCell::new();
 
+/// Process-global "production-strict armed" flag. Set exactly once by the
+/// bundle loader (`bundle_loader::load`) via `arm_production_strict()` after
+/// the validated cache is installed. Once armed, the V8 entry-point loader
+/// enforces `ModuleCacheMode::Production` semantics.
+///
+/// Why this exists separately from `MODULE_CACHE`: in-process unit/integration
+/// tests install ad-hoc caches directly via `install_module_cache` to test the
+/// install/get round-trip without going through bundle load. Those tests must
+/// NOT trip production-strict and break unrelated tests that dispatch
+/// `js_file()`-style ad-hoc handlers from `/tmp`. The bundle loader is the
+/// only call site that arms; tests don't.
+static MODULE_CACHE_ARMED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Mark production-strict mode as armed. Called from the bundle loader once
+/// the validated module cache has been installed. Idempotent.
+pub fn arm_production_strict() {
+    MODULE_CACHE_ARMED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether the production-strict module-cache enforcement is armed.
+pub fn is_production_strict_armed() -> bool {
+    MODULE_CACHE_ARMED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Module-cache resolution policy.
+///
+/// `Production` (default) — a cache miss is a hard error. Modules MUST be
+/// pre-compiled at bundle-load time and present in the validated cache before
+/// the V8 resolver will load them. This is the security/correctness boundary:
+/// a module not in the cache never executes.
+///
+/// `Development` — a cache miss falls through to disk read + live SWC compile,
+/// with a warn log so operators can spot bypasses in dev. Useful for hot edit
+/// loops without re-running bundle load. Opt in via the env var below.
+///
+/// Mirrors B2's `RIVERS_DEV_NO_STORAGE` pattern (P1-5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleCacheMode {
+    /// Cache miss → hard error. Default for deployed builds.
+    Production,
+    /// Cache miss → disk + live SWC compile with warn log. Opt-in only.
+    Development,
+}
+
+/// Env-var that opts in to dev-mode module cache fallback. Read once via
+/// `OnceLock` so toggling mid-process has no effect — set it before any V8
+/// task dispatches. Any value other than `permissive` (or unset) leaves the
+/// resolver in production-strict mode.
+///
+/// Production deployments must leave this unset. Setting it on a deployed
+/// instance disables the validated-bundle boundary and lets arbitrary
+/// `libraries/`-tree files compile and execute on demand.
+pub const RIVERS_DEV_MODULE_CACHE_ENV: &str = "RIVERS_DEV_MODULE_CACHE";
+
+/// Resolve the active `ModuleCacheMode`. Reads the env var exactly once.
+///
+/// Default (env unset, or any value other than `permissive`) → `Production`.
+pub fn module_cache_mode() -> ModuleCacheMode {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let permissive = *CACHED.get_or_init(|| {
+        std::env::var(RIVERS_DEV_MODULE_CACHE_ENV)
+            .map(|v| v == "permissive")
+            .unwrap_or(false)
+    });
+    if permissive {
+        ModuleCacheMode::Development
+    } else {
+        ModuleCacheMode::Production
+    }
+}
+
+/// Build the `MODULE_NOT_REGISTERED` error message used by the V8 entry-point
+/// loader when a cache miss is detected in production mode.
+///
+/// Centralised so the wording stays in one place and tests can pin the format
+/// without spinning up V8. Mirrors spec §3.4 boundary-check semantics: the
+/// validated cache IS the security boundary.
+pub fn module_not_registered_message(path: &str, abs: &Path) -> String {
+    format!(
+        "MODULE_NOT_REGISTERED: \"{path}\" is not in the validated bundle module cache\n  resolved to: {}\n  hint: rebuild + redeploy the bundle, or set RIVERS_DEV_MODULE_CACHE=permissive for dev-mode disk fallback",
+        abs.display()
+    )
+}
+
 /// Install (or replace) the global module cache.
 ///
 /// Spec §3.4: "Hot reload replaces the entire cache atomically." Phase 6
@@ -535,6 +620,56 @@ mod tests {
         // No runtime imports → no cycle. swc erased both `import type` lines.
         let cache = populate_module_cache(&bundle).expect("type-only: no cycle");
         assert_eq!(cache.len(), 2);
+    }
+
+    // ── B3 / P1-8: ModuleCacheMode + production-strict cache miss ──
+    //
+    // The env var is read once via OnceLock at first call to
+    // `module_cache_mode()`. In CI it's unset → Production. We assert that
+    // default; verifying the Development path requires either spawning a
+    // subprocess with the env var set (heavy) or unsafe env mutation in the
+    // current process before any other test calls `module_cache_mode()`.
+    // Those constraints are documented at the const definition. The B2
+    // (`RIVERS_DEV_NO_STORAGE`) sibling test follows the same convention —
+    // it only asserts the production-strict default path.
+
+    #[test]
+    fn module_cache_mode_defaults_to_production() {
+        // CI does not set RIVERS_DEV_MODULE_CACHE. Production is the default
+        // and the only mode an unconfigured process should ever observe.
+        assert_eq!(module_cache_mode(), ModuleCacheMode::Production);
+    }
+
+    #[test]
+    fn module_not_registered_message_format_matches_g5_3() {
+        // Pinned format: callers of the V8 entry-point loader (and their
+        // log scrapers) depend on the literal `MODULE_NOT_REGISTERED:` prefix
+        // and the `resolved to:` / `hint:` lines. Spec §3.4 boundary check.
+        let abs = Path::new("/opt/rivers/apps/orders/libraries/handlers/missing.ts");
+        let msg = module_not_registered_message(
+            "/opt/rivers/apps/orders/libraries/handlers/missing.ts",
+            abs,
+        );
+        assert!(
+            msg.starts_with("MODULE_NOT_REGISTERED:"),
+            "stable error code prefix: {msg}"
+        );
+        assert!(
+            msg.contains("not in the validated bundle module cache"),
+            "boundary phrasing: {msg}"
+        );
+        assert!(msg.contains("resolved to:"), "resolved-to line: {msg}");
+        assert!(
+            msg.contains("RIVERS_DEV_MODULE_CACHE=permissive"),
+            "hint points operators at the dev escape hatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn module_cache_env_const_value_is_stable() {
+        // The const name is a public contract (operator docs, deploy scripts).
+        // Pin the literal so accidental rename trips a compile + test break.
+        assert_eq!(RIVERS_DEV_MODULE_CACHE_ENV, "RIVERS_DEV_MODULE_CACHE");
     }
 
     #[test]
