@@ -113,6 +113,28 @@
         { id: "RT-V8-TIMEOUT", method: "GET", path: "/handlers/canary/rt/v8/timeout", isV8Sec: true },
         { id: "RT-V8-HEAP",    method: "GET", path: "/handlers/canary/rt/v8/heap",    isV8Sec: true }
       ]
+    },
+    {
+      // CS5 — scenario verdicts surface alongside atomic tests.
+      // The envelope is type="scenario" with per-step assertions[]; the
+      // existing renderer picks up top-level `passed` and aggregates
+      // assertions across all steps for the expand-card view. Per-step
+      // visual breakdown (expand/collapse with failed_at_step banner) is
+      // a follow-on polish; scenario assertions render correctly via the
+      // existing assertion list today.
+      name: "SCENARIOS",
+      label: "Scenarios (multi-step)",
+      tests: [
+        { id: "SCEN-SQL-PROBE",            method: "POST", path: "/sql/canary/scenarios/sql/probe",            body: "{}" },
+        { id: "SCEN-STREAM-PROBE",         method: "POST", path: "/streams/canary/scenarios/stream/probe",     body: "{}" },
+        { id: "SCEN-RUNTIME-PROBE",        method: "POST", path: "/handlers/canary/scenarios/runtime/probe",   body: "{}" },
+        { id: "SCEN-SQL-MESSAGING-SQLITE", method: "POST", path: "/sql/canary/scenarios/sql/messaging/sqlite", body: "{}" },
+        { id: "SCEN-SQL-MESSAGING-PG",     method: "POST", path: "/sql/canary/scenarios/sql/messaging/pg",     body: "{}" },
+        { id: "SCEN-SQL-MESSAGING-MYSQL",  method: "POST", path: "/sql/canary/scenarios/sql/messaging/mysql",  body: "{}" },
+        { id: "SCEN-RUNTIME-DOC-PIPELINE", method: "POST", path: "/handlers/canary/scenarios/runtime/doc-pipeline", body: "{}" },
+        // CS3 / BR5 — Activity Feed (unblocked 2026-04-23 by broker-publish bridge).
+        { id: "SCEN-STREAM-ACTIVITY-FEED", method: "POST", path: "/streams/canary/scenarios/stream/activity-feed", body: "{}" }
+      ]
     }
   ];
 

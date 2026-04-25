@@ -206,6 +206,50 @@ pub(super) fn inject_ctx_methods(
     // 29d: populate __rivers_direct_proxies from this task's Direct datasources.
     bootstrap_direct_proxies(scope)?;
 
+    // BR-2026-04-23: populate __rivers_direct_proxies with broker publish proxies.
+    bootstrap_broker_proxies(scope)?;
+
+    Ok(())
+}
+
+/// Build and install one typed proxy per broker datasource declared on this task.
+///
+/// Mirrors `bootstrap_direct_proxies` but uses the broker codegen which emits
+/// a single `publish(msg)` method that routes through `Rivers.__brokerPublish`.
+fn bootstrap_broker_proxies(
+    scope: &mut v8::ContextScope<'_, v8::HandleScope<'_>>,
+) -> Result<(), TaskError> {
+    let names: Vec<String> = TASK_DIRECT_BROKER_PRODUCERS.with(|m| {
+        m.borrow().keys().cloned().collect()
+    });
+
+    for name in names {
+        let proxy_js = super::broker_dispatch::build_broker_proxy_script(&name);
+
+        let mut wrapped = String::with_capacity(proxy_js.len() + name.len() + 48);
+        wrapped.push_str("__rivers_direct_proxies[\"");
+        for c in name.chars() {
+            match c {
+                '\\' => wrapped.push_str("\\\\"),
+                '"' => wrapped.push_str("\\\""),
+                _ => wrapped.push(c),
+            }
+        }
+        wrapped.push_str("\"]=");
+        wrapped.push_str(&proxy_js);
+        wrapped.push(';');
+
+        let src = v8::String::new(scope, &wrapped).ok_or_else(|| {
+            TaskError::Internal("failed to create broker proxy source".into())
+        })?;
+        let script = v8::Script::compile(scope, src, None).ok_or_else(|| {
+            TaskError::Internal(format!("failed to compile broker proxy for '{name}'"))
+        })?;
+        script
+            .run(scope)
+            .ok_or_else(|| TaskError::Internal(format!("failed to run broker proxy for '{name}'")))?;
+    }
+
     Ok(())
 }
 
@@ -688,10 +732,7 @@ fn ctx_transaction_callback(
             }
         }
         None => {
-            // Callback threw → rollback, re-throw the original exception.
-            // Capture the exception BEFORE rolling back so we re-throw
-            // the handler's exception, not any rollback error.
-            let captured_exc = tc.exception();
+            // Callback threw → rollback, re-propagate the original exception.
             let rollback_res = rt.block_on(txn_map.rollback(&ds_name));
             TASK_TRANSACTION.with(|t| *t.borrow_mut() = None);
             if let Err(e) = rollback_res {
@@ -702,12 +743,14 @@ fn ctx_transaction_callback(
                     "rollback failed after handler threw"
                 );
             }
-            // Re-throw the original handler exception.
-            if let Some(exc) = captured_exc {
-                tc.throw_exception(exc);
-            } else {
-                throw_js_error(tc, "TransactionError: callback threw (exception lost)");
-            }
+            // Re-propagate the handler's exception to the outer JS scope.
+            //
+            // IMPORTANT: must use rethrow(), NOT throw_exception().
+            // We are inside the TryCatch scope `tc`; any exception set via
+            // throw_exception() would be caught by `tc` again and never
+            // reach the outer scope. rethrow() marks the already-caught
+            // exception so it propagates outward when `tc` drops.
+            let _ = tc.rethrow();
         }
     }
 }
@@ -782,17 +825,26 @@ fn ctx_dataview_callback(
             });
         if let Some((_, ref txn_ds)) = txn_state {
             // Look up the dataview's configured datasource.
+            // DataViews are stored namespaced (e.g. "sql:canary-pg") but
+            // ctx.transaction() / Rivers.db.begin() receive the bare user name
+            // (e.g. "canary-pg"). Strip the namespace prefix before comparing
+            // so "sql:canary-pg" matches "canary-pg".
+            let ns_prefix = TASK_DV_NAMESPACE.with(|n| {
+                n.borrow().as_ref().map(|ns| format!("{ns}:")).unwrap_or_default()
+            });
             let dv_ds = exec.datasource_for(&namespaced_name);
             match dv_ds {
-                Some(ds) if ds == *txn_ds => { /* match — allowed */ }
-                Some(ds) => {
-                    throw_js_error(
-                        scope,
-                        &format!(
-                            "TransactionError: dataview \"{name}\" uses datasource \"{ds}\" which differs from transaction datasource \"{txn_ds}\""
-                        ),
-                    );
-                    return;
+                Some(ref ds) => {
+                    let bare_ds = ds.strip_prefix(&ns_prefix).unwrap_or(ds.as_str());
+                    if bare_ds != txn_ds.as_str() {
+                        throw_js_error(
+                            scope,
+                            &format!(
+                                "TransactionError: dataview \"{name}\" uses datasource \"{bare_ds}\" which differs from transaction datasource \"{txn_ds}\""
+                            ),
+                        );
+                        return;
+                    }
                 }
                 None => {
                     // Unknown dataview — let execute() produce the "not found"

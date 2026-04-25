@@ -37,18 +37,34 @@ pub(crate) async fn wire_streaming_and_events(
                 // AL2.2: Create broker consumer and spawn bridge
                 let namespaced_key = format!("{}:{}", entry_point, ds.name);
                 if let Some(params) = ds_params.get(&namespaced_key) {
-                    // Collect subscriptions from MessageConsumer views targeting this datasource
+                    // Collect subscriptions from MessageConsumer views targeting this datasource.
+                    // Subscription topic comes from `on_event.topic` (configured broker topic),
+                    // NOT the view id — code-review §6 fix. The MessageConsumer registry
+                    // subscribes to EventBus on `on_event.topic`; the broker bridge publishes
+                    // per-destination events under `msg.destination` (broker_bridge.rs:262).
+                    // Both sides must agree on the name.
                     let mut subscriptions = Vec::new();
                     for (view_id, view_cfg) in &app.config.api.views {
-                        if view_cfg.view_type == "MessageConsumer" {
-                            // Use the view_id as the topic name for the subscription
-                            subscriptions.push(
-                                rivers_runtime::rivers_driver_sdk::broker::BrokerSubscription {
-                                    topic: view_id.clone(),
-                                    event_name: Some(view_id.clone()),
-                                },
-                            );
+                        if view_cfg.view_type != "MessageConsumer" {
+                            continue;
                         }
+                        let topic = match view_cfg.on_event.as_ref() {
+                            Some(oe) => oe.topic.clone(),
+                            None => {
+                                tracing::warn!(
+                                    view = %view_id,
+                                    datasource = %ds.name,
+                                    "MessageConsumer view has no on_event.topic; falling back to view id"
+                                );
+                                view_id.clone()
+                            }
+                        };
+                        subscriptions.push(
+                            rivers_runtime::rivers_driver_sdk::broker::BrokerSubscription {
+                                topic: topic.clone(),
+                                event_name: Some(topic),
+                            },
+                        );
                     }
 
                     if subscriptions.is_empty() {
@@ -112,38 +128,38 @@ pub(crate) async fn wire_streaming_and_events(
                         subscriptions,
                     };
 
-                    match broker_driver.create_consumer(params, &broker_config).await {
-                        Ok(consumer) => {
-                            let bridge = crate::broker_bridge::BrokerConsumerBridge::new(
-                                consumer,
-                                ctx.event_bus.clone(),
-                                failure_policy,
-                                &ds.name,
-                                reconnect_ms,
-                                shutdown_rx.clone(),
-                            );
-                            tokio::spawn(bridge.run());
-                            broker_bridge_count += 1;
-                            tracing::info!(
-                                datasource = %ds.name,
-                                driver = %ds.driver,
-                                "broker bridge started"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                datasource = %ds.name,
-                                error = %e,
-                                "broker consumer creation failed — bridge not started"
-                            );
-                        }
-                    }
+                    // Code-review §1 fix: bridge startup is now supervisor-owned.
+                    // `create_consumer` runs inside the spawned supervisor, NOT
+                    // awaited inline here, so one unreachable broker cannot
+                    // hang bundle load. The supervisor retries with bounded
+                    // backoff until shutdown.
+                    let spec = crate::broker_bridge::BrokerBridgeSpec {
+                        driver: broker_driver.clone(),
+                        params: params.clone(),
+                        broker_config,
+                        event_bus: ctx.event_bus.clone(),
+                        failure_policy,
+                        datasource_name: ds.name.clone(),
+                        reconnect_ms,
+                        shutdown_rx: shutdown_rx.clone(),
+                    };
+                    tokio::spawn(crate::broker_bridge::run_with_retry(spec));
+                    broker_bridge_count += 1;
+                    tracing::info!(
+                        datasource = %ds.name,
+                        driver = %ds.driver,
+                        "broker bridge supervisor spawned (lazy consumer init)"
+                    );
                 }
             }
         }
 
-        // AL2.3: Build MessageConsumerRegistry and subscribe handlers
+        // AL2.3: Build MessageConsumerRegistry and subscribe handlers.
+        // `entry_point` is threaded in so each MessageConsumerConfig carries
+        // the owning app's identity — code-review §5 fix (empty app_id →
+        // ctx.store hit `app:default` instead of the owning app's namespace).
         let mc_registry = crate::message_consumer::MessageConsumerRegistry::from_views(
+            entry_point,
             &app.config.api.views,
         );
         if !mc_registry.is_empty() {

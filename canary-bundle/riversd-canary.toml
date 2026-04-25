@@ -42,3 +42,25 @@ backend = "memory"
 
 [graphql]
 enabled = false
+
+# All engines + driver plugins are statically linked into the riversd
+# binary (see `crates/riversd/src/server/drivers.rs`). No [engines] /
+# [plugins] dir needed — cdylib plugin loading is disabled in this
+# release per bugs/bugreport_2026-04-09.md (Tokio-runtime-per-cdylib
+# SIGABRT). Future "Plugin ABI v2" will re-enable dynamic loading.
+
+[base.tls]
+cert     = "canary-bundle/release/canary/config/tls/server.crt"
+key      = "canary-bundle/release/canary/config/tls/server.key"
+redirect = false
+
+[lockbox]
+path       = "/Users/pcastone/Projects/rust/rivers.pub/sec/lockbox/rivers.rkeystore"
+key_source = "file"
+key_file   = "/Users/pcastone/Projects/rust/rivers.pub/sec/lockbox/identity.key"
+
+# Raise task timeout to 30s so that scenario handlers can busy-wait for
+# Kafka consumer propagation (activity-feed scenario spins up to 5s per step,
+# 11 steps; doc-pipeline and messaging scenarios need headroom too).
+[runtime.process_pools.default]
+task_timeout_ms = 30000

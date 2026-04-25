@@ -2,16 +2,30 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Workflow
+# Operating Rules
 
-1. **Think-Plan-Check-Execute**: Read the codebase for relevant files, look for reuse vs create, then write a plan to `todo/tasks.md` with small, detailed tasks and validation steps. If clearing `todo/tasks.md` with unfinished tasks, copy them to `todo/gutter.md` first.
-2. **Check in before executing** — share the plan and get approval before starting work.
-3. **Mark tasks complete as you go** and give high-level explanations of changes at each step.
-4. **Simplicity first** — every change should impact as little code as possible. Reuse existing code, scripts, and patterns before creating new ones.
-5. **Log every decision** in `changedecisionlog.md` with: file affected, what was decided, spec reference, and resolution method.
-6. **Log level changes** in `changelog.md` with: file affected, summary of what was done, spec reference, and resolution method.
-7. **Documentation** — always update training, tutorial, and AI guide documentation while making changes to code.
-8. **Git commit** after each logical group of completed tasks with a summary of changes.
+## Standards — how you work
+
+These govern everything below. If a workflow step ever conflicts with these, the standard wins.
+
+1. **Read before you propose.** When a file grounds a recommendation, read it in full. Grep and partial views are for navigation, not structural decisions. If you skimmed instead of read, say so and list what you haven't verified.
+2. **State your grounding before you propose.** Briefly list what's confirmed from source vs. inferred or assumed. Hidden assumptions are the enemy.
+3. **Done means the deliverable is done, not that the response sounds complete.** Don't suggest stopping, deferring, or "picking this up later" as a way of handling work still in front of you. If you hit a real blocker (missing info, genuine ambiguity, a decision only I can make), name the specific blocker and the specific question. Fatigue, length, or difficulty are not blockers.
+4. **Banned exit phrases:** "for now," "as a starting point," "we can iterate tomorrow," "let's leave it here," "we can refine later," "this is a good place to pause." If work is unfinished, keep working. If you need input, ask a specific question and wait.
+5. **Operate at highest standards.** Take pride in the work. Shortcuts should feel embarrassing, not efficient. Push once more when something feels "good enough" — it usually isn't. Default to more thorough, not less.
+6. **Push back honestly.** If my framing is wrong, scope is off, or I'm asking for something half-baked, say so directly. Agreement is not the goal; the best outcome is. Clear disagreement is more useful than compliance.
+7. **Use the context window.** Long reads, multi-step reasoning, and extended work are expected. Don't truncate to fit an imagined budget.
+
+## Workflow — what you do
+
+1. **Think → Plan → Check → Execute.** Read relevant files in full (per Standard 1). Identify reuse candidates before proposing new code. Write the plan to `todo/tasks.md` with small, detailed tasks and validation steps per task. Before clearing `todo/tasks.md` with unfinished items, move them to `todo/gutter.md`.
+2. **One pre-flight gate.** Share the plan, get approval, then execute head-down. After approval, the plan is the permission — no per-task check-ins. Only pause mid-execution if discovery invalidates the plan; when that happens, name the specific invalidation and the specific question (per Standard 3), don't vaguely stall.
+3. **Mark tasks complete as you finish them** with a high-level explanation of what changed. No ceremonial status updates between tasks.
+4. **Simplicity and reuse first — with a limit.** Reuse when an existing pattern fits without contortions. Build new when reuse requires bending the pattern out of shape. "Simplicity" is not an alibi for settling (see Standard 5).
+5. **Log every decision to `changedecisionlog.md`**: file affected, what was decided, spec reference, resolution method. This is CB's reference baseline for drift detection — treat it as load-bearing, not bookkeeping.
+6. **Log every change to `changelog.md`**: file affected, summary of what was done, spec reference, resolution method. Also feeds CB.
+7. **Update docs when behavior, public API, or developer-facing interfaces change.** Training, tutorial, and AI guide docs follow reality. Pure internal refactors with no surface-level change don't require doc updates — but anything a user or downstream agent can observe does.
+8. **Git commit per logical group of completed tasks** with a summary of changes. Commit message should let CB reconstruct intent without reading the diff.
 
 ## Project Overview
 
@@ -75,7 +89,7 @@ Dynamic Mode (just build-dynamic / cargo deploy)
 
 | Crate | Role |
 |-------|------|
-| `rivers-runtime` | Facade crate — re-exports core, config, driver-sdk, engine-sdk. Contains ProcessPool shared types, `home` module for config discovery, and the 4-layer bundle validation pipeline (`validate_structural`, `validate_existence`, `validate_crossref`, `validate_syntax`, `validate_engine`, `validate_pipeline`, `validate_result`, `validate_format`). In static mode: rlib. In dynamic mode: dylib. |
+| `rivers-runtime` | Facade crate — re-exports core, config, driver-sdk, engine-sdk. Contains ProcessPool shared types, `home` module for config discovery, the 4-layer bundle validation pipeline (`validate_structural`, `validate_existence`, `validate_crossref`, `validate_syntax`, `validate_engine`, `validate_pipeline`, `validate_result`, `validate_format`), and the bundle module cache types (`module_cache::{CompiledModule, BundleModuleCache}`) populated at bundle load per `rivers-javascript-typescript-spec.md §3.4`. In static mode: rlib. In dynamic mode: dylib. |
 | `riversd` | Server binary — HTTP server, routing, ProcessPool dispatch, engine loader, host callbacks, per-app logging, metrics. |
 | `riversctl` | CLI tool — start/stop/status riversd, doctor (--fix/--lint), admin API, TLS management (gen/renew/show/expire). |
 | `rivers-core` | Config types, DriverFactory, StorageEngine, LockBox, EventBus, AppLogRouter, TLS cert generation. |

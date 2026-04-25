@@ -16,8 +16,10 @@ use tracing;
 use rivers_runtime::rivers_core::event::Event;
 use rivers_runtime::rivers_core::eventbus::{events, EventBus};
 use rivers_runtime::rivers_driver_sdk::broker::{
-    BrokerConsumer, BrokerProducer, FailureMode, FailurePolicy, InboundMessage, OutboundMessage,
+    BrokerConsumer, BrokerConsumerConfig, BrokerProducer, FailureMode, FailurePolicy,
+    InboundMessage, MessageBrokerDriver, OutboundMessage,
 };
+use rivers_runtime::rivers_driver_sdk::ConnectionParams;
 
 // ── BrokerConsumerBridge ───────────────────────────────────────────
 
@@ -242,17 +244,26 @@ impl BrokerConsumerBridge {
             }
         }
 
-        // Publish to EventBus
-        let event = Event::new(
-            events::BROKER_MESSAGE_RECEIVED,
-            serde_json::json!({
-                "datasource": self.datasource_name,
-                "message_id": msg.id,
-                "destination": msg.destination,
-                "payload_size": msg.payload.len(),
-            }),
-        );
-        let errors = self.event_bus.publish(&event).await;
+        // Publish to EventBus. Two events fire for each received message:
+        //   (1) a generic "BrokerMessageReceived" event for observers + any
+        //       handler that wants every message regardless of topic,
+        //   (2) a per-destination event (event_type = msg.destination) so
+        //       that MessageConsumer views subscribed to a specific topic
+        //       actually receive the message payload. Without (2),
+        //       MessageConsumer subscriptions silently drop every message
+        //       (the previous behaviour, before BR-2026-04-23 follow-up).
+        let payload = serde_json::json!({
+            "datasource": self.datasource_name,
+            "message_id": msg.id,
+            "destination": msg.destination,
+            "payload": String::from_utf8_lossy(&msg.payload).to_string(),
+            "payload_size": msg.payload.len(),
+            "headers": msg.headers,
+        });
+        let generic_event = Event::new(events::BROKER_MESSAGE_RECEIVED, payload.clone());
+        let topic_event = Event::new(&msg.destination, payload);
+        let mut errors = self.event_bus.publish(&generic_event).await;
+        errors.extend(self.event_bus.publish(&topic_event).await);
 
         if errors.is_empty() {
             // Success — ack broker
@@ -432,5 +443,294 @@ impl BrokerConsumerBridge {
                 "drain completed, all messages processed"
             );
         }
+    }
+}
+
+// ── Non-blocking bridge supervisor ─────────────────────────────
+//
+// Code-review §1 (`docs/canary_codereivew.md`) fix: broker bridge startup must
+// not be a bundle-load precondition. `run_with_retry` lives inside a spawned
+// task that owns the `create_consumer` call and retries with bounded backoff,
+// so one unreachable broker cannot hang bundle load for every other app.
+
+/// Everything `run_with_retry` needs to eventually build a `BrokerConsumerBridge`.
+///
+/// Decoupled from [`BrokerConsumerBridge::new`] because the consumer itself
+/// doesn't exist yet at spawn time — the supervisor creates it lazily.
+pub struct BrokerBridgeSpec {
+    /// Broker driver (Arc-shared with the DriverFactory).
+    pub driver: Arc<dyn MessageBrokerDriver>,
+    /// Resolved connection parameters for the broker.
+    pub params: ConnectionParams,
+    /// Consumer config: group prefix, subscriptions, etc.
+    pub broker_config: BrokerConsumerConfig,
+    /// Shared EventBus for published broker events (started/stopped/error).
+    pub event_bus: Arc<EventBus>,
+    /// Failure policy applied inside the bridge once a consumer exists.
+    pub failure_policy: FailurePolicy,
+    /// Datasource name for log + event payloads.
+    pub datasource_name: String,
+    /// Base reconnect delay; also serves as the base for exponential backoff.
+    pub reconnect_ms: u64,
+    /// Shutdown watch: any `true` value cancels the supervisor.
+    pub shutdown_rx: watch::Receiver<bool>,
+}
+
+/// Background supervisor — creates the consumer, runs the bridge, retries on failure.
+///
+/// Exit conditions:
+/// - shutdown signal received (checked before/between retries and during sleep)
+/// - bridge `run()` returned cleanly
+///
+/// Backoff: exponential with jitter, base = `spec.reconnect_ms`, capped at 30s.
+/// Never panics; a consumer-creation failure is logged + published as
+/// `BROKER_CONSUMER_ERROR` on the EventBus.
+pub async fn run_with_retry(mut spec: BrokerBridgeSpec) {
+    use rand::Rng;
+
+    let backoff_cap_ms: u64 = 30_000;
+    let mut attempt: u32 = 0;
+
+    loop {
+        // Respect shutdown before each attempt.
+        if *spec.shutdown_rx.borrow() {
+            tracing::info!(
+                datasource = %spec.datasource_name,
+                "broker bridge supervisor exiting before consumer create (shutdown)"
+            );
+            return;
+        }
+
+        match spec.driver.create_consumer(&spec.params, &spec.broker_config).await {
+            Ok(consumer) => {
+                tracing::info!(
+                    datasource = %spec.datasource_name,
+                    attempt = attempt + 1,
+                    "broker consumer created; starting bridge"
+                );
+                attempt = 0; // reset backoff on every successful create
+
+                let bridge = BrokerConsumerBridge::new(
+                    consumer,
+                    spec.event_bus.clone(),
+                    spec.failure_policy.clone(),
+                    spec.datasource_name.clone(),
+                    spec.reconnect_ms,
+                    spec.shutdown_rx.clone(),
+                );
+
+                // `run()` exits on shutdown. If the consumer fails mid-loop the
+                // existing `receive_loop` already handles reconnect internally,
+                // so returning here means "we're done for real".
+                bridge.run().await;
+
+                // Post-run: shutdown is the expected path. If the watch still
+                // reads `false`, the consumer torn down without a signal —
+                // loop back and try to rebuild.
+                if *spec.shutdown_rx.borrow() {
+                    return;
+                }
+                tracing::warn!(
+                    datasource = %spec.datasource_name,
+                    "bridge returned without shutdown — attempting to rebuild consumer"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    datasource = %spec.datasource_name,
+                    error = %e,
+                    attempt = attempt + 1,
+                    "broker consumer create failed; will retry"
+                );
+
+                let err_event = Event::new(
+                    events::BROKER_CONSUMER_ERROR,
+                    serde_json::json!({
+                        "datasource": spec.datasource_name,
+                        "error": e.to_string(),
+                        "phase": "create_consumer",
+                        "attempt": attempt + 1,
+                    }),
+                );
+                let _ = spec.event_bus.publish(&err_event).await;
+            }
+        }
+
+        // Bounded exponential backoff with jitter:
+        //   base = reconnect_ms
+        //   delay = base * 2^min(attempt, 6), capped at backoff_cap_ms
+        //   +/- 50% jitter
+        let shift = attempt.min(6);
+        let scaled = spec.reconnect_ms.saturating_mul(1u64 << shift);
+        let capped = scaled.min(backoff_cap_ms).max(100); // never below 100ms
+        let jitter_span = capped / 2;
+        let jitter = {
+            let mut rng = rand::thread_rng();
+            rng.gen_range(0..=jitter_span)
+        };
+        let delay_ms = capped.saturating_add(jitter).min(backoff_cap_ms);
+
+        let sleep = tokio::time::sleep(Duration::from_millis(delay_ms));
+        tokio::pin!(sleep);
+        tokio::select! {
+            _ = &mut sleep => {}
+            _ = spec.shutdown_rx.changed() => {
+                tracing::info!(
+                    datasource = %spec.datasource_name,
+                    "broker bridge supervisor exiting during backoff (shutdown)"
+                );
+                return;
+            }
+        }
+
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+#[cfg(test)]
+mod supervisor_tests {
+    //! CG3.5/CG3.6 coverage: supervisor must not block startup and must
+    //! honour shutdown during backoff.
+
+    use super::*;
+    use async_trait::async_trait;
+    use rivers_runtime::rivers_driver_sdk::DriverError;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicU32;
+
+    fn test_params() -> ConnectionParams {
+        ConnectionParams {
+            host: "127.0.0.1".into(),
+            port: 9092,
+            database: "test".into(),
+            username: String::new(),
+            password: String::new(),
+            options: HashMap::new(),
+        }
+    }
+
+    /// Driver whose `create_consumer` always errors — lets us verify the
+    /// supervisor retries + exits cleanly on shutdown.
+    struct FailingDriver {
+        attempts: Arc<AtomicU32>,
+    }
+
+    #[async_trait]
+    impl MessageBrokerDriver for FailingDriver {
+        fn name(&self) -> &str { "failing-broker" }
+
+        async fn create_consumer(
+            &self,
+            _params: &ConnectionParams,
+            _config: &BrokerConsumerConfig,
+        ) -> Result<Box<dyn BrokerConsumer>, DriverError> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            Err(DriverError::Connection("simulated host unreachable".into()))
+        }
+
+        async fn create_producer(
+            &self,
+            _params: &ConnectionParams,
+            _config: &BrokerConsumerConfig,
+        ) -> Result<Box<dyn BrokerProducer>, DriverError> {
+            Err(DriverError::Unsupported("test driver".into()))
+        }
+    }
+
+    fn spec_with_driver(
+        driver: Arc<dyn MessageBrokerDriver>,
+        shutdown_rx: watch::Receiver<bool>,
+    ) -> BrokerBridgeSpec {
+        BrokerBridgeSpec {
+            driver,
+            params: test_params(),
+            broker_config: BrokerConsumerConfig {
+                group_prefix: "test".into(),
+                app_id: "app".into(),
+                datasource_id: "ds".into(),
+                node_id: "node".into(),
+                reconnect_ms: 50,
+                subscriptions: Vec::new(),
+            },
+            event_bus: Arc::new(EventBus::new()),
+            failure_policy: FailurePolicy {
+                mode: FailureMode::Drop,
+                destination: None,
+                handlers: Vec::new(),
+            },
+            datasource_name: "failing-ds".into(),
+            reconnect_ms: 50,
+            shutdown_rx,
+        }
+    }
+
+    #[tokio::test]
+    async fn supervisor_retries_and_exits_on_shutdown() {
+        let attempts = Arc::new(AtomicU32::new(0));
+        let driver = Arc::new(FailingDriver { attempts: attempts.clone() });
+        let (tx, rx) = watch::channel(false);
+
+        let handle = tokio::spawn(run_with_retry(spec_with_driver(driver, rx)));
+
+        // Let it retry a few times.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            attempts.load(Ordering::SeqCst) >= 2,
+            "supervisor should have retried at least twice; got {}",
+            attempts.load(Ordering::SeqCst)
+        );
+
+        // Signal shutdown; supervisor must return promptly.
+        tx.send(true).unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("supervisor did not honour shutdown within 1s");
+    }
+
+    /// CG3.6: proof that the supervisor launch path is non-blocking —
+    /// `tokio::spawn(run_with_retry(...))` must return immediately even when
+    /// the underlying driver would hang forever inside `create_consumer`.
+    #[tokio::test]
+    async fn supervisor_spawn_is_non_blocking() {
+        struct HangingDriver;
+        #[async_trait]
+        impl MessageBrokerDriver for HangingDriver {
+            fn name(&self) -> &str { "hanging" }
+            async fn create_consumer(
+                &self,
+                _: &ConnectionParams,
+                _: &BrokerConsumerConfig,
+            ) -> Result<Box<dyn BrokerConsumer>, DriverError> {
+                // Simulate a hang — never returns.
+                let () = std::future::pending().await;
+                unreachable!()
+            }
+            async fn create_producer(
+                &self,
+                _: &ConnectionParams,
+                _: &BrokerConsumerConfig,
+            ) -> Result<Box<dyn BrokerProducer>, DriverError> {
+                Err(DriverError::Unsupported("test".into()))
+            }
+        }
+
+        let (tx, rx) = watch::channel(false);
+        let driver: Arc<dyn MessageBrokerDriver> = Arc::new(HangingDriver);
+        let spec = spec_with_driver(driver, rx);
+
+        // The spawn itself must return immediately regardless of driver state.
+        let start = std::time::Instant::now();
+        let handle = tokio::spawn(run_with_retry(spec));
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "spawn should be O(1), took {:?}",
+            start.elapsed()
+        );
+
+        // Cancel so the task doesn't leak across tests. The hanging driver
+        // may not honour shutdown mid-`create_consumer`; startup never
+        // blocked is what matters. Abort the task to ensure cleanup.
+        let _ = tx.send(true);
+        handle.abort();
     }
 }

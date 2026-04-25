@@ -27,10 +27,20 @@ use crate::process_pool::{
 pub struct MessageConsumerConfig {
     /// View identifier.
     pub view_id: String,
+    /// Owning app's entry point — used as `app_id` for ctx.store / keystore /
+    /// dataview namespace enrichment. Empty string falls back to
+    /// `app:default` in `TaskLocals::set`, which silently puts consumer
+    /// writes in a different namespace than REST reads — the bug that
+    /// code-review §5 caught.
+    pub entry_point: String,
     /// EventBus topic to subscribe to.
     pub topic: String,
-    /// Handler module and entrypoint.
+    /// Handler entrypoint (function name within the module).
     pub handler: String,
+    /// Handler module path (CodeComponent-only; empty for DataView-backed).
+    pub module: String,
+    /// Handler source language (javascript|typescript|wasm).
+    pub language: String,
     /// Handler mode (Stream, Normal, Auto).
     pub handler_mode: Option<String>,
     /// Auth mode — "none" by default (auto-exempt), but can opt-in to "session".
@@ -41,17 +51,37 @@ impl MessageConsumerConfig {
     /// Extract MessageConsumer config from an ApiViewConfig.
     ///
     /// Returns None if view_type != "MessageConsumer" or on_event is missing.
-    pub fn from_view(view_id: &str, config: &ApiViewConfig) -> Option<Self> {
+    ///
+    /// `entry_point` must be the owning app's entry point so downstream
+    /// task enrichment uses the correct `ctx.store` / keystore / dataview
+    /// namespace. See code-review §5 (`docs/canary_codereivew.md`).
+    pub fn from_view(
+        entry_point: &str,
+        view_id: &str,
+        config: &ApiViewConfig,
+    ) -> Option<Self> {
         if config.view_type != "MessageConsumer" {
             return None;
         }
 
         let on_event = config.on_event.as_ref()?;
 
+        // Pull module + language from the view's handler block; on_event
+        // only carries the entrypoint (handler function name).
+        let (module, language) = match &config.handler {
+            rivers_runtime::view::HandlerConfig::Codecomponent {
+                module, language, ..
+            } => (module.clone(), language.clone()),
+            _ => (String::new(), String::new()),
+        };
+
         Some(Self {
             view_id: view_id.to_string(),
+            entry_point: entry_point.to_string(),
             topic: on_event.topic.clone(),
             handler: on_event.handler.clone(),
+            module,
+            language,
             handler_mode: on_event.handler_mode.clone(),
             auth: config.auth.clone(),
         })
@@ -90,11 +120,20 @@ pub struct MessageConsumerRegistry {
 
 impl MessageConsumerRegistry {
     /// Build registry from all view configs.
-    pub fn from_views(views: &HashMap<String, ApiViewConfig>) -> Self {
+    ///
+    /// `entry_point` is threaded into every `MessageConsumerConfig` so the
+    /// downstream handler dispatch enriches the task with the correct
+    /// `app_id` (see code-review §5).
+    pub fn from_views(
+        entry_point: &str,
+        views: &HashMap<String, ApiViewConfig>,
+    ) -> Self {
         let mut consumers = HashMap::new();
 
         for (id, config) in views {
-            if let Some(mc_config) = MessageConsumerConfig::from_view(id, config) {
+            if let Some(mc_config) =
+                MessageConsumerConfig::from_view(entry_point, id, config)
+            {
                 consumers.insert(id.clone(), mc_config);
             }
         }
@@ -251,7 +290,7 @@ pub async fn dispatch_message_event(
         .entrypoint(entrypoint)
         .args(args)
         .trace_id(trace_id.to_string());
-    let builder = crate::task_enrichment::enrich(builder, "");
+    let builder = crate::task_enrichment::enrich(builder, &config.entry_point);
     let ctx = builder.build()?;
 
     let result = pool.dispatch("default", ctx).await?;
@@ -294,27 +333,44 @@ struct MessageConsumerHandler {
 impl EventHandler for MessageConsumerHandler {
     async fn handle(&self, event: &Event) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let entrypoint = Entrypoint {
-            module: self.config.handler.clone(),
-            function: self
-                .config
-                .handler_mode
-                .clone()
-                .unwrap_or_else(|| "onEvent".into()),
-            language: "javascript".into(),
+            // `module` comes from the view's [handler] block (file path);
+            // `function` is the entrypoint name from [on_event.handler].
+            module: self.config.module.clone(),
+            function: self.config.handler.clone(),
+            language: if self.config.language.is_empty() {
+                "javascript".into()
+            } else {
+                self.config.language.clone()
+            },
         };
 
+        // Expose the broker message payload under `ctx.request.body` so that
+        // MessageConsumer handlers can access the message the same way REST
+        // handlers access HTTP body. `event` and `topic` are also available
+        // via `__args` for handlers that prefer the raw EventBus shape.
+        //
+        // `_dv_namespace` must match the app's entry_point so that
+        // TASK_DV_NAMESPACE is populated in V8 task_locals — without it,
+        // `ctx.dataview("events_insert", ...)` looks for an un-namespaced
+        // DataView and fails with "not found".
         let args = serde_json::json!({
+            "request": {
+                "body": event.payload,
+                "method": "MESSAGE",
+                "headers": { "topic": &event.event_type }
+            },
             "event": event.payload,
             "topic": event.event_type,
             "trace_id": event.trace_id,
             "timestamp": event.timestamp.to_rfc3339(),
+            "_dv_namespace": &self.config.entry_point,
         });
 
         let builder = TaskContextBuilder::new()
             .entrypoint(entrypoint)
             .args(args)
             .trace_id(event.trace_id.clone().unwrap_or_default());
-        let builder = crate::task_enrichment::enrich(builder, "");
+        let builder = crate::task_enrichment::enrich(builder, &self.config.entry_point);
         let task_ctx = builder
             .build()
             .map_err(|e| {
@@ -373,8 +429,9 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe_consumer() {
         let event_bus = EventBus::new();
-        let config = MessageConsumerConfig {
+        let config = MessageConsumerConfig { module: String::new(), language: "javascript".into(),
             view_id: "order_consumer".into(),
+            entry_point: "test-app".into(),
             topic: "orders.created".into(),
             handler: "order_handler.js".into(),
             handler_mode: None,
@@ -403,8 +460,9 @@ mod tests {
         let mut views = HashMap::new();
         views.insert(
             "order_consumer".into(),
-            MessageConsumerConfig {
+            MessageConsumerConfig { module: String::new(), language: "javascript".into(),
                 view_id: "order_consumer".into(),
+                entry_point: "test-app".into(),
                 topic: "orders.created".into(),
                 handler: "order_handler.js".into(),
                 handler_mode: None,
@@ -413,8 +471,9 @@ mod tests {
         );
         views.insert(
             "payment_consumer".into(),
-            MessageConsumerConfig {
+            MessageConsumerConfig { module: String::new(), language: "javascript".into(),
                 view_id: "payment_consumer".into(),
+                entry_point: "test-app".into(),
                 topic: "payments.received".into(),
                 handler: "payment_handler.js".into(),
                 handler_mode: Some("onPayment".into()),
@@ -432,8 +491,9 @@ mod tests {
     #[tokio::test]
     async fn test_dispatch_message_event_engine_unavailable() {
         let pool = ProcessPoolManager::from_config(&HashMap::new());
-        let config = MessageConsumerConfig {
+        let config = MessageConsumerConfig { module: String::new(), language: "javascript".into(),
             view_id: "consumer".into(),
+            entry_point: "test-app".into(),
             topic: "test.topic".into(),
             handler: "handler.js".into(),
             handler_mode: None,

@@ -32,11 +32,12 @@ function txnCommit(ctx) {
     try {
         Rivers.db.begin("canary-pg");
         var id = "txn-commit-" + Date.now();
-        try { ctx.dataview("pg_insert", { id: id, zname: "TxnCommit", age: 1 }); } catch(e) {}
+        ctx.dataview("pg_insert", { id: id, zname: "TxnCommit", age: 1 });
         Rivers.db.commit("canary-pg");
 
-        var rows = ctx.dataview("pg_select_by_id", { id: id });
-        t.assert("row-exists-after-commit", rows && rows.length > 0, "row should exist after commit");
+        var result = ctx.dataview("pg_select_by_id", { id: id });
+        var rowCount = (result && result.rows) ? result.rows.length : 0;
+        t.assert("row-exists-after-commit", rowCount > 0, "row_count=" + rowCount);
         return t.finish();
     } catch(e) {
         try { Rivers.db.rollback("canary-pg"); } catch(e2) {}
@@ -50,11 +51,12 @@ function txnRollback(ctx) {
     try {
         var id = "txn-rollback-" + Date.now();
         Rivers.db.begin("canary-pg");
-        try { ctx.dataview("pg_insert", { id: id, zname: "TxnRollback", age: 2 }); } catch(e) {}
+        ctx.dataview("pg_insert", { id: id, zname: "TxnRollback", age: 2 });
         Rivers.db.rollback("canary-pg");
 
-        var rows = ctx.dataview("pg_select_by_id", { id: id });
-        t.assert("row-gone-after-rollback", !rows || rows.length === 0, "row should not exist after rollback");
+        var result = ctx.dataview("pg_select_by_id", { id: id });
+        var rowCount = (result && result.rows) ? result.rows.length : 0;
+        t.assert("row-gone-after-rollback", rowCount === 0, "row_count=" + rowCount);
         return t.finish();
     } catch(e) {
         try { Rivers.db.rollback("canary-pg"); } catch(e2) {}

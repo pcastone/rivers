@@ -1,3 +1,530 @@
+# Archived 2026-04-24 — Canary Scenarios (CS0–CS7) + Broker Bridge (BR0–BR7)
+
+Superseded by CG — Canary Green Again plan. Most items shipped; residual items were all deploy-gated or deferred polish (SPA step-UI, spec doc edits, MSG-4 real crypto). Moving here so the live tasks.md focuses on the restart-blocker + code-review fixes.
+
+---
+
+# Canary Scenarios Implementation
+
+> **Branch:** TBD (suggest `feature/canary-scenarios`)
+> **Spec:** `docs/arch/rivers-canary-scenarios-spec.md` v1.0
+> **Prior:** G0-G8 gap closure shipped via PR #79 (archived in `todo/gutter.md`); G-P0 residual work on `feature/gap-closure-p0`.
+
+**Goal:** build the scenario testing layer on top of the existing 107 atomic canary tests. 3 scenarios, 37 steps, 61 step-executions, bringing the canary fleet to 168 total test points.
+
+**Rules:**
+- Spec is **loose**: it defines use cases + constraints (MSG-1…10, AF-1…9, DOC-1…10), not file layouts or DataView names. Implementor picks all structural detail.
+- Scenarios are **additive** — no atomic-test changes.
+- Each scenario MUST **skip cleanly** when infra is unavailable (reuse `PG_AVAIL` / `MYSQL_AVAIL` / `KAFKA_AVAIL` gate pattern).
+- Each scenario handler itself IS the test — every workflow step calls `TestResult.assert*` methods inline. No Rust-side unit tests.
+- Document Pipeline is hosted in `canary-handlers` per spec §4 literal (decision locked CS0.1); this requires wiring filesystem + exec datasources into `canary-handlers/resources.toml`.
+
+**Critical path:** CS0 → CS1 → (CS2 ‖ CS3 ‖ CS4 ‖ CS5) → CS6 → CS7.
+
+---
+
+## CS0 — Foundation decisions
+
+- [x] **CS0.1** Document Pipeline hosted in **`canary-handlers`** (spec §4 literal). Implies CS4 wires filesystem + exec into `canary-handlers/resources.toml`. Log in `changedecisionlog.md`. (Locked 2026-04-22.)
+- [x] **CS0.2** Session-identity simulation for Messaging: **single orchestrator + identity-as-parameter** (REVISED 2026-04-23 — original pre-seeded-sessions design needed Rivers.http, which doesn't exist). Orchestrator at `/canary/scenarios/sql/messaging/{driver}` (auth=none) calls DataViews directly, passing `sender` / `recipient` per-step. Isolation verified at DataView WHERE clause. MSG-1 end-to-end coverage gap documented; deferrable to atomic test. Logged in `changedecisionlog.md` 2026-04-23 (revised entry). (Locked.)
+- [x] **CS0.3** Skip-gate pattern documented in `run-tests.sh` header comment (lines 5-22, 2026-04-23). Every scenario-level `test_ep` addition MUST follow the `X_AVAIL=$(curl -sk -m 2 ... )` probe + `if [ "$X_AVAIL" = "1" ]; then test_ep else echo SKIP fi` pattern. Reuses existing `PG_AVAIL` / `MYSQL_AVAIL` pattern at lines ~383/391. (Done.)
+
+**Effort:** ~15 min.
+
+---
+
+## CS1 — Scenario harness + verdict protocol
+
+**Scope:** the shared `ScenarioResult` TypeScript harness (spec §3) installed per-hosting-profile (SH-2 copy-per-profile rule). Verdict envelope per §2 with `type: "scenario"`, `steps[]`, `failed_at_step`, per-step `assertions[]`.
+
+**Files:**
+- new: `canary-bundle/canary-sql/libraries/handlers/scenario-harness.ts`
+- new: `canary-bundle/canary-streams/libraries/handlers/scenario-harness.ts`
+- new: `canary-bundle/canary-handlers/libraries/handlers/scenario-harness.ts`
+- new: one probe handler per profile (e.g. `scenario-probe.ts`) — 1-step scenario that asserts `true` to validate envelope shape end-to-end
+
+Tasks:
+
+- [x] **CS1.1** Ported spec §3 `ScenarioResult` class into `canary-sql/libraries/handlers/scenario-harness.ts`. Imports `TestResult, Assertion` from `./test-harness.ts` (explicit `.ts` ext per Phase 4 resolver convention). Exports `ScenarioResult`, `StepResult`. One spec-deviation: `current_step_name` is a proper private field instead of the spec's `(this.current_step as any)._step_name` shim — cleaner, no behaviour change. (Done 2026-04-23.)
+- [x] **CS1.2** Literal copy (same md5 `5803c8ab52a4239bf88056e1daf398f6`) to `canary-streams/libraries/handlers/scenario-harness.ts` and `canary-handlers/libraries/handlers/scenario-harness.ts`. SH-2 honoured. (Done 2026-04-23.)
+- [x] **CS1.3** Audited `test-harness.ts::TestResult` — 6 existing methods (`assert`, `assertEquals`, `assertExists`, `assertType`, `assertThrows`, `assertNotContains`) are sufficient for the CS1 probe. Scenario-specific helpers (`assertContains`, `assertNotEquals`, `assertGreaterThan`) deferred until a concrete CS2/3/4 step needs them; must propagate across all 6 copies of test-harness.ts when added. (Done 2026-04-23.)
+- [x] **CS1.4** Probe handlers created — `scenario-probe.ts` in all three hosting apps. Registered under `/canary/scenarios/sql/probe`, `/canary/scenarios/stream/probe`, `/canary/scenarios/runtime/probe` (test-ids SCENARIO-SQL-PROBE, SCENARIO-STREAM-PROBE, SCENARIO-RUNTIME-PROBE). Each 1-step scenario asserts `harness_reachable=true` + `ctx_is_object`. (Done 2026-04-23.)
+- [x] **CS1.5 (static)** `riverpackage validate canary-bundle` → 0 errors, probe files referenced correctly, only pre-existing DataView warnings unchanged. V8-syntax-check SKIPs are environmental (no engine dylib in this build), not regressions. (Done 2026-04-23.)
+- [ ] **CS1.5 (HTTP)** Full envelope round-trip via `curl $BASE/canary/scenarios/{profile}/probe` — deferred to first canary deploy + `riversd` foreground run. Expect: `passed=true`, `type=="scenario"`, `steps.length==1`, `failed_at_step==null`, `total_steps==1`, `steps[0].assertions.length==2`. Run before starting CS2.
+
+**Verify:** all 3 probe endpoints return well-formed scenario envelopes.
+
+**Effort:** ~45 min.
+
+---
+
+## CS2 — Scenario A: Messaging (canary-sql × {PG, MySQL, SQLite})
+
+**Scope:** 12-step user messaging workflow per spec §5, run against 3 SQL drivers. 36 step-executions total.
+
+**Files:**
+- new: `canary-bundle/canary-sql/libraries/handlers/scenario-messaging.ts`
+- new: `canary-bundle/canary-sql/schemas/messages-insert.json` (+ other param schemas as DataViews need them)
+- edit: `canary-bundle/canary-sql/app.toml` (DataView defs + 3 endpoint views)
+- edit: `canary-bundle/canary-sql/resources.toml` (ensure pg/mysql/sqlite present — they already are)
+- edit: `canary-bundle/canary-sql/libraries/handlers/init.ts` (or equivalent init handler; extend with messages-table DDL)
+
+Tasks:
+
+- [x] **CS2.1** Schema: `messages(id, zsender, recipient, subject, body, is_secret, cipher, created_at)`. MSG-7 zname-trap: `body` sorts alphabetically before `id`; `zsender` sorts after `recipient`. Portable types (TEXT/INTEGER) avoid per-driver DDL divergence. No dedicated schema file — declaration lives in init handler DDL. (Done 2026-04-23.)
+- [x] **CS2.2** Init DDL in `canary-sql/libraries/handlers/init.ts` — `CREATE TABLE IF NOT EXISTS messages (...)` for all 3 drivers; SQLite required (fails loudly), PG/MySQL best-effort (try/catch) matching existing init pattern. MySQL rewrites `id TEXT PRIMARY KEY` → `id VARCHAR(64) PRIMARY KEY` (TEXT can't be PK in MySQL). MSG-8 idempotent. (Done 2026-04-23.)
+- [x] **CS2.3** 18 DataViews registered in `canary-sql/app.toml` (6 logical × 3 drivers):
+    - **CS2.3.1** `msg_insert_{pg,mysql,sqlite}` — 7-param INSERT
+    - **CS2.3.2** `msg_inbox_{pg,mysql,sqlite}` — server-side `WHERE recipient = $recipient ORDER BY created_at DESC` (MSG-2)
+    - **CS2.3.3** `msg_search_{pg,mysql,sqlite}` — `WHERE recipient=$recipient AND body LIKE $pattern` (MSG-3)
+    - **CS2.3.4** `msg_select_cipher_{pg,mysql,sqlite}` — direct-probe for MSG-9 at-rest ciphertext
+    - **CS2.3.5** `msg_delete_{pg,mysql,sqlite}` — `WHERE id=$id AND (zsender=$actor OR recipient=$actor)` (MSG-5)
+    - **CS2.3.6** `msg_cleanup_{pg,mysql,sqlite}` — `WHERE id LIKE $id_prefix` for CS2.7 teardown
+    (Done 2026-04-23.)
+- [x] **CS2.4** Three endpoint views registered in `canary-sql/app.toml` — `scenario_messaging_pg`, `scenario_messaging_mysql`, `scenario_messaging_sqlite` — all `POST /canary/scenarios/sql/messaging/{driver}`, `auth="none"` (orchestrator endpoint, not session-gated per revised CS0.2). Three distinct entrypoints rather than a `driver` arg (simpler dispatch, no parameter plumbing). MSG-10 satisfied. (Done 2026-04-23.)
+- [x] **CS2.5** Handler file `scenario-messaging.ts` (~300 lines). Single shared `runMessagingScenario(ctx, driver)` + 3 thin export wrappers. `dv(driver, base)` helper picks the driver-suffixed DataView name. ScenarioResult per test_id `SCENARIO-SQL-MESSAGING-{DRIVER}`. (Done 2026-04-23.)
+- [x] **CS2.6** All 12 workflow steps implemented in `scenario-messaging.ts`. Identity passed as DataView parameter (revised CS0.2). Explicit `sr.endStep()` after each step body; `hasFailed(N)` + `skipStep` handles the dependency chain (step 2/4/10 depend on step 1; step 7/8/11/12 depend on step 6). **MSG-1 coverage gap**: orchestrator is auth=none and passes `zsender` as a parameter — MSG-1's "sender from session" invariant is not directly tested; flagged in handler header comment and CS0.2 decisionlog. (Done 2026-04-23.)
+- [x] **CS2.7** Cleanup-before AND cleanup-after using `msg_cleanup_{driver}` DataView with `id_prefix = "msg-" + ctx.trace_id + "-%"` — isolated per-run; no sender/recipient-based cleanup needed. Cleanup-before also sanitises after any prior abandoned run. Cleanup-after wrapped in try/catch per §10. (Done 2026-04-23.)
+- [x] **CS2.8** run-tests.sh SCENARIOS profile added (lines ~414-438). 3 probe `test_ep`s (unconditional) + SQLite Messaging (unconditional) + PG/MySQL Messaging gated on existing `PG_AVAIL`/`MYSQL_AVAIL`. URL prefixes corrected to actual mount paths (`/sql/`, `/streams/`, `/handlers/`). (Done 2026-04-23.)
+- [x] **CS2.9 (DEFERRED)** MSG-4 real encryption via `Rivers.crypto.encrypt` requires `[[keystores]]` configuration in `canary-sql/resources.toml`, which does not exist today (no canary app has keystore). Scenario uses a placeholder XOR+base64 "encryption" that exercises the MSG-9 at-rest invariant (stored cipher ≠ plaintext) but NOT AES-256-GCM semantics. Follow-on task: wire keystore config + LockBox keys into canary-sql; swap `placeholderEncrypt`/`placeholderDecrypt` for `Rivers.crypto.encrypt`/`.decrypt`.
+
+**Verify:** 3 driver-variant endpoints return `passed=true` with all 12 steps green on full infra; `SKIP` cleanly without PG/MySQL.
+
+**Effort:** ~4-6 hours.
+
+---
+
+## CS3 — Scenario B: Activity Feed (canary-streams) — **UN-DEFERRED 2026-04-23 (BR5)**
+
+**Status:** Blocker resolved — the V8 broker-publish bridge shipped via BR0-BR4. Shipping structural implementation now; runtime/Kafka verification follows first deploy (pattern same as CS2/CS4).
+
+**Scope:** 11-step Kafka-backed event pipeline per spec §6. Publish → MessageConsumer → SQL persist → REST history.
+
+**Files:**
+- new: `canary-bundle/canary-streams/libraries/handlers/scenario-activity-feed.ts`
+- new: `canary-bundle/canary-streams/libraries/handlers/events-consumer.ts` (MessageConsumer entrypoint)
+- edit: `canary-bundle/canary-streams/app.toml` (events table DataViews + MessageConsumer view + REST endpoint)
+- edit: `canary-bundle/canary-streams/resources.toml` (canary-kafka + SQL datasource)
+- edit: `canary-bundle/canary-streams/libraries/handlers/init.ts` (events-table DDL)
+
+Tasks:
+
+- [ ] **CS3.1** Table schema: `events(id, actor, target_user, event_type, payload, published_at, consumed_at)`. Stored by consumer per AF-2 / AF-7.
+- [ ] **CS3.2** Init DDL for events table (AF-9). Idempotent.
+- [ ] **CS3.3** DataView definitions:
+    - [ ] **CS3.3.1** `events_insert` — called from the consumer handler (not REST)
+    - [ ] **CS3.3.2** `events_for_user` — SELECT with `target_user=?`, pagination (limit + offset), date range `published_at >= ?` / `<= ?` (AF-4)
+    - [ ] **CS3.3.3** `events_count_by_user` — COUNT for test asserts
+    - [ ] **CS3.3.4** `events_delete_cleanup` — for CS3.9
+- [ ] **CS3.4** MessageConsumer view registration — Kafka topic via `canary-kafka` LockBox alias (AF-8). Consumer entrypoint = `events-consumer.ts::consumeEvent` which parses the Kafka payload and calls `ctx.dataview("events_insert", ...)`.
+- [ ] **CS3.5** REST history endpoint `/canary/scenarios/stream/activity-feed` — POST, auth=session, dispatches to `scenario-activity-feed.ts`. Implementation reads `target_user = ctx.session.sub` (AF-3 scoping).
+- [ ] **CS3.6** Handler file `scenario-activity-feed.ts` — 11 steps per §6.
+- [ ] **CS3.7** Step implementation:
+    - [ ] **CS3.7.1** Step 1: Publish event for Bob ("Alice commented on your post"). Assert Kafka produce OK.
+    - [ ] **CS3.7.2** Step 2: Poll-wait for consumer (§10 exponential backoff 100/200/400/800/1600/3200 ms, 5s total cap). Assert history shows the event.
+    - [ ] **CS3.7.3** Step 3: Bob REST history. Assert `count==1`, content matches.
+    - [ ] **CS3.7.4** Step 4: Publish 3 more Bob events in rapid succession. Assert all 3 produce calls OK.
+    - [ ] **CS3.7.5** Step 5: Wait + Bob history. Assert `count==4`, publish order preserved (AF-5).
+    - [ ] **CS3.7.6** Step 6: Bob history with date range (before last 3). Assert `count==1` (first event).
+    - [ ] **CS3.7.7** Step 7: Carol history. Assert `count==0`.
+    - [ ] **CS3.7.8** Step 8: Publish event for Carol. Assert Kafka OK.
+    - [ ] **CS3.7.9** Step 9: Carol history (after poll-wait). Assert `count==1`, only Carol's.
+    - [ ] **CS3.7.10** Step 10: Bob history. Assert `count==4` unchanged — scoping (AF-3).
+    - [ ] **CS3.7.11** Step 11: Bob pagination (limit=2 offset=0, then limit=2 offset=2). Assert 2 pages × 2 events, all 4 distinct, no duplicates (AF-4).
+- [ ] **CS3.8** Cleanup — `DELETE FROM events WHERE target_user IN ('alice','bob','carol')`. Best-effort (§10).
+- [ ] **CS3.9** run-tests.sh: `test_ep "scen-stream-activity-feed" POST "$BASE/canary/scenarios/stream/activity-feed" '{}'` behind `KAFKA_AVAIL` (add a Kafka-ping gate if one doesn't exist yet).
+
+**Verify:** full infra → `passed=true` with all 11 steps; no Kafka → clean SKIP.
+
+**Effort:** ~3-5 hours.
+
+---
+
+## CS4 — Scenario C: Document Pipeline (canary-handlers)
+
+**Scope:** 14-step document-workspace scenario per spec §7. Filesystem driver (sandboxed) + exec driver (hash-pinned allowlist).
+
+**Files:**
+- new: `canary-bundle/canary-handlers/libraries/handlers/scenario-doc-pipeline.ts`
+- edit: `canary-bundle/canary-handlers/resources.toml` — add `fs_workspace` (filesystem driver) + `exec_tools` (exec driver) datasources. Mirror `canary-filesystem/resources.toml` patterns.
+- edit: `canary-bundle/canary-handlers/app.toml` — filesystem/exec DataViews + 1 endpoint view
+
+Tasks:
+
+- [x] **CS4.1** `fs_workspace` filesystem datasource wired in `canary-handlers/resources.toml` (required=false) + `[data.datasources.fs_workspace]` config in `app.toml` (database=/tmp, mirroring canary-filesystem). DOC-7. (Done 2026-04-23.)
+- [x] **CS4.2** rivers-exec datasource wired in `canary-handlers/resources.toml` + `app.toml`. `wc-json.sh` wrapper script committed under `libraries/scripts/`; SHA-256 computed via `riverpackage import-exec wc` and pinned in `commands.wc.sha256`. Driver name is `rivers-exec` (corrected from earlier `exec`). Deploy-time step for path refresh documented inline in the datasource config block. (Done 2026-04-23 CS4.9.)
+- [x] **CS4.3** DataView definitions N/A — the filesystem driver exposes a direct object API (`ctx.datasource("fs_workspace").mkdir/writeFile/readFile/readDir/grep/stat/delete/exists`) rather than DataViews. Aligned with existing canary-filesystem pattern. Spec-plan assumption corrected. (Done 2026-04-23.)
+- [x] **CS4.4** Endpoint `scenario_doc_pipeline` at `POST /canary/scenarios/runtime/doc-pipeline`, auth=none, registered in `canary-handlers/app.toml`. (Done 2026-04-23.)
+- [x] **CS4.5** Handler file `scenario-doc-pipeline.ts` (~260 lines) with 14 steps + `deferredStep` helper for the 3 exec-dependent ones. `hasFailed()`/`skipStep()` dependency chain honoured. (Done 2026-04-23.)
+- [x] **CS4.6** 14 steps implemented — 11 filesystem-backed, 3 deferred:
+    - Steps 1-7, 11-14 — live filesystem ops via `ctx.datasource("fs_workspace")`.
+    - Steps 8, 9, 10 — `deferredStep(sr, name, "exec driver not wired")`; always-pass with `deferred: true` detail. Dashboard can distinguish.
+    - Dependency chain: steps 2-14 depend on step 1 (workspace created); step 12 depends on step 5 (notes written); step 6 depends on steps 2 and 5 (both docs present).
+    (Done 2026-04-23.)
+- [x] **CS4.7** Cleanup-before AND cleanup-after. The fs driver has no recursive-delete primitive — scenario walks `readDir` and deletes each entry, then deletes the workspace dir. Best-effort per DOC-8 (try/catch around each op). (Done 2026-04-23.)
+- [x] **CS4.8** `test_ep "scen-runtime-doc-pipeline" POST "$BASE/handlers/canary/scenarios/runtime/doc-pipeline" '{}'` — unconditional (local fs only). Added to run-tests.sh SCENARIOS profile. (Done 2026-04-23.)
+- [x] **CS4.9** Option B delivered 2026-04-23. Shipped:
+    - `canary-handlers/libraries/scripts/wc-json.sh` — DOC-4 JSON output, DOC-6 traversal rejection at script layer (driver has no path sandbox). Executable. SHA-256 `1573a43390b7237e583d90fd0ab01e45ced0332dd7fd6aaf47f93b10dc9d7a8f`.
+    - `resources.toml` gains `[[datasources]] name="exec_tools" driver="rivers-exec" required=false`.
+    - `app.toml` gains `[data.datasources.exec_tools]` + `[data.datasources.exec_tools.commands.wc]` + `[data.dataviews.exec_wc]`. DataView uses `query = "query"` so operation is inferred as `"query"` per SHAPE-7 — avoids the validator-flagged `operation` unknown-key warning.
+    - `scenario-doc-pipeline.ts` steps 8/9/10 replaced with real exec dispatch:
+        - Step 8 asserts `{lines, words, bytes}` all positive (accepts rowResult under `.result` or at row root — shape TBD).
+        - Step 9 asserts error contains one of `"unknown command"` / `"not allowlisted"` / `"not in allowlist"`.
+        - Step 10 accepts rejection either as thrown error OR row with `.error` field — script emits the latter on exit 2.
+    - **Operator deploy step**: after `cargo deploy`, re-run `riverpackage import-exec wc <deployed-path-to>/libraries/scripts/wc-json.sh` and paste the refreshed `path` + `sha256` into the `commands.wc` block. Only required if script is edited or deploy path differs from source layout.
+    - **Two live-only unknowns** flagged in the handler: (a) exec row shape (`.result` nesting), (b) script error-exit surfaces as throw vs row-with-error. Both path branches handled.
+    - `riverpackage validate canary-bundle` → 0 errors, 83 warnings (all pre-existing "param required no default" noise).
+
+**Verify:** endpoint returns `passed=true` with all 14 steps; no external infra required.
+
+**Effort:** ~3-4 hours.
+
+---
+
+## CS5 — Dashboard integration (canary-main)
+
+**Scope:** render scenario verdicts in the Svelte SPA.
+
+**Files:**
+- edit: `canary-bundle/canary-main/` SPA source — verdict loader + new scenario card component
+
+Tasks:
+
+- [x] **CS5.1** Scenarios shipped into the SPA via a new `SCENARIOS` profile in `canary-main/libraries/spa/bundle.js`. 7 test entries: 3 probes + 3 Messaging variants + Doc Pipeline. CS3 Activity Feed entry omitted (deferred). Profile renders through the existing atomic-test renderer — no new UI code. (Done 2026-04-23.)
+- [x] **CS5.1a** Harness change: `ScenarioResult.finish()` now emits a FLAT `assertions[]` field aggregating all per-step assertions with step-prefixed IDs (`"s1:alice-sends-to-bob:insert_no_throw"`), so the existing atomic-renderer's `r.data.assertions.forEach(...)` path shows full detail for scenarios without dashboard code changes. `steps[]` is preserved for future step-level rendering. Propagated across all 3 harness copies (same md5). (Done 2026-04-23.)
+- [ ] **CS5.2 (DEFERRED)** Dedicated per-step UI — scenario card with failed_at_step banner, expand/collapse list, per-step pass/fail indicators, skip-step visual distinction. Needs the SPA source tree (currently `libraries/src/components/` is empty — bundle.js ships pre-compiled). Requires resurrecting or rebuilding the Svelte build pipeline. Scenarios function in the current SPA today via the flat-assertion compatibility path; dedicated step view is polish, not blocker.
+- [ ] **CS5.3 (DEFERRED)** Skipped-step visual distinction — blocked on CS5.2 (same SPA-source reason).
+- [ ] **CS5.4 (DEFERRED)** Dedicated Scenarios tab — same. Scenarios render as a top-level profile alongside atomic tests today, which functionally covers the "separate section" goal.
+
+**Verify:** dashboard shows all 5 scenario cards (3 Messaging variants + Activity Feed + Doc Pipeline) with step-level detail expandable.
+
+**Effort:** ~2 hours.
+
+---
+
+## CS6 — run-tests.sh wiring
+
+Tasks:
+
+- [x] **CS6.1** `SCENARIOS` profile section added to `run-tests.sh` (before MCP, lines ~414-438). Skip-gate pattern header comment at top of file (CS0.3). (Done 2026-04-23.)
+- [x] **CS6.2** Gates: reuses existing `PG_AVAIL` / `MYSQL_AVAIL` probes from the INTEGRATION block. SQLite Messaging + Doc Pipeline unconditional. Probes unconditional. `KAFKA_AVAIL` not added — CS3 deferred. (Done 2026-04-23.)
+- [ ] **CS6.3 (DEFERRED)** Per-step summary pretty-printing on failure — standard `test_ep` asserts `passed=true` at the envelope level which is sufficient today. Step-breakdown printout is polish, bundled with CS5.2 follow-on.
+
+**Verify:** `./run-tests.sh` prints a clean "SCENARIOS Profile" section with 5 entries.
+
+**Effort:** ~30 min.
+
+---
+
+## CS7 — End-to-end verification + CHANGELOG
+
+Tasks:
+
+- [ ] **CS7.1 (PENDING DEPLOY)** Full-infra run: `./run-tests.sh` — expects SQLite Messaging + Doc Pipeline + 3 probes PASS unconditionally; PG/MySQL Messaging PASS on live infra. No Activity Feed entry (CS3 deferred). Requires `cargo deploy` + `riversctl start`. Static `riverpackage validate canary-bundle` → 0 errors, 83 warnings (all pre-existing). (Static gate done 2026-04-23; HTTP gate pending operator deploy.)
+- [ ] **CS7.2 (PENDING DEPLOY)** No-infra run: SQLite Messaging + Doc Pipeline + probes PASS; PG/MySQL Messaging SKIP cleanly via PG_AVAIL/MYSQL_AVAIL gates. Needs running riversd.
+- [ ] **CS7.3 (PENDING DEPLOY)** Deliberate-failure probe — edit one step's assertion, verify `failed_at_step=N`, SV-7 subsequent steps execute, SV-8 dependent steps show skipped. Needs running riversd.
+- [ ] **CS7.4 (PENDING DEPLOY)** Dashboard smoke — canary-main loaded in browser shows SCENARIOS profile section with per-scenario pass/fail + expandable flat-assertion detail. Per-step UI deferred per CS5.2.
+- [x] **CS7.5** `canary-bundle/CHANGELOG.md` appended with scenario-layer decision entry cross-referencing `rivers-canary-scenarios-spec.md` + CS3 deferral rationale + bug report pointer. (Done 2026-04-23.)
+- [x] **CS7.6** `changedecisionlog.md` gained four entries across the scenarios work: CS0.1 (doc-pipeline host), CS0.2 + CS0.2-revised (identity simulation), CS3 deferral + HTTP-as-datasource correction. (Done 2026-04-23.)
+
+**Effort:** ~30 min.
+
+---
+
+## Files touched (hot list)
+
+- **new:** `canary-bundle/canary-sql/libraries/handlers/scenario-harness.ts`
+- **new:** `canary-bundle/canary-streams/libraries/handlers/scenario-harness.ts`
+- **new:** `canary-bundle/canary-handlers/libraries/handlers/scenario-harness.ts`
+- **new:** `canary-bundle/canary-sql/libraries/handlers/scenario-messaging.ts`
+- **new:** `canary-bundle/canary-streams/libraries/handlers/scenario-activity-feed.ts`
+- **new:** `canary-bundle/canary-streams/libraries/handlers/events-consumer.ts`
+- **new:** `canary-bundle/canary-handlers/libraries/handlers/scenario-doc-pipeline.ts`
+- **new:** 3× `scenario-probe.ts` (one per hosting profile)
+- **edit:** `canary-bundle/canary-sql/app.toml`, `resources.toml`, `schemas/`, init handler
+- **edit:** `canary-bundle/canary-streams/app.toml`, `resources.toml`, init handler
+- **edit:** `canary-bundle/canary-handlers/app.toml`, `resources.toml` (filesystem + exec datasources — new for this app)
+- **edit:** `canary-bundle/canary-main/` SPA source (scenario card)
+- **edit:** `canary-bundle/run-tests.sh` (SCENARIOS profile)
+- **edit:** `canary-bundle/CHANGELOG.md`, `changedecisionlog.md`, `todo/changelog.md`
+
+## Effort summary
+
+| Tier | Items | Effort | Risk |
+|------|-------|--------|------|
+| CS0 foundation | 3 | 15 min | low |
+| CS1 harness | 5 | 45 min | low |
+| CS2 Messaging | 20 subtasks | 4-6 hours | medium (crypto roundtrip, zname-trap) |
+| CS3 Activity Feed | 18 subtasks | 3-5 hours | medium (Kafka timing, consumer wiring) |
+| CS4 Doc Pipeline | 22 subtasks | 3-4 hours | low-medium (path traversal, exec allowlist) |
+| CS5 dashboard | 4 | 2 hours | low |
+| CS6 run-tests.sh | 3 | 30 min | low |
+| CS7 verify | 6 | 30 min | low |
+| **Total** | **81 subtasks** | **~14-18 hours** | |
+
+## Execution order
+
+1. **CS0.2** — pick session-identity simulation (unblocks CS2).
+2. **CS0.3** — write the skip-gate comment block in run-tests.sh (unblocks CS2/CS3/CS4 test_ep additions).
+3. **CS1** — port harness to all 3 profiles; probe endpoints confirm envelope shape.
+4. **CS2 / CS3 / CS4** — independent; run in parallel if multiple developers.
+5. **CS5** — dashboard after at least one scenario ships (so there's something to render).
+6. **CS6** — wire run-tests.sh after scenarios exist.
+7. **CS7** — verify end-to-end.
+
+## Design decisions to log (changedecisionlog.md)
+
+1. **CS0.1** — Document Pipeline host: canary-handlers (spec §4 literal) vs canary-filesystem (infra-ready). Chose canary-handlers. (Locked.)
+2. **CS0.2** — Messaging session-identity: session injection vs pre-seeded sessions. (Pending.)
+3. **CS2.1** — Messages schema column ordering and zname-trap choice.
+4. **CS3.4** — MessageConsumer wiring pattern: new view type vs extending existing.
+5. **CS4.2** — Exec allowlist binary selection + hash-pinning strategy.
+
+## Non-goals (explicit out-of-scope)
+
+- SSE real-time delivery in Activity Feed scenario (spec §6 note — covered by atomic STREAM-SSE-* tests).
+- New scenarios beyond the 3 in the spec.
+- Replacing or modifying atomic tests.
+- Production-ready error taxonomy in scenario envelopes beyond SV-1…SV-9.
+- Multi-scenario composition (one scenario triggering another).
+
+---
+
+# BR-2026-04-23 — MessageBrokerDriver TS bridge
+
+> **Bug:** `bugs/bugreport_2026-04-23.md`
+> **Unblocks:** CS3 (Activity Feed) + any future pub/sub scenario.
+> **Spec touched:** `docs/arch/rivers-processpool-runtime-spec-v2.md` §ctx.datasource surface, `docs/arch/rivers-driver-spec.md` §MessageBrokerDriver.
+> **Scope:** expose `ctx.datasource("<broker>").publish(...)` in TS handlers for kafka, rabbitmq, nats, redis-streams. Mirror the filesystem direct-dispatch pattern.
+
+**Rule:** no workarounds ship under this banner. If a subtask hits a blocker that would require a hollow shortcut (path A / path B precedents from the CS3 deliberation), stop and mark DEFERRED rather than paper over it.
+
+**Design constraint:** `MessageBrokerDriver` is a distinct trait from `DatabaseDriver` (different `create_producer()` / `create_consumer()` surface; no shared `execute(Query)` method). The existing `TASK_DIRECT_DATASOURCES` + `Rivers.__directDispatch` machinery is tied to `DatabaseDriver::connect()`. Bridging brokers requires **parallel scaffolding**, not reuse. See BR0.1.
+
+---
+
+## BR0 — Design decisions
+
+- [x] **BR0.1** (Done 2026-04-23, see changedecisionlog.md) Pick the bridge pattern:
+    - **(a)** Parallel scaffolding — new `TASK_DIRECT_BROKER_PRODUCERS` thread-local, new `Rivers.__brokerPublish` V8 callback, new `DatasourceToken::Broker { driver, params }` variant. Cleanest type separation; ~1.5 days work. **Recommended.**
+    - **(b)** Unify — make MessageBrokerDrivers also implement `DatabaseDriver` with a synthetic `"publish"` operation whose `parameters` contains topic+payload. Reuse existing direct-dispatch entirely. ~2 days because every plugin gains a new trait impl; invasive across the four broker crates. No type separation between request/response and fire-and-forget semantics.
+    - **(c)** DataView-based — extend DataView dispatch to accept broker datasources, with `query` field naming the destination. Cheapest (~0.5 day) but surface is impoverished: no structured headers, no key partitioning, no PublishReceipt return. Rejected by spec intent ("one direction wired, the other stranded" from the bug report).
+
+    Log decision in `changedecisionlog.md`.
+- [x] **BR0.2** (Done 2026-04-23, see changedecisionlog.md) Decide producer lifecycle: cache one `BrokerProducer` instance per `(task, datasource_name)` like filesystem caches a `Connection`, OR create + close per-publish? Former is faster; latter avoids cross-task producer reuse bugs. Recommendation: per-task cache, cleared in `TaskLocals::drop` (mirror `TASK_DIRECT_DATASOURCES` lifecycle). Log in changedecisionlog.
+- [x] **BR0.3** (Done 2026-04-23, see changedecisionlog.md) Decide API shape in TS:
+    - `ctx.datasource("kafka").publish({topic, payload, key?, headers?, reply_to?})` — mirrors `OutboundMessage` fields literally.
+    - Return value shape: `{id: string | null, metadata: string | null}` — mirrors `PublishReceipt`. Throws on `DriverError`.
+    - Payload type: accept `string` (interpreted as UTF-8 bytes) AND `object` (JSON-stringify → bytes)? Or require explicit bytes/string from caller? Recommendation: accept both, document JSON auto-stringify.
+
+**Effort:** ~30 min decisions + logging.
+
+---
+
+## BR1 — Token plumbing + per-task producer cache
+
+**Files:**
+- edit: `crates/rivers-runtime/src/process_pool/types.rs` — add `DatasourceToken::Broker { driver, params }` variant, extend `resolve_token_for_dispatch` to emit it for broker drivers.
+- edit: `crates/riversd/src/process_pool/v8_engine/task_locals.rs` — add `TASK_DIRECT_BROKER_PRODUCERS: RefCell<HashMap<String, DirectBrokerProducer>>` thread-local (parallel to `TASK_DIRECT_DATASOURCES`). Struct holds driver name + ConnectionParams + lazy `RefCell<Option<Box<dyn BrokerProducer>>>`. Clear in `Drop` impl.
+- edit: `crates/riversd/src/bundle_loader/load.rs` (or wherever DatasourceToken dispatch is populated from resolved datasources) — populate `TASK_DIRECT_BROKER_PRODUCERS` on task-context build when the datasource's driver is a MessageBrokerDriver.
+
+Tasks:
+
+- [x] **BR1.1** (Done 2026-04-23) Add `DatasourceToken::Broker { driver: String, params: ConnectionParams }` variant + `DatasourceToken::broker(driver, params)` constructor + unit test.
+- [x] **BR1.2** (Done 2026-04-23) Extend `resolve_token_for_dispatch` — detect broker drivers by name (`"kafka" | "rabbitmq" | "nats" | "redis-streams"`) or by a trait query into `DriverFactory`. Prefer trait query so future broker drivers auto-qualify. Open item: `DriverFactory` currently registers DatabaseDriver vs MessageBrokerDriver in separate maps — check that the factory exposes a "kind" probe.
+- [x] **BR1.3** (Done 2026-04-23) Add `DirectBrokerProducer` struct to `task_locals.rs`:
+    ```rust
+    pub(super) struct DirectBrokerProducer {
+        pub(super) driver: String,
+        pub(super) params: ConnectionParams,
+        pub(super) producer: RefCell<Option<Box<dyn BrokerProducer>>>,
+    }
+    ```
+    + `TASK_DIRECT_BROKER_PRODUCERS` thread-local. `TaskLocals::set` populates from `ctx.datasources` broker variants; `TaskLocals::drop` clears AND closes any open producers (best-effort, log-on-error).
+- [x] **BR1.4** (Done 2026-04-23) Producer close on drop must be safe w.r.t. tokio runtime — mirror the existing `auto_rollback_all` pattern in `TaskLocals::drop` (capture RT handle before clearing).
+
+**Unit tests:**
+
+- [x] **BR1.T1** (Done 2026-04-23) `broker_token_constructs` — `DatasourceToken::broker("kafka", params)` round-trips.
+- [x] **BR1.T2** (Done 2026-04-23) `resolve_broker_driver_yields_broker_token` — run `resolve_token_for_dispatch` with a kafka `ResolvedDatasource`, assert Broker variant.
+- [x] **BR1.T3** (Done 2026-04-23) `pooled_drivers_still_yield_pooled` — postgres/mysql/redis produce `Pooled` as before (regression).
+
+**Effort:** ~3 hours.
+
+---
+
+## BR2 — V8 bridge callback + proxy-codegen integration
+
+**Files:**
+- new: `crates/riversd/src/process_pool/v8_engine/broker_dispatch.rs` — parallel to `direct_dispatch.rs`.
+- edit: `crates/riversd/src/process_pool/v8_engine/proxy_codegen.rs` — emit `.publish(args)` method on datasource proxies whose token type is Broker.
+- edit: `crates/riversd/src/process_pool/v8_engine/mod.rs` — register the new module, wire callback into init.
+- edit: `crates/riversd/src/process_pool/v8_engine/init.rs` — inject `Rivers.__brokerPublish` callback during context setup.
+
+Tasks:
+
+- [x] **BR2.1** (Done 2026-04-23) Create `broker_dispatch.rs` with `rivers_broker_publish_callback(scope, args, rv)`:
+    - Extract `name` (arg 0, string) and `message` (arg 1, object).
+    - Parse `message` into `OutboundMessage` — `destination` required, `payload` required, `headers` / `key` / `reply_to` optional. Auto-stringify `payload` if object (per BR0.3).
+    - Look up `TASK_DIRECT_BROKER_PRODUCERS[name]`; throw `TypeError` if missing.
+    - Lazy-init `BrokerProducer` on first call in this task — `driver.create_producer(params, &BrokerConsumerConfig::default())`.
+    - `rt.block_on(producer.publish(msg))` — return `{id, metadata}` object on Ok, throw `v8::Exception::error` with the DriverError message on Err.
+- [x] **BR2.2** (Done 2026-04-23) Extend `proxy_codegen.rs` — when the datasource's token is `Broker`, emit a JS proxy object with a `publish(msg)` method that calls `Rivers.__brokerPublish(name, msg)`. Filesystem's `FilesystemProxyObject` is the precedent.
+- [x] **BR2.3** (Done 2026-04-23) Register the V8 callback in `init.rs` (or wherever `Rivers.__directDispatch` is registered). Idempotent — only inject when at least one broker datasource is in scope (micro-optimisation; optional).
+- [x] **BR2.4** (Done 2026-04-23) Error mapping: `DriverError::Connection` / `Query` / `Unsupported` → distinct JS error messages so handlers can pattern-match.
+
+**Unit tests (Rust side):**
+
+- [x] **BR2.T1** (Done 2026-04-23) `broker_publish_missing_datasource_throws_type_error` — call callback with unknown name, assert TypeError + message.
+- [x] **BR2.T2** (Done 2026-04-23) `broker_publish_missing_destination_throws` — message object without `destination`, assert throw.
+- [x] **BR2.T3** (Done 2026-04-23) `broker_publish_happy_path_uses_cached_producer` — first call creates producer, second call reuses cached instance (verify via a mock BrokerProducer that counts `create_producer` invocations).
+
+**Effort:** ~4 hours.
+
+---
+
+## BR3 — Driver-side integration verification
+
+All four broker drivers already implement `MessageBrokerDriver` + `BrokerProducer::publish`. BR3 verifies the bridge works end-to-end against each, not just kafka.
+
+Tasks:
+
+- [ ] **BR3.1 (PENDING DEPLOY)** Kafka end-to-end: `ctx.datasource("kafka").publish(...)` from canary + kafkacat consumer verify. Atomic-level covered in BR4.
+- [ ] **BR3.2 (PENDING DEPLOY)** RabbitMQ — `key` field → AMQP routing-key.
+- [ ] **BR3.3 (PENDING DEPLOY)** NATS — publish to subject + subscriber verify.
+- [ ] **BR3.4 (PENDING DEPLOY)** Redis Streams — XADD publish + XREAD verify.
+- [x] **BR3.5** Broker plugin lib tests regression: kafka 15 / rabbitmq 15 / nats 12 / redis-streams 11 = **53 tests PASS**. No regression from BR1 token plumbing. (Done 2026-04-23.)
+
+**Effort:** ~3 hours (parallelisable across drivers if infra allows).
+
+---
+
+## BR4 — Testing: new canary atomic tests
+
+**Files:**
+- new: `canary-bundle/canary-streams/libraries/handlers/broker-publish-tests.ts` — atomic tests for the new surface.
+- edit: `canary-bundle/canary-streams/app.toml` — register test endpoints, uncomment the MessageConsumer view now that publish works.
+
+Tasks:
+
+- [x] **BR4.1** (Done 2026-04-23) New atomic test `STREAM-KAFKA-PUBLISH-RECEIPT` — publish a message, assert receipt has `id` (kafka returns offset) + `metadata` (partition).
+- [x] **BR4.2** (Done 2026-04-23) New atomic test `STREAM-KAFKA-PUBLISH-THEN-CONSUME` — handler publishes, triggers the MessageConsumer view (now re-enabled), consumer stores in `ctx.store`, second test endpoint reads from store and asserts roundtrip.
+- [x] **BR4.3** (Done 2026-04-23) Negative test `STREAM-KAFKA-PUBLISH-UNKNOWN-DATASOURCE` — call with unknown name, assert specific error message.
+- [x] **BR4.4** (Done 2026-04-23) Negative test `STREAM-KAFKA-PUBLISH-MISSING-DESTINATION` — message without `destination`, assert argument validation error.
+- [x] **BR4.5** (Done 2026-04-23) Uncomment the canary-streams `kafka_consume` MessageConsumer view block (currently disabled with `# no broker`). Wire it alongside BR4.2.
+- [ ] **BR4.6 (DEFERRED)** Equivalent publish-roundtrip tests for NATS + RabbitMQ + Redis-Streams if the canary hosts those brokers (otherwise SKIP-gate them).
+- [x] **BR4.7** (Done 2026-04-23) run-tests.sh — new tests fire under `STREAMS` profile; existing atomic counts don't regress.
+
+**Effort:** ~3 hours + infra time.
+
+---
+
+## BR5 — CS3 unblock (Activity Feed scenario ships)
+
+This is the downstream payoff — the scenario that was deferred in the canary-scenarios work becomes implementable.
+
+Tasks:
+
+- [x] **BR5.1** (Done 2026-04-23) Un-defer CS3 in `todo/tasks.md` (flip the header back from DEFERRED).
+- [x] **BR5.2** (Done 2026-04-23) Execute the CS3.1–CS3.9 subtasks as originally planned — now the orchestrator can publish events to Kafka, the consumer persists them via the existing `ctx.dataview("events_insert", ...)` path, and the scenario's 11 steps all run for real.
+- [x] **BR5.3** (Done 2026-04-23) run-tests.sh gains a `KAFKA_AVAIL` probe + one conditional `test_ep "scen-stream-activity-feed"` line.
+- [x] **BR5.4** (Done 2026-04-23) canary-main/spa/bundle.js gains the `SCEN-STREAM-ACTIVITY-FEED` entry in the SCENARIOS profile.
+
+**Effort:** ~3-4 hours (the original CS3 estimate — unchanged).
+
+---
+
+## BR6 — Documentation + decisions
+
+Tasks:
+
+- [ ] **BR6.1 (DEFERRED — spec doc edits)** Update `docs/arch/rivers-processpool-runtime-spec-v2.md` — document `ctx.datasource("<broker>").publish(...)` as a first-class surface alongside filesystem direct-dispatch.
+- [ ] **BR6.2 (DEFERRED — spec doc edits)** Update `docs/arch/rivers-driver-spec.md` §MessageBrokerDriver — note that `publish` is now reachable from TS handlers via the V8 bridge; cross-reference the new runtime spec section.
+- [x] **BR6.3** (Done 2026-04-23) Update `types/rivers.d.ts` — declare the datasource proxy type with `.publish(OutboundMessage): PublishReceipt` signature. Include JSDoc capability marker `@capability broker` following the existing `@capability keystore`/`@capability transaction` convention.
+- [x] **BR6.4** (Done 2026-04-23) `changedecisionlog.md` entries:
+    - BR0.1 bridge-pattern choice + rationale.
+    - BR0.2 producer lifecycle (per-task cache).
+    - BR0.3 TS API shape (string vs object payload, receipt shape).
+    - Why MessageBrokerDriver was chosen as the trait anchor rather than fronting it with a synthetic DatabaseDriver op.
+- [x] **BR6.5** (Done 2026-04-23) `todo/changelog.md` entry covering the whole BR phase.
+- [x] **BR6.6** (Done 2026-04-23) Append `bugs/bugreport_2026-04-23.md` with a "Resolved by" section pointing at the merge commit.
+
+**Effort:** ~1.5 hours.
+
+---
+
+## BR7 — Verification + canary roundtrip
+
+Tasks:
+
+- [x] **BR7.1** (Done 2026-04-23) `cargo test -p riversd` — all lib + integration tests pass, new BR1.T1-3 + BR2.T1-3 green.
+- [x] **BR7.2** (Done 2026-04-23) `cargo build -p riversd --features static-engines` — clean build.
+- [ ] **BR7.3 (PENDING DEPLOY)** `cargo deploy /tmp/rivers-br` — deploy with the new runtime.
+- [ ] **BR7.4 (PENDING DEPLOY)** `canary-bundle/run-tests.sh` against the deployed instance — existing atomic count unchanged; new STREAM atomic tests PASS; new `scen-stream-activity-feed` PASS (Kafka reachable).
+- [x] **BR7.5** (Done 2026-04-23) No regression in the 25 completed scenario items (CS0–CS2, CS4, CS5.1, CS6.1/6.2, CS7.5/7.6).
+
+**Effort:** ~1 hour.
+
+---
+
+## Files touched (hot list)
+
+- **new:** `crates/riversd/src/process_pool/v8_engine/broker_dispatch.rs`
+- **new:** `canary-bundle/canary-streams/libraries/handlers/broker-publish-tests.ts`
+- **edit:** `crates/rivers-runtime/src/process_pool/types.rs` (new DatasourceToken variant)
+- **edit:** `crates/riversd/src/process_pool/v8_engine/task_locals.rs` (TASK_DIRECT_BROKER_PRODUCERS + lifecycle)
+- **edit:** `crates/riversd/src/process_pool/v8_engine/proxy_codegen.rs` (.publish method emission)
+- **edit:** `crates/riversd/src/process_pool/v8_engine/init.rs` (register callback)
+- **edit:** `crates/riversd/src/process_pool/v8_engine/mod.rs` (module registration)
+- **edit:** `crates/riversd/src/bundle_loader/load.rs` (DatasourceToken dispatch for broker)
+- **edit:** 4 broker plugin crates — integration test updates if BR1.2 trait-query path touches their registration code
+- **edit:** `canary-bundle/canary-streams/app.toml` (enable kafka_consume view, register publish test endpoints)
+- **edit:** `docs/arch/rivers-processpool-runtime-spec-v2.md`, `rivers-driver-spec.md`
+- **edit:** `types/rivers.d.ts`
+- **edit:** `canary-bundle/canary-streams/libraries/handlers/scenario-activity-feed.ts` (new, BR5)
+- **edit:** `canary-bundle/canary-streams/libraries/handlers/events-consumer.ts` (BR5)
+- **edit:** `canary-bundle/run-tests.sh` (BR4 atomic lines + BR5 KAFKA_AVAIL gate)
+- **edit:** `canary-bundle/canary-main/libraries/spa/bundle.js` (BR5.4 scenario entry)
+- **edit:** `changedecisionlog.md`, `todo/changelog.md`, `canary-bundle/CHANGELOG.md`
+- **update:** `bugs/bugreport_2026-04-23.md` (Resolved by)
+
+## Effort summary
+
+| Tier | Items | Effort | Risk | Depends on |
+|------|-------|--------|------|-----------|
+| BR0 foundation | 3 decisions | 30 min | low | — |
+| BR1 token + cache | 4 impl + 3 tests | 3h | low-med (trait-query plumbing) | BR0 |
+| BR2 V8 bridge | 4 impl + 3 tests | 4h | medium (V8 callback + proxy emission) | BR0, BR1 |
+| BR3 driver integration verify | 5 | 3h | low | BR2, infra |
+| BR4 canary atomics | 7 | 3h | low | BR2 |
+| BR5 CS3 ship | 4 | 3-4h | low (plan pre-written) | BR2 |
+| BR6 docs | 6 | 1.5h | low | BR2 |
+| BR7 verify | 5 | 1h | low | all |
+| **Total** | **44 items** | **~19h (~2.5 days)** | | |
+
+**Critical path:** BR0 → BR1 → BR2 → (BR3 ‖ BR4 ‖ BR5 ‖ BR6) → BR7. BR5 and BR4 can share infra time.
+
+## Execution order
+
+1. **BR0** — lock the three decisions (bridge pattern, lifecycle, API shape).
+2. **BR1** — token plumbing + cache. Unit-testable in isolation.
+3. **BR2** — V8 bridge. Unit-testable with a mock BrokerProducer.
+4. **BR3** — verify against each driver (needs infra).
+5. **BR4** — canary atomics (new public-facing coverage).
+6. **BR5** — CS3 Activity Feed finally ships.
+7. **BR6** — docs while tests bake.
+8. **BR7** — full-bundle verification.
+
+## Non-goals (explicit out-of-scope)
+
+- Extending the bridge to `BrokerConsumer` from TS — consumers are already handled via MessageConsumer views.
+- Schema validation on `OutboundMessage.payload` — driver-specific, out of scope.
+- Retry / circuit-breaker policy for publish failures — caller's responsibility today; could be a follow-on.
+- Transactional publish (exactly-once semantics) — Kafka-specific, future work.
+- Request/reply pattern (NATS-specific) — requires a matching consume flow from TS, bigger scope.
+
+---
+
 # Tasks — Unit Test Infrastructure
 
 > **Branch:** `test-coverage`
@@ -4060,3 +4587,473 @@ V8's CallSite is a JS object; no rusty_v8 wrapper. Extract via property-lookup +
 | 6G | 0.5 | low |
 | 6H | 1 | low |
 | **Total** | **~7.5** | |
+
+
+---
+
+## Archived 2026-04-22 — TS Pipeline Gap Closure Plan (G0-G8 shipped)
+
+> Replaced by the Canary Scenarios task list per `docs/arch/rivers-canary-scenarios-spec.md`. The G0-G8 plan shipped via PR #79 (merged 2026-04-22). Residual P0 items (G-P0-A through G-P0-G) live on the `feature/gap-closure-p0` branch, commits 80a7f5e..c3eed8b.
+
+# TS Pipeline Spec-Compliance Gap Closure
+
+> **Branch:** `docs/guide-v0.54.0-updates` (continues TS pipeline work)
+> **Spec:** `docs/arch/rivers-javascript-typescript-spec.md`
+> **Gap analysis source:** this session's §-by-§ walkthrough. All 6 CB defects closed; remaining gaps are spec-compliance format/plumbing issues and canary coverage shortfall.
+> **Prior:** TS pipeline Phases 0–11 + Phase 6 completion archived in `todo/gutter.md`.
+
+**Goal:** close every observable gap between the implementation and the spec, split into four priority tiers. P0 is high-impact compliance (canary validation + runtime debug flag); P1 is format drift that changes observable surface; P2 is nice-to-haves; P3 is spec-doc corrections.
+
+**Critical path:** G1 (canary TS coverage) is the biggest remaining gap — spec §9.2 lists 16 required test IDs; 1 is shipped at canary level today.
+
+---
+
+## G0 — Foundation decisions (blocking P0+)
+
+Before executing G1–G8, two small calls clear ambiguity for the rest of the plan:
+
+- [x] **G0.1** Decision: **option (a)** — amend spec §5.3 envelope shape to match existing `ErrorResponse` convention (`{code, message, trace_id, details.stack}`). Zero code change; spec edit in G8.4. Logged in `changedecisionlog.md`. (Done 2026-04-21.)
+- [x] **G0.2** Decision: **option (a)** — drop `Rivers.db / Rivers.view / Rivers.http` from spec §8.3. None of these exist at runtime; aspirational stubs would create broken type-check signals. Spec edit in G8.6. Logged in `changedecisionlog.md`. (Done 2026-04-21.)
+
+---
+
+## P0 — High-impact spec compliance
+
+### G1 — Canary TS-syntax coverage (spec §9.2)
+
+**Scope:** 10 TS-syntax handler endpoints + 1 circular-import shell test + run-tests.sh profile. Each handler returns a `TestResult` per `test-harness.ts`; test harness asserts `passed=true`.
+
+**Rationale:** spec §9.2 mandates canary-level exercise of every TS compiler feature. Unit tests prove `compile_typescript` works; canary proves the full dispatch invokes it correctly on a running riversd. Biggest single compliance gap.
+
+**Files:**
+- new: `canary-bundle/canary-handlers/libraries/handlers/ts-compliance/*.ts` (one per case)
+- edit: `canary-bundle/canary-handlers/app.toml` (register 10 views under `[api.views.ts_*]`)
+- edit: `canary-bundle/run-tests.sh` (TYPESCRIPT profile expansion)
+- new: `canary-bundle/tests/circular-import-rejection.sh` (standalone; not part of run-tests.sh)
+
+Tasks:
+
+- [x] **G1.1** `ts-compliance/param-strip.ts` — `function paramStrip(ctx: any)` + typed assertions. Probe case B. (Done 2026-04-21.)
+- [x] **G1.2** `ts-compliance/var-strip.ts` — `const answer: number = 42` + `const name: string = "rivers"`. Probe case C. (Done 2026-04-21.)
+- [x] **G1.3** `ts-compliance/import-type.ts` + `import-type-helpers.ts` — `import { type Answer, buildAnswer }`; uses `buildAnswer` at runtime. Probe case D. (Done 2026-04-21.)
+- [x] **G1.4** `ts-compliance/generic.ts` — `function identity<T>(x: T): T` with call sites for number + string. Probe case E. (Done 2026-04-21.)
+- [x] **G1.5** `ts-compliance/multimod.ts` + `multimod-helpers.ts` — imports `double`, `MODULE_MARKER`. Probe case F. Both files under `libraries/` are cached at bundle load. (Done 2026-04-21.)
+- [x] **G1.6** `ts-compliance/export-fn.ts` — `export function exportFn(ctx)` hits the module namespace entrypoint path. Probe case G. (Done 2026-04-21.)
+- [x] **G1.7** `ts-compliance/enum.ts` — numeric enum with forward + reverse lookup assertions (reverse lookup is lowering-specific). (Done 2026-04-21.)
+- [x] **G1.8** `ts-compliance/decorator.ts` — TC39 Stage 3 decorator on a class method; sets `globalThis.__decorator_fired` + `__decorator_kind` so the handler can probe decorator-runtime execution. (Done 2026-04-21.)
+- [x] **G1.9** `ts-compliance/namespace.ts` — `namespace util { export const VERSION = "1.0"; export function greet(who) { … } }` with runtime reads. (Done 2026-04-21.)
+- [x] **G1.10** `canary-bundle/tests/circular-import-rejection.sh` + `fixtures/circular-import-reject/` — a.ts ↔ b.ts cycle. Shell test invokes `riverpackage validate`, asserts non-zero exit + the `circular import detected` phrase + both filenames in the error. SKIP path if `riverpackage` not on PATH. (Done 2026-04-21.)
+- [x] **G1.11** 9 new `[api.views.ts_*]` blocks registered in `canary-handlers/app.toml` — ts_param_strip, ts_var_strip, ts_import_type, ts_generic, ts_multimod, ts_export_fn, ts_enum, ts_decorator, ts_namespace. All `method = "POST"`, `view_type = "Rest"`, `auth = "none"`. (Done 2026-04-21.)
+- [x] **G1.12** `run-tests.sh` TYPESCRIPT profile split into "syntax + modules" (9 new `test_ep` lines) + "source map remap" (existing ts-sourcemap probe, unchanged). (Done 2026-04-21.)
+
+**Validate:** `./run-tests.sh` shows PASS for all 9 new IDs + the sourcemap probe; canary total goes from 69+N/69+N to 69+N+9/69+N+9 green.
+
+**Effort:** ~3 hours (mostly mechanical handler wrapper code).
+
+### G2 — Canary transaction handlers (spec §9.2)
+
+**Scope:** 5 transaction test endpoints. Requires a live PG datasource configured for the canary app.
+
+**Files:**
+- new: `canary-bundle/canary-handlers/libraries/handlers/ts-compliance/txn-commit.ts`, `txn-rollback.ts`, `txn-cross-ds.ts`, `txn-nested.ts`, `txn-unsupported.ts`
+- edit: `canary-bundle/canary-handlers/app.toml` (register under TRANSACTIONS-TS profile)
+- edit: `canary-bundle/canary-handlers/resources.toml` (add `pg` datasource if not present)
+- edit: `canary-bundle/run-tests.sh` (TRANSACTIONS-TS profile extension with PG_AVAIL gate)
+
+Tasks:
+
+- [x] **G2.1** `ts-compliance/txn-commit.ts` — `ctx.transaction("pg", () => ctx.dataview("txn_pg_ping"))`; assertions on no-throw + callback return value reaches handler + rows readable via held connection. Uses `SELECT 1` DataView to avoid schema setup. (Done 2026-04-21.)
+- [x] **G2.2** `ts-compliance/txn-rollback.ts` — callback executes a dataview then throws a distinctive message; handler asserts the re-thrown message reaches it unchanged. (Done 2026-04-21.)
+- [x] **G2.3** `ts-compliance/txn-cross-ds.ts` — transaction on `pg`, dataview `txn_sqlite_ping` (points at `sqlite_cross` datasource); asserts TransactionError + spec §6.2 "differs from" phrase + named dataview. (Done 2026-04-21.)
+- [x] **G2.4** `ts-compliance/txn-nested.ts` — genuine nested call: `ctx.transaction("pg", () => ctx.transaction("pg", …))`. Asserts `TransactionError: nested transactions not supported`. (Done 2026-04-21.)
+- [x] **G2.5** `ts-compliance/txn-unsupported.ts` — `ctx.transaction("canary-faker", …)`; asserts `TransactionError: ... does not support transactions`. Uses the pre-existing `canary-faker` datasource — no PG needed, so this runs even on no-infra deploys. (Done 2026-04-21.)
+- [x] **G2.6** `resources.toml` — added `pg` datasource pointing at 192.168.2.209 (required=false so missing infra doesn't block bundle load) + `sqlite_cross` for the cross-ds test. Two minimal DataViews (`txn_pg_ping` and `txn_sqlite_ping`, both `SELECT 1`) registered in `app.toml` — no table schema required. (Done 2026-04-21.)
+- [x] **G2.7** `run-tests.sh` TRANSACTIONS-TS profile extended. `txn-unsupported` runs unconditionally (uses faker). The PG-dependent four (txn-commit, txn-rollback, txn-cross-ds, txn-nested) run behind a `PG_AVAIL` gate that pings `/sql/canary/sql/pg/param-order` — the same gate pattern used elsewhere in run-tests.sh. On no-infra deploys, each prints `SKIP … (PG unreachable)` and contributes 0 to PASS/FAIL. (Done 2026-04-21.)
+
+**Validate:** 5/5 PASS on PG cluster; SKIP cleanly without PG.
+
+**Effort:** ~2 hours + infra access for the roundtrip run.
+
+### G3 — Per-app debug flag runtime plumbing (spec §5.3)
+
+**Scope:** replace `cfg!(debug_assertions)` gate in `error_response::map_view_error` with a runtime read of `AppConfig.base.debug` for the matched app.
+
+**Files:**
+- edit: `crates/riversd/src/error_response.rs` — `map_view_error` signature adds `debug_enabled: bool`
+- edit: `crates/riversd/src/server/view_dispatch.rs` — look up matched view's app's `AppConfig.base.debug`; pass to `map_view_error`
+
+Tasks:
+
+- [x] **G3.1** `map_view_error` signature extended with `debug_enabled: bool`; replaces `cfg!(debug_assertions)` checks for Handler, HandlerWithStack, Pipeline, Internal. `cfg!(debug_assertions)` retained as an OR fallback for dev-build convenience. (Done 2026-04-21.)
+- [x] **G3.2** `view_dispatch.rs` error branch looks up `ctx.loaded_bundle.apps[].manifest.app_id == manifest_app_id` and reads `.config.base.debug`. Falls back to `false` on lookup miss. Passed into `map_view_error`. (Done 2026-04-21.)
+- [x] **G3.3** Updated existing 6 `map_view_error(...)` test calls to pass `false`. Added 2 new G3 tests: `g3_handler_with_stack_surfaces_when_debug_enabled` (always passes) and `g3_handler_with_stack_debug_disabled_in_release_hides` (asserts OR semantics — hides in release, surfaces in cargo-test debug). 24/24 `error_response_tests` green. (Done 2026-04-21.)
+- [x] **G3.4** Decision-log entry captured in G0.1 / G8.4 rationale — runtime flag IS the mechanism; OR with `cfg!(debug_assertions)` for dev convenience documented in the function docstring. (Done 2026-04-21.)
+
+**Validate:** tests green; integration run shows debug=true app produces `details.stack` + debug=false app omits it, in the SAME build.
+
+**Effort:** ~1 hour.
+
+### G4 — `rivers.d.ts` spec alignment (spec §8.3)
+
+**Scope:** rename `Ctx` → `ViewContext` with type alias, reconcile `Rivers.db/view/http` per G0.2, add capability-gated JSDoc markers.
+
+**Files:** edit `types/rivers.d.ts`, edit `docs/guide/tutorials/tutorial-ts-handlers.md` if naming changes propagate.
+
+Tasks:
+
+- [x] **G4.1** Renamed primary interface `Ctx` → `ViewContext` (with JSDoc note). Added `type Ctx = ViewContext` alias at end-of-file for backcompat. Updated `HandlerFn`'s parameter type. (Done 2026-04-21.)
+- [x] **G4.2** Per G0.2: `Rivers.db/view/http` dropped from spec §8.3 (G8.6). `rivers.d.ts` declares only the runtime-injected surface. No stubs added. (Done 2026-04-21.)
+- [x] **G4.3** Capability markers added: `Rivers.keystore` + `Rivers.crypto.encrypt/decrypt` (`@capability keystore`), `ctx.transaction` (`@capability transaction`). Informational comment block describing the capability-tag convention added at the bottom of the file. `allow_outbound_http` marker deferred — no typed surface to annotate until `Rivers.http` ships. (Done 2026-04-21.)
+- [x] **G4.4** `tutorial-ts-handlers.md` updated: `Ctx` → `ViewContext` in the "Using the Rivers-shipped rivers.d.ts" section. (Done 2026-04-21.)
+
+**Validate:** `tsc --noEmit` on a sample handler using the new `ViewContext` name resolves; `Ctx` alias works for backcompat.
+
+**Effort:** ~30 min.
+
+---
+
+## P1 — Format / cosmetic drift
+
+### G5 — Error message format alignment
+
+Spec uses specific multi-line error formats in §2.5, §3.1, §3.2. Implementation condenses to single lines with equivalent information.
+
+**Files:** `crates/riversd/src/process_pool/v8_config.rs`, `v8_engine/execution.rs` (resolve_module_callback)
+
+Tasks:
+
+- [x] **G5.1** `.tsx` rejection now uses spec §2.5's `{app}/{path}` form when a `libraries/` ancestor is detected. New helper `shorten_app_path` walks path components backward; falls back to raw filename for inline/test paths. New test `compile_typescript_rejects_tsx_with_app_short_path` verifies the short form. (Done 2026-04-21.)
+- [x] **G5.2** Missing-extension error in `resolve_module_callback` expanded to spec §3.1 multi-line format with `in {referrer}` and `hint: use "{spec}.ts" or "{spec}.js"` lines. (Done 2026-04-21.)
+- [x] **G5.3** Not-in-cache error expanded to spec §3.2 format: `resolves outside app boundary` + `in {referrer}` + `resolved to:` + `boundary:`. New `boundary_from_referrer` helper walks up path components to find the nearest `libraries/` ancestor — that's the spec's `{app}/libraries/` boundary. Falls back to no-boundary-line if no `libraries/` ancestor found. (Done 2026-04-21.)
+- [x] **G5.4** Existing `compile_typescript_rejects_tsx` test updated with clearer intent comment; new short-path test added. No resolver-callback tests existed (V8 callback runs inside a live isolate; unit testing is indirect via dispatch). 141/141 `process_pool` lib tests still green; 19/19 `compile_typescript` integration tests green. (Done 2026-04-21.)
+
+**Validate:** existing unit tests pass with updated assertions; no behaviour change, only message change.
+
+**Effort:** ~1 hour.
+
+### G6 — Debug envelope field names (resolved by G0.1)
+
+Per G0.1 decision. If option (a) — spec changes to match Rivers' `ErrorResponse` convention — this work is a spec edit only, covered by G8.5. If option (b) — response envelope changes — it's a bigger migration:
+
+- [x] **G6.1** Not applicable — G0.1 = option (a). Envelope alignment was handled entirely by the G8.4 spec edit (spec §5.3 now documents the existing `{code, message, trace_id, details.stack}` shape). Zero code change. (Resolved 2026-04-21.)
+
+**Validate:** all error responses migrate; existing clients documented.
+
+**Effort:** option (a) = 0; option (b) = ~1 day + migration plan.
+
+---
+
+## P2 — Nice-to-have tightening
+
+### G7 — ES2022 codegen target (spec §2.4)
+
+Currently: parser target = ES2022, codegen target = default (ESNext). Spec intent is that ES2023+ syntax gets lowered to ES2022. In practice V8 v130 supports most ES2023; gap is theoretical.
+
+**Files:** `crates/riversd/src/process_pool/v8_config.rs`
+
+Tasks:
+
+- [x] **G7.1** Set `Config::with_target(EsVersion::Es2022)` on the Emitter in `v8_config.rs`. Documents ES2022 as the compilation target floor. **Scope note:** the codegen `target` flag influences emission decisions (reserved-word handling, some formatting); it does NOT semantically downlevel ES2023+ AST nodes. True downleveling requires a `swc_ecma_transforms_compat::es2022` transform pass inserted between `typescript()` and `fixer()` — not wired in this phase because V8 v130 natively supports ES2023 features (findLast, hashbangs, etc.) so the gap is theoretical. (Done 2026-04-21.)
+- [x] **G7.2** Added `compile_typescript_preserves_es2022_class_fields` — verifies canonical ES2022 syntax (class fields) emits as-is when target is set to Es2022. Full downlevel-an-ES2023+-feature test deferred with the lowering itself. (Done 2026-04-21.)
+
+**Validate:** test green; existing tests unaffected (current TS corpus is ES2022 or below).
+
+**Effort:** ~30 min.
+
+---
+
+## P3 — Spec document corrections
+
+### G8 — Spec self-corrections
+
+Not code changes; they're edits to `docs/arch/rivers-javascript-typescript-spec.md` to reflect implementation reality.
+
+Tasks:
+
+- [x] **G8.1** §2.1 updated: `swc_core = "64"` with full feature list + note that swc uses major-per-release; `swc_sourcemap = "10"` direct dep added. (Done 2026-04-21.)
+- [x] **G8.2** §2.2 bullet list: removed "TC39 Stage 3 decorator lowering" (that pass doesn't live in `typescript::typescript()`). Added a clarifying note pointing at §2.3 for decorator handling. (Done 2026-04-21.)
+- [x] **G8.3** §2.3 rewritten: removed the invalid `DecoratorVersion::V202203` snippet; documented the actual parse-and-pass-through model with V8 executing Stage 3 decorators natively. Points out `swc_ecma_transforms_proposal::decorators` is not applied. (Done 2026-04-21.)
+- [x] **G8.4** §5.3 envelope example aligned to `ErrorResponse` shape — `{code, message, trace_id, details.stack}`. Non-debug responses omit `details` entirely. (Done 2026-04-21.)
+- [x] **G8.5** §6.4 driver table qualified: built-in rows cite source file; plugin rows marked "verify at plugin load" with a note that runtime enforcement is authoritative. (Done 2026-04-21.)
+- [x] **G8.6** §8.3 required-declarations list corrected: removes `Rivers.db/view/http` with a rationale note; explicit cross-ref to `rivers_global.rs` as the authoritative injection surface. (Done 2026-04-21.)
+
+**Validate:** spec reads consistently with implementation; every MUST/SHOULD has a satisfied counterpart.
+
+**Effort:** ~1 hour (all editing, no code).
+
+---
+
+## Files touched (hot list)
+
+- **new:** 10 files under `canary-bundle/canary-handlers/libraries/handlers/ts-compliance/`
+- **new:** `canary-bundle/tests/circular-import-rejection.sh`
+- **edit:** `canary-bundle/canary-handlers/app.toml` (14 new `[api.views.ts_*]` and `[api.views.txn_*]` blocks)
+- **edit:** `canary-bundle/canary-handlers/resources.toml` (if PG datasource needed)
+- **edit:** `canary-bundle/run-tests.sh` (profile expansions)
+- **edit:** `crates/riversd/src/error_response.rs` (signature + tests)
+- **edit:** `crates/riversd/src/server/view_dispatch.rs` (debug flag lookup)
+- **edit:** `crates/riversd/src/process_pool/v8_config.rs` (error messages, ES2022 codegen)
+- **edit:** `crates/riversd/src/process_pool/v8_engine/execution.rs` (resolve_module_callback error messages)
+- **edit:** `types/rivers.d.ts` (ViewContext rename, capability markers)
+- **edit:** `docs/guide/tutorials/tutorial-ts-handlers.md` (type name propagation)
+- **edit:** `docs/arch/rivers-javascript-typescript-spec.md` (G8 self-corrections)
+- **edit:** `changedecisionlog.md`, `todo/changelog.md`
+
+## Verification — end to end
+
+1. `cargo test -p riversd --lib` — 310/310 prior tests still green; ~6 new tests from G3, G5, G7.
+2. `cargo deploy /tmp/rivers-gap-closure` — deploy succeeds with all updates.
+3. `just probe-ts` against deployed instance — all 9 probe cases green.
+4. `canary-bundle/run-tests.sh` — TYPESCRIPT profile shows 10/10 PASS; TRANSACTIONS-TS shows 5/5 PASS on PG cluster.
+5. `canary-bundle/tests/circular-import-rejection.sh` — non-zero exit with expected spec §3.5 error.
+6. Spec re-read: every MUST/SHOULD in `rivers-javascript-typescript-spec.md` maps to an implementation element or an explicit deferral with cross-ref.
+
+## Effort summary
+
+| Tier | Items | Effort | Risk |
+|------|-------|--------|------|
+| G0 | 2 decisions | 30 min | low |
+| G1 canary TS-syntax | 12 tasks | ~3 hours | low |
+| G2 canary transaction | 7 tasks | ~2 hours + infra | medium (PG access) |
+| G3 debug flag plumbing | 4 tasks | ~1 hour | low |
+| G4 rivers.d.ts | 4 tasks | ~30 min | low |
+| G5 error formats | 4 tasks | ~1 hour | low |
+| G6 envelope fields | 1 task (option b only) | 0 or ~1 day | medium if (b) |
+| G7 ES2022 codegen | 2 tasks | ~30 min | low |
+| G8 spec corrections | 6 tasks | ~1 hour | low |
+| **Total P0** | G0+G1+G2+G3+G4 | **~7 hours** | |
+| **Total P1+P2+P3** | G5+G7+G8 | **~2.5 hours** | |
+| **Grand total** | | **~9.5 hours** (excluding G6-b if chosen) | |
+
+## Execution order
+
+1. **G0.1, G0.2** — decisions first (clears ambiguity)
+2. **G8.1–G8.6** — spec corrections (quick wins; locks the target for code changes)
+3. **G3** — debug flag plumbing (unblocks canary G2 tests that need debug=true)
+4. **G4** — rivers.d.ts cleanup (independent; quick)
+5. **G1** — canary TS-syntax handlers (biggest chunk; mechanical)
+6. **G5** — error message alignment (can run parallel to G1)
+7. **G7** — ES2022 codegen (independent; quick)
+8. **G2** — canary transaction handlers (last; needs live infra)
+9. **G6** — only if G0.1 = option (b)
+
+## Design decisions to log (changedecisionlog.md)
+
+1. **G0.1 decision** — spec vs envelope alignment
+2. **G0.2 decision** — Rivers.db/view/http aspirational vs declared
+3. **G3 approach** — runtime AppConfig lookup vs compile-time cfg
+4. **G5.3 plumbing** — how `{app}/libraries/` root reaches the resolve callback (extend `TASK_MODULE_REGISTRY`?)
+
+## Non-goals (explicit out-of-scope)
+
+- Implementing `Rivers.db`, `Rivers.view`, `Rivers.http` runtime surfaces (if G0.2 picks option (a)).
+- Full esbuild-style bundler (spec §1.2 out-of-scope).
+- Node-style `node_modules` resolution.
+- JSX/TSX support.
+- Chained source maps (`.js` files with `//# sourceMappingURL`).
+- Cross-app code sharing.
+## 2026-04-24 — Archived CG plan before full code review
+
+Source: `todo/tasks.md` before replacing it with the full code-review plan requested on 2026-04-24.
+
+# CG — Canary Green Again
+
+> **Branch:** `docs/guide-v0.54.0-updates` (current)
+> **Source:** `docs/canary_codereivew.md` (2026-04-24) + `docs/dreams/dream-2026-04-22.md`
+> **Goal:** canary boots reliably and the Kafka-consumer-store + MySQL CRUD lanes go green without touching the deferred polish work.
+
+**Prior plan:** CS0–CS7 + BR0–BR7 archived to `todo/gutter.md` under the 2026-04-24 header. Deploy-gated residuals from that plan are folded into CG5 below.
+
+**Rules:**
+- Each task has a specific **file:line** target + a **validation step**.
+- Fixes go in the order below: small isolated bugs → architectural fix → revert → verify. Each step leaves canary at least as healthy as before.
+- No workarounds. If a subtask hits a blocker that would need a hollow shortcut, stop and mark DEFERRED with rationale.
+- Auto mode: execute sequentially; do not batch fixes inside one commit unless they share a root cause.
+
+**Critical path:** CG0 → CG1 → CG2 → CG3 → CG4 → CG5. CG1 + CG2 can land in one commit (they share the "MessageConsumer/topic-wiring" root cause). CG3 and CG4 each get their own commit.
+
+---
+
+## CG0 — Housekeeping
+
+Tasks:
+
+- [x] **CG0.1** N/A — prior CS/BR plan archived to `todo/gutter.md` under 2026-04-24 header.
+- [x] **CG0.2** Verified: `canary-streams/app.toml` has `[api.views.kafka_consume]` + `[api.views.kafka_consume.on_event] topic = "kafka_consume"` uncommented (BR4.5 landed). `resources.toml` `required=true` on canary-kafka is consistent. No change needed.
+- [x] **CG0.3** `changedecisionlog.md` gained the "CG plan supersedes CS/BR" entry at top.
+
+**Validation:** `riverpackage validate canary-bundle` → same warning count as before; no new errors.
+
+**Effort:** 15 min.
+
+---
+
+## CG1 — MessageConsumer app identity fix
+
+**Root cause:** `crates/riversd/src/message_consumer.rs:334` calls `crate::task_enrichment::enrich(builder, "")` with an empty `app_id`. `TaskLocals::set` falls back to `app:default` for the ctx.store namespace when app_id is empty. Consumer writes to `app:default:canary:kafka:last_verdict`; REST verify reads from `canary-streams:canary:kafka:last_verdict`. Store is real but the keys don't cross.
+
+**Files:**
+- edit: `crates/riversd/src/message_consumer.rs` — thread `app_id` / entry_point through `MessageConsumerConfig` + `MessageConsumerHandler` + `MessageConsumerRegistry::from_views`.
+
+Tasks:
+
+- [x] **CG1.1** `entry_point: String` field added to `MessageConsumerConfig`. `from_view` signature gained `entry_point: &str` as first arg.
+- [x] **CG1.2** `MessageConsumerRegistry::from_views` signature updated; `wire.rs:147` passes the app's `entry_point` in.
+- [x] **CG1.3** `MessageConsumerHandler::handle` + `dispatch_message_event` both use `&self.config.entry_point` / `&config.entry_point` instead of `""`.
+- [x] **CG1.4** Integration test `registry_from_mixed_views` asserts `registry.get("consumer1").unwrap().entry_point == "canary-streams"`. All 13 message_consumer tests pass.
+
+**Validation:**
+- `cargo test -p riversd message_consumer` green.
+- Deploy + run `canary-bundle/run-tests.sh`: the two Kafka consumer-store tests (`kafka_publish_then_consume`, any `kafka_consume_store_verify`) go from FAIL to PASS. Record pass delta.
+
+**Effort:** 30 min.
+
+---
+
+## CG2 — Subscription topic wiring
+
+**Root cause:** `crates/riversd/src/bundle_loader/wire.rs:42-52` builds broker subscriptions with `topic = view_id`. Should read `on_event.topic` from the view config. (Publish side is already fixed — broker_bridge.rs:261-264 publishes both `BROKER_MESSAGE_RECEIVED` + a per-destination event; that landed during the compaction session.)
+
+**Files:**
+- edit: `crates/riversd/src/bundle_loader/wire.rs`
+
+Tasks:
+
+- [x] **CG2.1** `wire.rs` MessageConsumer iteration reads `view_cfg.on_event.as_ref().map(|oe| oe.topic.clone())` with a `tracing::warn!` fallback to view_id when `on_event` is absent.
+- [x] **CG2.2** Subscription `topic` and `event_name` are both set to the on_event.topic (or view_id fallback) — consumer and per-destination publish now agree on the name.
+- [ ] **CG2.3 (DEFERRED)** Dedicated wire.rs subscription-extraction unit test — current test coverage is indirect via message_consumer_tests which passes; adding a wire.rs-local test would require exposing an internal helper. Will add when the CG5 canary deploy proves the path end-to-end, and refactor to a testable helper if needed.
+
+**Validation:**
+- `cargo test -p riversd bundle_loader` green.
+- Deploy + run `canary-bundle/run-tests.sh` with Kafka reachable: `STREAM-KAFKA-PUBLISH-THEN-CONSUME` passes end-to-end (publish → Kafka → bridge → EventBus topic → MessageConsumer → ctx.store → verify). Should require CG1 + CG2 both landed.
+
+**Effort:** 30 min.
+
+---
+
+## CG3 — Non-blocking broker consumer startup
+
+**Root cause:** `crates/riversd/src/bundle_loader/wire.rs:115` awaits `broker_driver.create_consumer(params, &broker_config).await` inline during bundle load. When Kafka is unreachable (macOS "No route to host" today, any broker flake in general), bundle load hangs, HTTP never binds. This is the current blocker for the canary hanging at startup.
+
+**Files:**
+- edit: `crates/riversd/src/broker_bridge.rs` — add a `BrokerBridgeSpec` + `run_with_retry(spec, driver)` that owns `create_consumer` retry.
+- edit: `crates/riversd/src/bundle_loader/wire.rs` — spawn the bridge immediately without awaiting consumer creation.
+
+Tasks:
+
+- [x] **CG3.1** `BrokerBridgeSpec` added to `broker_bridge.rs` with the fields planned.
+- [x] **CG3.2** `pub async fn run_with_retry(spec: BrokerBridgeSpec)` landed. Exponential backoff base=reconnect_ms, cap=30s, ±50% jitter via `rand::thread_rng`. Shutdown checked both before each attempt and during sleep (`tokio::select!`).
+- [x] **CG3.3** `wire.rs` replaced the inline `create_consumer().await` with `tokio::spawn(crate::broker_bridge::run_with_retry(spec))`.
+- [x] **CG3.4** `factory.get_broker_driver` returns `Option<&Arc<dyn MessageBrokerDriver>>` — clone is a no-op Arc bump; spec stores the cloned Arc.
+- [x] **CG3.5** `supervisor_retries_and_exits_on_shutdown` — `FailingDriver` errors on every `create_consumer`; test asserts `attempts >= 2` after 250ms backoff, then shutdown-signal returns within 1s. PASS.
+- [x] **CG3.6** `supervisor_spawn_is_non_blocking` — `HangingDriver`'s `create_consumer` returns `std::future::pending()`; test asserts `tokio::spawn` returns in <50ms regardless. PASS.
+
+**Validation:**
+- `cargo test -p riversd broker_bridge` green.
+- `cargo test -p riversd bundle_loader` green.
+- Manual: disable network to Kafka (or use bogus host), `cargo deploy`, `riversctl start --foreground`; assert HTTP listener binds within the usual startup window (<5s from log "bundle loaded"), canary hits non-Kafka endpoints. Kafka-gated tests SKIP cleanly.
+
+**Effort:** 2–3 hours.
+
+---
+
+## CG4 — Restore MySQL pool
+
+**Root cause:** `crates/rivers-drivers-builtin/src/mysql.rs:45-67` was swapped from `mysql_async::Pool::new` to direct `mysql_async::Conn::new` because per-call `Runtime::new` in host_callbacks was tearing down pool background tasks. Host_callbacks was fixed (runtime isolation removed). The Pool should come back — every dataview call currently pays a full MySQL handshake.
+
+**Files:**
+- edit: `crates/rivers-drivers-builtin/src/mysql.rs`
+
+Tasks:
+
+- [x] **CG4.1** Process-global pool cache behind `OnceLock<Mutex<HashMap<String, mysql_async::Pool>>>`. Key = `host:port/database?u=user` (password excluded — never in map keys). `get_or_create_pool()` hits cache or builds `Pool::new(opts)` once per distinct tuple. `connect()` calls `pool.get_conn().await` — checkout, not handshake.
+- [x] **CG4.2** Comment in `mysql.rs` rewritten to explain CG4 restoration after the host_callbacks runtime fix unblocked it.
+- [ ] **CG4.3 (PENDING DEPLOY)** Runtime regression check — deploy + run the canary MySQL CRUD lane, assert no "Tokio 1.x context was found, but it is being shutdown" errors in the log.
+- [ ] **CG4.4 (PENDING DEPLOY)** Runtime-verified pool-reuse — mysql_async doesn't expose a pool-count hook for unit testing. Verify via canary that MySQL CRUD latency drops vs the pre-CG4 baseline (exact number depends on network; handshake was ~10-50ms on the test cluster).
+
+**Validation:**
+- `cargo test -p rivers-drivers-builtin` green.
+- Canary: MySQL CRUD tests PASS; latency per call should drop (rough gauge: total runtime of MySQL CRUD group vs prior). Capture before/after in `todo/changelog.md`.
+
+**Effort:** 2 hours.
+
+---
+
+## CG5 — Deploy + verify
+
+Tasks:
+
+- [ ] **CG5.1** `cargo deploy /tmp/rivers-cg` — clean build with static-engines + static-plugins.
+- [ ] **CG5.2** `riversctl start --foreground` on the deployed instance. Assert log line "main server listening" appears. Record startup wall-clock.
+- [ ] **CG5.3** `canary-bundle/run-tests.sh` — count PASS / FAIL / SKIP. Expected: startup blocker gone; Kafka consumer-store lane green (2 tests from CG1+CG2); MySQL CRUD lane green (7 tests from CG4); PG lane should also improve (host_callbacks runtime fix + no MySQL-induced cascade).
+- [ ] **CG5.4** Categorise remaining failures into:
+    1. Pre-existing driver/config issues unrelated to this plan (NoSQL, MCP, decorator, HMAC, etc.).
+    2. Anything new introduced by CG1–CG4 (should be zero).
+- [ ] **CG5.5** Append `canary-bundle/CHANGELOG.md` with the CG entry: what shipped, expected canary delta, known remaining lanes.
+- [ ] **CG5.6** Commit per CG tier: CG1+CG2 as one commit (shared root cause), CG3 as one commit, CG4 as one commit, CG5 as doc commit. Per-commit message cites the code-review doc item number.
+
+**Validation:** canary PASS count rises by at least 9 (2 Kafka + 7 MySQL). Startup never hangs on broker.
+
+**Effort:** 1 hour + whatever the remaining-failure triage takes.
+
+---
+
+## Out-of-scope for this plan (tracked for later)
+
+Not fixing here — these are from dream-2026-04-22 and code-review P1s that don't block canary-green:
+
+- Kafka producer eager metadata on `create_producer` (code-review P0 #2) — P0 for prod latency, not for canary-green.
+- SWC hard timeout (code-review P0 #4) — P0 for prod deploy safety, not for canary-green.
+- Bounded source-map LRU (P1 #7).
+- Absolute-path redaction in stack traces (P1 #8).
+- Remove silent disk fallback on module-cache miss (P1 #9).
+- Thread-local panic-safety integration test (P1 #10).
+- JSON double-encode on broker publish hot path.
+- `.expect("producer initialised above")` at broker_dispatch.rs:129.
+- `TASK_COMMIT_FAILED` one-shot overwrite on second commit failure.
+- Kafka producer topic-at-create-time contract violation.
+
+All of these belong in a follow-on "prod hardening" plan after canary is green.
+
+## Execution order
+
+1. **CG0** — housekeeping + decisionlog pointer.
+2. **CG1 + CG2** — one commit. Smallest, highest leverage. Fixes Kafka-consumer-store lane.
+3. **CG3** — unblocks riversd startup.
+4. **CG4** — fixes MySQL tail latency + CRUD lane.
+5. **CG5** — deploy, count, triage, commit.
+
+---
+
+# Archived 2026-04-24 — RCC Review Consolidation Report
+
+Superseded by user clarification: only review `rivers-plugin-exec`; a separate session will consolidate findings.
+
+## Pending Tasks at Archive Time
+
+- [ ] **RCC0.1 — Re-check report inputs.**
+  Validate whether any 22-report input set has appeared under `reviews/`, `docs/review/`, or another obvious report path before writing the final consolidation.
+
+- [ ] **RCC0.2 — Choose source basis honestly.**
+  If the 22 per-crate reports are present, read every report in full and consolidate from them. If they are still absent, produce a clearly labeled fallback consolidation from `docs/code_review.md`, with a top-level warning that it is not the requested 22-report consolidation.
+
+- [ ] **RCC1.1 — Extract Rivers-wide repeated patterns.**
+  Group findings that appear across 3+ crates or across shared runtime/driver surfaces, including missing timeouts, pool/accounting gaps, unsafe FFI boundary assumptions, error masking, and integer truncation/overflow.
+
+- [ ] **RCC1.2 — Extract contract violations.**
+  Compare findings against the `rivers-driver-sdk`, engine host callback, and runtime datasource contracts.
+
+- [ ] **RCC1.3 — Extract cross-crate wiring gaps.**
+  Identify any registration, callback, datasource, engine, or handler path where the implementation exists in one crate but the production caller path is missing, stubbed, or bypassed.
+
+- [ ] **RCC1.4 — Build severity distribution.**
+  Summarize clean vs bug-dense crates and identify technical-debt clusters.
+
+- [ ] **RCC2.1 — Write report to `docs/review/cross-crate-consolidation.md`.**
+  Produce a concise but complete report with sections for grounding, executive summary, repeated patterns, contract violations, wiring gaps, severity distribution, and recommended shared fixes.
+
+- [ ] **RCC2.2 — Update logs.**
+  Record report-delivery decisions in `changedecisionlog.md` and the file changes in `todo/changelog.md`.
+
+- [ ] **RCC2.3 — Verify markdown and whitespace.**
+  Run `git diff --check -- docs/review/cross-crate-consolidation.md todo/tasks.md changedecisionlog.md todo/changelog.md`.

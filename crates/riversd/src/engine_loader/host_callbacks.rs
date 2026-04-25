@@ -363,33 +363,24 @@ pub(super) extern "C" fn host_datasource_build(
         query.parameters.insert(k.clone(), qv);
     }
 
-    // Isolate cdylib plugin calls — plugins have their own tokio, so they need
-    // a dedicated runtime. spawn_blocking + Runtime::new gives them one.
-    // catch_unwind prevents plugin panics from killing the process.
+    // Execute on the host runtime. Earlier versions spawned a dedicated
+    // `Runtime::new()` inside `spawn_blocking` to isolate cdylib plugins,
+    // but cdylib plugins are disabled in this build (all drivers are
+    // statically linked — see `server/drivers.rs`). Creating + dropping a
+    // fresh runtime per query tears down long-lived driver internals
+    // (mysql_async pool tasks, tokio_postgres connection tasks), producing
+    // "Tokio 1.x context was found, but it is being shutdown" on MySQL and
+    // "connection closed" on PG for every call after the first.
+    // Use the host runtime directly; `catch_unwind` still guards against
+    // driver panics.
     let (ds_tx, ds_rx) = std::sync::mpsc::channel();
     let factory = Arc::clone(factory);
     ctx.rt_handle.spawn(async move {
-        let result = tokio::task::spawn_blocking(move || {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| format!("failed to create plugin runtime: {e}"))?;
-                rt.block_on(async {
-                    let mut conn = factory.connect(&driver, &conn_params).await
-                        .map_err(|e| format!("driver connect failed: {e}"))?;
-                    conn.execute(&query).await.map_err(|e| e.to_string())
-                })
-            }))
-            .unwrap_or_else(|panic| {
-                let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                    s.clone()
-                } else if let Some(s) = panic.downcast_ref::<&str>() {
-                    s.to_string()
-                } else {
-                    "driver plugin panicked during connect/execute".to_string()
-                };
-                Err(msg)
-            })
-        }).await.unwrap_or_else(|e| Err(format!("driver task join failed: {e}")));
+        let result = async {
+            let mut conn = factory.connect(&driver, &conn_params).await
+                .map_err(|e| format!("driver connect failed: {e}"))?;
+            conn.execute(&query).await.map_err(|e| e.to_string())
+        }.await;
         let _ = ds_tx.send(result);
     });
     match ds_rx.recv().unwrap_or_else(|_| Err("datasource task panicked".to_string())) {
@@ -822,33 +813,19 @@ pub(super) extern "C" fn host_ddl_execute(
                 }
             }
 
-            // Isolate cdylib plugin calls in a dedicated runtime
+            // Execute DDL on the host runtime. See host_dataview_execute's
+            // comment for why the previous spawn_blocking+Runtime::new
+            // isolation was removed — cdylib plugins are disabled; the
+            // dedicated-runtime tear-down was breaking long-lived driver
+            // internals on the next query.
             let ds_name = datasource.clone();
             let stmt = statement.clone();
             let factory_clone = factory.clone();
-            tokio::task::spawn_blocking(move || {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let rt = tokio::runtime::Runtime::new()
-                        .map_err(|e| format!("failed to create plugin runtime: {e}"))?;
-                    rt.block_on(async {
-                        let mut conn = factory_clone.connect(&driver_name, &ds_params).await
-                            .map_err(|e| format!("DDL connect to '{}' failed: {}", ds_name, e))?;
-                        let query = rivers_runtime::rivers_driver_sdk::Query::new("ddl", &stmt);
-                        conn.ddl_execute(&query).await
-                            .map_err(|e| format!("DDL execute failed: {}", e))
-                    })
-                }))
-                .unwrap_or_else(|panic| {
-                    let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                        s.clone()
-                    } else if let Some(s) = panic.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else {
-                        "driver plugin panicked during DDL connect/execute".to_string()
-                    };
-                    Err(msg)
-                })
-            }).await.unwrap_or_else(|e| Err(format!("DDL task join failed: {e}")))?;
+            let mut conn = factory_clone.connect(&driver_name, &ds_params).await
+                .map_err(|e| format!("DDL connect to '{}' failed: {}", ds_name, e))?;
+            let query = rivers_runtime::rivers_driver_sdk::Query::new("ddl", &stmt);
+            conn.ddl_execute(&query).await
+                .map_err(|e| format!("DDL execute failed: {}", e))?;
 
             tracing::info!(
                 datasource = %datasource,

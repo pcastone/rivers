@@ -18,3 +18,13 @@ driver     = "faker"
 x-type     = "faker"
 nopassword = true
 required   = true
+
+# CS3 — SQLite events table for Activity Feed scenario (spec §6 AF-7).
+# Embedded; no external infra. required=false so bundle loads cleanly
+# even in minimal deploys.
+[[datasources]]
+name       = "events_db"
+driver     = "sqlite"
+x-type     = "sqlite"
+nopassword = true
+required   = false

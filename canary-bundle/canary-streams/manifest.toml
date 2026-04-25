@@ -6,3 +6,7 @@ appId         = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee04"
 entryPoint    = "streams"
 appEntryPoint = "https://canary-streams.internal"
 source        = "https://github.com/pcastone/rivers/canary-fleet"
+
+[init]
+module     = "handlers/init.ts"
+entrypoint = "initialize"

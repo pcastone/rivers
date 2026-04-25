@@ -28,6 +28,14 @@ pub enum DatasourceToken {
         /// Canonical root path the worker is allowed to operate within.
         root: std::path::PathBuf,
     },
+    /// Message-broker publish capability — worker invokes
+    /// `BrokerProducer::publish` via the V8 broker-dispatch bridge (BR-2026-04-23).
+    /// ConnectionParams aren't carried here (keeps the token cheaply hashable);
+    /// the worker looks them up from `TaskContext.datasource_configs`.
+    Broker {
+        /// Broker driver name (e.g. "kafka", "rabbitmq", "nats", "redis-streams").
+        driver: String,
+    },
 }
 
 impl DatasourceToken {
@@ -43,6 +51,13 @@ impl DatasourceToken {
         DatasourceToken::Direct {
             driver: driver.into(),
             root,
+        }
+    }
+
+    /// Construct a `Broker` token for a message-broker publish capability.
+    pub fn broker(driver: impl Into<String>) -> Self {
+        DatasourceToken::Broker {
+            driver: driver.into(),
         }
     }
 }
@@ -65,17 +80,34 @@ pub struct ResolvedDatasource {
     pub params: crate::rivers_driver_sdk::ConnectionParams,
 }
 
+/// Canonical broker driver names (BR-2026-04-23). Kept as a `const` list
+/// rather than a DriverFactory trait query because `resolve_token_for_dispatch`
+/// is called from `bundle_loader::load` where the factory isn't yet fully
+/// populated — static classification is simpler and safe because new broker
+/// drivers are rare and always land alongside this list being updated.
+pub const BROKER_DRIVER_NAMES: &[&str] = &["kafka", "rabbitmq", "nats", "redis-streams"];
+
+fn is_broker_driver(driver_name: &str) -> bool {
+    BROKER_DRIVER_NAMES.contains(&driver_name)
+}
+
 /// Emit the `DatasourceToken` variant appropriate for a resolved datasource.
 ///
-/// Self-contained drivers (today just `filesystem`) dispatch directly from the
-/// worker and require `Direct` tokens carrying the resource root; every other
-/// driver receives a `Pooled` token that routes through the host pool manager.
+/// Dispatch classification:
+/// - **Filesystem** → `Direct` (worker performs chroot-sandboxed I/O).
+/// - **Broker drivers** (kafka / rabbitmq / nats / redis-streams) → `Broker`
+///   (worker publishes via a lazy-created `BrokerProducer`, spec:
+///   `bugs/bugreport_2026-04-23.md`).
+/// - **Everything else** → `Pooled` (host pool manager).
 pub fn resolve_token_for_dispatch(rd: &ResolvedDatasource) -> DatasourceToken {
     if rd.driver_name == "filesystem" {
         return DatasourceToken::direct(
             rd.driver_name.clone(),
             std::path::PathBuf::from(&rd.params.database),
         );
+    }
+    if is_broker_driver(&rd.driver_name) {
+        return DatasourceToken::broker(rd.driver_name.clone());
     }
     DatasourceToken::pooled(format!("{}:{}", rd.driver_name, rd.params.database))
 }
@@ -363,5 +395,42 @@ mod direct_token_tests {
         let rd = mk_resolved("faker", "noop");
         let tok = resolve_token_for_dispatch(&rd);
         assert!(matches!(tok, DatasourceToken::Pooled { .. }));
+    }
+
+    // ── BR-2026-04-23: broker tokens ────────────────────────────────
+
+    #[test]
+    fn br1_t1_broker_token_constructs() {
+        let t = DatasourceToken::broker("kafka");
+        match t {
+            DatasourceToken::Broker { driver } => assert_eq!(driver, "kafka"),
+            _ => panic!("expected Broker variant"),
+        }
+    }
+
+    #[test]
+    fn br1_t2_resolve_broker_driver_yields_broker_token() {
+        for name in ["kafka", "rabbitmq", "nats", "redis-streams"] {
+            let rd = mk_resolved(name, "noop");
+            let tok = resolve_token_for_dispatch(&rd);
+            match tok {
+                DatasourceToken::Broker { driver } => assert_eq!(driver, name),
+                other => panic!("expected Broker variant for {name}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn br1_t3_pooled_drivers_still_yield_pooled() {
+        // Regression guard — request/response drivers must stay Pooled
+        // after the broker-classification extension.
+        for name in ["postgres", "mysql", "sqlite", "redis", "elasticsearch", "mongodb", "faker"] {
+            let rd = mk_resolved(name, "x");
+            let tok = resolve_token_for_dispatch(&rd);
+            assert!(
+                matches!(tok, DatasourceToken::Pooled { .. }),
+                "expected {name} → Pooled, got {tok:?}"
+            );
+        }
     }
 }

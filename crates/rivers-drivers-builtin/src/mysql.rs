@@ -11,6 +11,7 @@
 //! the statement string as-is.
 
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use async_trait::async_trait;
 use mysql_async::prelude::*;
@@ -19,6 +20,52 @@ use rivers_driver_sdk::{
     Query, QueryResult, QueryValue, SchemaDefinition, SchemaSyntaxError, ValidationDirection,
     ValidationError,
 };
+
+/// Process-global pool cache keyed by resolved `ConnectionParams` identity
+/// (host + port + database + username). One `mysql_async::Pool` per distinct
+/// datasource, shared across every `MysqlDriver::connect` call.
+///
+/// Pool reintroduction: CG4 (`docs/canary_codereivew.md` §3 + `tasks.md`).
+/// The earlier per-call `Conn::new` was a workaround for the
+/// host_callbacks per-call `Runtime::new()` bug, which was fixed separately.
+/// The runtime fix removed the teardown pressure that was killing pool
+/// background tasks; pooled connections are now safe again and we're paying
+/// the full MySQL handshake on every dataview call until this lands.
+fn pool_cache() -> &'static Mutex<HashMap<String, mysql_async::Pool>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, mysql_async::Pool>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Hash-stable key for a connection tuple. Password is intentionally excluded
+/// — two datasources with the same host/port/db/user but different passwords
+/// should not share a pool, but that's an edge case; if it happens the pool
+/// auth will simply reject on first checkout and we'll re-create next time.
+/// Including the password would leak secret bytes into map keys.
+fn pool_key(params: &ConnectionParams) -> String {
+    format!(
+        "{}:{}/{}?u={}",
+        params.host, params.port, params.database, params.username
+    )
+}
+
+fn get_or_create_pool(params: &ConnectionParams) -> Result<mysql_async::Pool, DriverError> {
+    let key = pool_key(params);
+    let mut cache = pool_cache()
+        .lock()
+        .map_err(|e| DriverError::Connection(format!("mysql pool cache poisoned: {e}")))?;
+    if let Some(pool) = cache.get(&key) {
+        return Ok(pool.clone());
+    }
+    let opts = mysql_async::OptsBuilder::default()
+        .ip_or_hostname(&params.host)
+        .tcp_port(params.port)
+        .user(Some(&params.username))
+        .pass(Some(&params.password))
+        .db_name(Some(&params.database));
+    let pool = mysql_async::Pool::new(opts);
+    cache.insert(key, pool.clone());
+    Ok(pool)
+}
 
 /// Supported field types for the MySQL driver.
 const MYSQL_TYPES: &[&str] = &[
@@ -46,21 +93,17 @@ impl DatabaseDriver for MysqlDriver {
         &self,
         params: &ConnectionParams,
     ) -> Result<Box<dyn Connection>, DriverError> {
-        let opts = mysql_async::OptsBuilder::default()
-            .ip_or_hostname(&params.host)
-            .tcp_port(params.port)
-            .user(Some(&params.username))
-            .pass(Some(&params.password))
-            .db_name(Some(&params.database));
-
-        let pool = mysql_async::Pool::new(opts);
-
+        // CG4: pool restored. Previous version used direct `Conn::new` per
+        // call as a workaround for the host_callbacks `Runtime::new()`
+        // teardown bug that killed mysql_async background tasks. That fix
+        // landed separately; pooled connections are safe again and avoid
+        // the full handshake per dataview call.
+        let pool = get_or_create_pool(params)?;
         let conn = pool
             .get_conn()
             .await
-            .map_err(|e| DriverError::Connection(format!("mysql connect: {e}")))?;
-
-        Ok(Box::new(MysqlConnection { conn, pool }))
+            .map_err(|e| DriverError::Connection(format!("mysql checkout: {e}")))?;
+        Ok(Box::new(MysqlConnection { conn }))
     }
 
     fn supports_transactions(&self) -> bool {
@@ -162,8 +205,6 @@ impl Driver for MysqlDriver {
 /// Also holds a reference to the pool so it is not dropped prematurely.
 pub struct MysqlConnection {
     conn: mysql_async::Conn,
-    #[allow(dead_code)]
-    pool: mysql_async::Pool,
 }
 
 #[async_trait]

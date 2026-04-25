@@ -1,257 +1,67 @@
-# TS Pipeline Spec-Compliance Gap Closure
-
-> **Branch:** `docs/guide-v0.54.0-updates` (continues TS pipeline work)
-> **Spec:** `docs/arch/rivers-javascript-typescript-spec.md`
-> **Gap analysis source:** this session's §-by-§ walkthrough. All 6 CB defects closed; remaining gaps are spec-compliance format/plumbing issues and canary coverage shortfall.
-> **Prior:** TS pipeline Phases 0–11 + Phase 6 completion archived in `todo/gutter.md`.
-
-**Goal:** close every observable gap between the implementation and the spec, split into four priority tiers. P0 is high-impact compliance (canary validation + runtime debug flag); P1 is format drift that changes observable surface; P2 is nice-to-haves; P3 is spec-doc corrections.
-
-**Critical path:** G1 (canary TS coverage) is the biggest remaining gap — spec §9.2 lists 16 required test IDs; 1 is shipped at canary level today.
-
----
-
-## G0 — Foundation decisions (blocking P0+)
-
-Before executing G1–G8, two small calls clear ambiguity for the rest of the plan:
-
-- [x] **G0.1** Decision: **option (a)** — amend spec §5.3 envelope shape to match existing `ErrorResponse` convention (`{code, message, trace_id, details.stack}`). Zero code change; spec edit in G8.4. Logged in `changedecisionlog.md`. (Done 2026-04-21.)
-- [x] **G0.2** Decision: **option (a)** — drop `Rivers.db / Rivers.view / Rivers.http` from spec §8.3. None of these exist at runtime; aspirational stubs would create broken type-check signals. Spec edit in G8.6. Logged in `changedecisionlog.md`. (Done 2026-04-21.)
-
----
-
-## P0 — High-impact spec compliance
-
-### G1 — Canary TS-syntax coverage (spec §9.2)
-
-**Scope:** 10 TS-syntax handler endpoints + 1 circular-import shell test + run-tests.sh profile. Each handler returns a `TestResult` per `test-harness.ts`; test harness asserts `passed=true`.
-
-**Rationale:** spec §9.2 mandates canary-level exercise of every TS compiler feature. Unit tests prove `compile_typescript` works; canary proves the full dispatch invokes it correctly on a running riversd. Biggest single compliance gap.
-
-**Files:**
-- new: `canary-bundle/canary-handlers/libraries/handlers/ts-compliance/*.ts` (one per case)
-- edit: `canary-bundle/canary-handlers/app.toml` (register 10 views under `[api.views.ts_*]`)
-- edit: `canary-bundle/run-tests.sh` (TYPESCRIPT profile expansion)
-- new: `canary-bundle/tests/circular-import-rejection.sh` (standalone; not part of run-tests.sh)
-
-Tasks:
-
-- [x] **G1.1** `ts-compliance/param-strip.ts` — `function paramStrip(ctx: any)` + typed assertions. Probe case B. (Done 2026-04-21.)
-- [x] **G1.2** `ts-compliance/var-strip.ts` — `const answer: number = 42` + `const name: string = "rivers"`. Probe case C. (Done 2026-04-21.)
-- [x] **G1.3** `ts-compliance/import-type.ts` + `import-type-helpers.ts` — `import { type Answer, buildAnswer }`; uses `buildAnswer` at runtime. Probe case D. (Done 2026-04-21.)
-- [x] **G1.4** `ts-compliance/generic.ts` — `function identity<T>(x: T): T` with call sites for number + string. Probe case E. (Done 2026-04-21.)
-- [x] **G1.5** `ts-compliance/multimod.ts` + `multimod-helpers.ts` — imports `double`, `MODULE_MARKER`. Probe case F. Both files under `libraries/` are cached at bundle load. (Done 2026-04-21.)
-- [x] **G1.6** `ts-compliance/export-fn.ts` — `export function exportFn(ctx)` hits the module namespace entrypoint path. Probe case G. (Done 2026-04-21.)
-- [x] **G1.7** `ts-compliance/enum.ts` — numeric enum with forward + reverse lookup assertions (reverse lookup is lowering-specific). (Done 2026-04-21.)
-- [x] **G1.8** `ts-compliance/decorator.ts` — TC39 Stage 3 decorator on a class method; sets `globalThis.__decorator_fired` + `__decorator_kind` so the handler can probe decorator-runtime execution. (Done 2026-04-21.)
-- [x] **G1.9** `ts-compliance/namespace.ts` — `namespace util { export const VERSION = "1.0"; export function greet(who) { … } }` with runtime reads. (Done 2026-04-21.)
-- [x] **G1.10** `canary-bundle/tests/circular-import-rejection.sh` + `fixtures/circular-import-reject/` — a.ts ↔ b.ts cycle. Shell test invokes `riverpackage validate`, asserts non-zero exit + the `circular import detected` phrase + both filenames in the error. SKIP path if `riverpackage` not on PATH. (Done 2026-04-21.)
-- [x] **G1.11** 9 new `[api.views.ts_*]` blocks registered in `canary-handlers/app.toml` — ts_param_strip, ts_var_strip, ts_import_type, ts_generic, ts_multimod, ts_export_fn, ts_enum, ts_decorator, ts_namespace. All `method = "POST"`, `view_type = "Rest"`, `auth = "none"`. (Done 2026-04-21.)
-- [x] **G1.12** `run-tests.sh` TYPESCRIPT profile split into "syntax + modules" (9 new `test_ep` lines) + "source map remap" (existing ts-sourcemap probe, unchanged). (Done 2026-04-21.)
-
-**Validate:** `./run-tests.sh` shows PASS for all 9 new IDs + the sourcemap probe; canary total goes from 69+N/69+N to 69+N+9/69+N+9 green.
-
-**Effort:** ~3 hours (mostly mechanical handler wrapper code).
-
-### G2 — Canary transaction handlers (spec §9.2)
-
-**Scope:** 5 transaction test endpoints. Requires a live PG datasource configured for the canary app.
-
-**Files:**
-- new: `canary-bundle/canary-handlers/libraries/handlers/ts-compliance/txn-commit.ts`, `txn-rollback.ts`, `txn-cross-ds.ts`, `txn-nested.ts`, `txn-unsupported.ts`
-- edit: `canary-bundle/canary-handlers/app.toml` (register under TRANSACTIONS-TS profile)
-- edit: `canary-bundle/canary-handlers/resources.toml` (add `pg` datasource if not present)
-- edit: `canary-bundle/run-tests.sh` (TRANSACTIONS-TS profile extension with PG_AVAIL gate)
-
-Tasks:
-
-- [x] **G2.1** `ts-compliance/txn-commit.ts` — `ctx.transaction("pg", () => ctx.dataview("txn_pg_ping"))`; assertions on no-throw + callback return value reaches handler + rows readable via held connection. Uses `SELECT 1` DataView to avoid schema setup. (Done 2026-04-21.)
-- [x] **G2.2** `ts-compliance/txn-rollback.ts` — callback executes a dataview then throws a distinctive message; handler asserts the re-thrown message reaches it unchanged. (Done 2026-04-21.)
-- [x] **G2.3** `ts-compliance/txn-cross-ds.ts` — transaction on `pg`, dataview `txn_sqlite_ping` (points at `sqlite_cross` datasource); asserts TransactionError + spec §6.2 "differs from" phrase + named dataview. (Done 2026-04-21.)
-- [x] **G2.4** `ts-compliance/txn-nested.ts` — genuine nested call: `ctx.transaction("pg", () => ctx.transaction("pg", …))`. Asserts `TransactionError: nested transactions not supported`. (Done 2026-04-21.)
-- [x] **G2.5** `ts-compliance/txn-unsupported.ts` — `ctx.transaction("canary-faker", …)`; asserts `TransactionError: ... does not support transactions`. Uses the pre-existing `canary-faker` datasource — no PG needed, so this runs even on no-infra deploys. (Done 2026-04-21.)
-- [x] **G2.6** `resources.toml` — added `pg` datasource pointing at 192.168.2.209 (required=false so missing infra doesn't block bundle load) + `sqlite_cross` for the cross-ds test. Two minimal DataViews (`txn_pg_ping` and `txn_sqlite_ping`, both `SELECT 1`) registered in `app.toml` — no table schema required. (Done 2026-04-21.)
-- [x] **G2.7** `run-tests.sh` TRANSACTIONS-TS profile extended. `txn-unsupported` runs unconditionally (uses faker). The PG-dependent four (txn-commit, txn-rollback, txn-cross-ds, txn-nested) run behind a `PG_AVAIL` gate that pings `/sql/canary/sql/pg/param-order` — the same gate pattern used elsewhere in run-tests.sh. On no-infra deploys, each prints `SKIP … (PG unreachable)` and contributes 0 to PASS/FAIL. (Done 2026-04-21.)
-
-**Validate:** 5/5 PASS on PG cluster; SKIP cleanly without PG.
-
-**Effort:** ~2 hours + infra access for the roundtrip run.
-
-### G3 — Per-app debug flag runtime plumbing (spec §5.3)
-
-**Scope:** replace `cfg!(debug_assertions)` gate in `error_response::map_view_error` with a runtime read of `AppConfig.base.debug` for the matched app.
-
-**Files:**
-- edit: `crates/riversd/src/error_response.rs` — `map_view_error` signature adds `debug_enabled: bool`
-- edit: `crates/riversd/src/server/view_dispatch.rs` — look up matched view's app's `AppConfig.base.debug`; pass to `map_view_error`
-
-Tasks:
-
-- [x] **G3.1** `map_view_error` signature extended with `debug_enabled: bool`; replaces `cfg!(debug_assertions)` checks for Handler, HandlerWithStack, Pipeline, Internal. `cfg!(debug_assertions)` retained as an OR fallback for dev-build convenience. (Done 2026-04-21.)
-- [x] **G3.2** `view_dispatch.rs` error branch looks up `ctx.loaded_bundle.apps[].manifest.app_id == manifest_app_id` and reads `.config.base.debug`. Falls back to `false` on lookup miss. Passed into `map_view_error`. (Done 2026-04-21.)
-- [x] **G3.3** Updated existing 6 `map_view_error(...)` test calls to pass `false`. Added 2 new G3 tests: `g3_handler_with_stack_surfaces_when_debug_enabled` (always passes) and `g3_handler_with_stack_debug_disabled_in_release_hides` (asserts OR semantics — hides in release, surfaces in cargo-test debug). 24/24 `error_response_tests` green. (Done 2026-04-21.)
-- [x] **G3.4** Decision-log entry captured in G0.1 / G8.4 rationale — runtime flag IS the mechanism; OR with `cfg!(debug_assertions)` for dev convenience documented in the function docstring. (Done 2026-04-21.)
-
-**Validate:** tests green; integration run shows debug=true app produces `details.stack` + debug=false app omits it, in the SAME build.
-
-**Effort:** ~1 hour.
-
-### G4 — `rivers.d.ts` spec alignment (spec §8.3)
-
-**Scope:** rename `Ctx` → `ViewContext` with type alias, reconcile `Rivers.db/view/http` per G0.2, add capability-gated JSDoc markers.
-
-**Files:** edit `types/rivers.d.ts`, edit `docs/guide/tutorials/tutorial-ts-handlers.md` if naming changes propagate.
-
-Tasks:
-
-- [x] **G4.1** Renamed primary interface `Ctx` → `ViewContext` (with JSDoc note). Added `type Ctx = ViewContext` alias at end-of-file for backcompat. Updated `HandlerFn`'s parameter type. (Done 2026-04-21.)
-- [x] **G4.2** Per G0.2: `Rivers.db/view/http` dropped from spec §8.3 (G8.6). `rivers.d.ts` declares only the runtime-injected surface. No stubs added. (Done 2026-04-21.)
-- [x] **G4.3** Capability markers added: `Rivers.keystore` + `Rivers.crypto.encrypt/decrypt` (`@capability keystore`), `ctx.transaction` (`@capability transaction`). Informational comment block describing the capability-tag convention added at the bottom of the file. `allow_outbound_http` marker deferred — no typed surface to annotate until `Rivers.http` ships. (Done 2026-04-21.)
-- [x] **G4.4** `tutorial-ts-handlers.md` updated: `Ctx` → `ViewContext` in the "Using the Rivers-shipped rivers.d.ts" section. (Done 2026-04-21.)
-
-**Validate:** `tsc --noEmit` on a sample handler using the new `ViewContext` name resolves; `Ctx` alias works for backcompat.
-
-**Effort:** ~30 min.
-
----
-
-## P1 — Format / cosmetic drift
-
-### G5 — Error message format alignment
-
-Spec uses specific multi-line error formats in §2.5, §3.1, §3.2. Implementation condenses to single lines with equivalent information.
-
-**Files:** `crates/riversd/src/process_pool/v8_config.rs`, `v8_engine/execution.rs` (resolve_module_callback)
-
-Tasks:
-
-- [x] **G5.1** `.tsx` rejection now uses spec §2.5's `{app}/{path}` form when a `libraries/` ancestor is detected. New helper `shorten_app_path` walks path components backward; falls back to raw filename for inline/test paths. New test `compile_typescript_rejects_tsx_with_app_short_path` verifies the short form. (Done 2026-04-21.)
-- [x] **G5.2** Missing-extension error in `resolve_module_callback` expanded to spec §3.1 multi-line format with `in {referrer}` and `hint: use "{spec}.ts" or "{spec}.js"` lines. (Done 2026-04-21.)
-- [x] **G5.3** Not-in-cache error expanded to spec §3.2 format: `resolves outside app boundary` + `in {referrer}` + `resolved to:` + `boundary:`. New `boundary_from_referrer` helper walks up path components to find the nearest `libraries/` ancestor — that's the spec's `{app}/libraries/` boundary. Falls back to no-boundary-line if no `libraries/` ancestor found. (Done 2026-04-21.)
-- [x] **G5.4** Existing `compile_typescript_rejects_tsx` test updated with clearer intent comment; new short-path test added. No resolver-callback tests existed (V8 callback runs inside a live isolate; unit testing is indirect via dispatch). 141/141 `process_pool` lib tests still green; 19/19 `compile_typescript` integration tests green. (Done 2026-04-21.)
-
-**Validate:** existing unit tests pass with updated assertions; no behaviour change, only message change.
-
-**Effort:** ~1 hour.
-
-### G6 — Debug envelope field names (resolved by G0.1)
-
-Per G0.1 decision. If option (a) — spec changes to match Rivers' `ErrorResponse` convention — this work is a spec edit only, covered by G8.5. If option (b) — response envelope changes — it's a bigger migration:
-
-- [x] **G6.1** Not applicable — G0.1 = option (a). Envelope alignment was handled entirely by the G8.4 spec edit (spec §5.3 now documents the existing `{code, message, trace_id, details.stack}` shape). Zero code change. (Resolved 2026-04-21.)
-
-**Validate:** all error responses migrate; existing clients documented.
-
-**Effort:** option (a) = 0; option (b) = ~1 day + migration plan.
-
----
-
-## P2 — Nice-to-have tightening
-
-### G7 — ES2022 codegen target (spec §2.4)
-
-Currently: parser target = ES2022, codegen target = default (ESNext). Spec intent is that ES2023+ syntax gets lowered to ES2022. In practice V8 v130 supports most ES2023; gap is theoretical.
-
-**Files:** `crates/riversd/src/process_pool/v8_config.rs`
-
-Tasks:
-
-- [x] **G7.1** Set `Config::with_target(EsVersion::Es2022)` on the Emitter in `v8_config.rs`. Documents ES2022 as the compilation target floor. **Scope note:** the codegen `target` flag influences emission decisions (reserved-word handling, some formatting); it does NOT semantically downlevel ES2023+ AST nodes. True downleveling requires a `swc_ecma_transforms_compat::es2022` transform pass inserted between `typescript()` and `fixer()` — not wired in this phase because V8 v130 natively supports ES2023 features (findLast, hashbangs, etc.) so the gap is theoretical. (Done 2026-04-21.)
-- [x] **G7.2** Added `compile_typescript_preserves_es2022_class_fields` — verifies canonical ES2022 syntax (class fields) emits as-is when target is set to Es2022. Full downlevel-an-ES2023+-feature test deferred with the lowering itself. (Done 2026-04-21.)
-
-**Validate:** test green; existing tests unaffected (current TS corpus is ES2022 or below).
-
-**Effort:** ~30 min.
-
----
-
-## P3 — Spec document corrections
-
-### G8 — Spec self-corrections
-
-Not code changes; they're edits to `docs/arch/rivers-javascript-typescript-spec.md` to reflect implementation reality.
-
-Tasks:
-
-- [x] **G8.1** §2.1 updated: `swc_core = "64"` with full feature list + note that swc uses major-per-release; `swc_sourcemap = "10"` direct dep added. (Done 2026-04-21.)
-- [x] **G8.2** §2.2 bullet list: removed "TC39 Stage 3 decorator lowering" (that pass doesn't live in `typescript::typescript()`). Added a clarifying note pointing at §2.3 for decorator handling. (Done 2026-04-21.)
-- [x] **G8.3** §2.3 rewritten: removed the invalid `DecoratorVersion::V202203` snippet; documented the actual parse-and-pass-through model with V8 executing Stage 3 decorators natively. Points out `swc_ecma_transforms_proposal::decorators` is not applied. (Done 2026-04-21.)
-- [x] **G8.4** §5.3 envelope example aligned to `ErrorResponse` shape — `{code, message, trace_id, details.stack}`. Non-debug responses omit `details` entirely. (Done 2026-04-21.)
-- [x] **G8.5** §6.4 driver table qualified: built-in rows cite source file; plugin rows marked "verify at plugin load" with a note that runtime enforcement is authoritative. (Done 2026-04-21.)
-- [x] **G8.6** §8.3 required-declarations list corrected: removes `Rivers.db/view/http` with a rationale note; explicit cross-ref to `rivers_global.rs` as the authoritative injection surface. (Done 2026-04-21.)
-
-**Validate:** spec reads consistently with implementation; every MUST/SHOULD has a satisfied counterpart.
-
-**Effort:** ~1 hour (all editing, no code).
-
----
-
-## Files touched (hot list)
-
-- **new:** 10 files under `canary-bundle/canary-handlers/libraries/handlers/ts-compliance/`
-- **new:** `canary-bundle/tests/circular-import-rejection.sh`
-- **edit:** `canary-bundle/canary-handlers/app.toml` (14 new `[api.views.ts_*]` and `[api.views.txn_*]` blocks)
-- **edit:** `canary-bundle/canary-handlers/resources.toml` (if PG datasource needed)
-- **edit:** `canary-bundle/run-tests.sh` (profile expansions)
-- **edit:** `crates/riversd/src/error_response.rs` (signature + tests)
-- **edit:** `crates/riversd/src/server/view_dispatch.rs` (debug flag lookup)
-- **edit:** `crates/riversd/src/process_pool/v8_config.rs` (error messages, ES2022 codegen)
-- **edit:** `crates/riversd/src/process_pool/v8_engine/execution.rs` (resolve_module_callback error messages)
-- **edit:** `types/rivers.d.ts` (ViewContext rename, capability markers)
-- **edit:** `docs/guide/tutorials/tutorial-ts-handlers.md` (type name propagation)
-- **edit:** `docs/arch/rivers-javascript-typescript-spec.md` (G8 self-corrections)
-- **edit:** `changedecisionlog.md`, `todo/changelog.md`
-
-## Verification — end to end
-
-1. `cargo test -p riversd --lib` — 310/310 prior tests still green; ~6 new tests from G3, G5, G7.
-2. `cargo deploy /tmp/rivers-gap-closure` — deploy succeeds with all updates.
-3. `just probe-ts` against deployed instance — all 9 probe cases green.
-4. `canary-bundle/run-tests.sh` — TYPESCRIPT profile shows 10/10 PASS; TRANSACTIONS-TS shows 5/5 PASS on PG cluster.
-5. `canary-bundle/tests/circular-import-rejection.sh` — non-zero exit with expected spec §3.5 error.
-6. Spec re-read: every MUST/SHOULD in `rivers-javascript-typescript-spec.md` maps to an implementation element or an explicit deferral with cross-ref.
-
-## Effort summary
-
-| Tier | Items | Effort | Risk |
-|------|-------|--------|------|
-| G0 | 2 decisions | 30 min | low |
-| G1 canary TS-syntax | 12 tasks | ~3 hours | low |
-| G2 canary transaction | 7 tasks | ~2 hours + infra | medium (PG access) |
-| G3 debug flag plumbing | 4 tasks | ~1 hour | low |
-| G4 rivers.d.ts | 4 tasks | ~30 min | low |
-| G5 error formats | 4 tasks | ~1 hour | low |
-| G6 envelope fields | 1 task (option b only) | 0 or ~1 day | medium if (b) |
-| G7 ES2022 codegen | 2 tasks | ~30 min | low |
-| G8 spec corrections | 6 tasks | ~1 hour | low |
-| **Total P0** | G0+G1+G2+G3+G4 | **~7 hours** | |
-| **Total P1+P2+P3** | G5+G7+G8 | **~2.5 hours** | |
-| **Grand total** | | **~9.5 hours** (excluding G6-b if chosen) | |
-
-## Execution order
-
-1. **G0.1, G0.2** — decisions first (clears ambiguity)
-2. **G8.1–G8.6** — spec corrections (quick wins; locks the target for code changes)
-3. **G3** — debug flag plumbing (unblocks canary G2 tests that need debug=true)
-4. **G4** — rivers.d.ts cleanup (independent; quick)
-5. **G1** — canary TS-syntax handlers (biggest chunk; mechanical)
-6. **G5** — error message alignment (can run parallel to G1)
-7. **G7** — ES2022 codegen (independent; quick)
-8. **G2** — canary transaction handlers (last; needs live infra)
-9. **G6** — only if G0.1 = option (b)
-
-## Design decisions to log (changedecisionlog.md)
-
-1. **G0.1 decision** — spec vs envelope alignment
-2. **G0.2 decision** — Rivers.db/view/http aspirational vs declared
-3. **G3 approach** — runtime AppConfig lookup vs compile-time cfg
-4. **G5.3 plumbing** — how `{app}/libraries/` root reaches the resolve callback (extend `TASK_MODULE_REGISTRY`?)
-
-## Non-goals (explicit out-of-scope)
-
-- Implementing `Rivers.db`, `Rivers.view`, `Rivers.http` runtime surfaces (if G0.2 picks option (a)).
-- Full esbuild-style bundler (spec §1.2 out-of-scope).
-- Node-style `node_modules` resolution.
-- JSX/TSX support.
-- Chained source maps (`.js` files with `//# sourceMappingURL`).
-- Cross-app code sharing.
+# RXE — `rivers-plugin-exec` Review
+
+> **Branch:** current worktree
+> **Source:** user request on 2026-04-24: focus only on `rivers-plugin-exec`; consolidation will happen in a separate session.
+> **Goal:** produce a source-grounded per-crate review report at `docs/review/rivers-plugin-exec.md`.
+
+**Grounding confirmed:**
+- Crate path: `crates/rivers-plugin-exec`.
+- Crate type: `cdylib` + `rlib`.
+- Production Rust source: 13 files, 3,375 lines under `src/`.
+- Key dependencies: `rivers-driver-sdk`, `tokio`, `serde`, `serde_json`, `sha2`, `hex`, `tracing`, `jsonschema`, `libc`.
+- Review focus from `docs/review_inc/rivers-per-crate-focus-blocks.md`: command execution, SHA-256 hash pinning, integrity modes, stdin/args input modes, privilege drop, process lifecycle, dual semaphore concurrency, stdio bounds, and environment sanitization.
+
+## Pending Tasks
+
+- [ ] **RXE0.1 — Read crate manifest and focus block.**
+  Read `crates/rivers-plugin-exec/Cargo.toml` and the `rivers-plugin-exec` block in `docs/review_inc/rivers-per-crate-focus-blocks.md`.
+  Validation: report grounding lists crate role, source files, dependencies, and high-risk review axes.
+
+- [ ] **RXE0.2 — Run mechanical sweeps.**
+  Run review sweeps against `crates/rivers-plugin-exec/src`: panic paths, unsafe/FFI, discarded errors, lock usage, casts, format/query construction, unbounded collections, spawns, blocking calls, dead-code allowances, public API, and registration/bootstrap functions.
+  Validation: sweep output is inspected before findings are drafted; raw hits are not reported without source confirmation.
+
+- [ ] **RXE0.3 — Run compiler validation.**
+  Run `cargo check -p rivers-plugin-exec` and, if feasible without unrelated workspace breakage, `cargo test -p rivers-plugin-exec`.
+  Validation: report records exact commands and whether they passed or failed.
+
+- [ ] **RXE1.1 — Read all production source files in full.**
+  Read every file under `crates/rivers-plugin-exec/src/` in full:
+  `lib.rs`, `schema.rs`, `template.rs`, `integrity.rs`, `executor.rs`, `config/{mod.rs,parser.rs,types.rs,validator.rs}`, and `connection/{mod.rs,driver.rs,exec_connection.rs,pipeline.rs}`.
+  Validation: no finding is based on grep alone.
+
+- [ ] **RXE1.2 — Check hash authorization and integrity modes.**
+  Trace configured command hash validation from parsing through startup validation and runtime execution.
+  Validation: explicitly cover TOCTOU risk, `each_time`, `startup_only`, `every:N`, counter behavior, symlink/file replacement behavior, and config reload implications if visible in this crate.
+
+- [ ] **RXE1.3 — Check command invocation safety.**
+  Trace how user-controlled parameters become stdin, argv, env, working directory, and process command.
+  Validation: explicitly cover shell invocation, argument separation, template substitution, env inheritance/sanitization, stdout/stderr limits, and timeout behavior.
+
+- [ ] **RXE1.4 — Check privilege drop and child lifecycle.**
+  Trace Unix-only isolation code and child cleanup.
+  Validation: explicitly cover `setgid`/`setuid` order, supplementary groups, process groups, timeout kill scope, zombie prevention, and shutdown/orphan behavior where source allows.
+
+- [ ] **RXE1.5 — Check concurrency and resource bounds.**
+  Trace global/per-command semaphores and any buffers/collections.
+  Validation: identify whether permits are acquired in a consistent order, released on all paths, and whether stdout/stderr/input/output sizes are bounded.
+
+- [ ] **RXE1.6 — Check driver-sdk contract compliance.**
+  Compare `ExecDriver` / `ExecConnection` behavior with `rivers-driver-sdk` expectations: `prepare`, `execute`, DDL behavior, errors, operation names, query values, connection lifecycle, transaction support, and plugin exports.
+  Validation: every contract issue cites both the exec implementation and the SDK contract source.
+
+- [ ] **RXE1.7 — Read integration tests for coverage context.**
+  Read `crates/rivers-plugin-exec/tests/integration_test.rs` to separate tested invariants from untested risk.
+  Validation: report observations note major high-risk behavior covered or missing from tests.
+
+- [ ] **RXE2.1 — Write per-crate review report.**
+  Create `docs/review/rivers-plugin-exec.md` using the established finding format: one-line summary, Tier 1/2/3 findings, evidence snippets, impact, fix direction, and non-finding observations.
+  Validation: report only includes confirmed issues or explicitly labeled non-findings.
+
+- [ ] **RXE2.2 — Update logs.**
+  Record the single-crate scope decision and final report delivery in `changedecisionlog.md`; record file changes in `todo/changelog.md`.
+  Validation: logs name `docs/review/rivers-plugin-exec.md` and the exact source basis.
+
+- [ ] **RXE2.3 — Mark tasks complete and verify whitespace.**
+  Mark completed RXE tasks with high-level notes, then run `git diff --check -- docs/review/rivers-plugin-exec.md todo/tasks.md todo/gutter.md changedecisionlog.md todo/changelog.md`.
+  Validation: command passes.

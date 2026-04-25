@@ -126,7 +126,7 @@ pub async fn execute_rest_view(
                     .entrypoint(entrypoint)
                     .args(args)
                     .trace_id(ctx.trace_id.clone());
-                let builder = crate::task_enrichment::enrich(builder, &ctx.app_id);
+                let builder = crate::task_enrichment::enrich(builder, &ctx.dv_namespace);
                 let task_ctx = builder
                     .build()
                     .map_err(|e| ViewError::Pipeline(format!("pre_process build: {e}")))?;
@@ -192,13 +192,15 @@ pub async fn execute_rest_view(
                     if config.allow_outbound_http {
                         builder = builder.http(crate::process_pool::HttpToken);
                     }
-                    // Wire direct datasources (e.g. filesystem) into the task context.
-                    // The executor holds all namespaced params; we scan for entries
-                    // belonging to this app's namespace that use a direct driver.
+                    // Wire datasources into the task context.
+                    // - Filesystem: DatasourceToken::Direct (in-process dispatch).
+                    // - Broker: DatasourceToken::Broker + datasource_config (lazy producer).
+                    // - All others (SQL, NoSQL, etc.): datasource_config only — used by
+                    //   ctx.transaction() and Rivers.db.begin() to open a connection
+                    //   on demand. No token needed; driver dispatch is via DriverFactory.
                     if let Some(exec) = executor {
                         let ns_prefix = format!("{}:", ctx.dv_namespace);
                         for (key, params) in exec.datasource_params().iter() {
-                            // Match namespaced keys like "canary-filesystem:canary-fs"
                             let ds_name = if let Some(n) = key.strip_prefix(&ns_prefix) {
                                 n
                             } else {
@@ -211,10 +213,35 @@ pub async fn execute_rest_view(
                                     std::path::PathBuf::from(&params.database),
                                 );
                                 builder = builder.datasource(ds_name.to_string(), token);
+                            } else if rivers_runtime::process_pool::BROKER_DRIVER_NAMES
+                                .contains(&driver)
+                            {
+                                // BR-2026-04-23: broker datasources get a
+                                // Broker token + full ConnectionParams copy so
+                                // the worker can lazy-build a BrokerProducer.
+                                let token = rivers_runtime::process_pool::DatasourceToken::broker(driver);
+                                builder = builder.datasource(ds_name.to_string(), token.clone());
+                                // Also feed datasource_configs so task_locals'
+                                // producer bootstrap finds the ConnectionParams.
+                                let resolved = rivers_runtime::process_pool::ResolvedDatasource {
+                                    driver_name: driver.to_string(),
+                                    params: params.clone(),
+                                };
+                                builder = builder.datasource_config(ds_name.to_string(), resolved);
+                            } else if !driver.is_empty() {
+                                // SQL / NoSQL / other regular drivers: wire into
+                                // datasource_configs so ctx.transaction() and
+                                // Rivers.db.begin() can open a connection by name.
+                                // No token is needed; the DriverFactory routes by driver name.
+                                let resolved = rivers_runtime::process_pool::ResolvedDatasource {
+                                    driver_name: driver.to_string(),
+                                    params: params.clone(),
+                                };
+                                builder = builder.datasource_config(ds_name.to_string(), resolved);
                             }
                         }
                     }
-                    let builder = crate::task_enrichment::enrich(builder, &ctx.app_id);
+                    let builder = crate::task_enrichment::enrich(builder, &ctx.dv_namespace);
                     let task_ctx = builder
                         .build()
                         .map_err(|e| ViewError::Handler(format!("codecomponent build: {e}")))?;
@@ -281,7 +308,7 @@ pub async fn execute_rest_view(
                     .entrypoint(entrypoint)
                     .args(args)
                     .trace_id(ctx.trace_id.clone());
-                let builder = crate::task_enrichment::enrich(builder, &ctx.app_id);
+                let builder = crate::task_enrichment::enrich(builder, &ctx.dv_namespace);
                 let task_ctx = builder
                     .build()
                     .map_err(|e| ViewError::Pipeline(format!("handler build: {e}")))?;
@@ -319,7 +346,7 @@ pub async fn execute_rest_view(
                     .entrypoint(entrypoint)
                     .args(args)
                     .trace_id(ctx.trace_id.clone());
-                let builder = crate::task_enrichment::enrich(builder, &ctx.app_id);
+                let builder = crate::task_enrichment::enrich(builder, &ctx.dv_namespace);
                 let task_ctx = builder
                     .build()
                     .map_err(|e| ViewError::Pipeline(format!("post_process build: {e}")))?;
