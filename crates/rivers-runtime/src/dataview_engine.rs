@@ -853,20 +853,39 @@ impl DataViewExecutor {
             )));
         }
 
-        // Connect and execute DDL
+        // Connect and execute DDL — pool-first (P0-3), fall back to direct
+        // factory.connect for unpooled datasources (test fixtures, plugin-
+        // failed apps). DDL is rare and gated by ddl_whitelist, so the small
+        // extra branching cost is negligible.
         let driver_name = ds_params
             .options
             .get("driver")
             .map(|s| s.as_str())
             .unwrap_or(datasource_name);
 
-        let mut conn = self.factory.connect(driver_name, ds_params).await
-            .map_err(|e| DataViewError::Pool(format!("connection failed: {e}")))?;
+        let pool_acquire = match &self.pool_manager {
+            Some(pm) => pm
+                .acquire(datasource_name)
+                .await
+                .map_err(|e| DataViewError::Pool(format!("pool acquire (ddl) failed: {e}")))?,
+            None => None,
+        };
 
-        let result = conn
-            .ddl_execute(query)
-            .await
-            .map_err(|e| DataViewError::Driver(e.to_string()))?;
+        let result = if let Some(pooled) = pool_acquire {
+            let crate::pool_handle::PooledConnection { mut conn, release_token } = pooled;
+            let r = conn
+                .ddl_execute(query)
+                .await
+                .map_err(|e| DataViewError::Driver(e.to_string()));
+            release_token.release(conn);
+            r?
+        } else {
+            let mut conn = self.factory.connect(driver_name, ds_params).await
+                .map_err(|e| DataViewError::Pool(format!("connection failed: {e}")))?;
+            conn.ddl_execute(query)
+                .await
+                .map_err(|e| DataViewError::Driver(e.to_string()))?
+        };
 
         tracing::info!(
             datasource = %datasource_name,
