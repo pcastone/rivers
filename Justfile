@@ -18,13 +18,59 @@ os := if os() == "macos" { "darwin" } else { os() }
 
 # ── Build ────────────────────────────────────────────────────────
 
-# Build monolithic static binaries (~80MB riversd)
+# Build monolithic static binaries for the host (~80MB riversd)
 build:
     cargo build --release
 
 # Build in debug mode
 build-debug:
     cargo build
+
+# ── Targeted (cross) builds ─────────────────────────────────────
+#
+# Aliases:
+#   linux-x64  → x86_64-unknown-linux-gnu  (uses `cross` via Docker)
+#   linux-arm  → aarch64-unknown-linux-gnu (uses `cross` via Docker)
+#   mac-arm    → aarch64-apple-darwin      (native cargo)
+#   mac-x64    → x86_64-apple-darwin       (native cargo, needs target)
+#   host       → cargo build --release (no --target)
+#
+# Cross-targets require: Docker running + `cross` installed.
+build-target target="linux-x64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{target}}" in
+        host)
+            echo "→ host build (no --target)"
+            cargo build --release
+            ;;
+        linux-x64)
+            echo "→ cross build x86_64-unknown-linux-gnu (Docker)"
+            cross build --release --target x86_64-unknown-linux-gnu \
+                -p riversd -p riversctl -p rivers-lockbox -p riverpackage
+            ;;
+        linux-arm)
+            echo "→ cross build aarch64-unknown-linux-gnu (Docker)"
+            cross build --release --target aarch64-unknown-linux-gnu \
+                -p riversd -p riversctl -p rivers-lockbox -p riverpackage
+            ;;
+        mac-arm)
+            echo "→ native build aarch64-apple-darwin"
+            cargo build --release --target aarch64-apple-darwin \
+                -p riversd -p riversctl -p rivers-lockbox -p riverpackage
+            ;;
+        mac-x64)
+            echo "→ native build x86_64-apple-darwin"
+            cargo build --release --target x86_64-apple-darwin \
+                -p riversd -p riversctl -p rivers-lockbox -p riverpackage
+            ;;
+        *)
+            echo "error: unknown target '{{target}}'" >&2
+            echo "       use one of: host | linux-x64 | linux-arm | mac-arm | mac-x64" >&2
+            exit 1
+            ;;
+    esac
+    echo "✓ build complete"
 
 # Run all tests
 test:
@@ -221,9 +267,71 @@ release-static:
 package-deb:
     ./scripts/build-packages.sh deb
 
-# Build .rpm packages (rivers, rivers-lib, rivers-plugins)
+# Build .rpm packages (rivers, rivers-lib, rivers-plugins) — legacy, requires rpmbuild on Linux
 package-rpm:
     ./scripts/build-packages.sh rpm
+
+# Build a static-only RPM for a target arch via cargo-generate-rpm.
+# Works from macOS (no rpmbuild needed). Default target = linux-x64.
+# Output: dist/rpm/rivers-<version>-1.x86_64.rpm
+package-rpm-target target="linux-x64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just build-target {{target}}
+    case "{{target}}" in
+        linux-x64) triple="x86_64-unknown-linux-gnu"; rpm_arch="x86_64" ;;
+        linux-arm) triple="aarch64-unknown-linux-gnu"; rpm_arch="aarch64" ;;
+        host)      triple=""; rpm_arch="$(uname -m)" ;;
+        *)         echo "error: rpm only supports linux targets (got '{{target}}')" >&2; exit 1 ;;
+    esac
+    mkdir -p dist/rpm
+    if [ -n "$triple" ]; then
+        echo "→ generating rpm (target=$triple, arch=$rpm_arch)"
+        cargo generate-rpm -p crates/riversd --target "$triple" --arch "$rpm_arch" \
+            --output dist/rpm/
+    else
+        echo "→ generating rpm (host, arch=$rpm_arch)"
+        cargo generate-rpm -p crates/riversd --arch "$rpm_arch" --output dist/rpm/
+    fi
+    echo ""
+    echo "✓ rpm built:"
+    ls -lh dist/rpm/*.rpm
+
+# Build the linux-x64 RPM, ship to beta-01 (192.168.2.170), and prompt before
+# restarting riversd. Skips the prompt with `BETA_RESTART=yes` env var.
+ship-beta01:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    HOST="root@192.168.2.170"
+
+    just package-rpm-target linux-x64
+    RPM=$(ls -t dist/rpm/rivers-*.x86_64.rpm | head -1)
+    if [ -z "$RPM" ]; then
+        echo "error: no rpm found in dist/rpm/" >&2
+        exit 1
+    fi
+    BASENAME=$(basename "$RPM")
+    echo ""
+    echo "→ shipping $BASENAME to $HOST:/tmp/"
+    scp "$RPM" "${HOST}:/tmp/${BASENAME}"
+
+    echo ""
+    echo "→ installing on beta-01 via dnf"
+    ssh "$HOST" "dnf install -y /tmp/${BASENAME}"
+
+    echo ""
+    if [ "${BETA_RESTART:-}" = "yes" ]; then
+        echo "→ BETA_RESTART=yes — restarting riversd without prompt"
+        ssh "$HOST" "systemctl restart riversd && systemctl status riversd --no-pager"
+    else
+        printf "Restart riversd on beta-01 now? [y/N] "
+        read -r REPLY
+        if [[ "$REPLY" =~ ^[Yy] ]]; then
+            ssh "$HOST" "systemctl restart riversd && systemctl status riversd --no-pager | head -15"
+        else
+            echo "→ skipped restart. Run manually:  ssh ${HOST} 'systemctl restart riversd'"
+        fi
+    fi
 
 # Build Windows .zip (cross-compiled x86_64)
 package-windows:

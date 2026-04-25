@@ -101,3 +101,90 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 tempfile = { workspace = true }
 tower = { workspace = true }
+
+# ── RPM packaging (cargo-generate-rpm) ────────────────────────────
+#
+# Static-only RPM with riversd + CLI tools + systemd unit + sample config.
+# Mirrors the intent of `packaging/rpm/rivers.spec` but uses pure-Rust
+# packaging so it builds from macOS without rpmbuild.
+#
+# Build:   `just package-rpm linux-x64`
+# Source paths are workspace-relative (resolved by cargo-generate-rpm).
+[package.metadata.generate-rpm]
+name = "rivers"
+summary = "Declarative app-service framework — build APIs with TOML config"
+license = "Apache-2.0"
+url = "https://github.com/pcastone/rivers"
+requires = { systemd = "*" }
+
+assets = [
+    # Binaries — paths resolved relative to workspace root, --target prefixes target dir.
+    { source = "target/release/riversd",        dest = "/usr/bin/riversd",        mode = "0755" },
+    { source = "target/release/riversctl",      dest = "/usr/bin/riversctl",      mode = "0755" },
+    { source = "target/release/rivers-lockbox", dest = "/usr/bin/rivers-lockbox", mode = "0755" },
+    { source = "target/release/riverpackage",   dest = "/usr/bin/riverpackage",   mode = "0755" },
+
+    # systemd unit
+    { source = "packaging/systemd/riversd.service", dest = "/usr/lib/systemd/system/riversd.service", mode = "0644" },
+
+    # Sample config — preserved on upgrade (config-noreplace)
+    { source = "packaging/config/riversd.toml", dest = "/etc/rivers/riversd.toml", mode = "0640", config = "noreplace", user = "rivers", group = "rivers" },
+
+    # Docs
+    { source = "LICENSE",   dest = "/usr/share/doc/rivers/LICENSE",   mode = "0644", doc = true },
+    { source = "README.md", dest = "/usr/share/doc/rivers/README.md", mode = "0644", doc = true },
+]
+
+# Empty runtime directories — owned by rivers user/group.
+[[package.metadata.generate-rpm.dirs]]
+path = "/var/lib/rivers"
+mode = "0755"
+user = "rivers"
+group = "rivers"
+
+[[package.metadata.generate-rpm.dirs]]
+path = "/var/lib/rivers/lockbox"
+mode = "0700"
+user = "rivers"
+group = "rivers"
+
+[[package.metadata.generate-rpm.dirs]]
+path = "/var/log/rivers"
+mode = "0755"
+user = "rivers"
+group = "rivers"
+
+[[package.metadata.generate-rpm.dirs]]
+path = "/etc/rivers"
+mode = "0755"
+user = "root"
+group = "rivers"
+
+# Scriptlets — mirror `rivers.spec` %pre/%post/%preun/%postun.
+[package.metadata.generate-rpm.scripts]
+pre_install = """
+getent group rivers > /dev/null 2>&1 || groupadd -r rivers
+getent passwd rivers > /dev/null 2>&1 || \\
+    useradd -r -g rivers -d /var/lib/rivers -s /sbin/nologin \\
+    -c "Rivers application server" rivers
+"""
+
+post_install = """
+systemctl daemon-reload >/dev/null 2>&1 || :
+if [ "$1" = "1" ]; then
+    systemctl enable riversd.service >/dev/null 2>&1 || :
+fi
+"""
+
+pre_uninstall = """
+if [ "$1" = "0" ]; then
+    systemctl --no-reload disable --now riversd.service >/dev/null 2>&1 || :
+fi
+"""
+
+post_uninstall = """
+systemctl daemon-reload >/dev/null 2>&1 || :
+if [ "$1" -ge 1 ]; then
+    systemctl try-restart riversd.service >/dev/null 2>&1 || :
+fi
+"""
