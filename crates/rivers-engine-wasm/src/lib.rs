@@ -383,6 +383,7 @@ mod tests {
             inline_source: None,
             prefetched_data: HashMap::new(),
             libs: vec![],
+            task_kind: None,
         }
     }
 
