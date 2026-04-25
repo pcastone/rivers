@@ -22,16 +22,15 @@ struct PoolReleaseToken {
     created_at: Instant,
 }
 
+#[async_trait]
 impl ReleaseToken for PoolReleaseToken {
-    fn release(self: Box<Self>, conn: Box<dyn Connection>) {
-        let pool = self.pool;
-        let created_at = self.created_at;
-        // Fire-and-forget release — `release()` is sync by trait contract,
-        // but the pool's release is async. Caller is in async context
-        // (DataView execute), so the runtime is live for tokio::spawn.
-        tokio::spawn(async move {
-            pool.release(conn, Some(created_at)).await;
-        });
+    async fn release(self: Box<Self>, conn: Box<dyn Connection>) {
+        // Await directly — caller is always in async context. Previously
+        // this was a fire-and-forget tokio::spawn, but on current_thread
+        // runtime the spawned release didn't land in the idle queue
+        // before the next sequential acquire, defeating reuse. See
+        // docs/code_review.md P0-3 and changedecisionlog.md POOL-CR-P0-3.2.
+        self.pool.release(conn, Some(self.created_at)).await;
     }
 }
 

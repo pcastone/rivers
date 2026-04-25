@@ -23,9 +23,10 @@ pub struct PooledConnection {
 /// Type-erased token that releases a pooled connection on drop.
 ///
 /// Implementations forward to `ConnectionPool::release(conn, Some(created_at))`.
+#[async_trait]
 pub trait ReleaseToken: Send + Sync {
     /// Release the held connection back to its pool.
-    fn release(self: Box<Self>, conn: Box<dyn Connection>);
+    async fn release(self: Box<Self>, conn: Box<dyn Connection>);
 }
 
 /// Snapshot returned by the pool manager — kept structurally identical

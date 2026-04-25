@@ -758,7 +758,7 @@ impl DataViewExecutor {
                     conn.execute(&query).await
                 };
                 // Release after the operation completes (success or failure).
-                release_token.release(conn);
+                release_token.release(conn).await;
                 result
             } else {
                 // No pool for this datasource — preserve the existing broker
@@ -877,7 +877,7 @@ impl DataViewExecutor {
                 .ddl_execute(query)
                 .await
                 .map_err(|e| DataViewError::Driver(e.to_string()));
-            release_token.release(conn);
+            release_token.release(conn).await;
             r?
         } else {
             let mut conn = self.factory.connect(driver_name, ds_params).await

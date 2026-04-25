@@ -187,12 +187,6 @@ async fn dataview_reuses_pool_connection_across_calls() {
             .execute("ping", HashMap::new(), "GET", "trace-1", None)
             .await
             .expect("dataview execute");
-        // The pool's release path runs in a tokio::spawn (because the
-        // sync ReleaseToken trait can't await). Yield so the spawned
-        // release lands back in `idle` before the next acquire — without
-        // this yield, sequential calls would create up to `max_size`
-        // connections before any reuse could happen.
-        tokio::task::yield_now().await;
     }
 
     let snaps = manager.snapshots().await;
@@ -201,12 +195,14 @@ async fn dataview_reuses_pool_connection_across_calls() {
         .find(|s| s.datasource_id == ds_name())
         .expect("snapshot for mock-ds");
 
-    // With sequential calls and a yield between each, the pool should
-    // reuse aggressively — far fewer than 50 distinct connections.
-    // Without pool routing, connect_count would be 50.
-    assert!(
-        driver.connect_count() <= 5,
-        "pool created {} connections in 50 sequential calls; expected <= 5",
+    // ReleaseToken::release is async and awaited directly by the executor,
+    // so the connection is back in `idle` before the next sequential acquire.
+    // 50 sequential calls should reuse a single connection. Without pool
+    // routing, connect_count would be 50.
+    assert_eq!(
+        driver.connect_count(),
+        1,
+        "pool created {} connections in 50 sequential calls; expected exactly 1 (perfect reuse)",
         driver.connect_count()
     );
     assert!(
