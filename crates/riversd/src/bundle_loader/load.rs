@@ -689,6 +689,71 @@ pub async fn load_and_wire_bundle(
         }
     }
 
+    // ── Register a ConnectionPool per database datasource ───────────────
+    //
+    // For every database datasource defined in the bundle, register a pool
+    // keyed on the namespaced datasource id (`"{entry_point}:{ds.name}"`),
+    // matching the keys used in `ds_params` and the namespaced
+    // `DataViewConfig.datasource` field. Broker datasources (Kafka,
+    // RabbitMQ, NATS) have no `DatabaseDriver` registered in the factory —
+    // skip them. Plugin datasources whose plugin failed to load also have
+    // no driver — skip those too. `ensure_pool` is idempotent, so hot
+    // reload doesn't double-register.
+    //
+    // Per docs/code_review.md P0-3.
+    for app in &bundle.apps {
+        let entry_point = app
+            .manifest
+            .entry_point
+            .as_deref()
+            .unwrap_or(&app.manifest.app_name);
+
+        for (ds_name, ds_config) in &app.config.data.datasources {
+            let Some(driver) = factory.get_driver(&ds_config.driver) else {
+                // Broker datasource or unloaded plugin — skip.
+                tracing::debug!(
+                    datasource = %ds_name,
+                    driver = %ds_config.driver,
+                    app = %entry_point,
+                    "skipping pool registration: no DatabaseDriver registered"
+                );
+                continue;
+            };
+
+            let namespaced_ds = format!("{}:{}", entry_point, ds_name);
+            let Some(params) = ds_params.get(&namespaced_ds) else {
+                // Should not happen if upstream wiring is consistent, but
+                // skip defensively rather than panic.
+                tracing::warn!(
+                    datasource = %namespaced_ds,
+                    "skipping pool registration: no ConnectionParams in ds_params map"
+                );
+                continue;
+            };
+
+            let pool_cfg = crate::pool::PoolConfig {
+                max_size: ds_config.connection_pool.max_size,
+                min_idle: ds_config.connection_pool.min_idle,
+                connection_timeout_ms: ds_config.connection_pool.connection_timeout_ms,
+                idle_timeout_ms: ds_config.connection_pool.idle_timeout_ms,
+                max_lifetime_ms: ds_config.connection_pool.max_lifetime_ms,
+                health_check_interval_ms: ds_config.connection_pool.health_check_interval_ms,
+                circuit_breaker: (&ds_config.connection_pool.circuit_breaker).into(),
+            };
+
+            let _ = ctx
+                .pool_manager
+                .ensure_pool(
+                    &namespaced_ds,
+                    pool_cfg,
+                    Arc::clone(driver),
+                    params.clone(),
+                    ctx.event_bus.clone(),
+                )
+                .await;
+        }
+    }
+
     let ds_params = Arc::new(ds_params);
     let mut executor = DataViewExecutor::new(registry, factory.clone(), ds_params.clone(), cache);
     executor.set_event_bus(ctx.event_bus.clone());
