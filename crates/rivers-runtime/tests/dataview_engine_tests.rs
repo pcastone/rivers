@@ -758,3 +758,277 @@ fn coerce_incompatible_types_returns_none() {
     assert!(coerce_param_type(&QueryValue::Boolean(true), "integer").is_none());
     assert!(coerce_param_type(&QueryValue::Null, "string").is_none());
 }
+
+// ── D3 / P1-10 — DataView request-level timeout enforcement ───────
+//
+// `DataViewExecutor::execute_with_timeout` MUST wrap the combined
+// pool-acquire + driver-execute future in `tokio::time::timeout` when the
+// per-request budget is positive. On elapse, it returns
+// `DataViewError::Timeout { datasource_id, timeout_ms }` carrying the
+// configured budget so the log line is actionable, and the inner future
+// is dropped (cancelling any in-flight acquire so the request worker is
+// freed).
+//
+// We use a minimal mock `ConnectionAcquirer` that sleeps inside `acquire`
+// to simulate a slow datasource. The test asserts:
+//   - the call returns within ~budget + a small slack
+//   - the error variant is `Timeout` with the right fields
+//   - a separate `timeout_ms = None` call against the same slow acquirer
+//     completes successfully (no enforced budget → prior behavior preserved)
+
+mod d3_timeout {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use rivers_core::DriverFactory;
+    use rivers_driver_sdk::error::DriverError;
+    use rivers_driver_sdk::traits::Connection;
+    use rivers_driver_sdk::types::{Query, QueryResult};
+    use rivers_driver_sdk::ConnectionParams;
+    use rivers_runtime::tiered_cache::NoopDataViewCache;
+    use rivers_runtime::{
+        AcquireError, ConnectionAcquirer, DataViewError, DataViewExecutor, DataViewRegistry,
+        PooledConnection,
+    };
+
+    /// Minimal `Connection` that returns an empty result. Only used so the
+    /// fast-path test (no timeout) actually has a real conn to execute on.
+    struct StubConn;
+
+    #[async_trait]
+    impl Connection for StubConn {
+        async fn execute(&mut self, _q: &Query) -> Result<QueryResult, DriverError> {
+            Ok(QueryResult {
+                rows: Vec::new(),
+                affected_rows: 0,
+                last_insert_id: None,
+                column_names: None,
+            })
+        }
+        async fn ping(&mut self) -> Result<(), DriverError> { Ok(()) }
+        fn driver_name(&self) -> &str { "stub" }
+    }
+
+    struct StubGuard {
+        conn: Box<dyn Connection>,
+    }
+    impl PooledConnection for StubGuard {
+        fn conn_mut(&mut self) -> &mut Box<dyn Connection> { &mut self.conn }
+    }
+
+    /// Acquirer that sleeps `acquire_delay` before returning a stub guard.
+    /// Tracks whether the acquire future completed (false ⇒ it was
+    /// dropped/cancelled before finishing — proves the worker was freed).
+    struct SlowAcquirer {
+        acquire_delay: Duration,
+        acquire_started: AtomicU64,
+        acquire_completed: AtomicBool,
+    }
+
+    impl SlowAcquirer {
+        fn new(delay: Duration) -> Self {
+            Self {
+                acquire_delay: delay,
+                acquire_started: AtomicU64::new(0),
+                acquire_completed: AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ConnectionAcquirer for SlowAcquirer {
+        async fn acquire(
+            &self,
+            _datasource_id: &str,
+        ) -> Result<Box<dyn PooledConnection>, AcquireError> {
+            self.acquire_started.fetch_add(1, Ordering::Relaxed);
+            tokio::time::sleep(self.acquire_delay).await;
+            // Only flips true if the timeout did NOT cancel us mid-sleep.
+            self.acquire_completed.store(true, Ordering::Relaxed);
+            Ok(Box::new(StubGuard { conn: Box::new(StubConn) }))
+        }
+
+        async fn has_pool(&self, _datasource_id: &str) -> bool { true }
+    }
+
+    fn dv_config_for_ds(ds: &str) -> DataViewConfig {
+        DataViewConfig {
+            name: "slow_view".into(),
+            datasource: ds.into(),
+            query: Some("SELECT 1".into()),
+            parameters: Vec::new(),
+            return_schema: None,
+            invalidates: Vec::new(),
+            validate_result: false,
+            strict_parameters: false,
+            caching: None,
+            get_query: None,
+            post_query: None,
+            put_query: None,
+            delete_query: None,
+            get_schema: None,
+            post_schema: None,
+            put_schema: None,
+            delete_schema: None,
+            get_parameters: Vec::new(),
+            post_parameters: Vec::new(),
+            put_parameters: Vec::new(),
+            delete_parameters: Vec::new(),
+            streaming: false,
+            circuit_breaker_id: None,
+            prepared: false,
+            query_params: HashMap::new(),
+            max_rows: 1000,
+        }
+    }
+
+    /// Build an executor wired to the given acquirer. Fast factory + a
+    /// single datasource keyed "ds-slow" matching the registered DataView.
+    fn build_executor(acquirer: Arc<SlowAcquirer>) -> DataViewExecutor {
+        let mut registry = DataViewRegistry::new();
+        registry.register(dv_config_for_ds("ds-slow"));
+
+        let factory = Arc::new(DriverFactory::new());
+        let mut params_map = HashMap::new();
+        let mut opts = HashMap::new();
+        opts.insert("driver".to_string(), "stub".to_string());
+        params_map.insert("ds-slow".to_string(), ConnectionParams {
+            host: String::new(), port: 0, database: String::new(),
+            username: String::new(), password: String::new(),
+            options: opts,
+        });
+
+        let mut exec = DataViewExecutor::new(
+            registry,
+            factory,
+            Arc::new(params_map),
+            Arc::new(NoopDataViewCache),
+        );
+        exec.set_acquirer(acquirer as Arc<dyn ConnectionAcquirer>);
+        exec
+    }
+
+    /// Slow acquirer (500 ms sleep) + 100 ms request budget → must return
+    /// `DataViewError::Timeout` within the budget plus a small slack.
+    #[tokio::test]
+    async fn execute_with_timeout_fires_on_slow_acquire() {
+        let slow = Arc::new(SlowAcquirer::new(Duration::from_millis(500)));
+        let exec = build_executor(slow.clone());
+
+        let start = std::time::Instant::now();
+        let result = exec
+            .execute_with_timeout(
+                "slow_view",
+                HashMap::new(),
+                "GET",
+                "trace-d3",
+                None,
+                Some(100),
+            )
+            .await;
+        let elapsed = start.elapsed();
+
+        // Must fire within the budget + a small slack (CI scheduler jitter).
+        // 100 ms budget → assert ≤ 250 ms. Acquire would have slept 500 ms.
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "timeout did not fire in budget: elapsed={:?}",
+            elapsed
+        );
+
+        match result {
+            Err(DataViewError::Timeout { datasource_id, timeout_ms }) => {
+                assert_eq!(datasource_id, "ds-slow");
+                assert_eq!(timeout_ms, 100);
+            }
+            other => panic!("expected DataViewError::Timeout, got: {:?}", other),
+        }
+
+        // Confirm the in-flight acquire future was cancelled (not allowed
+        // to run to completion). This is the "request worker is freed"
+        // guarantee — `tokio::time::timeout` drops the wrapped future on
+        // elapse, which cancels the `tokio::time::sleep` inside acquire.
+        assert!(
+            !slow.acquire_completed.load(Ordering::Relaxed),
+            "acquire future should have been dropped/cancelled by the timeout"
+        );
+        assert_eq!(
+            slow.acquire_started.load(Ordering::Relaxed),
+            1,
+            "acquire should have been entered exactly once"
+        );
+    }
+
+    /// `timeout_ms = None` → no enforced budget, slow acquire runs to
+    /// completion and the call succeeds. Preserves prior behavior.
+    #[tokio::test]
+    async fn execute_with_timeout_none_disables_budget() {
+        let slow = Arc::new(SlowAcquirer::new(Duration::from_millis(50)));
+        let exec = build_executor(slow.clone());
+
+        let result = exec
+            .execute_with_timeout(
+                "slow_view",
+                HashMap::new(),
+                "GET",
+                "trace-d3-none",
+                None,
+                None,
+            )
+            .await;
+
+        assert!(result.is_ok(), "no-timeout call should succeed: {:?}", result.err());
+        assert!(slow.acquire_completed.load(Ordering::Relaxed));
+    }
+
+    /// `timeout_ms = Some(0)` is treated as "no timeout" — same convention
+    /// as the builder's validation (it rejects 0 there, but the executor
+    /// must defensively accept 0 as "disabled" rather than firing a 0 ms
+    /// timeout that always elapses).
+    #[tokio::test]
+    async fn execute_with_timeout_zero_disables_budget() {
+        let slow = Arc::new(SlowAcquirer::new(Duration::from_millis(20)));
+        let exec = build_executor(slow.clone());
+
+        let result = exec
+            .execute_with_timeout(
+                "slow_view",
+                HashMap::new(),
+                "GET",
+                "trace-d3-zero",
+                None,
+                Some(0),
+            )
+            .await;
+
+        assert!(result.is_ok(), "zero-timeout call should succeed: {:?}", result.err());
+    }
+
+    /// Plain `execute()` (no timeout arg) must remain a no-timeout call —
+    /// it forwards to `execute_with_timeout` with `None`, so a slow
+    /// acquirer must NOT trip a timeout error.
+    #[tokio::test]
+    async fn execute_default_path_has_no_timeout() {
+        let slow = Arc::new(SlowAcquirer::new(Duration::from_millis(30)));
+        let exec = build_executor(slow.clone());
+
+        let result = exec.execute("slow_view", HashMap::new(), "GET", "trace-default", None).await;
+
+        assert!(result.is_ok(), "default execute must not enforce a timeout: {:?}", result.err());
+    }
+
+    /// `DataViewError::Timeout` Display should mention the datasource id
+    /// and budget so on-call has actionable context in logs.
+    #[test]
+    fn timeout_error_display_is_actionable() {
+        let err = DataViewError::Timeout {
+            datasource_id: "pg-primary".into(),
+            timeout_ms: 250,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("pg-primary"), "datasource id missing: {}", msg);
+        assert!(msg.contains("250"), "timeout_ms missing: {}", msg);
+    }
+}

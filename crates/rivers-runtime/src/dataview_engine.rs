@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rivers_core::DriverFactory;
 use rivers_driver_sdk::broker::{BrokerConsumerConfig, OutboundMessage};
@@ -194,6 +194,21 @@ pub enum DataViewError {
     /// Cache read/write error.
     #[error("cache error: {0}")]
     Cache(String),
+
+    /// Request-level timeout (D3 / P1-10) — the combined acquire + execute
+    /// budget elapsed before the call finished.
+    ///
+    /// Emitted by `DataViewExecutor::execute` when `request.timeout_ms` is
+    /// positive and the acquire-and-execute future runs longer than that
+    /// budget. Carries the datasource id and the configured timeout so the
+    /// log line is actionable.
+    #[error("dataview timeout: datasource '{datasource_id}' exceeded {timeout_ms}ms budget")]
+    Timeout {
+        /// Datasource id the timeout was enforced against.
+        datasource_id: String,
+        /// Configured per-request timeout in milliseconds that elapsed.
+        timeout_ms: u64,
+    },
 }
 
 // ── DataView Request / Response ───────────────────────────────────
@@ -621,6 +636,18 @@ enum FactoryOutcome {
     BrokerResponse(DataViewResponse),
 }
 
+/// Outcome of the acquire+execute future inside `DataViewExecutor::execute`.
+///
+/// Mirrors `FactoryOutcome` but lifted to the outer scope so the
+/// `tokio::time::timeout` wrapper can return it. Carrying the broker
+/// short-circuit through the timeout boundary lets us preserve the
+/// existing broker-produce flow (which builds its own `DataViewResponse`
+/// and bypasses the post-execute cache / max_rows / schema pipeline).
+enum InnerOutcome {
+    Query(Result<QueryResult, DriverError>),
+    BrokerResponse(DataViewResponse),
+}
+
 
 /// Execution facade for DataViews — combines registry lookup, parameter
 /// validation, query building, and driver execution in one call.
@@ -719,6 +746,10 @@ impl DataViewExecutor {
     ///
     /// If `txn_conn` is `Some`, the provided connection is used directly
     /// (transaction path) and cache population is skipped.
+    ///
+    /// Equivalent to [`Self::execute_with_timeout`] with `timeout_ms = None`
+    /// (no enforced per-request budget). Existing call sites use this form
+    /// and remain unchanged.
     pub async fn execute(
         &self,
         name: &str,
@@ -726,6 +757,31 @@ impl DataViewExecutor {
         method: &str,
         trace_id: &str,
         txn_conn: Option<&mut Box<dyn rivers_driver_sdk::Connection>>,
+    ) -> Result<DataViewResponse, DataViewError> {
+        self.execute_with_timeout(name, params, method, trace_id, txn_conn, None).await
+    }
+
+    /// Execute a named DataView with an explicit per-request timeout (D3 / P1-10).
+    ///
+    /// The timeout, when `Some(ms)` with `ms > 0`, encompasses BOTH the
+    /// connection acquire (pool checkout) and the driver query execution —
+    /// it is a request-level budget, not just a query-level one. On elapse,
+    /// the inner future is dropped (cancelling any in-flight acquire/execute,
+    /// freeing the request worker) and the call returns
+    /// [`DataViewError::Timeout`] carrying the datasource id and the
+    /// configured budget.
+    ///
+    /// `None` or `Some(0)` disables the timeout (current behavior preserved).
+    /// The transaction path (`txn_conn = Some(...)`) does not apply the
+    /// timeout — transactions own their own deadline at the orchestrator level.
+    pub async fn execute_with_timeout(
+        &self,
+        name: &str,
+        params: HashMap<String, QueryValue>,
+        method: &str,
+        trace_id: &str,
+        txn_conn: Option<&mut Box<dyn rivers_driver_sdk::Connection>>,
+        timeout_ms: Option<u64>,
     ) -> Result<DataViewResponse, DataViewError> {
         let start = Instant::now();
         let is_transaction = txn_conn.is_some();
@@ -807,13 +863,76 @@ impl DataViewExecutor {
             }
         }
 
-        // Use transaction connection if provided, otherwise route through the
-        // per-datasource pool (D2). Falls back to direct factory.connect when
-        // no acquirer is installed (legacy/test path) — this keeps existing
-        // unit tests that build a bare `DataViewExecutor::new(...)` working.
-        let execute_result = if let Some(conn) = txn_conn {
-            // Transaction path — use provided connection, skip caching
-            if config.prepared && conn.has_prepared(&query.statement) {
+        // Build the acquire+execute future. The whole future is then either
+        // awaited directly (no timeout) or wrapped in `tokio::time::timeout`
+        // (D3 / P1-10) so a slow datasource cannot tie up the request worker
+        // indefinitely. The timeout encompasses BOTH pool acquisition and
+        // driver query execution — a request-level budget, not just a
+        // query-level one.
+        //
+        // Transaction path: skip the timeout wrapper. Transactions own their
+        // own deadline at the orchestrator level and the caller-provided
+        // connection is not ours to cancel mid-flight.
+        let acquire_and_execute = async {
+            if let Some(ref acquirer) = self.acquirer {
+                // Pool path (D2) — `acquire` resolves the datasource id to a
+                // pool and returns an RAII guard. Single checkout for the
+                // whole call; dropped automatically once `guard` falls out
+                // of scope at the end of this async block.
+                //
+                // `has_pool` lets us route broker datasources (which have no
+                // pool registered) through the legacy direct-connect path.
+                let datasource_id = config.datasource.as_str();
+                if acquirer.has_pool(datasource_id).await {
+                    match acquirer.acquire(datasource_id).await {
+                        Ok(mut guard) => {
+                            let conn = guard.conn_mut();
+                            let r = if config.prepared && conn.has_prepared(&query.statement) {
+                                conn.execute_prepared(&query).await
+                            } else if config.prepared {
+                                if let Err(e) = conn.prepare(&query.statement).await {
+                                    return Err(DataViewError::Driver(format!("prepare: {e}")));
+                                }
+                                conn.execute_prepared(&query).await
+                            } else {
+                                conn.execute(&query).await
+                            };
+                            Ok(InnerOutcome::Query(r))
+                        }
+                        Err(e) => Err(DataViewError::Pool(format!("pool acquire failed: {e}"))),
+                    }
+                } else {
+                    // No pool registered → direct-connect path (broker or pre-wired test).
+                    match self.connect_and_execute_or_broker(
+                        driver_name, ds_params, &query, config, name, start, trace_id,
+                    ).await? {
+                        FactoryOutcome::Query(r) => Ok(InnerOutcome::Query(r)),
+                        FactoryOutcome::BrokerResponse(resp) => Ok(InnerOutcome::BrokerResponse(resp)),
+                    }
+                }
+            } else {
+                // No acquirer installed — legacy direct-connect path. We log
+                // at WARN once-per-call so it's noticeable in production but
+                // doesn't break test fixtures that drive the executor
+                // without a pool.
+                tracing::warn!(
+                    dataview = %name,
+                    datasource = %config.datasource,
+                    "DataViewExecutor has no ConnectionAcquirer installed; falling back to factory.connect (per-call handshake)"
+                );
+                match self.connect_and_execute_or_broker(
+                    driver_name, ds_params, &query, config, name, start, trace_id,
+                ).await? {
+                    FactoryOutcome::Query(r) => Ok(InnerOutcome::Query(r)),
+                    FactoryOutcome::BrokerResponse(resp) => Ok(InnerOutcome::BrokerResponse(resp)),
+                }
+            }
+        };
+
+        let inner_outcome = if let Some(conn) = txn_conn {
+            // Transaction path — use provided connection, skip caching AND
+            // skip the timeout wrapper. Transactions own their own deadline.
+            let r = if config.prepared && conn.has_prepared(&query.statement) {
                 conn.execute_prepared(&query).await
             } else if config.prepared {
                 conn.prepare(&query.statement).await
@@ -821,56 +940,43 @@ impl DataViewExecutor {
                 conn.execute_prepared(&query).await
             } else {
                 conn.execute(&query).await
-            }
-        } else if let Some(ref acquirer) = self.acquirer {
-            // Pool path (D2) — `acquire` resolves the datasource id to a pool
-            // and returns an RAII guard. Single checkout for the whole call;
-            // dropped automatically once `guard` falls out of scope at the
-            // end of the surrounding scope.
-            //
-            // `has_pool` lets us route broker datasources (which have no pool
-            // registered) through the legacy direct-connect path.
-            let datasource_id = config.datasource.as_str();
-            if acquirer.has_pool(datasource_id).await {
-                match acquirer.acquire(datasource_id).await {
-                    Ok(mut guard) => {
-                        let conn = guard.conn_mut();
-                        if config.prepared && conn.has_prepared(&query.statement) {
-                            conn.execute_prepared(&query).await
-                        } else if config.prepared {
-                            conn.prepare(&query.statement).await
-                                .map_err(|e| DataViewError::Driver(format!("prepare: {e}")))?;
-                            conn.execute_prepared(&query).await
-                        } else {
-                            conn.execute(&query).await
+            };
+            InnerOutcome::Query(r)
+        } else {
+            // Apply request-level timeout (D3 / P1-10) when configured.
+            // `None` or `Some(0)` → no timeout (preserves prior behavior).
+            // Any positive value → enforced via tokio::time::timeout. The
+            // inner future is dropped on elapse, which cancels any in-flight
+            // acquire / driver call and frees the request worker.
+            match timeout_ms {
+                Some(ms) if ms > 0 => {
+                    match tokio::time::timeout(Duration::from_millis(ms), acquire_and_execute).await {
+                        Ok(inner) => inner?,
+                        Err(_elapsed) => {
+                            tracing::warn!(
+                                dataview = %name,
+                                datasource = %config.datasource,
+                                timeout_ms = ms,
+                                "dataview request timeout — acquire+execute exceeded budget"
+                            );
+                            return Err(DataViewError::Timeout {
+                                datasource_id: config.datasource.clone(),
+                                timeout_ms: ms,
+                            });
                         }
                     }
-                    Err(e) => return Err(DataViewError::Pool(format!("pool acquire failed: {e}"))),
                 }
-            } else {
-                // No pool registered → direct-connect path (broker or pre-wired test).
-                match self.connect_and_execute_or_broker(
-                    driver_name, ds_params, &query, config, name, start, trace_id,
-                ).await? {
-                    FactoryOutcome::Query(r) => r,
-                    FactoryOutcome::BrokerResponse(resp) => return Ok(resp),
-                }
+                _ => acquire_and_execute.await?,
             }
-        } else {
-            // No acquirer installed — legacy direct-connect path. We log at
-            // WARN once-per-call so it's noticeable in production but doesn't
-            // break test fixtures that drive the executor without a pool.
-            tracing::warn!(
-                dataview = %name,
-                datasource = %config.datasource,
-                "DataViewExecutor has no ConnectionAcquirer installed; falling back to factory.connect (per-call handshake)"
-            );
-            match self.connect_and_execute_or_broker(
-                driver_name, ds_params, &query, config, name, start, trace_id,
-            ).await? {
-                FactoryOutcome::Query(r) => r,
-                FactoryOutcome::BrokerResponse(resp) => return Ok(resp),
-            }
+        };
+
+        // Hoist the broker-response short-circuit out of the timeout block so
+        // both the inner-pool branch and the inner-direct branch can return
+        // it. (Broker produce builds its own DataViewResponse and skips the
+        // remaining max_rows / cache / schema validation pipeline.)
+        let execute_result = match inner_outcome {
+            InnerOutcome::Query(r) => r,
+            InnerOutcome::BrokerResponse(resp) => return Ok(resp),
         };
 
         let mut query_result = execute_result
