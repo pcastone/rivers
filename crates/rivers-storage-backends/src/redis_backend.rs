@@ -223,22 +223,111 @@ impl StorageEngine for RedisStorageEngine {
                 Ok(keys)
             }
             RedisConn::Cluster(conn) => {
-                // SCAN is per-node and not supported on ClusterConnection.
-                // Use KEYS command instead (acceptable for storage engine use case
-                // where key counts are bounded).
-                let vals: Vec<String> = conn
-                    .keys(&pattern)
-                    .await
-                    .map_err(|e| StorageError::Backend(format!("redis cluster keys: {e}")))?;
+                // G_R1: cluster path now uses per-node SCAN instead of KEYS.
+                // KEYS blocks the entire Redis server while it walks every key
+                // — pathological on large keyspaces. SCAN is per-node and
+                // cursor-based, so we fan out one SCAN per primary, then
+                // continue each node's cursor independently until it returns
+                // to 0. The async cluster connection's `route_command` with
+                // `MultipleNodeRoutingInfo::AllMasters` and no response
+                // policy returns a `Value::Map<addr, [cursor, [keys...]]>`,
+                // letting us drive per-node cursors using `ByAddress` routing
+                // for the follow-up calls.
+                use redis::cluster_routing::{
+                    MultipleNodeRoutingInfo, RoutingInfo, SingleNodeRoutingInfo,
+                };
 
-                let keys: Vec<String> = vals
-                    .into_iter()
-                    .filter_map(|full_key| {
-                        full_key
-                            .strip_prefix(&ns_prefix)
-                            .map(|bare| bare.to_string())
-                    })
-                    .collect();
+                let mut keys: Vec<String> = Vec::new();
+                // First round: broadcast SCAN 0 to every primary and harvest
+                // (address, cursor, keys) tuples.
+                let mut first = redis::cmd("SCAN");
+                first
+                    .arg(0u64)
+                    .arg("MATCH")
+                    .arg(&pattern)
+                    .arg("COUNT")
+                    .arg(500u64);
+                let initial = conn
+                    .route_command(
+                        &first,
+                        RoutingInfo::MultiNode((MultipleNodeRoutingInfo::AllMasters, None)),
+                    )
+                    .await
+                    .map_err(|e| {
+                        StorageError::Backend(format!("redis cluster scan (broadcast): {e}"))
+                    })?;
+
+                // Per-node continuation state: addr → next cursor (None when done).
+                let mut pending: Vec<(String, u64)> = Vec::new();
+                for (addr_val, payload) in extract_node_map(initial)? {
+                    let addr = addr_val_to_string(addr_val).ok_or_else(|| {
+                        StorageError::Backend(
+                            "redis cluster scan: non-string node address in response".into(),
+                        )
+                    })?;
+                    let (cursor, batch) = parse_scan_response(payload)?;
+                    for k in batch {
+                        if let Some(bare) = k.strip_prefix(&ns_prefix) {
+                            keys.push(bare.to_string());
+                        }
+                    }
+                    if cursor != 0 {
+                        pending.push((addr, cursor));
+                    }
+                }
+
+                // Drain remaining cursors per node. Each node is independent,
+                // so we cycle through `pending` and reissue against each
+                // `ByAddress` route until the cursor returns 0. A modest
+                // safety bound prevents runaway loops on a misbehaving node.
+                let max_iterations = 10_000;
+                let mut iterations = 0;
+                while !pending.is_empty() {
+                    iterations += 1;
+                    if iterations > max_iterations {
+                        return Err(StorageError::Backend(format!(
+                            "redis cluster scan: exceeded {max_iterations} iterations (node cursors did not drain)"
+                        )));
+                    }
+                    let mut next_pending = Vec::with_capacity(pending.len());
+                    for (addr, cursor) in pending.drain(..) {
+                        let (host, port) = split_addr(&addr).ok_or_else(|| {
+                            StorageError::Backend(format!(
+                                "redis cluster scan: malformed node address '{addr}'"
+                            ))
+                        })?;
+                        let mut cmd = redis::cmd("SCAN");
+                        cmd.arg(cursor)
+                            .arg("MATCH")
+                            .arg(&pattern)
+                            .arg("COUNT")
+                            .arg(500u64);
+                        let resp = conn
+                            .route_command(
+                                &cmd,
+                                RoutingInfo::SingleNode(SingleNodeRoutingInfo::ByAddress {
+                                    host,
+                                    port,
+                                }),
+                            )
+                            .await
+                            .map_err(|e| {
+                                StorageError::Backend(format!(
+                                    "redis cluster scan (continue {addr} @ cursor {cursor}): {e}"
+                                ))
+                            })?;
+                        let (next_cursor, batch) = parse_scan_response(resp)?;
+                        for k in batch {
+                            if let Some(bare) = k.strip_prefix(&ns_prefix) {
+                                keys.push(bare.to_string());
+                            }
+                        }
+                        if next_cursor != 0 {
+                            next_pending.push((addr, next_cursor));
+                        }
+                    }
+                    pending = next_pending;
+                }
 
                 Ok(keys)
             }
@@ -289,6 +378,92 @@ impl StorageEngine for RedisStorageEngine {
         // Redis handles TTL expiration natively; nothing to sweep.
         Ok(0)
     }
+}
+
+// ── G_R1: cluster SCAN helpers ──────────────────────────────────────
+
+/// Extract the `(addr, payload)` pairs from a `Value::Map` returned by
+/// `route_command(.., MultiNode(AllMasters, None))`. Returns an error for
+/// any other shape.
+fn extract_node_map(value: redis::Value) -> Result<Vec<(redis::Value, redis::Value)>, StorageError> {
+    match value {
+        redis::Value::Map(entries) => Ok(entries),
+        // Single-node clusters might collapse to a single response; treat
+        // that as a one-element map with an empty address.
+        other => Err(StorageError::Backend(format!(
+            "redis cluster scan: expected Map response from broadcast SCAN, got {other:?}"
+        ))),
+    }
+}
+
+/// Convert a `Value::BulkString`/`Value::SimpleString` (the address key in
+/// the broadcast response Map) into a Rust string.
+fn addr_val_to_string(v: redis::Value) -> Option<String> {
+    match v {
+        redis::Value::BulkString(bytes) => String::from_utf8(bytes).ok(),
+        redis::Value::SimpleString(s) => Some(s),
+        _ => None,
+    }
+}
+
+/// Split a `host:port` address into its parts.
+fn split_addr(addr: &str) -> Option<(String, u16)> {
+    let (host, port) = addr.rsplit_once(':')?;
+    let port: u16 = port.parse().ok()?;
+    Some((host.to_string(), port))
+}
+
+/// Parse a SCAN response (`[cursor_string, [keys...]]`) into a `(cursor,
+/// keys)` tuple. The cursor is decoded from its bulk-string ASCII form.
+fn parse_scan_response(value: redis::Value) -> Result<(u64, Vec<String>), StorageError> {
+    let arr = match value {
+        redis::Value::Array(arr) => arr,
+        other => {
+            return Err(StorageError::Backend(format!(
+                "redis cluster scan: expected Array reply, got {other:?}"
+            )))
+        }
+    };
+    if arr.len() != 2 {
+        return Err(StorageError::Backend(format!(
+            "redis cluster scan: expected 2-element reply, got {}",
+            arr.len()
+        )));
+    }
+    let mut it = arr.into_iter();
+    let cursor_val = it.next().unwrap();
+    let keys_val = it.next().unwrap();
+
+    let cursor = match cursor_val {
+        redis::Value::BulkString(bytes) => std::str::from_utf8(&bytes)
+            .map_err(|e| StorageError::Backend(format!("redis cluster scan cursor utf8: {e}")))?
+            .parse::<u64>()
+            .map_err(|e| StorageError::Backend(format!("redis cluster scan cursor parse: {e}")))?,
+        redis::Value::Int(i) => i as u64,
+        other => {
+            return Err(StorageError::Backend(format!(
+                "redis cluster scan: unexpected cursor type {other:?}"
+            )))
+        }
+    };
+
+    let keys = match keys_val {
+        redis::Value::Array(items) => items
+            .into_iter()
+            .filter_map(|v| match v {
+                redis::Value::BulkString(b) => String::from_utf8(b).ok(),
+                redis::Value::SimpleString(s) => Some(s),
+                _ => None,
+            })
+            .collect(),
+        other => {
+            return Err(StorageError::Backend(format!(
+                "redis cluster scan: expected Array of keys, got {other:?}"
+            )))
+        }
+    };
+
+    Ok((cursor, keys))
 }
 
 #[cfg(test)]
@@ -523,6 +698,56 @@ mod tests {
         // Redis handles TTL natively, so flush_expired always returns 0.
         let removed = engine.flush_expired().await.unwrap();
         assert_eq!(removed, 0);
+    }
+
+    /// G_R1: cluster `list_keys` MUST use SCAN (not KEYS) and return every
+    /// matching key across all primaries. Gated on `REDIS_CLUSTER_AVAILABLE=1`
+    /// because it requires the test cluster at 192.168.2.206-208.
+    #[tokio::test]
+    async fn cluster_list_keys_uses_scan_for_large_keyspace() {
+        if std::env::var("REDIS_CLUSTER_AVAILABLE").ok().as_deref() != Some("1") {
+            println!(
+                "SKIP cluster_list_keys_uses_scan_for_large_keyspace — set REDIS_CLUSTER_AVAILABLE=1 to enable (cluster at 192.168.2.206-208)"
+            );
+            return;
+        }
+
+        // Cluster credentials per `sec/test-infrastructure.md`.
+        const CLUSTER_URL: &str = "redis://:rivers_test@192.168.2.206:6379,redis://:rivers_test@192.168.2.207:6379,redis://:rivers_test@192.168.2.208:6379";
+        let prefix = format!("test:cluster_scan:{}:", uuid_like_suffix());
+        let engine = RedisStorageEngine::with_prefix(CLUSTER_URL, &prefix)
+            .expect("redis cluster engine should construct");
+        let ns = "ns-scan";
+
+        // Seed 250 keys (well above the per-SCAN COUNT hint of 500 to
+        // exercise multi-cursor iteration without taking forever).
+        for i in 0..250 {
+            engine
+                .set(ns, &format!("k:{i}"), b"v".to_vec(), None)
+                .await
+                .expect("set should succeed");
+        }
+
+        let keys = engine
+            .list_keys(ns, Some("k:"))
+            .await
+            .expect("list_keys should succeed");
+        assert_eq!(keys.len(), 250, "SCAN must surface every matching key");
+
+        // Cleanup — same engine.delete loop as the helper above; we can't
+        // call cleanup() because the prefix is unique per-test.
+        for key in keys {
+            let _ = engine.delete(ns, &key).await;
+        }
+    }
+
+    /// Light pseudo-uuid for test isolation without pulling a uuid dep.
+    fn uuid_like_suffix() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| format!("{}{}", d.as_secs(), d.subsec_nanos()))
+            .unwrap_or_else(|_| "fallback".into())
     }
 
     #[tokio::test]
