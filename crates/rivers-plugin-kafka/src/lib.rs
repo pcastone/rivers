@@ -290,7 +290,7 @@ impl BrokerConsumer for KafkaConsumer {
                 .fetch_records(
                     fetch_offset,
                     1..1_000_000,
-                    5_000,
+                    500, // max_wait_ms: 500ms poll interval (vs 5s) for faster delivery
                 )
                 .await
                 .map_err(|e| DriverError::Query(format!("kafka fetch: {e}")))?;

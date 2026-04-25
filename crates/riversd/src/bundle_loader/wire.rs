@@ -37,18 +37,34 @@ pub(crate) async fn wire_streaming_and_events(
                 // AL2.2: Create broker consumer and spawn bridge
                 let namespaced_key = format!("{}:{}", entry_point, ds.name);
                 if let Some(params) = ds_params.get(&namespaced_key) {
-                    // Collect subscriptions from MessageConsumer views targeting this datasource
+                    // Collect subscriptions from MessageConsumer views targeting this datasource.
+                    // Subscription topic comes from `on_event.topic` (configured broker topic),
+                    // NOT the view id — code-review §6 fix. The MessageConsumer registry
+                    // subscribes to EventBus on `on_event.topic`; the broker bridge publishes
+                    // per-destination events under `msg.destination` (broker_bridge.rs:262).
+                    // Both sides must agree on the name.
                     let mut subscriptions = Vec::new();
                     for (view_id, view_cfg) in &app.config.api.views {
-                        if view_cfg.view_type == "MessageConsumer" {
-                            // Use the view_id as the topic name for the subscription
-                            subscriptions.push(
-                                rivers_runtime::rivers_driver_sdk::broker::BrokerSubscription {
-                                    topic: view_id.clone(),
-                                    event_name: Some(view_id.clone()),
-                                },
-                            );
+                        if view_cfg.view_type != "MessageConsumer" {
+                            continue;
                         }
+                        let topic = match view_cfg.on_event.as_ref() {
+                            Some(oe) => oe.topic.clone(),
+                            None => {
+                                tracing::warn!(
+                                    view = %view_id,
+                                    datasource = %ds.name,
+                                    "MessageConsumer view has no on_event.topic; falling back to view id"
+                                );
+                                view_id.clone()
+                            }
+                        };
+                        subscriptions.push(
+                            rivers_runtime::rivers_driver_sdk::broker::BrokerSubscription {
+                                topic: topic.clone(),
+                                event_name: Some(topic),
+                            },
+                        );
                     }
 
                     if subscriptions.is_empty() {
@@ -116,6 +132,13 @@ pub(crate) async fn wire_streaming_and_events(
                     // wire_streaming_and_events returns immediately so HTTP
                     // listener bind isn't gated on broker reachability.
                     // See code review P0-4 / todo/tasks.md A1.1.
+                    //
+                    // Both branches independently added a non-blocking broker
+                    // startup fix (this branch's `broker_supervisor` module vs
+                    // main's `broker_bridge::BrokerBridgeSpec`/`run_with_retry`).
+                    // Keeping this branch's version because it surfaces per-bridge
+                    // state to `/health/verbose` via `BrokerBridgeRegistry` and
+                    // has integration tests under `tests/broker_supervisor_tests.rs`.
                     let backoff = crate::broker_supervisor::SupervisorBackoff::from_reconnect_ms(
                         reconnect_ms,
                     );
@@ -141,7 +164,10 @@ pub(crate) async fn wire_streaming_and_events(
             }
         }
 
-        // AL2.3: Build MessageConsumerRegistry and subscribe handlers
+        // AL2.3: Build MessageConsumerRegistry and subscribe handlers.
+        // `entry_point` is threaded in so each MessageConsumerConfig carries
+        // the owning app's identity — code-review §5 fix (empty app_id →
+        // ctx.store hit `app:default` instead of the owning app's namespace).
         let mc_registry = crate::message_consumer::MessageConsumerRegistry::from_views(
             &app.config.api.views,
             entry_point,

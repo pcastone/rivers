@@ -37,6 +37,19 @@ pub(super) struct DirectDatasource {
         RefCell<Option<Box<dyn rivers_runtime::rivers_driver_sdk::Connection>>>,
 }
 
+/// Per-task state for a `DatasourceToken::Broker` entry (BR-2026-04-23).
+///
+/// Mirrors `DirectDatasource` but for `MessageBrokerDriver::create_producer`.
+/// The `BrokerProducer` is lazy-built on first `.publish()` call in this task;
+/// closed in `TaskLocals::drop` using the live RT handle (same ordering
+/// precedent as `auto_rollback_all`).
+pub(super) struct DirectBrokerProducer {
+    pub(super) driver: String,
+    pub(super) params: rivers_runtime::rivers_driver_sdk::ConnectionParams,
+    pub(super) producer:
+        RefCell<Option<Box<dyn rivers_runtime::rivers_driver_sdk::broker::BrokerProducer>>>,
+}
+
 // ── Thread-Local Async Bridge ───────────────────────────────────
 
 thread_local! {
@@ -154,6 +167,13 @@ thread_local! {
     /// map to build/reuse a `Connection` and run operations in-thread.
     pub(super) static TASK_DIRECT_DATASOURCES:
         RefCell<HashMap<String, DirectDatasource>> = RefCell::new(HashMap::new());
+
+    /// `DatasourceToken::Broker` entries declared by the current task
+    /// (BR-2026-04-23). The broker-dispatch host fn
+    /// (`Rivers.__brokerPublish`) reads from this map to build/reuse a
+    /// `BrokerProducer` and run `publish` operations in-thread.
+    pub(super) static TASK_DIRECT_BROKER_PRODUCERS:
+        RefCell<HashMap<String, DirectBrokerProducer>> = RefCell::new(HashMap::new());
 }
 
 /// Active transaction state for the current task.
@@ -265,6 +285,40 @@ impl TaskLocals {
                 }
             }
         });
+        // BR-2026-04-23 — broker producer cache. ConnectionParams come
+        // from the parallel ctx.datasource_configs map (TaskContext
+        // populates both at build time).
+        TASK_DIRECT_BROKER_PRODUCERS.with(|m| {
+            let mut map = m.borrow_mut();
+            map.clear();
+            for (name, token) in &ctx.datasources {
+                if let DatasourceToken::Broker { driver } = token {
+                    // Missing datasource_configs entry is a plumbing bug
+                    // (TaskContextBuilder should populate both maps);
+                    // surface it at publish-time via the V8 callback
+                    // rather than panicking here.
+                    let params = ctx.datasource_configs
+                        .get(name)
+                        .map(|rd| rd.params.clone())
+                        .unwrap_or_else(|| rivers_runtime::rivers_driver_sdk::ConnectionParams {
+                            host: String::new(),
+                            port: 0,
+                            database: String::new(),
+                            username: String::new(),
+                            password: String::new(),
+                            options: HashMap::new(),
+                        });
+                    map.insert(
+                        name.clone(),
+                        DirectBrokerProducer {
+                            driver: driver.clone(),
+                            params,
+                            producer: RefCell::new(None),
+                        },
+                    );
+                }
+            }
+        });
         Ok(TaskLocals)
     }
 }
@@ -279,6 +333,27 @@ impl Drop for TaskLocals {
             if let Some(rt) = RT_HANDLE.with(|h| h.borrow().clone()) {
                 rt.block_on(state.map.auto_rollback_all());
             }
+        }
+        // BR-2026-04-23: close any broker producers opened this task.
+        // Must run BEFORE RT_HANDLE is cleared because producer.close()
+        // is async. Best-effort — log on error, don't block drop.
+        if let Some(rt) = RT_HANDLE.with(|h| h.borrow().clone()) {
+            TASK_DIRECT_BROKER_PRODUCERS.with(|m| {
+                let mut map = m.borrow_mut();
+                for (name, entry) in map.drain() {
+                    if let Some(mut prod) = entry.producer.borrow_mut().take() {
+                        if let Err(e) = rt.block_on(prod.close()) {
+                            tracing::warn!(
+                                target: "rivers.broker",
+                                datasource = %name,
+                                driver = %entry.driver,
+                                error = %e,
+                                "broker producer close failed on TaskLocals drop"
+                            );
+                        }
+                    }
+                }
+            });
         }
         RT_HANDLE.with(|h| *h.borrow_mut() = None);
         TASK_ENV.with(|e| *e.borrow_mut() = None);
@@ -300,6 +375,7 @@ impl Drop for TaskLocals {
         // TASK_TRANSACTION was drained above, before RT_HANDLE was cleared.
         TASK_COMMIT_FAILED.with(|c| *c.borrow_mut() = None);
         TASK_DIRECT_DATASOURCES.with(|m| m.borrow_mut().clear());
+        TASK_DIRECT_BROKER_PRODUCERS.with(|m| m.borrow_mut().clear());
     }
 }
 

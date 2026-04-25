@@ -22,6 +22,73 @@ handshake per request.
 finally connected on the production DataView path. Pool limits, idle
 reuse, max-lifetime, and circuit breaking now actually apply to user
 traffic — not just to the unit tests that exercise them in isolation.
+## 2026-04-24 — Canary 135/135 final push
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `crates/rivers-driver-sdk/src/lib.rs` | translate_params() QuestionPositional: track all_occurrences (with duplicates) for correct MySQL ?-binding when $name appears multiple times | Bug fix | Added all_occurrences vec; QuestionPositional uses it for both ordered list and replacen() |
+| `crates/riversd/src/process_pool/v8_engine/init.rs` | Document that js_decorators flag is a no-op in V8 13.0.245.12 (EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE) | spec §2.3 | Removed --js-decorators from flags; test rewritten to not use @syntax |
+| `canary-bundle/canary-handlers/libraries/handlers/ts-compliance/decorator.ts` | Rewrote to apply Stage 3 decorator semantics manually (no @-syntax) since V8 parser doesn't support it in this build | spec §2.3 | Manual application with correct context object; 135/135 |
+| `canary-bundle/run-tests.sh` | MCP: added -k flag, session handshake (initialize → Mcp-Session-Id header); RT-V8-TIMEOUT: 35s curl timeout, accept 408 as PASS | MCP protocol, V8 spec §9 | All 135 tests pass |
+| `canary-bundle/canary-handlers/libraries/handlers/ctx-surface.ts` | RT-CTX-APP-ID: updated expectation to "handlers" (entry_point slug) not manifest UUID | processpool §9.8 | Matches actual behavior after store-namespace fix |
+| `canary-bundle/canary-streams/app.toml` | Added events_cleanup_user DataView (DELETE by target_user) for clean-slate pagination | scenario spec §10 | Prevents accumulated SQLite events from displacing pagination windows |
+| `canary-bundle/canary-streams/libraries/handlers/scenario-activity-feed.ts` | Cleanup-before wipes all bob+carol events (not just trace_id-prefixed) | scenario spec §10 | Ensures pagination step 11 works across repeated test runs |
+
+## 2026-04-24 — `rivers-keystore-engine` review planning
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `todo/tasks.md` | Replaced the completed lockbox-engine review task list with an RKE plan targeting `docs/review/rivers-keystore-engine.md` | User request on 2026-04-24; AGENTS.md workflow rules 1 and 2 | Plan records completed crate/test reads, pending cross-crate evidence reads, security sweeps, validation commands, report writing, and final whitespace verification |
+| `changedecisionlog.md` | Logged the focused app-keystore review scope and report target | AGENTS.md workflow rule 5 | Decision entry names the changed task file, future report file, and validation method |
+
+## 2026-04-24 — `rivers-plugin-exec` review planning
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `todo/gutter.md` | Archived the unfinished RCC consolidation plan because the user narrowed scope to `rivers-plugin-exec` only | User clarification on 2026-04-24; AGENTS.md workflow rule 1 | Preserved pending consolidation tasks for a later separate session |
+| `todo/tasks.md` | Replaced RCC with RXE, a per-crate review plan targeting `docs/review/rivers-plugin-exec.md` | User clarification on 2026-04-24 | Plan requires full production-source read, sweeps, compiler validation, exec-specific security review, SDK contract check, report writing, and whitespace verification |
+| `changedecisionlog.md` | Logged the scope change from consolidation to exec-only review | AGENTS.md workflow rule 5 | Decision entry names the archived plan, new report target, and validation method |
+
+## 2026-04-24 — Full code review report delivered
+
+- `docs/code_review.md` — replaced the older static review with a crate-by-crate Tier 1/2/3 report matching the user's requested format. The report includes 26 confirmed production-impact findings plus "No issues found" entries for crates where this pass did not retain a finding.
+- `todo/tasks.md` — marked FCR review tasks complete with short notes for each review area, including final whitespace verification and self-review.
+- `changedecisionlog.md` — logged the report-format and stale-finding policy so CB can distinguish current-source findings from older prior-art items.
+
+## 2026-04-24 — Full code review refresh planning
+
+- `todo/gutter.md` — archived the active CG canary plan before replacing `todo/tasks.md`, preserving unfinished deploy-gated items per workflow rule 1.
+- `todo/tasks.md` — replaced the active task list with the FCR full code-review plan, including source files to read in full, area-by-area review tasks, and validation steps.
+- `changedecisionlog.md` — logged the decision to treat the existing `docs/code_review.md` as prior art and require fresh source confirmation for every retained finding.
+
+## 2026-04-24 — CG plan (Canary Green Again) code changes landed
+
+Four focused fixes from `docs/canary_codereivew.md` + `docs/dreams/dream-2026-04-22.md`. Each maps to a specific failing canary category. Runtime verification (canary deploy) pending.
+
+**CG1 — MessageConsumer app identity fix (code-review §5)**
+- `crates/riversd/src/message_consumer.rs` — added `entry_point: String` to `MessageConsumerConfig`; threaded through `from_view(entry_point, view_id, config)` and `MessageConsumerRegistry::from_views(entry_point, views)`.
+- `MessageConsumerHandler::handle` + `dispatch_message_event` now call `enrich(builder, &config.entry_point)` instead of `enrich(builder, "")` — ctx.store writes from Kafka consumer now land in the owning app's namespace instead of `app:default`. Directly unblocks the 2 Kafka consumer-store canary failures.
+- `crates/riversd/src/bundle_loader/wire.rs:147` passes `entry_point` into `MessageConsumerRegistry::from_views`.
+- `crates/riversd/tests/message_consumer_tests.rs` + in-file tests updated for the new signatures; added `entry_point == "canary-streams"` assertion. 13/13 PASS.
+
+**CG2 — Broker subscription topic from `on_event.topic` (code-review §6)**
+- `crates/riversd/src/bundle_loader/wire.rs:40-67` — subscription topic now reads `view_cfg.on_event.as_ref().map(|oe| oe.topic.clone())` instead of blindly using view_id; `tracing::warn!` fallback when `on_event` is absent. Consumer and per-destination publish now agree on the name. Publish side (`broker_bridge.rs:261-264`) was already fixed to publish both generic + per-destination events during the compaction session.
+
+**CG3 — Non-blocking broker consumer startup (code-review §1)** — unblocks the startup hang
+- `crates/riversd/src/broker_bridge.rs` — new `BrokerBridgeSpec` struct + `pub async fn run_with_retry(spec)` supervisor. Loops: `create_consumer` → on Ok, build `BrokerConsumerBridge` and call `run()` → on Err, publish `BROKER_CONSUMER_ERROR` event, sleep with bounded exponential backoff (base=reconnect_ms, cap=30s, ±50% jitter via `rand::thread_rng`), check shutdown, retry. Exits cleanly on shutdown.
+- `crates/riversd/src/bundle_loader/wire.rs:115` — inline `match broker_driver.create_consumer(...).await` replaced with `tokio::spawn(run_with_retry(spec))`. Bundle load no longer awaits Kafka connectivity. HTTP listener can bind even when every broker is unreachable.
+- 2 new unit tests: `supervisor_retries_and_exits_on_shutdown` (FailingDriver + shutdown returns in <1s), `supervisor_spawn_is_non_blocking` (HangingDriver + spawn returns in <50ms). Both PASS.
+
+**CG4 — Restore MySQL pool (code-review §3)**
+- `crates/rivers-drivers-builtin/src/mysql.rs` — process-global pool cache behind `OnceLock<Mutex<HashMap<String, mysql_async::Pool>>>`, keyed by `host:port/database?u=user`. Password excluded from key (never in map keys). `connect()` now does `pool.get_conn().await` — no per-call handshake.
+- Motivation: the earlier `Pool::new` → `Conn::new` swap was a symptomatic fix for the host_callbacks per-call `Runtime::new()` teardown bug. That bug was fixed separately (runtime isolation removed). Pool is safe again; every dataview call was paying a full MySQL handshake until this lands.
+- Comment in `mysql.rs:45-54` rewritten to explain the CG4 restoration.
+
+**Test status:** 347/347 riversd lib tests PASS. 200+ integration tests PASS across 20 suites. No regressions.
+
+**Pending:** `cargo deploy` + canary run to verify runtime behaviour. Expected PASS delta ≥ 9 (2 Kafka + 7 MySQL CRUD). Startup should never hang on broker.
+
+---
 
 ## 2026-04-21 — TS pipeline Phase 6 completion: stack-trace remapping
 
@@ -311,3 +378,33 @@ Plan correction: task 4.3 said "thread via closure capture (not thread-local)." 
 - 8 new unit tests in `redact_path_tests` — all green.
 - 2 new integration tests in `path_redaction_tests.rs` — all green.
 - Re-ran 357 lib tests + 25 v8_bridge + 2 b3_module_cache_strict + 10 task_kind_dispatch — all green, no regressions.
+# 2026-04-24 — Review consolidation planning
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `todo/tasks.md` | Replaced the completed FCR task list with the RCC plan for writing `docs/review/cross-crate-consolidation.md` | User request to write the report to `docs/review/`; AGENTS.md workflow rules 1-2 | Plan includes input re-check, fallback-source policy, consolidation sections, log updates, and whitespace validation |
+| `changedecisionlog.md` | Logged the output path and missing-input policy for the consolidation report | AGENTS.md workflow rule 5 | Report must state whether it is based on 22 per-crate reports or fallback grounding from `docs/code_review.md` |
+
+# 2026-04-24 — `rivers-lockbox-engine` review planning
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `todo/gutter.md` | Preserved the unfinished `rivers-plugin-exec` review task list before replacing active tasks | AGENTS.md workflow rule 1 | Added a dated "Moved From Active Tasks" section |
+| `todo/tasks.md` | Replaced the active task list with the approval-gated `rivers-lockbox-engine` review plan | User request for crate 2 review; AGENTS.md workflow rules 1-2 | Plan covers full source/test reads, security sweeps, validation, cross-crate wiring, report writing, and whitespace checks |
+| `changedecisionlog.md` | Logged the task preservation decision and the planned report path | AGENTS.md workflow rule 5 | Records `docs/review/rivers-lockbox-engine.md` as the target report |
+
+# 2026-04-24 — `rivers-lockbox-engine` review delivered
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `docs/review/rivers-lockbox-engine.md` | Added the per-crate Tier 1/2/3 review for the lockbox engine | User request to write output to `docs/review/{{crate}}`; lockbox spec security model | Report includes 3 Tier 1 findings, 4 Tier 2 findings, 1 Tier 3 finding, clean areas, coverage notes, and a shared fix recommendation |
+| `todo/tasks.md` | Marked the approved RLE review tasks complete with concise validation notes | AGENTS.md workflow rule 3 | Source/test reads, sweeps, validation, cross-crate wiring, report writing, logs, and whitespace check are complete |
+| `changedecisionlog.md` | Logged the secret-lifecycle prioritization, CLI/runtime split inclusion, and constant-time-comparison non-finding | AGENTS.md workflow rule 5 | Decisions are traceable for CB drift detection |
+
+# 2026-04-24 — `rivers-keystore-engine` review delivered
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `docs/review/rivers-keystore-engine.md` | Added the per-crate Tier 1/2/3 review for the application keystore engine | User request to write output to `docs/review/{{crate}}`; app-keystore role/risk list in the request | Report includes 3 Tier 1 findings, 3 Tier 2 findings, 2 Tier 3 findings, repeated-pattern/shared-fix notes, clean areas, coverage gaps, bug-density assessment, and recommended fix order |
+| `todo/tasks.md` | Marked the approved RKE review tasks complete with concise validation notes | AGENTS.md workflow rule 3 | Source/test reads, runtime/CLI/docs reads, security sweeps, validation, report writing, logs, and final whitespace/diff checks are complete |
+| `changedecisionlog.md` | Logged the report path/basis plus the multi-keystore and dynamic-callback cross-crate inclusion decisions | AGENTS.md workflow rule 5 | Decisions are traceable for CB drift detection |

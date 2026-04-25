@@ -44,8 +44,35 @@ function onMessage(ctx) {
                 "payload present");
         }
 
-        // Store verdict for retrieval by the test harness
+        // Store verdict for retrieval by the test harness (existing behaviour).
         ctx.store.set("canary:kafka:last_verdict", t.finish(), 60000);
+
+        // CS3 — if this message is a scenario event (JSON payload with the
+        // AF-6 shape), persist it to the events table. Messages from other
+        // producers without that shape are skipped silently.
+        try {
+            var body;
+            if (typeof msg === "string") {
+                body = JSON.parse(msg);
+            } else if (msg && msg.payload) {
+                body = typeof msg.payload === "string" ? JSON.parse(msg.payload) : msg.payload;
+            } else {
+                body = msg;
+            }
+            if (body && body.id && body.actor && body.target_user && body.event_type && body.published_at) {
+                ctx.dataview("events_insert", {
+                    id: body.id,
+                    actor: body.actor,
+                    target_user: body.target_user,
+                    event_type: body.event_type,
+                    payload: typeof body.payload === "string" ? body.payload : JSON.stringify(body.payload || null),
+                    published_at: body.published_at,
+                    consumed_at: new Date().toISOString(),
+                });
+            }
+        } catch (persistErr) {
+            Rivers.log.warn("canary-kafka consumer: scenario-event persist skipped — " + String(persistErr));
+        }
     } catch (e) {
         ctx.store.set("canary:kafka:last_verdict", t.fail(String(e)), 60000);
     }

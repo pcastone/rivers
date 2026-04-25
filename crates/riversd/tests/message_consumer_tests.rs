@@ -62,6 +62,7 @@ fn config_from_valid_consumer_view() {
     assert!(config.is_some());
     let config = config.unwrap();
     assert_eq!(config.view_id, "order_consumer");
+    assert_eq!(config.entry_point, "test-app");
     assert_eq!(config.topic, "orders.new");
     assert_eq!(config.handler, "onNewOrder");
 }
@@ -100,6 +101,10 @@ fn registry_from_mixed_views() {
     assert!(registry.get("consumer1").is_some());
     assert!(registry.get("consumer2").is_some());
     assert!(registry.get("rest_view").is_none());
+    // Every MC config in the registry carries the app's entry point —
+    // code-review §5 fix so the downstream `ctx.store` namespace is
+    // the owning app, not `app:default`.
+    assert_eq!(registry.get("consumer1").unwrap().entry_point, "test-app");
 }
 
 #[test]

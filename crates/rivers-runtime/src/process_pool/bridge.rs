@@ -19,6 +19,9 @@ impl From<&TaskContext> for crate::rivers_engine_sdk::SerializedTaskContext {
                     DatasourceToken::Direct { driver, root } => {
                         format!("direct://{}?root={}", driver, root.display())
                     }
+                    DatasourceToken::Broker { driver } => {
+                        format!("broker://{driver}")
+                    }
                 }))
                 .collect(),
             dataview_tokens: ctx.dataviews.iter()

@@ -10,7 +10,10 @@ port               = 5432
 database           = "rivers"
 username           = "rivers"
 credentials_source = "lockbox://postgres/test"
-introspect         = true
+# CS2/BR5: introspection races init-handler DDL (messages table created
+# by init.ts; introspection runs before). Disable — runtime still
+# validates on first use.
+introspect         = false
 
 [data.datasources.canary-mysql]
 name               = "canary-mysql"
@@ -20,12 +23,14 @@ port               = 3306
 database           = "rivers"
 username           = "rivers"
 credentials_source = "lockbox://mysql/test"
+introspect         = false
 
 [data.datasources.canary-sqlite]
 name       = "canary-sqlite"
 driver     = "sqlite"
 database   = "canary-sql/data/canary.db"
 nopassword = true
+introspect = false
 
 # ─────────────────────────────────────────────
 # DataViews — parameter names deliberately non-alphabetical
@@ -866,3 +871,354 @@ type = "none"
 dataview    = "pg_select_all"
 description = "Select all contacts from PostgreSQL"
 hints       = { read_only = true }
+
+# ── Scenario probe (CS1.4) ────────────────────────────────
+# SCENARIO-SQL-PROBE — validates the scenario-harness.ts envelope
+# shape end-to-end before CS2 Messaging scenarios are built on it.
+# Per rivers-canary-scenarios-spec.md §4 path convention.
+
+[api.views.scenario_probe]
+path      = "/canary/scenarios/sql/probe"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.scenario_probe.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/scenario-probe.ts"
+entrypoint = "scenarioProbe"
+
+# ─────────────────────────────────────────────────────────────────
+# CS2 — Messaging scenario DataViews (spec §5)
+# Schema: messages(id, zsender, recipient, subject, body, is_secret, cipher, created_at)
+# zname-trap: param names `body`, `cipher`, `id`, `is_secret`, `recipient`,
+# `subject`, `zsender` don't alphabetize in declaration order (MSG-7).
+# All parameterised (MSG-6).
+# ─────────────────────────────────────────────────────────────────
+
+# ── msg_insert (CS2.3.1) — one per driver ────────────────────────
+
+[data.dataviews.msg_insert_pg]
+name       = "msg_insert_pg"
+datasource = "canary-pg"
+query      = "INSERT INTO messages (id, zsender, recipient, subject, body, is_secret, cipher) VALUES ($id, $zsender, $recipient, $subject, $body, $is_secret, $cipher)"
+
+[[data.dataviews.msg_insert_pg.parameters]]
+name = "id"
+type = "string"
+required = true
+[[data.dataviews.msg_insert_pg.parameters]]
+name = "zsender"
+type = "string"
+required = true
+[[data.dataviews.msg_insert_pg.parameters]]
+name = "recipient"
+type = "string"
+required = true
+[[data.dataviews.msg_insert_pg.parameters]]
+name = "subject"
+type = "string"
+required = false
+[[data.dataviews.msg_insert_pg.parameters]]
+name = "body"
+type = "string"
+required = false
+[[data.dataviews.msg_insert_pg.parameters]]
+name = "is_secret"
+type = "integer"
+required = true
+[[data.dataviews.msg_insert_pg.parameters]]
+name = "cipher"
+type = "string"
+required = false
+
+[data.dataviews.msg_insert_mysql]
+name       = "msg_insert_mysql"
+datasource = "canary-mysql"
+query      = "INSERT INTO messages (id, zsender, recipient, subject, body, is_secret, cipher) VALUES ($id, $zsender, $recipient, $subject, $body, $is_secret, $cipher)"
+
+[[data.dataviews.msg_insert_mysql.parameters]]
+name = "id"
+type = "string"
+required = true
+[[data.dataviews.msg_insert_mysql.parameters]]
+name = "zsender"
+type = "string"
+required = true
+[[data.dataviews.msg_insert_mysql.parameters]]
+name = "recipient"
+type = "string"
+required = true
+[[data.dataviews.msg_insert_mysql.parameters]]
+name = "subject"
+type = "string"
+required = false
+[[data.dataviews.msg_insert_mysql.parameters]]
+name = "body"
+type = "string"
+required = false
+[[data.dataviews.msg_insert_mysql.parameters]]
+name = "is_secret"
+type = "integer"
+required = true
+[[data.dataviews.msg_insert_mysql.parameters]]
+name = "cipher"
+type = "string"
+required = false
+
+[data.dataviews.msg_insert_sqlite]
+name       = "msg_insert_sqlite"
+datasource = "canary-sqlite"
+query      = "INSERT INTO messages (id, zsender, recipient, subject, body, is_secret, cipher) VALUES ($id, $zsender, $recipient, $subject, $body, $is_secret, $cipher)"
+
+[[data.dataviews.msg_insert_sqlite.parameters]]
+name = "id"
+type = "string"
+required = true
+[[data.dataviews.msg_insert_sqlite.parameters]]
+name = "zsender"
+type = "string"
+required = true
+[[data.dataviews.msg_insert_sqlite.parameters]]
+name = "recipient"
+type = "string"
+required = true
+[[data.dataviews.msg_insert_sqlite.parameters]]
+name = "subject"
+type = "string"
+required = false
+[[data.dataviews.msg_insert_sqlite.parameters]]
+name = "body"
+type = "string"
+required = false
+[[data.dataviews.msg_insert_sqlite.parameters]]
+name = "is_secret"
+type = "integer"
+required = true
+[[data.dataviews.msg_insert_sqlite.parameters]]
+name = "cipher"
+type = "string"
+required = false
+
+# ── msg_inbox_by_recipient (CS2.3.2) — server-side recipient filter (MSG-2) ─
+
+[data.dataviews.msg_inbox_pg]
+name       = "msg_inbox_pg"
+datasource = "canary-pg"
+query      = "SELECT id, zsender, recipient, subject, body, is_secret, cipher, created_at FROM messages WHERE recipient = $recipient ORDER BY created_at DESC"
+
+[[data.dataviews.msg_inbox_pg.parameters]]
+name = "recipient"
+type = "string"
+required = true
+
+[data.dataviews.msg_inbox_mysql]
+name       = "msg_inbox_mysql"
+datasource = "canary-mysql"
+query      = "SELECT id, zsender, recipient, subject, body, is_secret, cipher, created_at FROM messages WHERE recipient = $recipient ORDER BY created_at DESC"
+
+[[data.dataviews.msg_inbox_mysql.parameters]]
+name = "recipient"
+type = "string"
+required = true
+
+[data.dataviews.msg_inbox_sqlite]
+name       = "msg_inbox_sqlite"
+datasource = "canary-sqlite"
+query      = "SELECT id, zsender, recipient, subject, body, is_secret, cipher, created_at FROM messages WHERE recipient = $recipient ORDER BY created_at DESC"
+
+[[data.dataviews.msg_inbox_sqlite.parameters]]
+name = "recipient"
+type = "string"
+required = true
+
+# ── msg_search (CS2.3.3) — keyword + recipient filter (MSG-3) ────
+
+[data.dataviews.msg_search_pg]
+name       = "msg_search_pg"
+datasource = "canary-pg"
+query      = "SELECT id, zsender, recipient, subject, body FROM messages WHERE recipient = $recipient AND body LIKE $pattern ORDER BY created_at DESC"
+
+[[data.dataviews.msg_search_pg.parameters]]
+name = "recipient"
+type = "string"
+required = true
+[[data.dataviews.msg_search_pg.parameters]]
+name = "pattern"
+type = "string"
+required = true
+
+[data.dataviews.msg_search_mysql]
+name       = "msg_search_mysql"
+datasource = "canary-mysql"
+query      = "SELECT id, zsender, recipient, subject, body FROM messages WHERE recipient = $recipient AND body LIKE $pattern ORDER BY created_at DESC"
+
+[[data.dataviews.msg_search_mysql.parameters]]
+name = "recipient"
+type = "string"
+required = true
+[[data.dataviews.msg_search_mysql.parameters]]
+name = "pattern"
+type = "string"
+required = true
+
+[data.dataviews.msg_search_sqlite]
+name       = "msg_search_sqlite"
+datasource = "canary-sqlite"
+query      = "SELECT id, zsender, recipient, subject, body FROM messages WHERE recipient = $recipient AND body LIKE $pattern ORDER BY created_at DESC"
+
+[[data.dataviews.msg_search_sqlite.parameters]]
+name = "recipient"
+type = "string"
+required = true
+[[data.dataviews.msg_search_sqlite.parameters]]
+name = "pattern"
+type = "string"
+required = true
+
+# ── msg_select_raw_cipher (CS2.3.4) — direct-probe for MSG-9 at-rest ciphertext
+
+[data.dataviews.msg_select_cipher_pg]
+name       = "msg_select_cipher_pg"
+datasource = "canary-pg"
+query      = "SELECT id, cipher FROM messages WHERE id = $id"
+
+[[data.dataviews.msg_select_cipher_pg.parameters]]
+name = "id"
+type = "string"
+required = true
+
+[data.dataviews.msg_select_cipher_mysql]
+name       = "msg_select_cipher_mysql"
+datasource = "canary-mysql"
+query      = "SELECT id, cipher FROM messages WHERE id = $id"
+
+[[data.dataviews.msg_select_cipher_mysql.parameters]]
+name = "id"
+type = "string"
+required = true
+
+[data.dataviews.msg_select_cipher_sqlite]
+name       = "msg_select_cipher_sqlite"
+datasource = "canary-sqlite"
+query      = "SELECT id, cipher FROM messages WHERE id = $id"
+
+[[data.dataviews.msg_select_cipher_sqlite.parameters]]
+name = "id"
+type = "string"
+required = true
+
+# ── msg_delete_with_owner_check (CS2.3.5) — MSG-5 sender-or-recipient rule
+
+[data.dataviews.msg_delete_pg]
+name       = "msg_delete_pg"
+datasource = "canary-pg"
+query      = "DELETE FROM messages WHERE id = $id AND (zsender = $actor OR recipient = $actor)"
+
+[[data.dataviews.msg_delete_pg.parameters]]
+name = "id"
+type = "string"
+required = true
+[[data.dataviews.msg_delete_pg.parameters]]
+name = "actor"
+type = "string"
+required = true
+
+[data.dataviews.msg_delete_mysql]
+name       = "msg_delete_mysql"
+datasource = "canary-mysql"
+query      = "DELETE FROM messages WHERE id = $id AND (zsender = $actor OR recipient = $actor)"
+
+[[data.dataviews.msg_delete_mysql.parameters]]
+name = "id"
+type = "string"
+required = true
+[[data.dataviews.msg_delete_mysql.parameters]]
+name = "actor"
+type = "string"
+required = true
+
+[data.dataviews.msg_delete_sqlite]
+name       = "msg_delete_sqlite"
+datasource = "canary-sqlite"
+query      = "DELETE FROM messages WHERE id = $id AND (zsender = $actor OR recipient = $actor)"
+
+[[data.dataviews.msg_delete_sqlite.parameters]]
+name = "id"
+type = "string"
+required = true
+[[data.dataviews.msg_delete_sqlite.parameters]]
+name = "actor"
+type = "string"
+required = true
+
+# ── msg_cleanup (CS2.7) — scenario teardown ──────────────────────
+
+[data.dataviews.msg_cleanup_pg]
+name       = "msg_cleanup_pg"
+datasource = "canary-pg"
+query      = "DELETE FROM messages WHERE id LIKE $id_prefix"
+
+[[data.dataviews.msg_cleanup_pg.parameters]]
+name = "id_prefix"
+type = "string"
+required = true
+
+[data.dataviews.msg_cleanup_mysql]
+name       = "msg_cleanup_mysql"
+datasource = "canary-mysql"
+query      = "DELETE FROM messages WHERE id LIKE $id_prefix"
+
+[[data.dataviews.msg_cleanup_mysql.parameters]]
+name = "id_prefix"
+type = "string"
+required = true
+
+[data.dataviews.msg_cleanup_sqlite]
+name       = "msg_cleanup_sqlite"
+datasource = "canary-sqlite"
+query      = "DELETE FROM messages WHERE id LIKE $id_prefix"
+
+[[data.dataviews.msg_cleanup_sqlite.parameters]]
+name = "id_prefix"
+type = "string"
+required = true
+
+# ── CS2.4: scenario endpoints (one per driver, MSG-10) ───────────
+
+[api.views.scenario_messaging_pg]
+path      = "/canary/scenarios/sql/messaging/pg"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.scenario_messaging_pg.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/scenario-messaging.ts"
+entrypoint = "scenarioMessagingPg"
+
+[api.views.scenario_messaging_mysql]
+path      = "/canary/scenarios/sql/messaging/mysql"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.scenario_messaging_mysql.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/scenario-messaging.ts"
+entrypoint = "scenarioMessagingMysql"
+
+[api.views.scenario_messaging_sqlite]
+path      = "/canary/scenarios/sql/messaging/sqlite"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.scenario_messaging_sqlite.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/scenario-messaging.ts"
+entrypoint = "scenarioMessagingSqlite"

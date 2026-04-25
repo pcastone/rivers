@@ -11,15 +11,15 @@ required   = true
 # unreachable. The ctx.transaction surface tests that don't need
 # real writes (nested, unsupported, args validation) still run.
 [[datasources]]
-name       = "pg"
-driver     = "postgres"
-x-type     = "postgres"
-host       = "192.168.2.209"
-port       = 5432
-database   = "rivers"
-username   = "rivers"
-password   = "rivers_test"
-required   = false
+name                = "pg"
+driver              = "postgres"
+x-type              = "postgres"
+host                = "192.168.2.209"
+port                = 5432
+database            = "rivers"
+username            = "rivers"
+credentials_source  = "lockbox://postgres/test"
+required            = false
 
 # SQLite — used as the cross-datasource target for the spec §6.2
 # cross-ds TransactionError probe. SQLite supports transactions, so
@@ -29,5 +29,29 @@ required   = false
 name       = "sqlite_cross"
 driver     = "sqlite"
 x-type     = "sqlite"
+nopassword = true
+required   = false
+
+# Filesystem datasource for CS4 Document Pipeline scenario (spec §7 DOC-7).
+# Root is /tmp — portable across macOS/Linux canary hosts. Scenario
+# confines its work to the canary-docs-<trace_id>/ subdir it creates
+# itself, matching the canary-filesystem pattern.
+[[datasources]]
+name       = "fs_workspace"
+driver     = "filesystem"
+x-type     = "filesystem"
+nopassword = true
+required   = false
+
+# Exec datasource for CS4.9 — Document Pipeline steps 8/9/10 (spec §7
+# DOC-3/4/6). rivers-exec dispatches hash-pinned scripts; the `wc`
+# command below wraps /usr/bin/wc in a script we ship + hash, because
+# the wc binary hash varies per-host (see libraries/scripts/wc-json.sh
+# header). required=false so bundle loads even when the operator hasn't
+# re-run `riverpackage import-exec` to refresh the sha256 post-deploy.
+[[datasources]]
+name       = "exec_tools"
+driver     = "rivers-exec"
+x-type     = "rivers-exec"
 nopassword = true
 required   = false

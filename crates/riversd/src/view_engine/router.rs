@@ -136,6 +136,28 @@ impl ViewRouter {
                     "route registered"
                 );
 
+                // For MCP views: also register GET `{path}/instructions` (spec MCP-15)
+                if config.view_type == "Mcp" {
+                    let instructions_path = format!("{}/instructions", full_path.trim_end_matches('/'));
+                    let instructions_segments = parse_path_pattern(&instructions_path);
+                    let instructions_id = format!("{qualified_id}:instructions");
+                    tracing::debug!(
+                        method = "GET",
+                        path = %instructions_path,
+                        view_id = %instructions_id,
+                        "route registered (mcp instructions)"
+                    );
+                    routes.push(ViewRoute {
+                        view_id: instructions_id,
+                        method: "GET".to_string(),
+                        path_pattern: instructions_path,
+                        segments: instructions_segments,
+                        config: config.clone(),
+                        app_entry_point: entry_point.to_string(),
+                        app_id: app.manifest.app_id.clone(),
+                    });
+                }
+
                 routes.push(ViewRoute {
                     view_id: qualified_id,
                     method,

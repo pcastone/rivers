@@ -106,9 +106,12 @@ pub fn translate_params(
         return (statement.to_string(), ordered);
     }
 
-    // Extract $name placeholders in order of appearance
-    let mut placeholders: Vec<String> = Vec::new();
-    let mut chars = statement.chars().peekable();
+    // Extract $name placeholders in order of first appearance (unique list for
+    // positional-index assignment) and in full appearance order (for QuestionPositional
+    // binding — each occurrence of the same name needs its own bound value).
+    let mut placeholders: Vec<String> = Vec::new();      // unique, first-appearance order
+    let mut all_occurrences: Vec<String> = Vec::new();   // every occurrence in order
+    let chars = statement.chars().peekable();
     let mut i = 0;
     let bytes = statement.as_bytes();
 
@@ -121,6 +124,7 @@ pub fn translate_params(
                 end += 1;
             }
             let name = String::from_utf8_lossy(&bytes[start..end]).to_string();
+            all_occurrences.push(name.clone());
             if !placeholders.contains(&name) {
                 placeholders.push(name);
             }
@@ -131,11 +135,21 @@ pub fn translate_params(
     }
     let _ = chars; // consumed above via bytes
 
-    // Build ordered params matching placeholder order
-    let ordered: Vec<(String, QueryValue)> = placeholders
-        .iter()
-        .filter_map(|name| params.get(name).map(|v| (name.clone(), v.clone())))
-        .collect();
+    // Build ordered params matching placeholder order.
+    // For QuestionPositional every occurrence of a repeated $name needs a
+    // separate bound value (MySQL/SQLite require one value per '?').
+    // For all other styles deduplicated placeholders are sufficient.
+    let ordered: Vec<(String, QueryValue)> = if style == ParamStyle::QuestionPositional {
+        all_occurrences
+            .iter()
+            .filter_map(|name| params.get(name).map(|v| (name.clone(), v.clone())))
+            .collect()
+    } else {
+        placeholders
+            .iter()
+            .filter_map(|name| params.get(name).map(|v| (name.clone(), v.clone())))
+            .collect()
+    };
 
     // Rewrite statement
     let mut result = statement.to_string();
@@ -149,17 +163,11 @@ pub fn translate_params(
             }
         }
         ParamStyle::QuestionPositional => {
-            // Replace each $name with ? in order of first appearance
-            for name in &placeholders {
+            // Replace each occurrence of $name (including repeats) with ?
+            // in the order they appear so the bound-value list lines up.
+            for name in &all_occurrences {
                 let from = format!("${name}");
                 result = result.replacen(&from, "?", 1);
-            }
-            // Handle duplicates — remaining occurrences of same $name also become ?
-            for name in &placeholders {
-                let from = format!("${name}");
-                while result.contains(&from) {
-                    result = result.replacen(&from, "?", 1);
-                }
             }
         }
         ParamStyle::ColonNamed => {

@@ -29,6 +29,12 @@ pub(crate) fn ensure_v8_initialized() {
     V8_INIT.call_once(|| {
         // Block dynamic code generation from strings in the sandbox.
         // Prevents code injection via Function() constructor and similar APIs.
+        //
+        // Note: V8 13.0.245.12 (crate v130.0.7) has `js_decorators` defined
+        // as EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE — the flag is a placeholder
+        // and the parser.cc has no `@`-token handling. TC39 Stage 3 decorator
+        // syntax is not supported in this V8 build. The canary decorator test
+        // (RT-TS-DECORATOR) uses the manual application pattern instead.
         v8::V8::set_flags_from_string("--disallow-code-generation-from-strings");
 
         let platform = v8::new_default_platform(0, false).make_shared();
@@ -145,3 +151,4 @@ pub(super) extern "C" fn near_heap_limit_cb(
     // 3. Process the termination from the spawned thread
     current_heap_limit + 64 * 1024 * 1024
 }
+

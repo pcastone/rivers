@@ -91,29 +91,18 @@ impl DriverFactory {
     ///
     /// Per spec §8.1. Returns `DriverError::UnknownDriver` if name is not registered.
     ///
-    /// ### Runtime policy (G_R7.2 / P2-7)
-    ///
-    /// Drivers report whether they need an isolated tokio runtime via
-    /// [`DatabaseDriver::needs_isolated_runtime`]. The factory branches on
-    /// that flag:
-    ///
-    /// - `false` (built-in drivers — postgres, mysql, sqlite, redis, faker):
-    ///   `connect()` runs on the active host runtime. No `spawn_blocking`,
-    ///   no fresh runtime construction. Built-in async drivers therefore
-    ///   share the host's reactor (timers, IO, etc.) and pay no per-connect
-    ///   runtime cost. Built-ins live in the same address space and Rust
-    ///   ABI as the host so their panics already unwind cleanly through the
-    ///   host's panic handler — no `catch_unwind` needed.
-    ///
-    /// - `true` (cdylib plugin drivers — cassandra, mongodb, neo4j, …):
-    ///   `connect()` runs inside a fresh tokio runtime built on a
-    ///   `spawn_blocking` thread, with `catch_unwind` wrapping the call.
-    ///   This is load-bearing for plugins for two reasons. (1) cdylib
-    ///   plugins ship their own statically-linked tokio that does not see
-    ///   the host's reactor; without an isolated runtime, plugin drivers
-    ///   that touch tokio primitives panic. (2) panics that cross the FFI
-    ///   boundary are foreign exceptions and would `SIGABRT` the process —
-    ///   `catch_unwind` converts them to a clean `DriverError`.
+    /// All drivers are statically compiled (cdylib plugin loading is disabled pending
+    /// Plugin ABI v2). The previous `spawn_blocking` + dedicated `Runtime::new()` isolation
+    /// is removed: it caused the tokio background connection task spawned by drivers like
+    /// `PostgresDriver` and `MySQLDriver` to be cancelled the moment the temporary runtime
+    /// was dropped, rendering every returned connection immediately dead
+    /// ("connection closed" / "Tokio 1.x context was found, but it is being shutdown").
+    /// Calling `driver.connect()` directly in the current async context is safe — the
+    /// background task is spawned on the caller's runtime and survives for the connection
+    /// lifetime. When cdylib plugins are re-enabled (Plugin ABI v2), the
+    /// `DatabaseDriver::needs_isolated_runtime()` trait method (still present, default
+    /// `false`) is the intended hook for re-introducing per-driver isolation — see
+    /// G_R7.2 in `todo/tasks.md`.
     pub async fn connect(
         &self,
         driver_name: &str,
@@ -124,36 +113,7 @@ impl DriverFactory {
             .get(driver_name)
             .ok_or_else(|| DriverError::UnknownDriver(driver_name.to_string()))?
             .clone();
-
-        if !driver.needs_isolated_runtime() {
-            // Built-in async driver — run on the active runtime so it can
-            // share the host's reactor and avoid per-connect runtime cost.
-            return driver.connect(params).await;
-        }
-
-        // Plugin path: isolated runtime + catch_unwind.
-        let params = params.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| DriverError::Connection(format!("runtime: {e}")))?;
-                rt.block_on(async { driver.connect(&params).await })
-            }))
-            .unwrap_or_else(|panic| {
-                let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                    s.clone()
-                } else if let Some(s) = panic.downcast_ref::<&str>() {
-                    s.to_string()
-                } else {
-                    "driver panicked during connect".to_string()
-                };
-                Err(DriverError::Connection(msg))
-            })
-        })
-        .await
-        .unwrap_or_else(|e| Err(DriverError::Connection(format!("connect task failed: {e}"))))?;
-
-        Ok(result)
+        driver.connect(params).await
     }
 
     /// Get a reference to a database driver by name.
@@ -550,30 +510,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn plugin_driver_runs_on_isolated_runtime() {
-        // When `needs_isolated_runtime()` is true, a fresh runtime is used.
-        let observed = Arc::new(std::sync::Mutex::new(None));
-        let mut factory = DriverFactory::new();
-        factory.register_database_driver(Arc::new(PolicyTestDriver {
-            isolated: true,
-            observed_runtime_id: observed.clone(),
-        }));
-        let _ = factory.connect("policy-test", &test_params()).await;
-
-        let host_id = {
-            let id = tokio::runtime::Handle::current().id();
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            format!("{id:?}").hash(&mut h);
-            h.finish()
-        };
-        let observed_id = observed.lock().unwrap().expect("driver must run");
-        assert_ne!(
-            observed_id, host_id,
-            "plugin driver should observe a runtime distinct from the host"
-        );
-    }
+    // NOTE (G_R7.2 deferred): an earlier version of this branch enforced
+    // a separate isolated runtime for drivers that returned
+    // `needs_isolated_runtime() = true`. Main's canary 135/135 fix removed
+    // that branch in `connect()` (the per-call `Runtime::new()` was killing
+    // pooled connections in postgres/mysql). The trait method still exists
+    // with default `false`, but `connect()` no longer consults it. When
+    // cdylib plugin loading is re-enabled (Plugin ABI v2), reintroduce the
+    // isolated-runtime branch + a `plugin_driver_runs_on_isolated_runtime`
+    // test pinning the behavior.
 
     #[test]
     fn test_plugin_load_failed_event_on_bad_directory() {

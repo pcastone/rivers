@@ -116,18 +116,23 @@ pub async fn load_and_wire_bundle(
     // ── Phase 2 (spec §2.6–2.7): compile every `.ts`/`.js` under every app's
     //    `libraries/` at load time, populate the process-global module cache,
     //    and install it atomically. Any compile failure aborts bundle load.
-    let module_cache = crate::process_pool::module_cache::populate_module_cache(&bundle)
-        .map_err(|e| ServerError::Config(format!("module cache population failed: {e}")))?;
-    tracing::info!(
-        modules = module_cache.len(),
-        "bundle: module cache populated"
-    );
-    crate::process_pool::module_cache::install_module_cache(module_cache);
-    // B3 / P1-8: arm production-strict cache enforcement now that the
-    // validated bundle's modules are installed. Subsequent V8 dispatches that
-    // miss the cache will hard-fail unless the operator opted into dev-mode
-    // via `RIVERS_DEV_MODULE_CACHE=permissive`.
-    crate::process_pool::module_cache::arm_production_strict();
+    //    Module cache lives behind the `static-engines` feature; dynamic
+    //    builds populate the engine's cache through the dylib load path.
+    #[cfg(feature = "static-engines")]
+    {
+        let module_cache = crate::process_pool::module_cache::populate_module_cache(&bundle)
+            .map_err(|e| ServerError::Config(format!("module cache population failed: {e}")))?;
+        tracing::info!(
+            modules = module_cache.len(),
+            "bundle: module cache populated"
+        );
+        crate::process_pool::module_cache::install_module_cache(module_cache);
+        // B3 / P1-8: arm production-strict cache enforcement now that the
+        // validated bundle's modules are installed. Subsequent V8 dispatches
+        // that miss the cache will hard-fail unless the operator opted into
+        // dev-mode via `RIVERS_DEV_MODULE_CACHE=permissive`.
+        crate::process_pool::module_cache::arm_production_strict();
+    }
 
     let mut registry = rivers_runtime::DataViewRegistry::new();
     let mut ds_params: HashMap<String, rivers_runtime::rivers_driver_sdk::ConnectionParams> = HashMap::new();
@@ -772,6 +777,16 @@ pub async fn load_and_wire_bundle(
         app_id_map.insert(entry_point, app.manifest.app_id.clone());
     }
     crate::engine_loader::set_app_id_map(app_id_map);
+
+    // Publish the shared TaskCapabilities snapshot (driver_factory,
+    // dataview_executor, storage, lockbox, keystore) so `task_enrichment::
+    // enrich` — used by `dispatch_init_handler` below — actually wires
+    // them into the init handler's TaskContext. Without this sync,
+    // `ctx.ddl()` fails with "DriverFactory not available" because the
+    // shared state is still the LazyLock default. The subsequent
+    // sync_from_app_context at the end of this function remains (harmless
+    // repeat; covers any late state changes in the remaining wiring).
+    crate::task_enrichment::sync_from_app_context(ctx);
 
     // ── Phase 1.5: Run application init handlers (DDL security spec) ──
     for app in &bundle.apps {

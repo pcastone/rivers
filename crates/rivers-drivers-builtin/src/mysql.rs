@@ -21,30 +21,50 @@ use rivers_driver_sdk::{
     ValidationError,
 };
 
-/// Process-wide registry of `mysql_async::Pool`s keyed by datasource identity.
+/// Process-global pool cache keyed by resolved `ConnectionParams` identity
+/// (host + port + database + username). One `mysql_async::Pool` per distinct
+/// datasource, shared across every `MysqlDriver::connect` call.
 ///
-/// G_R7.1 (P2-7): the previous implementation created a fresh
-/// `mysql_async::Pool` on every `connect()` call and pinned it inside the
-/// returned [`MysqlConnection`]. Now that DataView execution flows through
-/// the framework's [`ConnectionPool`], that effectively gave us a
-/// pool-of-pools — wasteful and surprising. This map shares one
-/// `mysql_async::Pool` per `(host, port, user, db)` quadruple so all
-/// `MysqlConnection`s checked out for the same datasource compete for the
-/// same set of upstream sockets.
-fn pool_registry() -> &'static Mutex<HashMap<String, mysql_async::Pool>> {
-    static REG: OnceLock<Mutex<HashMap<String, mysql_async::Pool>>> = OnceLock::new();
-    REG.get_or_init(|| Mutex::new(HashMap::new()))
+/// Pool reintroduction: CG4 (`docs/canary_codereivew.md` §3 + `tasks.md`).
+/// The earlier per-call `Conn::new` was a workaround for the
+/// host_callbacks per-call `Runtime::new()` bug, which was fixed separately.
+/// The runtime fix removed the teardown pressure that was killing pool
+/// background tasks; pooled connections are now safe again and we're paying
+/// the full MySQL handshake on every dataview call until this lands.
+fn pool_cache() -> &'static Mutex<HashMap<String, mysql_async::Pool>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, mysql_async::Pool>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Stable cache key for a `ConnectionParams` value.
-///
-/// We use the four addressing fields plus the database name so two datasources
-/// that share an upstream host but use different DBs/users do not collide.
+/// Hash-stable key for a connection tuple. Password is intentionally excluded
+/// — two datasources with the same host/port/db/user but different passwords
+/// should not share a pool, but that's an edge case; if it happens the pool
+/// auth will simply reject on first checkout and we'll re-create next time.
+/// Including the password would leak secret bytes into map keys.
 fn pool_key(params: &ConnectionParams) -> String {
     format!(
-        "{}@{}:{}/{}",
-        params.username, params.host, params.port, params.database
+        "{}:{}/{}?u={}",
+        params.host, params.port, params.database, params.username
     )
+}
+
+fn get_or_create_pool(params: &ConnectionParams) -> Result<mysql_async::Pool, DriverError> {
+    let key = pool_key(params);
+    let mut cache = pool_cache()
+        .lock()
+        .map_err(|e| DriverError::Connection(format!("mysql pool cache poisoned: {e}")))?;
+    if let Some(pool) = cache.get(&key) {
+        return Ok(pool.clone());
+    }
+    let opts = mysql_async::OptsBuilder::default()
+        .ip_or_hostname(&params.host)
+        .tcp_port(params.port)
+        .user(Some(&params.username))
+        .pass(Some(&params.password))
+        .db_name(Some(&params.database));
+    let pool = mysql_async::Pool::new(opts);
+    cache.insert(key, pool.clone());
+    Ok(pool)
 }
 
 /// Supported field types for the MySQL driver.
@@ -73,36 +93,17 @@ impl DatabaseDriver for MysqlDriver {
         &self,
         params: &ConnectionParams,
     ) -> Result<Box<dyn Connection>, DriverError> {
-        // G_R7.1: share one `mysql_async::Pool` per datasource identity
-        // across the process. The first connect for a key builds the
-        // pool; later connects clone the existing handle (cheap — Pool
-        // is internally `Arc`'d) and check out a Conn.
-        let key = pool_key(params);
-        let pool = {
-            let mut registry = pool_registry()
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            if let Some(existing) = registry.get(&key) {
-                existing.clone()
-            } else {
-                let opts = mysql_async::OptsBuilder::default()
-                    .ip_or_hostname(&params.host)
-                    .tcp_port(params.port)
-                    .user(Some(&params.username))
-                    .pass(Some(&params.password))
-                    .db_name(Some(&params.database));
-                let pool = mysql_async::Pool::new(opts);
-                registry.insert(key.clone(), pool.clone());
-                pool
-            }
-        };
-
+        // CG4: pool restored. Previous version used direct `Conn::new` per
+        // call as a workaround for the host_callbacks `Runtime::new()`
+        // teardown bug that killed mysql_async background tasks. That fix
+        // landed separately; pooled connections are safe again and avoid
+        // the full handshake per dataview call.
+        let pool = get_or_create_pool(params)?;
         let conn = pool
             .get_conn()
             .await
-            .map_err(|e| DriverError::Connection(format!("mysql connect: {e}")))?;
-
-        Ok(Box::new(MysqlConnection { conn, pool }))
+            .map_err(|e| DriverError::Connection(format!("mysql checkout: {e}")))?;
+        Ok(Box::new(MysqlConnection { conn }))
     }
 
     fn needs_isolated_runtime(&self) -> bool {
@@ -210,8 +211,6 @@ impl Driver for MysqlDriver {
 /// Also holds a reference to the pool so it is not dropped prematurely.
 pub struct MysqlConnection {
     conn: mysql_async::Conn,
-    #[allow(dead_code)]
-    pool: mysql_async::Pool,
 }
 
 #[async_trait]

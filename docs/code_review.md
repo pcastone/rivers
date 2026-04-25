@@ -1,428 +1,725 @@
-# Rivers Full Code Review
+# Rivers Code Review
 
 Date: 2026-04-24
 
-Scope requested: security, V8 JavaScript/TypeScript execution, database drivers, connection pooling, event bus, storage engine, datasource wiring for handlers, dataview, and view function wiring.
+Scope: Rust production code under `crates/`, excluding test-only code, build scripts, generated/vendor code, TOML/JSON config, and Markdown docs.
 
-This review was performed as a static code review of the current worktree. I did not make production code changes. The most important theme is that several reliability and security controls exist in isolation, but the hot request and startup paths often bypass them. That makes canary failures harder to interpret because the system can appear configured while the runtime is still doing direct connects, synchronous broker startup, in-memory storage fallback, or context-less handler dispatch.
+Grounding:
+- Confirmed from source: root `Cargo.toml` workspace membership, workspace-wide `rg` sweeps for panic paths, unsafe blocks, discarded errors, locks, casts, spawns, unbounded collections/channels, SQL construction, and timeout coverage.
+- Every finding below is grounded in source read around the cited lines.
+- Crates marked "No issues found" were covered by workspace sweeps and targeted reads where a hit appeared; they were not all read line-by-line.
 
-## Executive Summary
+Workspace crates reviewed: `rivers-core-config`, `rivers-core`, `rivers-drivers-builtin`, `rivers-storage-backends`, `rivers-lockbox-engine`, `rivers-keystore-engine`, `rivers-driver-sdk`, `rivers-runtime`, `riversd`, all `rivers-plugin-*` driver crates, `rivers-engine-sdk`, `rivers-engine-v8`, `rivers-engine-wasm`, `rivers-lockbox`, `rivers-keystore`, `riversctl`, `riverpackage`, and `cargo-deploy`.
 
-The highest-risk items are:
+## riversd
 
-1. Protected views can fail open if session management is missing or miswired.
-2. `ctx.ddl()` is injected in the V8 context without an obvious task-type guard in the host callback path.
-3. DataView execution bypasses the `ConnectionPool` entirely and connects directly on every call.
-4. Broker consumer creation is synchronous during bundle load, so one unreachable broker can prevent `riversd` from booting.
-5. Message consumer and some lifecycle dispatch paths lose app identity, which breaks storage namespaces and datasource wiring.
-6. Storage failures in `ctx.store` can silently fall back to task-local memory, creating false success and data loss.
-7. Module cache misses can fall through to disk and live TypeScript compilation, bypassing bundle validation.
-8. Several error paths expose absolute host filesystem paths.
+### riversd — T1-1: Protected views fail open when session management is absent
 
-## Severity Legend
+**File:** `crates/riversd/src/security_pipeline.rs:50`
+**Severity:** Tier 1
+**Category:** Security / logic error
 
-- P0: can block production boot, fail open security, or allow broad data/host impact.
-- P1: high likelihood production incident, data loss, contract violation, or serious operability issue.
-- P2: correctness, reliability, performance, or hardening issue that should be scheduled.
+**What:** A non-public view only validates sessions when `ctx.session_manager` exists; if it is absent, execution continues.
 
-## P0 Findings
+**Why it matters:** A production wiring/config error can turn protected routes into public routes.
 
-### P0-1: Protected views fail open when session management is absent
+**Code:**
+```rust
+if !view.public {
+    if let Some(session_manager) = &ctx.session_manager {
+        // validation...
+    }
+}
 
-Files:
-- `crates/riversd/src/security_pipeline.rs`
+Ok(SecurityDecision::Allow { context: SecurityContext { ... } })
+```
 
-`run_security_pipeline` rejects missing sessions only when a `session_manager` exists. If a view is not public but `ctx.session_manager` is `None`, the function does not fail closed and execution can continue.
+**Fix direction:** Fail closed when `!view.public && ctx.session_manager.is_none()`.
 
-Impact:
-- A production misconfiguration can turn protected routes into public routes.
-- This is especially dangerous because it presents as a wiring/config issue rather than an explicit auth failure.
+### riversd — T1-2: Static file root check is bypassable with symlinks
 
-Recommendation:
-- Treat `!view.public && session_manager.is_none()` as an immediate 500 or 401/403 fail-closed condition.
-- Add an integration test with a non-public view and no session manager.
-- Consider startup validation that refuses bundles containing protected views unless session management is configured.
+**File:** `crates/riversd/src/static_files.rs:50`
+**Severity:** Tier 1
+**Category:** Security / TOCTOU file handling
 
-### P0-2: `ctx.ddl()` appears injectable for all V8 handlers
+**What:** The traversal guard checks the syntactic joined path before `metadata()` and file read follow symlinks.
 
-Files:
-- `crates/riversd/src/process_pool/v8_engine/context.rs`
-- `crates/riversd/src/view_engine/pipeline.rs`
+**Why it matters:** A symlink inside the static root can expose files outside the bundle directory.
 
-`inject_ctx_methods` installs `ctx.ddl` generally, and `ctx_ddl_callback` uses the driver factory and datasource parameters directly. The reviewed callback does not appear to verify that the current task is an application init hook or that the requested DDL is allowed for the current phase.
+**Code:**
+```rust
+let root = Path::new(static_root);
+let resolved = root.join(&sanitized);
 
-Impact:
-- If this V8 context path is reachable by normal request handlers, application code can execute DDL outside the init lifecycle.
-- That violates the expected separation between handler execution and schema/bootstrap operations.
+if !resolved.starts_with(root) {
+    return Err(StatusCode::FORBIDDEN);
+}
 
-Recommendation:
-- Gate `ctx.ddl()` in the host callback itself, not only at higher layers.
-- Allow DDL only for an explicit `ApplicationInit` task kind with an app id and datasource id bound into the task context.
-- Add a negative integration test proving that REST handlers, message consumers, validation hooks, and security hooks cannot call `ctx.ddl()`.
+let metadata = tokio::fs::metadata(&resolved).await?;
+```
 
-### P0-3: DataView execution bypasses the connection pool
+**Fix direction:** Canonicalize both root and resolved path after symlink resolution, then enforce containment before serving.
 
-Files:
-- `crates/rivers-runtime/src/dataview_engine.rs`
-- `crates/riversd/src/pool.rs`
-- `crates/riversd/src/server/handlers.rs`
+### riversd — T1-3: `ctx.ddl()` is injected into every V8 task context
 
-`DataViewExecutor::execute` calls `self.factory.connect(driver_name, ds_params).await` directly for datasource queries. The `ConnectionPool` and `PoolManager` implementations are not used on the production DataView path. The verbose health handler also reports an empty pool snapshot.
+**File:** `crates/riversd/src/process_pool/v8_engine/context.rs:121`
+**Severity:** Tier 1
+**Category:** Security / capability gating
 
-Impact:
-- Pool limits, idle reuse, health checks, circuit breaking, and observability do not apply to the main query path.
-- MySQL and PostgreSQL can perform a full connection handshake for each dataview call.
-- Canary failures can look like driver instability when the actual issue is the missing pool integration.
+**What:** `ctx.ddl` is installed unconditionally for V8 handlers even though the comment says it is for init handlers only.
 
-Recommendation:
-- Make DataView execution acquire connections through a datasource-scoped pool.
-- Move pool ownership into the application runtime context so handlers, DataViews, health, and lifecycle hooks share the same path.
-- Add a canary or integration test that verifies repeated DataView calls reuse pool state and obey max connection limits.
+**Why it matters:** Normal request, security, validation, or event handlers can reach DDL execution if they have a datasource context.
 
-### P0-4: Broker consumer startup blocks bundle load
+**Code:**
+```rust
+// ctx.ddl(datasource, statement) — init handlers only
+let ddl_tmpl = v8::FunctionTemplate::new(scope, ctx_ddl_callback);
+let ddl_val = ddl_tmpl.get_function(scope).unwrap();
+ctx_obj.set(scope, v8_str_safe(scope, "ddl").into(), ddl_val.into());
+```
 
-Files:
-- `crates/riversd/src/bundle_loader/wire.rs`
-- `crates/rivers-plugin-kafka/src/lib.rs`
+**Fix direction:** Bind a task kind/capability into `TaskContext` and inject or execute DDL only for authorized application-init tasks.
 
-`wire_streaming_and_events` awaits `broker_driver.create_consumer(...).await` inline. The Kafka implementation performs async client and partition setup during `create_consumer`. If a broker route is flaky or unavailable, bundle load never completes and the HTTP listener never binds.
+### riversd — T1-4: V8-local `ctx.ddl()` bypasses the DDL whitelist path
 
-Impact:
-- One broker outage can prevent the whole node from starting.
-- This matches the current canary blocker where `rskafka` reports `No route to host` while basic TCP probes can still succeed.
+**File:** `crates/riversd/src/process_pool/v8_engine/context.rs:543`
+**Severity:** Tier 1
+**Category:** Security / datasource wiring
 
-Recommendation:
-- Spawn the consumer bridge supervisor immediately during wiring.
-- Move `create_consumer` into that supervisor loop with retry/backoff and health reporting.
-- Surface broker readiness separately from process readiness so `riversd` can boot while broker consumers recover.
+**What:** The V8-local DDL callback resolves datasource params and calls `conn.ddl_execute()` directly instead of using the whitelist-enforced host/DataView path.
 
-## P1 Findings
+**Why it matters:** DDL authorization can be bypassed from the in-process V8 execution path.
 
-### P1-1: ConnectionPool accounting and lifetime logic are unsafe if enabled
+**Code:**
+```rust
+let mut conn = factory.connect(&driver_name, &ds_params).await
+    .map_err(|e| format!("DDL connect failed: {e}"))?;
+let query = rivers_runtime::rivers_driver_sdk::Query::new("ddl", &statement);
+conn.ddl_execute(&query).await
+    .map_err(|e| format!("DDL execute failed: {e}"))?;
+```
 
-Files:
-- `crates/riversd/src/pool.rs`
+**Fix direction:** Route all DDL through one host-enforced path that checks task phase, app identity, datasource identity, and whitelist before execution.
 
-`PoolGuard::drop` returns a `PooledConnection` with a fresh `created_at`, so `max_lifetime` is effectively reset on every checkout. `acquire` counts active and idle connections but not the `idle_return` queue, which can undercount total connections and allow over-creation under load. `PoolManager` stores pools in a `Vec`, allowing duplicate datasource ids and O(n) lookup.
+### riversd — T1-5: Persistent `ctx.store` failures are masked with task-local memory
 
-Impact:
-- Long-lived connections may never expire.
-- Burst traffic can exceed configured pool limits.
-- Pool behavior will be difficult to reason about once DataView starts using it.
+**File:** `crates/riversd/src/process_pool/v8_engine/context.rs:429`
+**Severity:** Tier 1
+**Category:** Error swallowing / data loss
 
-Recommendation:
-- Preserve original connection creation time through guard return.
-- Include the return queue in capacity accounting or use a single synchronized pool state.
-- Replace `Vec<Arc<ConnectionPool>>` with a `HashMap<String, Arc<ConnectionPool>>` keyed by datasource id.
+**What:** When a configured storage backend fails, `ctx.store.set` warns and writes to `TASK_STORE` instead.
 
-### P1-2: Message consumer and lifecycle dispatch lose app identity
+**Why it matters:** Handlers can report success while session/cache/message state is only stored in ephemeral per-task memory.
 
-Files:
-- `crates/riversd/src/message_consumer.rs`
-- `crates/riversd/src/security_pipeline.rs`
-- `crates/riversd/src/view_engine/validation.rs`
-- `crates/riversd/src/process_pool/v8_engine/task_locals.rs`
+**Code:**
+```rust
+if let Err(e) = rt.block_on(engine.set(&namespace, &key, bytes, ttl_ms)) {
+    tracing::warn!(error = %e, "storage set failed; falling back to task-local store");
+    fallback = true;
+}
+if fallback {
+    TASK_STORE.with(|s| {
+        s.borrow_mut().insert(key, value);
+    });
+}
+```
 
-Message consumer dispatch enriches task context with an empty app id. Some security and validation lifecycle hooks do the same. `TaskLocals::set` falls back to `"app:default"` when the app id is empty.
+**Fix direction:** If a storage engine is configured, surface backend failures to JavaScript instead of falling back.
 
-Impact:
-- `ctx.store`, lockbox, datasource, logs, and event wiring can land in the wrong namespace.
-- Consumer writes may not be visible to HTTP handlers for the intended app.
-- This explains the observed Kafka consumer to store verification gap.
+### riversd — T1-6: Synchronous V8 host bridges can block forever
 
-Recommendation:
-- Centralize handler dispatch through a helper that always binds app id, view id, handler id, datasource map, storage engine, lockbox, and driver factory consistently.
-- Add integration tests for REST, ApplicationInit, security hooks, validation hooks, and MessageConsumer that assert `ctx.store` and datasource access use the app namespace.
+**File:** `crates/riversd/src/process_pool/v8_engine/context.rs:547`
+**Severity:** Tier 1
+**Category:** Missing timeouts / resource leak
 
-### P1-3: Kafka producer violates the OutboundMessage destination contract
+**What:** `ctx.ddl()` spawns async driver work, then blocks the V8 worker on `rx.recv()` with no timeout or cancellation.
 
-Files:
-- `crates/rivers-runtime/src/dataview_engine.rs`
-- `crates/rivers-plugin-kafka/src/lib.rs`
+**Why it matters:** A hung datasource connect or DDL call can pin a V8 worker indefinitely.
 
-`execute_broker_produce` builds an `OutboundMessage` with `destination` from the dataview statement, but Kafka `create_producer` resolves and binds the topic at producer creation time. `publish` then ignores `message.destination`.
+**Code:**
+```rust
+rt.spawn(async move {
+    let result = async { /* connect + ddl */ }.await;
+    let _ = tx.send(result);
+});
 
-Impact:
-- The runtime contract says the message destination controls routing, but Kafka routing is fixed at producer creation.
-- Producer creation performs metadata work in the request path.
-- Dynamic per-message destinations cannot work correctly.
+match rx.recv() {
+    Ok(Ok(())) => { /* success */ }
+```
 
-Recommendation:
-- Make producer initialization lazy and nonblocking, but route per `OutboundMessage.destination`.
-- Cache partition clients by topic inside the producer with bounded TTL/backoff.
-- Add tests proving two messages from one producer can publish to two destinations.
+**Fix direction:** Use a bounded timeout and propagate cancellation/failure back to the handler.
 
-### P1-4: EventBus wildcard subscribers can violate priority ordering
+### riversd — T2-1: Handler response status truncates from `u64` to `u16`
 
-Files:
-- `crates/rivers-core/src/eventbus.rs`
+**File:** `crates/riversd/src/view_engine/validation.rs:270`
+**Severity:** Tier 2
+**Category:** Integer truncation
 
-Exact subscribers are sorted by priority, but wildcard subscribers are appended afterward. If a wildcard subscriber has `Expect` or `Handle` priority, it can run after exact `Emit` or `Observe` handlers.
+**What:** JavaScript handler status values are cast with `as u16` without range validation.
 
-Impact:
-- Event validation and handling order can be wrong.
-- The bug will be intermittent because it depends on exact versus wildcard subscription mix.
+**Why it matters:** A handler returning `65536`, `70000`, or another invalid status can wrap into a different response status.
 
-Recommendation:
-- Collect exact and wildcard subscribers into one list, then sort globally by priority before dispatch.
-- If wildcard subscribers must be observe-only, enforce that at subscribe time.
+**Code:**
+```rust
+let status = value.get("status")?.as_u64()? as u16;
+```
 
-### P1-5: `ctx.store` masks persistent storage failures with in-memory fallback
+**Fix direction:** Parse the status through an HTTP status type or reject values outside `100..=599`.
 
-Files:
-- `crates/riversd/src/process_pool/v8_engine/context.rs`
+### riversd — T2-2: Connection limits race in WebSocket and SSE registries
 
-The V8 store callbacks attempt persistent storage, but on errors or missing runtime handles they warn and fall back to `TASK_STORE`. This makes `ctx.store.set` appear successful even when the configured storage backend is unavailable.
+**File:** `crates/riversd/src/websocket.rs:104`
+**Severity:** Tier 2
+**Category:** Race condition / unbounded growth
 
-Impact:
-- Data can be lost silently.
-- Tests may pass against ephemeral task-local memory while production persistence is broken.
-- Message consumer to HTTP handler persistence becomes unreliable.
+**What:** The max-connection check happens before insertion and increment, so concurrent registrations can all pass the limit.
 
-Recommendation:
-- If a storage engine is configured, storage operation failures should throw a JS exception.
-- Reserve task-local fallback only for explicit no-storage development mode.
-- Add tests that force backend failure and assert `ctx.store.set/get/delete` fail visibly.
+**Why it matters:** Connection limits can be exceeded under a burst, weakening DoS protection.
 
-### P1-6: Static file serving can follow symlinks outside the root
+**Code:**
+```rust
+if self.connection_count.load(Ordering::Relaxed) >= max {
+    return Err(WebSocketError::ConnectionLimitExceeded);
+}
+let mut connections = self.connections.write().await;
+connections.insert(connection_id.clone(), connection);
+self.connection_count.fetch_add(1, Ordering::Relaxed);
+```
 
-Files:
-- `crates/riversd/src/static_files.rs`
+**Fix direction:** Reserve capacity atomically or perform the check and insertion under one synchronized state update.
 
-The path traversal guard checks that the syntactic resolved path starts with the root. It does not canonicalize the final path after symlink resolution.
+### riversd — T2-3: Pool lifetime resets on every return
 
-Impact:
-- A symlink inside the static root can expose files outside the intended directory.
+**File:** `crates/riversd/src/pool.rs:125`
+**Severity:** Tier 2
+**Category:** Connection pool / resource lifetime
 
-Recommendation:
-- Canonicalize both the root and resolved file path before serving.
-- Reject symlinks if static assets are expected to be immutable bundle content.
-- Add tests for `../` traversal and symlink escape.
+**What:** Returning a connection creates a new `PooledConnection` with `created_at: Instant::now()`.
 
-### P1-7: SWC TypeScript compilation has panic containment but no timeout
+**Why it matters:** `max_lifetime` is effectively extended on every checkout, so old connections may never age out.
 
-Files:
-- `crates/riversd/src/process_pool/v8_config.rs`
-- `crates/riversd/src/process_pool/module_cache.rs`
+**Code:**
+```rust
+self.pool.return_connection(PooledConnection {
+    conn,
+    created_at: Instant::now(),
+    last_used: Instant::now(),
+    use_count: self.use_count,
+});
+```
 
-TypeScript compilation is wrapped in `catch_unwind`, but parse, transform, and codegen are still synchronous and unbounded. Bundle loading compiles modules during startup.
+**Fix direction:** Preserve the original creation timestamp in the guard and return it unchanged.
 
-Impact:
-- Pathological or malicious TypeScript can hang the deploy pipeline or node startup.
-- Panic safety does not protect against infinite or extremely expensive compiler work.
+### riversd — T2-4: Pool capacity accounting ignores the return queue
 
-Recommendation:
-- Run SWC compilation in a supervised worker with a hard timeout.
-- Treat timeout as a bundle validation failure with a sanitized error.
-- Add property/fuzz corpus coverage for pathological TypeScript inputs.
+**File:** `crates/riversd/src/pool.rs:517`
+**Severity:** Tier 2
+**Category:** Connection pool / race condition
 
-### P1-8: Module cache misses fall back to disk and live compilation
+**What:** `acquire()` counts active and idle connections but not connections waiting in `idle_return`.
 
-Files:
-- `crates/riversd/src/process_pool/v8_engine/execution.rs`
-- `crates/riversd/src/process_pool/module_cache.rs`
+**Why it matters:** Returned connections can be invisible during a burst, allowing over-creation beyond `max_connections`.
 
-The module resolver first checks the compiled cache, but a miss can read from disk and compile live. This bypasses the startup validation boundary.
+**Code:**
+```rust
+let total = self.active_count.load(Ordering::SeqCst) + self.idle.lock().await.len();
+if total < self.config.max_connections {
+    return self.create_connection().await;
+}
+```
 
-Impact:
-- A module can execute despite not being part of the validated module cache.
-- Source map, cycle detection, and policy checks can diverge between startup and runtime.
+**Fix direction:** Include the return queue in accounting or collapse pool state into one synchronized structure.
 
-Recommendation:
-- In production mode, make module cache miss a hard error.
-- Keep disk fallback only behind an explicit development flag.
-- Add a test where an import is missing from the cache and assert runtime execution fails.
+### riversd — T2-5: Pool health checks hold the idle mutex across network I/O
 
-### P1-9: Errors and stack traces expose absolute host paths
+**File:** `crates/riversd/src/pool.rs:668`
+**Severity:** Tier 2
+**Category:** Async lock held across `.await`
 
-Files:
-- `crates/riversd/src/process_pool/v8_engine/execution.rs`
-- `crates/riversd/src/process_pool/module_cache.rs`
+**What:** `health_check()` holds the idle connection mutex while awaiting each `ping()`.
 
-V8 module origins and module resolver errors use absolute filesystem paths. Some compile errors and stack trace formatting can expose raw script names.
+**Why it matters:** A slow or hung ping blocks other tasks from acquiring or returning idle connections.
 
-Impact:
-- Production errors can leak host paths, workspace layout, usernames, and deployment structure.
+**Code:**
+```rust
+let mut idle = self.idle.lock().await;
+while let Some(mut pooled) = idle.pop_front() {
+    match pooled.conn.ping().await {
+        Ok(_) => { healthy.push_back(pooled); }
+```
 
-Recommendation:
-- Introduce a single app-relative path redaction helper.
-- Use app/module logical ids for V8 script origins where possible.
-- Assert in tests that public handler errors never contain the workspace root.
+**Fix direction:** Drain the idle queue, drop the lock before pings, then reacquire it to return healthy connections.
 
-### P1-10: DataView and health checks lack bounded runtime behavior
+### riversd — T2-6: Outbound HTTP callbacks have no timeout
 
-Files:
-- `crates/rivers-runtime/src/dataview_engine.rs`
-- `crates/riversd/src/server/handlers.rs`
+**File:** `crates/riversd/src/process_pool/v8_engine/http.rs:130`
+**Severity:** Tier 2
+**Category:** Missing timeouts
 
-`DataViewRequest` carries timeout configuration, but the reviewed execution path does not enforce a query timeout around connect and execute. `/health/verbose` probes each datasource by opening fresh connections sequentially with a timeout per datasource.
+**What:** `Rivers.http.*` creates a default `reqwest::Client` and awaits `send()`/`text()` without a timeout.
 
-Impact:
-- Slow datasources can tie up request workers.
-- Verbose health can become expensive or slow exactly when the system is degraded.
+**Why it matters:** A slow remote server can hold a V8 worker and request path indefinitely.
 
-Recommendation:
-- Enforce datasource timeouts at the executor level with `tokio::time::timeout`.
-- Use pool health state for health endpoints.
-- If active probing is required, make it bounded, parallel, and cached.
+**Code:**
+```rust
+rt.block_on(async {
+    let client = reqwest::Client::new();
+    let mut builder = match method { /* ... */ };
+    let resp = builder.send().await.map_err(|e| e.to_string())?;
+    let body_text = resp.text().await.map_err(|e| e.to_string())?;
+```
 
-### P1-11: PostgreSQL connection string construction is fragile
+**Fix direction:** Use a configured client with connect/read/request timeouts and bounded response size.
 
-Files:
-- `crates/rivers-drivers-builtin/src/postgres.rs`
+### riversd — T2-7: Dynamic engine host HTTP callback also lacks a timeout
 
-The PostgreSQL driver builds a connection string with direct string interpolation of host, user, password, and dbname.
+**File:** `crates/riversd/src/engine_loader/host_callbacks.rs:456`
+**Severity:** Tier 2
+**Category:** Missing timeouts
 
-Impact:
-- Spaces or special characters in credentials can break connections.
-- Depending on parsing rules, crafted values may alter connection options.
+**What:** The cdylib host HTTP callback awaits `req.send()` and `resp.text()` on a default client with no request timeout.
 
-Recommendation:
-- Use `tokio_postgres::Config` builder APIs instead of interpolating a connection string.
-- Add tests for passwords and database names containing spaces, quotes, and option-like substrings.
+**Why it matters:** A dynamic engine HTTP call can block the engine callback bridge indefinitely.
 
-### P1-12: Handler responses should validate status and headers from JS
+**Code:**
+```rust
+let resp = req.send().await.map_err(|e| e.to_string())?;
+let status = resp.status().as_u16();
+let resp_body = resp.text().await.map_err(|e| e.to_string())?;
+```
 
-Files:
-- `crates/riversd/src/view_engine/validation.rs`
+**Fix direction:** Build the host HTTP client with explicit timeout and body-size limits.
 
-`parse_handler_view_result` accepts a JS-provided numeric status and response headers. The reviewed code should explicitly reject invalid status codes and unsafe header names/values.
+### riversd — T2-8: Transaction host callbacks are success-returning stubs
 
-Impact:
-- Invalid status values can cause downstream response construction failures.
-- Header injection or policy override risks depend on downstream validation.
+**File:** `crates/riversd/src/engine_loader/host_callbacks.rs:919`
+**Severity:** Tier 2
+**Category:** Datasource wiring / error swallowing
 
-Recommendation:
-- Accept only status codes in `100..=599`.
-- Validate header names and values before response construction.
-- Consider blocking handler-supplied security headers unless explicitly allowed by policy.
+**What:** `db_begin`, `db_commit`, `db_rollback`, and `db_batch` return `{"ok": true}` without executing the operation.
 
-## P2 Findings
+**Why it matters:** Dynamic engine handlers can believe a transaction or batch operation succeeded when no transaction exists.
 
-### P2-1: Redis cluster key listing uses `KEYS`
+**Code:**
+```rust
+// TODO: Wire to TransactionMap in Task 8
+tracing::debug!(datasource = %datasource, "Rivers.db.begin (stub)");
+let result = serde_json::json!({"ok": true, "datasource": datasource});
+write_output(out_ptr, out_len, &result);
+0
+```
 
-Files:
-- `crates/rivers-storage-backends/src/redis_backend.rs`
-- `crates/rivers-core/src/storage.rs`
+**Fix direction:** Return an explicit unsupported error until the TransactionMap and batch execution are actually wired.
 
-Single-node Redis listing uses `SCAN`, but the cluster path uses `KEYS`. Sentinel claiming and cache/session operations may list broad namespaces.
+### riversd — T2-9: Engine log callback trusts UTF-8 with `from_utf8_unchecked`
 
-Recommendation:
-- Replace cluster `KEYS` with node-local `SCAN` across primaries.
-- Avoid broad key listing for hot paths where an index set or explicit ownership record can be used.
+**File:** `crates/riversd/src/engine_loader/host_callbacks.rs:496`
+**Severity:** Tier 2
+**Category:** Unsafe / FFI boundary
 
-### P2-2: EventBus subscriptions have no removal/backpressure story
+**What:** The host log callback converts engine-provided bytes to `&str` with `from_utf8_unchecked`.
 
-Files:
-- `crates/rivers-core/src/eventbus.rs`
+**Why it matters:** A buggy or hostile dynamic engine can pass invalid UTF-8 and trigger undefined behavior in the host process.
 
-Subscriptions are appended but there is no reviewed unsubscribe path. Broadcast forwarding creates additional subscribers each time.
+**Code:**
+```rust
+let msg = unsafe {
+    std::str::from_utf8_unchecked(std::slice::from_raw_parts(msg_ptr, msg_len))
+};
+```
 
-Recommendation:
-- Return subscription handles that unregister on drop.
-- Add metrics for subscriber counts and dispatch duration.
-- Bound broadcast subscribers or tie them to request/session lifetime.
+**Fix direction:** Use `std::str::from_utf8` and log/return on invalid input.
 
-### P2-3: Reserved storage prefixes are inconsistent
+### riversd — T3-1: Manual JSON log construction allows malformed app log lines
 
-Files:
-- `crates/rivers-core-config/src/storage.rs`
-- `crates/riversd/src/process_pool/v8_engine/context.rs`
+**File:** `crates/riversd/src/process_pool/v8_engine/rivers_global.rs:41`
+**Severity:** Tier 3
+**Category:** Serialization bug / log integrity
 
-Core storage reserves `poll:`, while the V8 context reserved list omits `poll:` and adds `raft:`.
+**What:** JavaScript-controlled log messages are interpolated into a JSON string without JSON escaping.
 
-Recommendation:
-- Define reserved prefixes in one shared module.
-- Add tests that every public storage entry point enforces the same reserved set.
+**Why it matters:** Quotes and control characters can corrupt per-app logs or spoof fields in downstream log processing.
 
-### P2-4: View lifecycle observer hooks are awaited despite fire-and-forget comments
+**Code:**
+```rust
+let line = format!(
+    r#"{{"timestamp":"{ts}","level":"{}","app":"{app_name}","trace_id":"{trace_id}","message":"{}"}}"#,
+    level,
+    msg.replace('\n', "\\n")
+);
+```
 
-Files:
-- `crates/riversd/src/view_engine/pipeline.rs`
+**Fix direction:** Serialize a structured log object with `serde_json` instead of hand-building JSON.
 
-Pre-process and post-process observers are described as fire-and-forget, but the dispatch calls are awaited.
+## rivers-runtime
 
-Recommendation:
-- Either make the hooks truly asynchronous background work with bounded queues, or update the contract and apply short timeouts so observers cannot dominate request latency.
+### rivers-runtime — T1-1: DataView execution bypasses connection pools and circuit state
 
-### P2-5: JavaScript module detection is string-based
+**File:** `crates/rivers-runtime/src/dataview_engine.rs:720`
+**Severity:** Tier 1
+**Category:** Connection pool / resource exhaustion
 
-Files:
-- `crates/riversd/src/process_pool/v8_engine/execution.rs`
+**What:** The DataView hot path connects directly through `DriverFactory` for each execution.
 
-Module syntax detection uses string containment checks like `export ` and `import `. Comments or strings can trigger the module path incorrectly.
+**Why it matters:** Pool limits, reuse, health checks, and circuit-breaker-style connection controls do not protect the primary query path.
 
-Recommendation:
-- Treat files as modules based on bundle metadata or extension.
-- If content detection remains, use parser-level detection.
+**Code:**
+```rust
+let mut conn = self.factory.connect(driver_name, ds_params).await
+    .map_err(|e| DataViewError::ExecutionFailed { ... })?;
 
-### P2-6: Promise resolution loop does not model real async work
+let prepared = conn.prepare(&view.query).await?;
+let result = conn.execute(&prepared).await?;
+```
 
-Files:
-- `crates/riversd/src/process_pool/v8_engine/execution.rs`
+**Fix direction:** Execute DataViews through datasource-scoped pooled connections with shared health/circuit accounting.
 
-Promise resolution runs microtask checkpoints for a fixed number of ticks and returns a timeout with `0` for pending promises. This does not reflect configured task timeouts or timer/I/O progress.
+### rivers-runtime — T2-1: DataView request timeout is accepted but unused
 
-Recommendation:
-- Tie promise resolution to the task timeout budget.
-- Make pending promise errors include the configured timeout and handler identity.
-- Add tests for async handlers using timers and host callbacks.
+**File:** `crates/rivers-runtime/src/dataview_engine.rs:149`
+**Severity:** Tier 2
+**Category:** Missing timeouts
 
-### P2-7: MySQL and DriverFactory runtime strategy need separation
+**What:** `DataViewRequest.timeout_ms` is validated by the builder but not applied around connect, prepare, or execute.
 
-Files:
-- `crates/rivers-drivers-builtin/src/mysql.rs`
-- `crates/rivers-core/src/driver_factory.rs`
+**Why it matters:** A caller can configure a timeout and still hang on driver I/O.
 
-The MySQL driver creates a `mysql_async::Pool` per connect and keeps it behind one returned connection. `DriverFactory::connect` runs driver connects inside `spawn_blocking` and creates a fresh Tokio runtime.
+**Code:**
+```rust
+pub struct DataViewRequest {
+    pub timeout_ms: Option<u64>,
+}
 
-Recommendation:
-- Once DataView uses real pooling, make MySQL pool ownership datasource-scoped, not per connection.
-- Use the extra runtime isolation only for plugin drivers that require it; keep built-in async drivers on the active runtime where safe.
+let mut conn = self.factory.connect(driver_name, ds_params).await?;
+let prepared = conn.prepare(&view.query).await?;
+let result = conn.execute(&prepared).await?;
+```
 
-### P2-8: SQLite path behavior needs deployment policy
+**Fix direction:** Wrap the full connect/prepare/execute sequence in `tokio::time::timeout`.
 
-Files:
-- `crates/rivers-drivers-builtin/src/sqlite.rs`
+### rivers-runtime — T2-2: Result schema validation silently disables itself on schema errors
 
-SQLite creates parent directories for configured paths and logs the database path.
+**File:** `crates/rivers-runtime/src/dataview_engine.rs:1059`
+**Severity:** Tier 2
+**Category:** Error swallowing / serialization validation
 
-Recommendation:
-- Ensure SQLite datasource paths are restricted to an approved data directory.
-- Redact absolute paths in production logs.
-- Avoid silently creating directories for bundle-provided datasource paths unless an operator explicitly enabled it.
+**What:** If the configured schema file cannot be read or parsed, `validate_query_result()` returns `Ok(())`.
 
-## Recommended Remediation Sequence
+**Why it matters:** A broken or missing schema silently disables result validation for untrusted datasource output.
 
-1. Unblock boot: make broker consumer startup nonblocking and move `create_consumer` into the bridge retry loop.
-2. Fail closed: fix protected-view behavior when session management is absent.
-3. Lock down V8 host capabilities: guard `ctx.ddl`, storage fallback, module cache miss behavior, and absolute path leakage.
-4. Restore datasource identity: centralize task enrichment so every handler path carries app id, datasource map, lockbox, storage engine, and driver factory.
-5. Integrate DataView with datasource-scoped connection pools and enforce query timeouts.
-6. Fix pool internals before broad adoption.
-7. Correct Kafka producer destination semantics and lazy metadata behavior.
-8. Tighten EventBus priority ordering and subscription lifecycle.
-9. Harden storage backends and static file path handling.
-10. Expand integration tests around canary-critical paths: REST, DataView, ApplicationInit, MessageConsumer, security hooks, validation hooks, storage persistence, and broker degraded startup.
+**Code:**
+```rust
+let schema_content = match std::fs::read_to_string(schema_path) {
+    Ok(content) => content,
+    Err(_) => return Ok(()),
+};
+let schema: serde_json::Value = match serde_json::from_str(&schema_content) {
+    Ok(schema) => schema,
+    Err(_) => return Ok(()),
+};
+```
 
-## Test Recommendations
+**Fix direction:** Treat configured-but-unreadable or invalid schemas as validation errors.
 
-Add focused tests for:
+## rivers-core
 
-- Non-public view with missing session manager fails closed.
-- REST handler cannot call `ctx.ddl`.
-- ApplicationInit can call allowed DDL and cannot call disallowed DDL.
-- MessageConsumer `ctx.store.set` is readable from the same app's HTTP handler.
-- DataView calls reuse datasource pool state and obey max connections.
-- DataView connect and query timeout paths.
-- Broker consumer startup succeeds even when Kafka is unreachable.
-- Kafka producer routes by `OutboundMessage.destination`.
-- Wildcard EventBus `Expect` handler runs before exact `Emit` or `Observe`.
-- Static file symlink escape is rejected.
-- Module cache miss fails in production mode.
-- Public errors redact absolute workspace paths.
-- Redis cluster list uses scan-style iteration rather than `KEYS`.
+### rivers-core — T1-1: Plugin ABI function panics are not contained
 
-## Closing Assessment
+**File:** `crates/rivers-core/src/driver_factory.rs:324`
+**Severity:** Tier 1
+**Category:** Plugin safety / unsafe FFI
 
-The codebase has many of the right pieces: explicit storage traits, datasource drivers, pool primitives, event priorities, V8 task locals, and security pipeline hooks. The current risk is mostly at the wiring boundaries. The runtime needs one authoritative path for app identity, datasource access, storage, and host capabilities. Once that exists, the canary failures should become much easier to separate into real driver issues versus runtime wiring regressions.
+**What:** `_rivers_abi_version` is called directly from an unsafe libloading symbol; only registration is wrapped in `catch_unwind`.
+
+**Why it matters:** A buggy plugin that panics in the ABI-version function can unwind across FFI or abort the host process.
+
+**Code:**
+```rust
+let abi_version = unsafe {
+    let abi_fn: Symbol<unsafe extern "C" fn() -> u32> =
+        lib.get(b"_rivers_abi_version")?;
+    abi_fn()
+};
+```
+
+**Fix direction:** Treat every plugin FFI call as hostile: wrap with unwind containment where possible and reject on panic.
+
+### rivers-core — T2-1: EventBus observe handlers spawn without backpressure
+
+**File:** `crates/rivers-core/src/eventbus.rs:295`
+**Severity:** Tier 2
+**Category:** Unbounded growth / async task leak
+
+**What:** Each `Observe` handler invocation gets a detached `tokio::spawn` with no concurrency limit or shutdown tracking.
+
+**Why it matters:** An event storm can create unbounded background tasks and memory pressure.
+
+**Code:**
+```rust
+HandlerPriority::Observe => {
+    let handler = sub.handler.clone();
+    let event_clone = event.clone();
+    tokio::spawn(async move {
+        if let Err(e) = handler.handle(&event_clone).await { ... }
+    });
+}
+```
+
+**Fix direction:** Run observers through a bounded worker queue or track and cancel them during shutdown.
+
+### rivers-core — T3-1: Wildcard EventBus subscribers can violate priority ordering
+
+**File:** `crates/rivers-core/src/eventbus.rs:253`
+**Severity:** Tier 3
+**Category:** Logic error / event ordering
+
+**What:** Exact subscribers are sorted by priority, then wildcard subscribers are appended afterward.
+
+**Why it matters:** A wildcard `Expect` or `Handle` subscriber can run after exact lower-priority handlers.
+
+**Code:**
+```rust
+if let Some(subs) = subs.get(&event.event_type) {
+    subscribers.extend(subs.iter().cloned());
+    subscribers.sort_by_key(|s| s.priority);
+}
+if let Some(wildcards) = subs.get("*") {
+    subscribers.extend(wildcards.iter().cloned());
+}
+```
+
+**Fix direction:** Merge exact and wildcard subscribers first, then sort the combined list.
+
+## rivers-drivers-builtin
+
+### rivers-drivers-builtin — T1-1: MySQL global pool cache ignores password
+
+**File:** `crates/rivers-drivers-builtin/src/mysql.rs:39`
+**Severity:** Tier 1
+**Category:** Secret handling / connection pool isolation
+
+**What:** MySQL pools are cached by host, port, database, and username, but not password.
+
+**Why it matters:** Two datasources with the same user tuple but different passwords can reuse the first pool and authenticate as the wrong credential context.
+
+**Code:**
+```rust
+// Pool cache key intentionally excludes password from logs/errors.
+let pool_key = format!(
+    "{}:{}/{}?u={}",
+    params.host, params.port, params.database, params.username
+);
+```
+
+**Fix direction:** Include a non-logged credential fingerprint or datasource identity in the pool key.
+
+### rivers-drivers-builtin — T2-1: MySQL unsigned integers can wrap into negative values
+
+**File:** `crates/rivers-drivers-builtin/src/mysql.rs:499`
+**Severity:** Tier 2
+**Category:** Integer truncation
+
+**What:** `mysql_async::Value::UInt` is converted with `as i64`.
+
+**Why it matters:** Values above `i64::MAX` silently wrap and corrupt query results.
+
+**Code:**
+```rust
+Value::UInt(u) => QueryValue::Integer(*u as i64),
+```
+
+**Fix direction:** Represent oversized unsigned values as decimal strings or a JSON number type that preserves range.
+
+### rivers-drivers-builtin — T2-2: PostgreSQL connection strings are built by interpolation
+
+**File:** `crates/rivers-drivers-builtin/src/postgres.rs:44`
+**Severity:** Tier 2
+**Category:** Secret handling / connection parsing
+
+**What:** User, password, database, and host are interpolated into a libpq-style connection string without escaping.
+
+**Why it matters:** Spaces or option-like content in credentials can break parsing or alter connection parameters.
+
+**Code:**
+```rust
+let conn_string = format!(
+    "host={} port={} user={} password={} dbname={}",
+    params.host, params.port, params.username, params.password, params.database
+);
+```
+
+**Fix direction:** Build PostgreSQL connection configuration with structured parameters instead of a formatted string.
+
+## rivers-storage-backends
+
+### rivers-storage-backends — T2-1: Redis cluster `list_keys` uses blocking `KEYS`
+
+**File:** `crates/rivers-storage-backends/src/redis_backend.rs:225`
+**Severity:** Tier 2
+**Category:** Unbounded growth / DoS
+
+**What:** Cluster mode falls back to Redis `KEYS` for namespace listing.
+
+**Why it matters:** `KEYS` can block Redis under a large keyspace and make storage operations a DoS vector.
+
+**Code:**
+```rust
+let vals: Vec<String> = conn
+    .keys(&pattern)
+    .await
+    .map_err(|e| StorageError::Backend(format!("redis cluster keys: {e}")))?;
+```
+
+**Fix direction:** Implement bounded per-node scan or avoid key listing for cluster-backed storage.
+
+### rivers-storage-backends — T2-2: SQLite TTL arithmetic can overflow
+
+**File:** `crates/rivers-storage-backends/src/sqlite_backend.rs:119`
+**Severity:** Tier 2
+**Category:** Integer overflow
+
+**What:** Expiration timestamps are calculated as `now_ms() + ttl` without checked arithmetic.
+
+**Why it matters:** A very large TTL can wrap the expiry time and make a value expire immediately or persist incorrectly.
+
+**Code:**
+```rust
+let expires_at = ttl_ms.map(|ttl| now_ms() + ttl);
+```
+
+**Fix direction:** Use checked or saturating addition and reject TTLs above a configured maximum.
+
+## rivers-engine-v8
+
+### rivers-engine-v8 — T2-1: Host callback table is copied with undocumented `ptr::read`
+
+**File:** `crates/rivers-engine-v8/src/lib.rs:44`
+**Severity:** Tier 2
+**Category:** Unsafe / FFI boundary
+
+**What:** `_rivers_engine_init_with_callbacks` copies `HostCallbacks` from a raw pointer with `std::ptr::read`, but the safety invariant is not documented and `HostCallbacks` is not marked `Copy`.
+
+**Why it matters:** The struct currently contains function pointers, but future non-`Copy` fields would make this unsound at the ABI boundary.
+
+**Code:**
+```rust
+pub extern "C" fn _rivers_engine_init_with_callbacks(callbacks: *const HostCallbacks) -> i32 {
+    if !callbacks.is_null() {
+        let cb = unsafe { std::ptr::read(callbacks) };
+        let _ = HOST_CALLBACKS.set(cb);
+    }
+    _rivers_engine_init()
+}
+```
+
+**Fix direction:** Make `HostCallbacks` explicitly `Copy + Clone`, or copy each function pointer field with documented safety.
+
+## rivers-engine-wasm
+
+### rivers-engine-wasm — T2-1: WASM memory pointer math casts negative offsets to `usize`
+
+**File:** `crates/rivers-engine-wasm/src/lib.rs:254`
+**Severity:** Tier 2
+**Category:** Integer truncation / host callback correctness
+
+**What:** Host log callbacks cast guest `i32` pointers and lengths to `usize` before slicing memory.
+
+**Why it matters:** Negative guest values become huge `usize` values; bounds checks prevent memory unsafety, but valid guest mistakes are silently ignored instead of trapped.
+
+**Code:**
+```rust
+if let Some(slice) = data.get(ptr as usize..(ptr as usize + len as usize)) {
+    let msg = String::from_utf8_lossy(slice);
+    log_to_host(2, &msg);
+}
+```
+
+**Fix direction:** Reject negative pointer or length values before casting and return a host-function error/trap.
+
+## rivers-engine-sdk
+
+No issues found in this pass.
+
+## rivers-core-config
+
+No issues found in this pass.
+
+## rivers-driver-sdk
+
+No issues found in this pass.
+
+## rivers-lockbox-engine
+
+No issues found in this pass.
+
+## rivers-keystore-engine
+
+No issues found in this pass.
+
+## rivers-plugin-cassandra
+
+No issues found in this pass.
+
+## rivers-plugin-couchdb
+
+No issues found in this pass.
+
+## rivers-plugin-elasticsearch
+
+No issues found in this pass.
+
+## rivers-plugin-exec
+
+No issues found in this pass.
+
+## rivers-plugin-influxdb
+
+No issues found in this pass.
+
+## rivers-plugin-kafka
+
+No issues found in this pass.
+
+## rivers-plugin-ldap
+
+No issues found in this pass.
+
+## rivers-plugin-mongodb
+
+No issues found in this pass.
+
+## rivers-plugin-nats
+
+No issues found in this pass.
+
+## rivers-plugin-neo4j
+
+No issues found in this pass.
+
+## rivers-plugin-rabbitmq
+
+No issues found in this pass.
+
+## rivers-plugin-redis-streams
+
+No issues found in this pass.
+
+## rivers-lockbox
+
+No issues found in this pass.
+
+## rivers-keystore
+
+No issues found in this pass.
+
+## riversctl
+
+No issues found in this pass.
+
+## riverpackage
+
+No issues found in this pass.
+
+## cargo-deploy
+
+No issues found in this pass.

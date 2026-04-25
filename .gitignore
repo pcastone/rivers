@@ -63,19 +63,19 @@ docs/superpowers/
 release/
 
 # Task tracking (local workflow)
-todo/
+#todo/
 
 # ATT docs (local)
 docs/att/
 
 # AI reflection artifacts
-docs/dreams/
+#docs/dreams/
 
 # Internal planning / completed feature requests
 docs/deviation.md
 docs/rivers-remediation-plan.md
-docs/rivers-feature-request-app-keystore*.md
-docs/rivers-exec-driver-spec.md
+#docs/rivers-feature-request-app-keystore*.md
+#docs/rivers-exec-driver-spec.md
 crates/rivers-dependency-report.md
 
 # SPA build artifacts

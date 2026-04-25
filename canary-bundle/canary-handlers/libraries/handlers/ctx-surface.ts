@@ -176,6 +176,10 @@ function ctxTraceId(ctx) {
 }
 
 // ── RT-CTX-APPID — verify ctx.app_id is populated (not empty) ──
+// ctx.app_id returns the app's entry_point (slug, e.g. "handlers") — the
+// stable identity token used for store namespacing and keystore lookup.
+// (Changed from manifest UUID in store-namespace fix: slug is consistent
+// across both REST pipeline and MessageConsumer dispatch paths.)
 
 function ctxAppId(ctx) {
     var t = new TestResult("RT-CTX-APP-ID", "RUNTIME", "processpool section 9.8");
@@ -186,9 +190,10 @@ function ctxAppId(ctx) {
             "type=" + typeof ctx.app_id);
         t.assert("app_id_not_empty", ctx.app_id.length > 0,
             "length=" + (ctx.app_id ? ctx.app_id.length : 0));
-        // Verify it matches the manifest appId
+        // Verify it matches the app entry_point slug (not the manifest UUID —
+        // see store-namespace-isolation fix in changedecisionlog.md).
         t.assertEquals("app_id_matches_manifest",
-            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee03", ctx.app_id);
+            "handlers", ctx.app_id);
     } catch (e) {
         return t.fail(String(e));
     }
