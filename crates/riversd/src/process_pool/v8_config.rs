@@ -180,14 +180,17 @@ pub fn compile_typescript_with_imports(
             } else {
                 "<non-string panic payload>".to_string()
             };
+            // P1-9 / B4: redact host path in both the log line and the
+            // user-visible error message so neither leaks `/Users/...`.
+            let redacted = super::v8_engine::redact_to_app_relative(filename);
             tracing::error!(
                 target: "rivers.ts",
-                filename = %filename,
+                filename = %redacted,
                 panic = %panic_msg,
                 "swc compile panicked — treating as compile error"
             );
             Err(TaskError::HandlerError(format!(
-                "TypeScript compile panicked in {filename}: {panic_msg}"
+                "TypeScript compile panicked in {redacted}: {panic_msg}"
             )))
         }
     }
@@ -226,8 +229,10 @@ fn compile_typescript_with_imports_inner(
         &mut recovered,
     )
     .map_err(|e| {
+        // P1-9 / B4: redact host path in user-visible parse error.
+        let redacted = super::v8_engine::redact_to_app_relative(filename);
         TaskError::HandlerError(format!(
-            "TypeScript parse error in {filename}: {:?}",
+            "TypeScript parse error in {redacted}: {:?}",
             e.kind()
         ))
     })?;
@@ -237,8 +242,10 @@ fn compile_typescript_with_imports_inner(
             .iter()
             .map(|e| format!("{:?}", e.kind()))
             .collect();
+        // P1-9 / B4: redact host path in user-visible parse-errors message.
+        let redacted = super::v8_engine::redact_to_app_relative(filename);
         return Err(TaskError::HandlerError(format!(
-            "TypeScript parse errors in {filename}: {}",
+            "TypeScript parse errors in {redacted}: {}",
             msgs.join("; ")
         )));
     }
