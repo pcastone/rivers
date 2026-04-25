@@ -93,6 +93,8 @@ impl DatabaseDriver for CouchDBDriver {
     fn param_style(&self) -> rivers_driver_sdk::ParamStyle {
         rivers_driver_sdk::ParamStyle::DollarPositional
     }
+    /// G_R7.2: cdylib plugin runs connect() in an isolated runtime.
+    fn needs_isolated_runtime(&self) -> bool { true }
 }
 
 // ── Connection ─────────────────────────────────────────────────────────

@@ -600,6 +600,22 @@ pub trait DatabaseDriver: Send + Sync {
     fn operations(&self) -> &[crate::OperationDescriptor] {
         &[]
     }
+
+    /// Whether this driver's `connect()` requires an isolated tokio runtime.
+    ///
+    /// Per G_R7.2 (P2-7): the framework's `DriverFactory::connect` historically
+    /// ran every driver inside a freshly-built tokio runtime via
+    /// `spawn_blocking` to insulate cdylib plugins (which ship their own
+    /// statically-linked tokio) from the host reactor. That's load-bearing for
+    /// plugins but harmful for built-in async drivers, which lose access to
+    /// shared timers/IO and pay the runtime-construction cost on every connect.
+    ///
+    /// Built-in drivers (postgres, mysql, sqlite, redis, faker, …) leave this
+    /// at the default `false` and run on the active runtime. Plugin drivers
+    /// that need their own runtime override to `true`.
+    fn needs_isolated_runtime(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

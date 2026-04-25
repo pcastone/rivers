@@ -11,6 +11,7 @@
 //! the statement string as-is.
 
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use async_trait::async_trait;
 use mysql_async::prelude::*;
@@ -19,6 +20,32 @@ use rivers_driver_sdk::{
     Query, QueryResult, QueryValue, SchemaDefinition, SchemaSyntaxError, ValidationDirection,
     ValidationError,
 };
+
+/// Process-wide registry of `mysql_async::Pool`s keyed by datasource identity.
+///
+/// G_R7.1 (P2-7): the previous implementation created a fresh
+/// `mysql_async::Pool` on every `connect()` call and pinned it inside the
+/// returned [`MysqlConnection`]. Now that DataView execution flows through
+/// the framework's [`ConnectionPool`], that effectively gave us a
+/// pool-of-pools — wasteful and surprising. This map shares one
+/// `mysql_async::Pool` per `(host, port, user, db)` quadruple so all
+/// `MysqlConnection`s checked out for the same datasource compete for the
+/// same set of upstream sockets.
+fn pool_registry() -> &'static Mutex<HashMap<String, mysql_async::Pool>> {
+    static REG: OnceLock<Mutex<HashMap<String, mysql_async::Pool>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Stable cache key for a `ConnectionParams` value.
+///
+/// We use the four addressing fields plus the database name so two datasources
+/// that share an upstream host but use different DBs/users do not collide.
+fn pool_key(params: &ConnectionParams) -> String {
+    format!(
+        "{}@{}:{}/{}",
+        params.username, params.host, params.port, params.database
+    )
+}
 
 /// Supported field types for the MySQL driver.
 const MYSQL_TYPES: &[&str] = &[
@@ -46,14 +73,29 @@ impl DatabaseDriver for MysqlDriver {
         &self,
         params: &ConnectionParams,
     ) -> Result<Box<dyn Connection>, DriverError> {
-        let opts = mysql_async::OptsBuilder::default()
-            .ip_or_hostname(&params.host)
-            .tcp_port(params.port)
-            .user(Some(&params.username))
-            .pass(Some(&params.password))
-            .db_name(Some(&params.database));
-
-        let pool = mysql_async::Pool::new(opts);
+        // G_R7.1: share one `mysql_async::Pool` per datasource identity
+        // across the process. The first connect for a key builds the
+        // pool; later connects clone the existing handle (cheap — Pool
+        // is internally `Arc`'d) and check out a Conn.
+        let key = pool_key(params);
+        let pool = {
+            let mut registry = pool_registry()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if let Some(existing) = registry.get(&key) {
+                existing.clone()
+            } else {
+                let opts = mysql_async::OptsBuilder::default()
+                    .ip_or_hostname(&params.host)
+                    .tcp_port(params.port)
+                    .user(Some(&params.username))
+                    .pass(Some(&params.password))
+                    .db_name(Some(&params.database));
+                let pool = mysql_async::Pool::new(opts);
+                registry.insert(key.clone(), pool.clone());
+                pool
+            }
+        };
 
         let conn = pool
             .get_conn()
@@ -61,6 +103,12 @@ impl DatabaseDriver for MysqlDriver {
             .map_err(|e| DriverError::Connection(format!("mysql connect: {e}")))?;
 
         Ok(Box::new(MysqlConnection { conn, pool }))
+    }
+
+    fn needs_isolated_runtime(&self) -> bool {
+        // Built-in drivers can run on the host's tokio runtime — no need
+        // for the per-call isolated runtime that plugin cdylibs require.
+        false
     }
 
     fn supports_transactions(&self) -> bool {
@@ -719,5 +767,46 @@ mod tests {
         let result = query_value_to_mysql(&QueryValue::Array(arr.clone()));
         let expected = mysql_async::Value::from(serde_json::to_string(&arr).unwrap());
         assert_eq!(result, expected);
+    }
+
+    // -- G_R7.1: per-datasource shared pool key --
+
+    fn params_for(host: &str, port: u16, user: &str, db: &str) -> ConnectionParams {
+        ConnectionParams {
+            host: host.into(),
+            port,
+            database: db.into(),
+            username: user.into(),
+            password: "x".into(),
+            options: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn pool_key_distinguishes_datasources() {
+        let a = pool_key(&params_for("h1", 3306, "u", "db1"));
+        let b = pool_key(&params_for("h1", 3306, "u", "db2"));
+        let c = pool_key(&params_for("h2", 3306, "u", "db1"));
+        let d = pool_key(&params_for("h1", 3307, "u", "db1"));
+        let e = pool_key(&params_for("h1", 3306, "v", "db1"));
+        assert_ne!(a, b, "different db must yield different key");
+        assert_ne!(a, c, "different host must yield different key");
+        assert_ne!(a, d, "different port must yield different key");
+        assert_ne!(a, e, "different user must yield different key");
+    }
+
+    #[test]
+    fn pool_key_stable_for_same_params() {
+        let a = pool_key(&params_for("h1", 3306, "u", "db1"));
+        let b = pool_key(&params_for("h1", 3306, "u", "db1"));
+        assert_eq!(a, b, "same params must produce same key");
+    }
+
+    #[test]
+    fn driver_does_not_need_isolated_runtime() {
+        // G_R7.2: built-in driver returns false → DriverFactory runs
+        // connect() on the active runtime instead of spawning a fresh one.
+        let driver = MysqlDriver;
+        assert!(!DatabaseDriver::needs_isolated_runtime(&driver));
     }
 }

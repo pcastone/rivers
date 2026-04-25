@@ -81,6 +81,9 @@ impl DatabaseDriver for MongoDriver {
 
         Ok(Box::new(MongoConnection { db, session: None }))
     }
+
+    /// G_R7.2: cdylib plugin runs connect() in an isolated runtime.
+    fn needs_isolated_runtime(&self) -> bool { true }
 }
 
 // ── Connection ─────────────────────────────────────────────────────────

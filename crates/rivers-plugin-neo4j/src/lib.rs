@@ -74,6 +74,9 @@ impl DatabaseDriver for Neo4jDriver {
     fn param_style(&self) -> ParamStyle {
         ParamStyle::DollarNamed
     }
+
+    /// G_R7.2: cdylib plugin runs connect() in an isolated runtime.
+    fn needs_isolated_runtime(&self) -> bool { true }
 }
 
 /// A live Neo4j connection wrapping `neo4rs::Graph`.

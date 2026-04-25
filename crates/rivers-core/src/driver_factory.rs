@@ -91,13 +91,29 @@ impl DriverFactory {
     ///
     /// Per spec §8.1. Returns `DriverError::UnknownDriver` if name is not registered.
     ///
-    /// Each connect runs in an isolated tokio runtime via `spawn_blocking`.
-    /// This ensures cdylib plugin drivers get a reactor (they have their own
-    /// statically-linked tokio that needs its own runtime). Built-in drivers
-    /// are unaffected — the extra runtime is harmless for rlib drivers.
-    /// `catch_unwind` prevents plugin panics from aborting the process
-    /// (panics from cdylib code are "foreign exceptions" that would SIGABRT
-    /// if they cross the FFI boundary uncaught).
+    /// ### Runtime policy (G_R7.2 / P2-7)
+    ///
+    /// Drivers report whether they need an isolated tokio runtime via
+    /// [`DatabaseDriver::needs_isolated_runtime`]. The factory branches on
+    /// that flag:
+    ///
+    /// - `false` (built-in drivers — postgres, mysql, sqlite, redis, faker):
+    ///   `connect()` runs on the active host runtime. No `spawn_blocking`,
+    ///   no fresh runtime construction. Built-in async drivers therefore
+    ///   share the host's reactor (timers, IO, etc.) and pay no per-connect
+    ///   runtime cost. Built-ins live in the same address space and Rust
+    ///   ABI as the host so their panics already unwind cleanly through the
+    ///   host's panic handler — no `catch_unwind` needed.
+    ///
+    /// - `true` (cdylib plugin drivers — cassandra, mongodb, neo4j, …):
+    ///   `connect()` runs inside a fresh tokio runtime built on a
+    ///   `spawn_blocking` thread, with `catch_unwind` wrapping the call.
+    ///   This is load-bearing for plugins for two reasons. (1) cdylib
+    ///   plugins ship their own statically-linked tokio that does not see
+    ///   the host's reactor; without an isolated runtime, plugin drivers
+    ///   that touch tokio primitives panic. (2) panics that cross the FFI
+    ///   boundary are foreign exceptions and would `SIGABRT` the process —
+    ///   `catch_unwind` converts them to a clean `DriverError`.
     pub async fn connect(
         &self,
         driver_name: &str,
@@ -108,10 +124,15 @@ impl DriverFactory {
             .get(driver_name)
             .ok_or_else(|| DriverError::UnknownDriver(driver_name.to_string()))?
             .clone();
-        let params = params.clone();
 
-        // Isolate driver.connect() in a dedicated runtime + catch_unwind.
-        // This prevents cdylib plugin crashes from killing the host process.
+        if !driver.needs_isolated_runtime() {
+            // Built-in async driver — run on the active runtime so it can
+            // share the host's reactor and avoid per-connect runtime cost.
+            return driver.connect(params).await;
+        }
+
+        // Plugin path: isolated runtime + catch_unwind.
+        let params = params.clone();
         let result = tokio::task::spawn_blocking(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let rt = tokio::runtime::Runtime::new()
@@ -455,6 +476,103 @@ mod tests {
         let mut factory = DriverFactory::new();
         factory.register_database_driver(Arc::new(crate::drivers::FakerDriver::new()));
         assert_eq!(factory.driver_names(), vec!["faker"]);
+    }
+
+    // ── G_R7.2: built-in vs plugin runtime policy ──
+
+    /// Test driver that flips its `needs_isolated_runtime` flag and records
+    /// which runtime path executed `connect()`.
+    struct PolicyTestDriver {
+        isolated: bool,
+        observed_runtime_id: Arc<std::sync::Mutex<Option<u64>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DatabaseDriver for PolicyTestDriver {
+        fn name(&self) -> &str { "policy-test" }
+        async fn connect(
+            &self,
+            _params: &ConnectionParams,
+        ) -> Result<Box<dyn Connection>, DriverError> {
+            // Capture the current Tokio runtime id so the test can compare.
+            let id = tokio::runtime::Handle::current().id();
+            // Handle's id is opaque; encode via debug.
+            let observed: u64 = {
+                let s = format!("{id:?}");
+                // Hash to a stable u64 for comparison.
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                s.hash(&mut h);
+                h.finish()
+            };
+            *self.observed_runtime_id.lock().unwrap() = Some(observed);
+            // Return a dummy error — we only care about routing.
+            Err(DriverError::Connection("policy probe".into()))
+        }
+        fn needs_isolated_runtime(&self) -> bool {
+            self.isolated
+        }
+    }
+
+    fn test_params() -> ConnectionParams {
+        ConnectionParams {
+            host: "localhost".into(),
+            port: 0,
+            database: "x".into(),
+            username: "u".into(),
+            password: "p".into(),
+            options: std::collections::HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn builtin_driver_runs_on_active_runtime() {
+        // When `needs_isolated_runtime()` is false, the host runtime is reused.
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let mut factory = DriverFactory::new();
+        factory.register_database_driver(Arc::new(PolicyTestDriver {
+            isolated: false,
+            observed_runtime_id: observed.clone(),
+        }));
+        let _ = factory.connect("policy-test", &test_params()).await;
+
+        let host_id = {
+            let id = tokio::runtime::Handle::current().id();
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            format!("{id:?}").hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(
+            *observed.lock().unwrap(),
+            Some(host_id),
+            "built-in driver should observe the host runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_driver_runs_on_isolated_runtime() {
+        // When `needs_isolated_runtime()` is true, a fresh runtime is used.
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let mut factory = DriverFactory::new();
+        factory.register_database_driver(Arc::new(PolicyTestDriver {
+            isolated: true,
+            observed_runtime_id: observed.clone(),
+        }));
+        let _ = factory.connect("policy-test", &test_params()).await;
+
+        let host_id = {
+            let id = tokio::runtime::Handle::current().id();
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            format!("{id:?}").hash(&mut h);
+            h.finish()
+        };
+        let observed_id = observed.lock().unwrap().expect("driver must run");
+        assert_ne!(
+            observed_id, host_id,
+            "plugin driver should observe a runtime distinct from the host"
+        );
     }
 
     #[test]
