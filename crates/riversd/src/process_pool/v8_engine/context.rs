@@ -265,7 +265,14 @@ fn bootstrap_direct_proxies(
 
 /// Reserved key prefixes for the task store. Keys starting with these
 /// prefixes are reserved for system use and rejected with an error.
-const STORE_RESERVED_PREFIXES: &[&str] = &["session:", "csrf:", "cache:", "raft:", "rivers:"];
+///
+/// G_R3: this list previously lived inline in v8_engine and drifted from the
+/// canonical core list (`rivers-core-config::storage::RESERVED_PREFIXES`) —
+/// the V8 list omitted `poll:` and core omitted `raft:`, so a handler could
+/// scribble over Raft consensus state via the StorageEngine namespace path
+/// or over poll state via `ctx.store`. Both perspectives now consume the
+/// single source of truth.
+use rivers_runtime::rivers_core::storage::RESERVED_PREFIXES as STORE_RESERVED_PREFIXES;
 
 /// Check if a store key uses a reserved namespace prefix.
 fn store_key_is_reserved(key: &str) -> bool {
@@ -1018,4 +1025,26 @@ fn ctx_dataview_callback(
     let msg = v8_str_safe(scope, &err_msg);
     let exception = v8::Exception::error(scope, msg);
     scope.throw_exception(exception);
+}
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// G_R3: the V8 `ctx.store` reserved-prefix check now consumes the
+    /// canonical list from `rivers-core-config::storage::RESERVED_PREFIXES`.
+    /// Both `poll:` (was missing in V8 before) and `raft:` (was missing in
+    /// core before) MUST be reserved from the V8 perspective.
+    #[test]
+    fn reserved_prefixes_match_canonical_list() {
+        assert!(store_key_is_reserved("session:abc"));
+        assert!(store_key_is_reserved("csrf:token"));
+        assert!(store_key_is_reserved("cache:dataview"));
+        assert!(store_key_is_reserved("rivers:node"));
+        assert!(store_key_is_reserved("poll:foo"), "V8 must see poll: as reserved");
+        assert!(store_key_is_reserved("raft:foo"), "V8 must see raft: as reserved");
+        assert!(!store_key_is_reserved("user:data"));
+    }
 }

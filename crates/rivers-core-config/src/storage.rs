@@ -53,7 +53,15 @@ pub enum StorageError {
 // ── Reserved prefixes ───────────────────────────────────────────────
 
 /// Reserved namespace prefixes that CodeComponents cannot access.
-const RESERVED_PREFIXES: &[&str] = &["session:", "csrf:", "poll:", "cache:", "rivers:"];
+///
+/// This is the single source of truth for storage prefix reservations. Both
+/// the core StorageEngine namespace check (`is_reserved_namespace`) and the
+/// V8 `ctx.store` key-prefix enforcement consume this constant — historically
+/// the two lists drifted (core had `poll:`, V8 had `raft:` but not `poll:`),
+/// allowing handlers to scribble over system namespaces depending on the
+/// entry point.
+pub const RESERVED_PREFIXES: &[&str] =
+    &["session:", "csrf:", "poll:", "cache:", "raft:", "rivers:"];
 
 /// Check if a namespace uses a reserved prefix.
 pub fn is_reserved_namespace(namespace: &str) -> bool {

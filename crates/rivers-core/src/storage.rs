@@ -198,7 +198,20 @@ mod tests {
         assert!(is_reserved_namespace("session:abc"));
         assert!(is_reserved_namespace("csrf:token"));
         assert!(is_reserved_namespace("poll:xyz"));
+        assert!(is_reserved_namespace("raft:state"));
+        assert!(is_reserved_namespace("cache:dataview"));
         assert!(is_reserved_namespace("rivers:node"));
         assert!(!is_reserved_namespace("user:data"));
+    }
+
+    /// G_R3: the canonical reserved-prefix list lives in
+    /// `rivers-core-config::storage::RESERVED_PREFIXES`. Asserting from this
+    /// crate's perspective — `is_reserved_namespace` is the re-exported public
+    /// API — both `poll:` and `raft:` MUST resolve to true. Historically these
+    /// two crates each tracked their own list and drifted.
+    #[test]
+    fn reserved_prefix_list_includes_poll_and_raft() {
+        assert!(is_reserved_namespace("poll:foo"), "core sees poll: as reserved");
+        assert!(is_reserved_namespace("raft:foo"), "core sees raft: as reserved");
     }
 }
