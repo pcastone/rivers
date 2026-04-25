@@ -132,6 +132,148 @@ pub fn compile_typescript(source: &str, filename: &str) -> Result<String, TaskEr
     compile_typescript_with_imports(source, filename).map(|(js, _, _)| js)
 }
 
+// ── F2 (P1-7): SWC compile-time bound ───────────────────────────
+
+/// Env var that overrides the per-module SWC compile budget.
+///
+/// Positive integer milliseconds. Empty / unset / `0` / unparseable → fall
+/// back to the 5000ms default. Read once via `OnceLock` (mirrors B2's
+/// `RIVERS_DEV_NO_STORAGE` and B3's `RIVERS_DEV_MODULE_CACHE` patterns), so
+/// toggling mid-process has no effect — set it before bundle load.
+pub const RIVERS_SWC_COMPILE_TIMEOUT_MS_ENV: &str = "RIVERS_SWC_COMPILE_TIMEOUT_MS";
+
+/// Default per-module SWC compile budget (ms). Generous enough that any
+/// non-pathological handler compiles comfortably (real TS handlers in the
+/// canary measure < 50ms each), tight enough that a hostile / runaway input
+/// cannot stall a 1000-file bundle deploy by hours.
+pub const SWC_COMPILE_TIMEOUT_DEFAULT_MS: u64 = 5000;
+
+/// Resolve the active SWC compile timeout (ms). Reads the env var exactly
+/// once via `OnceLock`. Test helpers may bypass via the override hook below.
+pub fn swc_compile_timeout_ms() -> u64 {
+    if let Some(test_override) = test_override_timeout_ms() {
+        return test_override;
+    }
+    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var(RIVERS_SWC_COMPILE_TIMEOUT_MS_ENV)
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(SWC_COMPILE_TIMEOUT_DEFAULT_MS)
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    static SWC_TIMEOUT_OVERRIDE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn test_override_timeout_ms() -> Option<u64> {
+    SWC_TIMEOUT_OVERRIDE.with(|c| c.get())
+}
+
+#[cfg(not(test))]
+fn test_override_timeout_ms() -> Option<u64> {
+    None
+}
+
+/// Test-only RAII guard that sets a thread-local override for
+/// `swc_compile_timeout_ms()`. Cleared on drop so tests stay hermetic and
+/// the once-cached env var value never gets shadowed for siblings.
+#[cfg(test)]
+pub(crate) struct SwcTimeoutOverride;
+
+#[cfg(test)]
+impl SwcTimeoutOverride {
+    pub(crate) fn new(ms: u64) -> Self {
+        SWC_TIMEOUT_OVERRIDE.with(|c| c.set(Some(ms)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for SwcTimeoutOverride {
+    fn drop(&mut self) {
+        SWC_TIMEOUT_OVERRIDE.with(|c| c.set(None));
+    }
+}
+
+/// Compile TypeScript with a hard per-module wall-clock budget (F2 / P1-7).
+///
+/// `compile_typescript_with_imports` is wrapped in `catch_unwind` (F1 / P0-3)
+/// so panics are recoverable, but parse / transform / codegen are still
+/// synchronous and unbounded. Pathological input (deeply nested generics,
+/// extreme template-literal types, etc.) can stall `populate_module_cache`
+/// indefinitely, blocking riversd startup or `cargo deploy`.
+///
+/// This wrapper runs the compile on a dedicated `std::thread` and races it
+/// against a `recv_timeout`. On timeout the join handle is dropped: the
+/// worker thread leaks until SWC eventually finishes (SWC is synchronous and
+/// CPU-bound — slow, not infinite). We accept that leak as the price of
+/// keeping the bundle loader sync; the alternative (forcibly killing a
+/// thread mid-compile) is unsound in Rust.
+///
+/// Bound is per-module, not global: a 1000-file bundle that all hit the
+/// timeout produces a slow deploy with a clear per-file error, but never a
+/// hang. The bound is set by `swc_compile_timeout_ms()`.
+pub fn compile_typescript_with_imports_timeout(
+    source: &str,
+    filename: &str,
+) -> Result<(String, Vec<String>, String), TaskError> {
+    let timeout_ms = swc_compile_timeout_ms();
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+
+    // Owned clones cross the thread boundary; we don't await the inner
+    // closure on the calling thread, so it must own its inputs.
+    let source_owned = source.to_string();
+    let filename_owned = filename.to_string();
+
+    // sync_channel(1): the compile thread sends exactly one message (the
+    // result). recv_timeout drops the receiver on timeout; the sender's
+    // subsequent `send` returns Err but is otherwise harmless.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(String, Vec<String>, String), TaskError>>(1);
+
+    // We deliberately do NOT join the handle. Holding it would force us to
+    // wait for the slow compile on Drop. Letting it run to completion in
+    // the background is the documented trade-off.
+    let _ = std::thread::Builder::new()
+        .name("swc-compile".into())
+        .spawn(move || {
+            let result = compile_typescript_with_imports(&source_owned, &filename_owned);
+            // Receiver may have been dropped (timeout). Ignore the send error
+            // — the result is no longer wanted.
+            let _ = tx.send(result);
+        });
+
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            let redacted = super::v8_engine::redact_to_app_relative(filename).into_owned();
+            tracing::error!(
+                target: "rivers.ts",
+                filename = %redacted,
+                timeout_ms = timeout_ms,
+                "swc compile exceeded per-module timeout"
+            );
+            Err(TaskError::CompileTimeout {
+                module: redacted,
+                timeout_ms,
+            })
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            // Sender thread died without sending — should be unreachable
+            // because the inner compile is wrapped in catch_unwind. Treat
+            // as an internal error so we don't silently swallow it.
+            let redacted = super::v8_engine::redact_to_app_relative(filename).into_owned();
+            Err(TaskError::Internal(format!(
+                "swc compile worker disconnected for {redacted}"
+            )))
+        }
+    }
+}
+
 /// Compile TypeScript and return the JS, runtime import specifiers, and source map.
 ///
 /// Per `docs/arch/rivers-javascript-typescript-spec.md` §2.1–2.5, §3.5, §5.1:

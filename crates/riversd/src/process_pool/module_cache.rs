@@ -25,7 +25,7 @@ use rivers_runtime::module_cache::{BundleModuleCache, CompiledModule};
 use rivers_runtime::rivers_core_config::RiversError;
 use rivers_runtime::LoadedBundle;
 
-use super::v8_config::compile_typescript_with_imports;
+use super::v8_config::compile_typescript_with_imports_timeout;
 
 /// Process-global cache slot. Installed after bundle load; swapped atomically
 /// on hot reload.
@@ -187,10 +187,24 @@ pub fn compile_app_modules(
                 })?;
                 let filename = abs.to_string_lossy().to_string();
                 let (compiled_js, imports, source_map) =
-                    compile_typescript_with_imports(&source, &filename).map_err(|e| {
-                        RiversError::Config(format!(
-                            "TypeScript compile error in app '{app_name}', file {filename}: {e:?}"
-                        ))
+                    compile_typescript_with_imports_timeout(&source, &filename).map_err(|e| {
+                        // F2 (P1-7): CompileTimeout carries an already-
+                        // redacted module path. Other variants haven't been
+                        // sanitized — but `filename` is the absolute on-disk
+                        // path, so redact via the same B4 helper before
+                        // surfacing to the operator-facing config error.
+                        let redacted = super::v8_engine::redact_to_app_relative(&filename)
+                            .into_owned();
+                        match e {
+                            super::TaskError::CompileTimeout { module, timeout_ms } => {
+                                RiversError::Config(format!(
+                                    "TypeScript compile timeout in app '{app_name}', file {module} after {timeout_ms}ms (set RIVERS_SWC_COMPILE_TIMEOUT_MS to override)"
+                                ))
+                            }
+                            other => RiversError::Config(format!(
+                                "TypeScript compile error in app '{app_name}', file {redacted}: {other:?}"
+                            )),
+                        }
                     })?;
                 acc.insert(
                     abs.clone(),
