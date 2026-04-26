@@ -691,6 +691,64 @@ fn ctx_ddl_callback(
     let driver_name = ds_params.options.get("driver").cloned()
         .unwrap_or_else(|| datasource.split(':').last().unwrap_or(&datasource).to_string());
 
+    // H1: DDL whitelist check (Gate 3) — mirrors engine_loader::host_ddl_execute.
+    //
+    // Phase B1 already gated this callback to ApplicationInit, but without
+    // consulting `[security].ddl_whitelist` an init handler could still run
+    // any DDL the connecting user has DB-level permission for. This check
+    // makes the in-process V8 path enforce the same whitelist the
+    // dynamic-engine path enforces, reusing the single store of whitelist
+    // state (`engine_loader::host_context::DDL_WHITELIST`).
+    //
+    // Behavior matches host_ddl_execute (engine_loader/host_callbacks.rs):
+    //   - whitelist unset (None) or empty  → check skipped (operator opt-in)
+    //   - whitelist Some(non-empty)        → must match `database@app_id`
+    //
+    // The whitelist key is `{database}@{appId}` with the manifest UUID, NOT
+    // the entry_point name the ProcessPool dispatches with. We resolve via
+    // engine_loader::app_id_for_entry_point — same fallback as the dynamic
+    // path: if no map is registered, treat the entry_point name as the id.
+    let whitelist = crate::engine_loader::ddl_whitelist();
+    if let Some(ref whitelist) = whitelist {
+        if !whitelist.is_empty() {
+            let entry_point = super::task_locals::TASK_APP_NAME
+                .with(|n| n.borrow().clone())
+                .unwrap_or_default();
+            let app_id = crate::engine_loader::app_id_for_entry_point(&entry_point)
+                .unwrap_or_else(|| entry_point.clone());
+            // Resolved database name from connection params; fall back to
+            // the JS-level datasource label if the driver doesn't populate
+            // `database` (mirrors dataview_engine::execute_ddl).
+            let database: &str = if ds_params.database.is_empty() {
+                &datasource
+            } else {
+                &ds_params.database
+            };
+            if !rivers_runtime::rivers_core_config::config::security::is_ddl_permitted(
+                database,
+                &app_id,
+                whitelist,
+            ) {
+                tracing::warn!(
+                    datasource = %datasource,
+                    database = %database,
+                    app_id = %app_id,
+                    "ctx.ddl(): DDL rejected by whitelist (Gate 3)"
+                );
+                // Error string matches host_ddl_execute verbatim so operators
+                // see one message regardless of which engine path executed.
+                throw_js_error(
+                    scope,
+                    &format!(
+                        "DDL not permitted for database '{}' (datasource '{}') in app '{}'",
+                        database, datasource, app_id
+                    ),
+                );
+                return;
+            }
+        }
+    }
+
     // Execute DDL on Tokio runtime
     let (tx, rx) = std::sync::mpsc::channel();
     rt.spawn(async move {
