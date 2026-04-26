@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-04-25 — I-FU2: Postgres parallel e2e tests for dyn-engine transactions
+
+Mirrors the SQLite e2e cases (in `process_pool::dyn_e2e_tests`) against
+the Postgres test cluster at 192.168.2.209 so the wire-format paths
+SQLite can't surface (real network latency, server-side BEGIN tracking,
+positional `$1` param style, `tokio_postgres` connection lifecycle) get
+coverage. Tests-only PR; no production-code changes.
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `crates/riversd/src/process_pool/mod.rs` | New `pg_e2e_tests` submodule (sibling of `dyn_e2e_tests`) with five cluster-gated cases: `pg_commit_persists`, `pg_rollback_discards`, `pg_auto_rollback_on_engine_error`, `pg_cross_datasource_in_txn_rejects`, `pg_concurrent_txns_isolated_by_task_id`. Each is `#[ignore]` AND short-circuits via a runtime `cluster_available()` check (env `RIVERS_TEST_CLUSTER=1` + 2-second TCP probe to the primary). Each test allocates a unique table name (pid + atomic counter prefix) and uses Drop-based best-effort cleanup so unwind paths still drop schema. Test #5 uses two distinct tables to make per-task isolation independently verifiable. | TXN-IFU2.1 in `changedecisionlog.md`; brief I-FU2 in `todo/tasks.md` | Lib-internal `cfg(test)` placement (option A) chosen because every test helper this leans on is `pub(crate)` — integration-test files in `tests/` can't reach those, and the task constraint forbids widening visibility |
+| `crates/riversd/src/engine_loader/txn_test_fixtures.rs` | `ensure_host_context()` now also registers `PostgresDriver` (in addition to mock + sqlite). New `build_postgres_executor(name, query, params, datasource_id)` helper paralleling `build_sqlite_executor`. PostgresDriver is stateless — registration is unconditional and harmless when the cluster is unreachable; only per-test `connect()` calls touch the network and those are gated. | TXN-IFU2.1 decisions 2 + 4 | Co-located registration in the single `OnceLock` init (only one fixture init wins per test binary, and the SQLite e2e tests already won that race) |
+| `Cargo.toml` (workspace) | Version bump `0.55.0+1219260426` → `0.55.0+1232260426` (build-only; tests-only PR per CLAUDE.md versioning policy) | CLAUDE.md §Versioning | `just bump` |
+| `todo/tasks.md` | I-FU2 marked `[x]` with completion summary | — | Done |
+
+**Validation:**
+- `cargo build -p riversd --tests` clean (only pre-existing warnings).
+- `cargo test -p riversd --lib pg_e2e` — 5 ignored / 0 run / 0 failed.
+- Live cluster verification could not be performed from this Bash-tool sandbox (compiled Rust binaries get "No route to host" to 192.168.2.209 even though `nc`/`ping`/`curl` work — appears to be a macOS app-firewall restriction on outbound TCP from cargo-spawned binaries). Cluster CI on a host with direct network access is the canonical green-light. The `cluster_available()` runtime check correctly detects the unreachability and short-circuits cleanly with a diagnostic eprintln rather than failing.
+
 ## 2026-04-25 — D2: Route DataView execution through ConnectionPool (P0-3)
 
 Closes the second half of the pool-adoption work (D1 landed in `2dfbb7b`).

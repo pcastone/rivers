@@ -121,16 +121,21 @@ fn shared_test_runtime_handle() -> tokio::runtime::Handle {
 
 /// Idempotent `HOST_CONTEXT` setup. Registers the legacy
 /// `mock-txn-driver` (for I3-I5 tests), `dispatch-mock-driver` (for
-/// I7 tests), AND the real built-in `sqlite` driver (for I8 e2e tests)
-/// into the same factory before installing it into the `HOST_CONTEXT`
-/// `OnceLock`. Subsequent calls are no-ops because `set_host_context`
-/// itself uses `OnceLock::set`.
+/// I7 tests), the real built-in `sqlite` driver (for I8 e2e tests),
+/// AND the real built-in `postgres` driver (for I-FU2 cluster e2e
+/// tests) into the same factory before installing it into the
+/// `HOST_CONTEXT` `OnceLock`. Subsequent calls are no-ops because
+/// `set_host_context` itself uses `OnceLock::set`.
 ///
-/// SQLite registration is co-located here (rather than in a separate
-/// fixture) because `HOST_CONTEXT` is a `OnceLock` — only one fixture
-/// init wins per test binary, and Phase I8 e2e tests need both the
-/// mock drivers (kept for I3-I7 tests' commit-fail behavior) and a
-/// real durable driver wired through the same factory.
+/// SQLite + Postgres registration are co-located here (rather than in
+/// separate fixtures) because `HOST_CONTEXT` is a `OnceLock` — only
+/// one fixture init wins per test binary, and Phase I8/I-FU2 e2e
+/// tests need the mock drivers (kept for I3-I7 tests' commit-fail
+/// behavior) plus the real durable drivers wired through the same
+/// factory. PostgresDriver is stateless — registering it does not
+/// open a connection, so this is safe even when the cluster is
+/// unreachable; only the per-test `connect()` calls in `pg_e2e_tests`
+/// touch the network, and those are gated on `RIVERS_TEST_CLUSTER=1`.
 pub(crate) fn ensure_host_context() -> Arc<SharedConnBehavior> {
     static SETUP: OnceLock<()> = OnceLock::new();
     let beh = behavior();
@@ -149,6 +154,13 @@ pub(crate) fn ensure_host_context() -> Arc<SharedConnBehavior> {
         // `database` field is the temp-file path.
         factory.register_database_driver(Arc::new(
             rivers_runtime::rivers_core::drivers::SqliteDriver,
+        ));
+        // I-FU2 — register real Postgres for cluster-gated e2e tests.
+        // Driver name is "postgres"; e2e tests construct ConnectionParams
+        // pointing at the test cluster (192.168.2.209). Stateless
+        // registration; no network call is issued here.
+        factory.register_database_driver(Arc::new(
+            rivers_runtime::rivers_core::drivers::PostgresDriver,
         ));
         // Enter the shared fixture runtime BEFORE calling set_host_context
         // so its `Handle::current()` capture binds to the long-lived
@@ -239,6 +251,82 @@ pub(crate) fn build_sqlite_executor(
     };
     let mut params_map = HashMap::new();
     params_map.insert("sqlite_e2e".to_string(), params);
+
+    let cache: Arc<dyn DataViewCache> = Arc::new(NoopDataViewCache);
+    Arc::new(DataViewExecutor::new(
+        registry,
+        factory,
+        Arc::new(params_map),
+        cache,
+    ))
+}
+
+/// I-FU2 e2e helper — build a `DataViewExecutor` wired to the registered
+/// `postgres` driver and a single dataview definition. Mirrors
+/// `build_sqlite_executor` but targets the live test cluster.
+///
+/// Connection params are passed through verbatim (host/port/user/pass/db).
+/// The `dataview_name` becomes the registered name; `query` is the raw
+/// SQL (callers wire any `$1, $2, ...` placeholders to match Postgres'
+/// positional style). The executor is wrapped in `Arc` so tests can
+/// install it via `host_context::install_dataview_executor_for_test`.
+pub(crate) fn build_postgres_executor(
+    dataview_name: &str,
+    query: &str,
+    params: rivers_runtime::rivers_driver_sdk::ConnectionParams,
+    datasource_id: &str,
+) -> Arc<rivers_runtime::DataViewExecutor> {
+    use rivers_runtime::dataview::{DataViewConfig, DataViewParameterConfig};
+    use rivers_runtime::dataview_engine::{DataViewExecutor, DataViewRegistry};
+    use rivers_runtime::tiered_cache::{DataViewCache, NoopDataViewCache};
+    use std::collections::HashMap;
+
+    let factory = super::host_context::HOST_CONTEXT
+        .get()
+        .expect("HOST_CONTEXT must be set first (call ensure_host_context())")
+        .driver_factory
+        .clone()
+        .expect("driver factory present");
+
+    let mut registry = DataViewRegistry::new();
+    registry.register(DataViewConfig {
+        name: dataview_name.into(),
+        datasource: datasource_id.into(),
+        query: Some(query.to_string()),
+        parameters: vec![],
+        return_schema: None,
+        get_query: Some(query.to_string()),
+        post_query: Some(query.to_string()),
+        put_query: Some(query.to_string()),
+        delete_query: Some(query.to_string()),
+        get_schema: None,
+        post_schema: None,
+        put_schema: None,
+        delete_schema: None,
+        get_parameters: Vec::<DataViewParameterConfig>::new(),
+        post_parameters: Vec::<DataViewParameterConfig>::new(),
+        put_parameters: Vec::<DataViewParameterConfig>::new(),
+        delete_parameters: Vec::<DataViewParameterConfig>::new(),
+        streaming: false,
+        circuit_breaker_id: None,
+        prepared: false,
+        query_params: Default::default(),
+        caching: None,
+        invalidates: vec![],
+        validate_result: false,
+        strict_parameters: false,
+        max_rows: 1000,
+    });
+
+    // Force the driver to "postgres" via the connection-params options
+    // map. Without it the executor falls back to using the datasource id
+    // as the driver name (which would be e.g. "pg_e2e", unregistered).
+    let mut params = params;
+    params
+        .options
+        .insert("driver".to_string(), "postgres".to_string());
+    let mut params_map = HashMap::new();
+    params_map.insert(datasource_id.to_string(), params);
 
     let cache: Arc<dyn DataViewCache> = Arc::new(NoopDataViewCache);
     Arc::new(DataViewExecutor::new(
