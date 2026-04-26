@@ -560,6 +560,53 @@ pub(super) fn inject_rivers_global(
     let decrypt_key = v8_str(scope, "decrypt")?;
     crypto_obj.set(scope, decrypt_key.into(), decrypt_fn.into());
 
+    // Rivers.crypto.sha256(input: string): string
+    //
+    // Returns the lowercase hex-encoded SHA-256 digest of the UTF-8 bytes of
+    // `input`. Pure helper — no key material involved (use Rivers.crypto.hmac
+    // for keyed authentication).
+    //
+    // Per docs/bugs/case-rivers-crypto-textencoder-gap.md (Bug 1).
+    let sha256_fn = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            use sha2::{Digest, Sha256};
+            let input = args.get(0).to_rust_string_lossy(scope);
+            let result = hex::encode(Sha256::digest(input.as_bytes()));
+            if let Some(v8_str) = v8::String::new(scope, &result) {
+                rv.set(v8_str.into());
+            }
+        },
+    )
+    .ok_or_else(|| TaskError::Internal("failed to create Rivers.crypto.sha256".into()))?;
+    let sha256_key = v8_str(scope, "sha256")?;
+    crypto_obj.set(scope, sha256_key.into(), sha256_fn.into());
+
+    // Rivers.crypto.sha512(input: string): string
+    //
+    // Returns the lowercase hex-encoded SHA-512 digest of the UTF-8 bytes of
+    // `input`. Pure helper — no key material involved.
+    //
+    // Per docs/bugs/case-rivers-crypto-textencoder-gap.md (Bug 1).
+    let sha512_fn = v8::Function::new(
+        scope,
+        |scope: &mut v8::HandleScope,
+         args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            use sha2::{Digest, Sha512};
+            let input = args.get(0).to_rust_string_lossy(scope);
+            let result = hex::encode(Sha512::digest(input.as_bytes()));
+            if let Some(v8_str) = v8::String::new(scope, &result) {
+                rv.set(v8_str.into());
+            }
+        },
+    )
+    .ok_or_else(|| TaskError::Internal("failed to create Rivers.crypto.sha512".into()))?;
+    let sha512_key = v8_str(scope, "sha512")?;
+    crypto_obj.set(scope, sha512_key.into(), sha512_fn.into());
+
     let crypto_key = v8_str(scope, "crypto")?;
     rivers_obj.set(scope, crypto_key.into(), crypto_obj.into());
 
