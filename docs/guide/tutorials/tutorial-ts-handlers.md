@@ -106,6 +106,8 @@ declare const Rivers: {
         randomHex(bytes: number): string;
         randomBase64url(bytes: number): string;
         hmac(key: string, data: string): string;
+        sha256(input: string): string;
+        sha512(input: string): string;
         timingSafeEqual(a: string, b: string): boolean;
         encrypt(keyName: string, plaintext: string, options?: { aad?: string }): EncryptResult;
         decrypt(keyName: string, ciphertext: string, nonce: string, options: { key_version: number; aad?: string }): string;

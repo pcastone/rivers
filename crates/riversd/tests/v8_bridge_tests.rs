@@ -252,6 +252,56 @@ async fn rivers_crypto_hmac_deterministic() {
     assert_eq!(v["same"], true);
 }
 
+/// Bug 1: Rivers.crypto.sha256 — known SHA-256 vector for "abc" (NIST FIPS 180-4).
+#[tokio::test]
+async fn rivers_crypto_sha256_known_vector_abc() {
+    let v = eval_js(r#"
+        ctx.resdata = { hex: Rivers.crypto.sha256("abc") };
+    "#).await;
+    assert_eq!(
+        v["hex"],
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+
+/// Bug 1: Rivers.crypto.sha256 — empty string vector (NIST FIPS 180-4).
+#[tokio::test]
+async fn rivers_crypto_sha256_known_vector_empty() {
+    let v = eval_js(r#"
+        ctx.resdata = { hex: Rivers.crypto.sha256("") };
+    "#).await;
+    assert_eq!(
+        v["hex"],
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+}
+
+/// Bug 1: Rivers.crypto.sha512 — known SHA-512 vector for "abc" (NIST FIPS 180-4).
+#[tokio::test]
+async fn rivers_crypto_sha512_known_vector_abc() {
+    let v = eval_js(r#"
+        ctx.resdata = { hex: Rivers.crypto.sha512("abc") };
+    "#).await;
+    assert_eq!(
+        v["hex"],
+        "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a\
+2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+    );
+}
+
+/// Bug 1: Rivers.crypto.sha512 — empty string vector (NIST FIPS 180-4).
+#[tokio::test]
+async fn rivers_crypto_sha512_known_vector_empty() {
+    let v = eval_js(r#"
+        ctx.resdata = { hex: Rivers.crypto.sha512("") };
+    "#).await;
+    assert_eq!(
+        v["hex"],
+        "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce\
+47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+    );
+}
+
 #[tokio::test]
 async fn rivers_crypto_timing_safe() {
     let v = eval_js(r#"
@@ -274,7 +324,8 @@ async fn all_spec_rivers_apis_exist() {
             "Rivers.log.info", "Rivers.log.warn", "Rivers.log.error",
             "Rivers.crypto.hashPassword", "Rivers.crypto.verifyPassword",
             "Rivers.crypto.randomHex", "Rivers.crypto.randomBase64url",
-            "Rivers.crypto.hmac", "Rivers.crypto.timingSafeEqual"
+            "Rivers.crypto.hmac", "Rivers.crypto.timingSafeEqual",
+            "Rivers.crypto.sha256", "Rivers.crypto.sha512"
         ];
         var ghosts = [];
         for (var i = 0; i < apis.length; i++) {
