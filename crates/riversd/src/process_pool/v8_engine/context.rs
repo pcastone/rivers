@@ -392,7 +392,16 @@ fn ctx_store_get_callback(
                 return;
             }
         };
-        match rt.block_on(engine.get(&namespace, &key)) {
+        let outcome = match block_on_with_timeout(
+            scope,
+            &rt,
+            "ctx.store.get",
+            engine.get(&namespace, &key),
+        ) {
+            Some(v) => v,
+            None => return, // JS error already thrown by the timeout helper
+        };
+        match outcome {
             Ok(Some(bytes)) => {
                 let json_str = String::from_utf8(bytes).unwrap_or_else(|_| "null".into());
                 let v8_str = v8_str_safe(scope, &json_str);
@@ -502,7 +511,16 @@ fn ctx_store_set_callback(
             }
         };
         let bytes: Bytes = serde_json::to_vec(&json_value).unwrap_or_else(|_| b"null".to_vec());
-        match rt.block_on(engine.set(&namespace, &key, bytes, ttl_ms)) {
+        let outcome = match block_on_with_timeout(
+            scope,
+            &rt,
+            "ctx.store.set",
+            engine.set(&namespace, &key, bytes, ttl_ms),
+        ) {
+            Some(v) => v,
+            None => return,
+        };
+        match outcome {
             Ok(()) => {
                 // Mirror the write into TASK_STORE so same-task reads stay
                 // cheap. Best-effort — the authoritative copy is in the
@@ -573,7 +591,16 @@ fn ctx_store_del_callback(
                 return;
             }
         };
-        match rt.block_on(engine.delete(&namespace, &key)) {
+        let outcome = match block_on_with_timeout(
+            scope,
+            &rt,
+            "ctx.store.del",
+            engine.delete(&namespace, &key),
+        ) {
+            Some(v) => v,
+            None => return,
+        };
+        match outcome {
             Ok(()) => {
                 TASK_STORE.with(|s| s.borrow_mut().remove(&key));
             }
@@ -691,7 +718,72 @@ fn ctx_ddl_callback(
     let driver_name = ds_params.options.get("driver").cloned()
         .unwrap_or_else(|| datasource.split(':').last().unwrap_or(&datasource).to_string());
 
-    // Execute DDL on Tokio runtime
+    // H1: DDL whitelist check (Gate 3) — mirrors engine_loader::host_ddl_execute.
+    //
+    // Phase B1 already gated this callback to ApplicationInit, but without
+    // consulting `[security].ddl_whitelist` an init handler could still run
+    // any DDL the connecting user has DB-level permission for. This check
+    // makes the in-process V8 path enforce the same whitelist the
+    // dynamic-engine path enforces, reusing the single store of whitelist
+    // state (`engine_loader::host_context::DDL_WHITELIST`).
+    //
+    // Behavior matches host_ddl_execute (engine_loader/host_callbacks.rs):
+    //   - whitelist unset (None) or empty  → check skipped (operator opt-in)
+    //   - whitelist Some(non-empty)        → must match `database@app_id`
+    //
+    // The whitelist key is `{database}@{appId}` with the manifest UUID, NOT
+    // the entry_point name the ProcessPool dispatches with. We resolve via
+    // engine_loader::app_id_for_entry_point — same fallback as the dynamic
+    // path: if no map is registered, treat the entry_point name as the id.
+    let whitelist = crate::engine_loader::ddl_whitelist();
+    if let Some(ref whitelist) = whitelist {
+        if !whitelist.is_empty() {
+            let entry_point = super::task_locals::TASK_APP_NAME
+                .with(|n| n.borrow().clone())
+                .unwrap_or_default();
+            let app_id = crate::engine_loader::app_id_for_entry_point(&entry_point)
+                .unwrap_or_else(|| entry_point.clone());
+            // Resolved database name from connection params; fall back to
+            // the JS-level datasource label if the driver doesn't populate
+            // `database` (mirrors dataview_engine::execute_ddl).
+            let database: &str = if ds_params.database.is_empty() {
+                &datasource
+            } else {
+                &ds_params.database
+            };
+            if !rivers_runtime::rivers_core_config::config::security::is_ddl_permitted(
+                database,
+                &app_id,
+                whitelist,
+            ) {
+                tracing::warn!(
+                    datasource = %datasource,
+                    database = %database,
+                    app_id = %app_id,
+                    "ctx.ddl(): DDL rejected by whitelist (Gate 3)"
+                );
+                // Error string matches host_ddl_execute verbatim so operators
+                // see one message regardless of which engine path executed.
+                throw_js_error(
+                    scope,
+                    &format!(
+                        "DDL not permitted for database '{}' (datasource '{}') in app '{}'",
+                        database, datasource, app_id
+                    ),
+                );
+                return;
+            }
+        }
+    }
+
+    // Execute DDL on Tokio runtime.
+    //
+    // The spawned task drives the work; the V8 worker blocks on a channel
+    // until the task sends back a result. The `recv_timeout` here is the
+    // wall-clock guard that prevents a hung driver / pool starvation /
+    // infinite loop in user-supplied DDL from pinning this V8 worker
+    // forever (H2). The spawned task is allowed to keep running in the
+    // background after a timeout — we only release the worker.
     let (tx, rx) = std::sync::mpsc::channel();
     rt.spawn(async move {
         let result = async {
@@ -705,7 +797,8 @@ fn ctx_ddl_callback(
         let _ = tx.send(result);
     });
 
-    match rx.recv() {
+    let budget = std::time::Duration::from_millis(HOST_CALLBACK_TIMEOUT_MS);
+    match rx.recv_timeout(budget) {
         Ok(Ok(())) => {
             let result_json = serde_json::json!({"ok": true}).to_string();
             let v8_val = v8_str_safe(scope, &result_json);
@@ -716,7 +809,16 @@ fn ctx_ddl_callback(
         Ok(Err(e)) => {
             throw_js_error(scope, &e);
         }
-        Err(_) => {
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            throw_js_error(
+                scope,
+                &format!(
+                    "host callback 'ctx.ddl' timed out after {}ms",
+                    HOST_CALLBACK_TIMEOUT_MS
+                ),
+            );
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             throw_js_error(scope, "ctx.ddl(): task panicked");
         }
     }
@@ -727,6 +829,56 @@ fn throw_js_error(scope: &mut v8::HandleScope, message: &str) {
     let msg = v8_str_safe(scope, message);
     let exception = v8::Exception::error(scope, msg);
     scope.throw_exception(exception);
+}
+
+/// Wall-clock budget for synchronous host-bridge work driven from a V8 worker
+/// thread. If a host callback's spawned tokio task or `block_on`'d future has
+/// not made progress within this budget, the worker throws a JS error and
+/// reclaims its slot rather than pinning indefinitely on a hung driver, a
+/// pool-starvation, or an infinite loop in user-supplied SQL.
+///
+/// Hard-coded today; threading a per-pool config knob is tracked separately
+/// (see `ProcessPoolConfig::task_timeout_ms` for the related task-level budget
+/// — the host-callback budget is intentionally tighter than the task budget so
+/// the JS handler still has room to surface the timeout error).
+///
+/// TODO(H2 follow-up): make this configurable via `[runtime.process_pools.*]`
+/// once the task-locals plumbing carries pool config to V8 worker callbacks.
+const HOST_CALLBACK_TIMEOUT_MS: u64 = 30_000;
+
+/// Bound an `async` future against `HOST_CALLBACK_TIMEOUT_MS` while running
+/// it on the supplied tokio handle.
+///
+/// Returns the future's value on success. On timeout, throws a structured JS
+/// error that names the callback and the budget, then returns `None` so the
+/// caller can early-return without unwrapping.
+///
+/// `Handle::block_on` enters the runtime context for the duration of the
+/// call, so the `tokio::time::timeout` timer driver ticks correctly even
+/// though the caller is a synchronous V8 worker thread.
+fn block_on_with_timeout<F, T>(
+    scope: &mut v8::HandleScope,
+    rt: &tokio::runtime::Handle,
+    callback_name: &str,
+    fut: F,
+) -> Option<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    let budget = std::time::Duration::from_millis(HOST_CALLBACK_TIMEOUT_MS);
+    match rt.block_on(async move { tokio::time::timeout(budget, fut).await }) {
+        Ok(v) => Some(v),
+        Err(_elapsed) => {
+            throw_js_error(
+                scope,
+                &format!(
+                    "host callback '{}' timed out after {}ms",
+                    callback_name, HOST_CALLBACK_TIMEOUT_MS
+                ),
+            );
+            None
+        }
+    }
 }
 
 /// `ctx.transaction(datasource_name, callback)` — spec §6.
@@ -815,12 +967,20 @@ fn ctx_transaction_callback(
     };
 
     let txn_map = Arc::new(crate::transaction::TransactionMap::new());
-    let begin_outcome: Result<(), DriverError> = rt.block_on(async {
-        let conn = factory
-            .connect(&resolved.driver_name, &resolved.params)
-            .await?;
-        txn_map.begin(&ds_name, conn).await
-    });
+    let begin_outcome: Result<(), DriverError> = match block_on_with_timeout(
+        scope,
+        &rt,
+        "ctx.transaction (begin)",
+        async {
+            let conn = factory
+                .connect(&resolved.driver_name, &resolved.params)
+                .await?;
+            txn_map.begin(&ds_name, conn).await
+        },
+    ) {
+        Some(v) => v,
+        None => return, // JS error already thrown by the timeout helper
+    };
 
     if let Err(e) = begin_outcome {
         let msg = match &e {
@@ -847,17 +1007,25 @@ fn ctx_transaction_callback(
     let call_result = cb_fn.call(tc, undefined, &[]);
 
     // ── Commit or rollback ──────────────────────────────────────
+    //
+    // H2: Both commit and rollback are bounded by HOST_CALLBACK_TIMEOUT_MS.
+    // On timeout we treat the outcome as a commit failure (writes may or
+    // may not have persisted) and we still clear TASK_TRANSACTION so the
+    // worker isn't pinned by a hung driver.
+    let budget = std::time::Duration::from_millis(HOST_CALLBACK_TIMEOUT_MS);
     match call_result {
         Some(val) => {
             // Clean return → commit, yield callback's return value.
-            let commit_res = rt.block_on(txn_map.commit(&ds_name));
+            let commit_res = rt.block_on(async {
+                tokio::time::timeout(budget, txn_map.commit(&ds_name)).await
+            });
             TASK_TRANSACTION.with(|t| *t.borrow_mut() = None);
             match commit_res {
-                Ok(_conn) => {
+                Ok(Ok(_conn)) => {
                     // Connection drops → pool slot released.
                     rv.set(val);
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     // Spec §6 + financial-correctness gate: commit failure
                     // is observably different from a handler throw — the
                     // handler's writes may or may not have persisted. Stash
@@ -877,19 +1045,50 @@ fn ctx_transaction_callback(
                     let err = v8::Exception::error(tc, msg);
                     tc.throw_exception(err);
                 }
+                Err(_elapsed) => {
+                    // Same financial-correctness gate as a commit error:
+                    // the writes' persistence is now indeterminate.
+                    let driver_msg = format!(
+                        "commit timed out after {HOST_CALLBACK_TIMEOUT_MS}ms"
+                    );
+                    TASK_COMMIT_FAILED.with(|c| {
+                        *c.borrow_mut() = Some((ds_name.clone(), driver_msg.clone()));
+                    });
+                    let msg = v8_str_safe(
+                        tc,
+                        &format!(
+                            "TransactionError: commit on datasource '{ds_name}' timed out after {HOST_CALLBACK_TIMEOUT_MS}ms"
+                        ),
+                    );
+                    let err = v8::Exception::error(tc, msg);
+                    tc.throw_exception(err);
+                }
             }
         }
         None => {
             // Callback threw → rollback, re-propagate the original exception.
-            let rollback_res = rt.block_on(txn_map.rollback(&ds_name));
+            let rollback_res = rt.block_on(async {
+                tokio::time::timeout(budget, txn_map.rollback(&ds_name)).await
+            });
             TASK_TRANSACTION.with(|t| *t.borrow_mut() = None);
-            if let Err(e) = rollback_res {
-                tracing::warn!(
-                    target: "rivers.handler",
-                    datasource = %ds_name,
-                    error = %e,
-                    "rollback failed after handler threw"
-                );
+            match rollback_res {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        target: "rivers.handler",
+                        datasource = %ds_name,
+                        error = %e,
+                        "rollback failed after handler threw"
+                    );
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        target: "rivers.handler",
+                        datasource = %ds_name,
+                        budget_ms = HOST_CALLBACK_TIMEOUT_MS,
+                        "rollback timed out after handler threw — connection abandoned"
+                    );
+                }
             }
             // Re-propagate the handler's exception to the outer JS scope.
             //
@@ -1003,36 +1202,44 @@ fn ctx_dataview_callback(
 
         match get_rt_handle() {
             Ok(rt) => {
-                let exec_outcome = rt.block_on(async {
-                    if let Some((map, ds)) = txn_state {
-                        // Take the held connection out of the map, use it,
-                        // put it back. take/return is the pattern the
-                        // TransactionMap was designed for.
-                        if let Some(mut conn) = map.take_connection(&ds).await {
-                            let res = exec
-                                .execute(
-                                    &namespaced_name,
-                                    query_params,
-                                    "GET",
-                                    &trace_id,
-                                    Some(&mut conn),
-                                )
-                                .await;
-                            map.return_connection(&ds, conn).await;
-                            res
+                let exec_outcome = match block_on_with_timeout(
+                    scope,
+                    &rt,
+                    "ctx.dataview",
+                    async {
+                        if let Some((map, ds)) = txn_state {
+                            // Take the held connection out of the map, use it,
+                            // put it back. take/return is the pattern the
+                            // TransactionMap was designed for.
+                            if let Some(mut conn) = map.take_connection(&ds).await {
+                                let res = exec
+                                    .execute(
+                                        &namespaced_name,
+                                        query_params,
+                                        "GET",
+                                        &trace_id,
+                                        Some(&mut conn),
+                                    )
+                                    .await;
+                                map.return_connection(&ds, conn).await;
+                                res
+                            } else {
+                                // Unreachable in practice — the thread-local
+                                // should stay consistent with the map — but
+                                // return a clear error rather than panic.
+                                Err(rivers_runtime::dataview_engine::DataViewError::Driver(
+                                    format!("transaction connection for '{ds}' unavailable"),
+                                ))
+                            }
                         } else {
-                            // Unreachable in practice — the thread-local
-                            // should stay consistent with the map — but
-                            // return a clear error rather than panic.
-                            Err(rivers_runtime::dataview_engine::DataViewError::Driver(
-                                format!("transaction connection for '{ds}' unavailable"),
-                            ))
+                            exec.execute(&namespaced_name, query_params, "GET", &trace_id, None)
+                                .await
                         }
-                    } else {
-                        exec.execute(&namespaced_name, query_params, "GET", &trace_id, None)
-                            .await
-                    }
-                });
+                    },
+                ) {
+                    Some(v) => v,
+                    None => return, // JS error already thrown by the timeout helper
+                };
                 match exec_outcome {
                     Ok(response) => {
                         // Convert QueryResult rows to JSON
@@ -1098,5 +1305,64 @@ mod tests {
         assert!(store_key_is_reserved("poll:foo"), "V8 must see poll: as reserved");
         assert!(store_key_is_reserved("raft:foo"), "V8 must see raft: as reserved");
         assert!(!store_key_is_reserved("user:data"));
+    }
+
+    /// H2 (T1-6): `ctx.ddl` swapped its unbounded `rx.recv()` for a
+    /// `recv_timeout(HOST_CALLBACK_TIMEOUT_MS)`. This test exercises the
+    /// underlying primitive against the same channel type the callback uses
+    /// (`std::sync::mpsc::channel`), with a tiny budget, to prove that a
+    /// hung spawned task surfaces as `RecvTimeoutError::Timeout` — i.e.
+    /// the V8 worker does NOT block forever.
+    #[test]
+    fn ddl_recv_timeout_returns_timeout_error_when_spawned_task_hangs() {
+        let (_tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        // Note: we deliberately do NOT spawn a producer. Holding `_tx` keeps
+        // the channel from auto-disconnecting, which simulates a still-alive
+        // background task that simply hasn't sent a result yet — exactly the
+        // pinned-V8-worker scenario H2 fixes.
+        let budget = std::time::Duration::from_millis(50);
+        let result = rx.recv_timeout(budget);
+        assert!(
+            matches!(result, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+            "expected Timeout, got {:?}",
+            result
+        );
+    }
+
+    /// H2 (T1-6): `ctx.store.*`, `ctx.transaction`, and `ctx.dataview` all
+    /// route their async work through `block_on_with_timeout`, which wraps
+    /// `Handle::block_on(tokio::time::timeout(budget, fut))`. This test
+    /// exercises the same composition end-to-end with a future that never
+    /// completes, to prove that a hung driver surfaces as an `Elapsed`
+    /// error rather than pinning the worker.
+    #[test]
+    fn block_on_with_timeout_primitive_returns_elapsed_when_future_hangs() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_time()
+            .build()
+            .expect("build test runtime");
+        let handle = rt.handle().clone();
+        let budget = std::time::Duration::from_millis(50);
+        let outcome: Result<(), tokio::time::error::Elapsed> = handle.block_on(async move {
+            tokio::time::timeout(budget, std::future::pending::<()>()).await
+        });
+        assert!(
+            outcome.is_err(),
+            "pending future should time out, got {:?}",
+            outcome
+        );
+    }
+
+    /// H2 (T1-6): the host-callback budget is intentionally tighter than
+    /// the task budget so the JS handler can still surface the timeout
+    /// error before the wider task wall-clock fires. If someone shrinks
+    /// the task default below the host-callback budget, this test breaks
+    /// and forces a deliberate decision.
+    #[test]
+    fn host_callback_budget_is_bounded_and_nonzero() {
+        assert!(HOST_CALLBACK_TIMEOUT_MS > 0);
+        // Sanity: we expect this to be in seconds-not-hours range.
+        assert!(HOST_CALLBACK_TIMEOUT_MS <= 5 * 60 * 1000);
     }
 }

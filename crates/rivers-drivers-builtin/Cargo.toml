@@ -25,6 +25,8 @@ base64 = { workspace = true }
 glob = { workspace = true }
 regex = { workspace = true }
 chrono = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 async-memcached = { workspace = true }

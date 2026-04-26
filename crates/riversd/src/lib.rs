@@ -23,6 +23,8 @@ pub mod graphql;
 pub mod guard;
 pub mod hot_reload;
 pub mod health;
+/// Shared outbound HTTP client (V8 + dynamic-engine host callbacks).
+pub mod http_client;
 pub mod keystore;
 pub mod init_handler;
 pub mod message_consumer;

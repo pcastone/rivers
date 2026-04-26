@@ -43,7 +43,12 @@ pub extern "C" fn _rivers_engine_init() -> i32 {
 #[no_mangle]
 pub extern "C" fn _rivers_engine_init_with_callbacks(callbacks: *const HostCallbacks) -> i32 {
     if !callbacks.is_null() {
-        let cb = unsafe { std::ptr::read(callbacks) };
+        // SAFETY: Caller (riversd) guarantees `callbacks` points to a valid,
+        // initialized `HostCallbacks` for the duration of this call.
+        // `HostCallbacks: Copy` is enforced at the type level (see its derive
+        // in rivers-engine-sdk), so `*p` is a sound bitwise read — no Drop
+        // semantics, no aliasing concerns.
+        let cb = unsafe { *callbacks };
         let _ = HOST_CALLBACKS.set(cb);
     }
     _rivers_engine_init()
@@ -214,6 +219,15 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use rivers_engine_sdk::SerializedTaskResult;
+
+    #[test]
+    fn host_callbacks_is_copy() {
+        // Compile-time assertion: HostCallbacks must remain bitwise-copyable so
+        // that `_rivers_engine_init_with_callbacks`'s `*p` read is sound. If
+        // any field becomes non-Copy this test (and the trait bound) fail.
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<HostCallbacks>();
+    }
 
     fn make_ctx(source: &str, function: &str) -> SerializedTaskContext {
         SerializedTaskContext {

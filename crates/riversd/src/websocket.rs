@@ -97,20 +97,25 @@ impl ConnectionRegistry {
     /// Register a new connection. Returns `Err(ConnectionLimitExceeded)` if at capacity.
     ///
     /// Per spec §6.4: 503 when max_connections exceeded.
+    ///
+    /// H5 / T2-2 fix: the limit check and the insert happen under the same
+    /// `write().await`. Previously the count was loaded outside the write
+    /// lock, so N concurrent registers could each observe `count < max`,
+    /// then all proceed to insert → final count > max. The borrow checker
+    /// keeps `len()` and `insert()` atomic by construction now.
     pub async fn register(
         &self,
         info: ConnectionInfo,
     ) -> Result<broadcast::Receiver<WebSocketMessage>, WebSocketError> {
-        if let Some(max) = self.max_connections {
-            if self.connection_count.load(Ordering::Relaxed) >= max {
-                return Err(WebSocketError::ConnectionLimitExceeded(max));
-            }
-        }
-
         let (tx, rx) = broadcast::channel(256);
         let id = info.id.0.clone();
 
         let mut conns = self.connections.write().await;
+        if let Some(max) = self.max_connections {
+            if conns.len() >= max {
+                return Err(WebSocketError::ConnectionLimitExceeded(max));
+            }
+        }
         conns.insert(
             id,
             ConnectionEntry {
@@ -118,6 +123,8 @@ impl ConnectionRegistry {
                 sender: tx,
             },
         );
+        // Keep the atomic counter in sync as a fast accessor; the map's
+        // length under the write lock is the source of truth for the limit.
         self.connection_count.fetch_add(1, Ordering::Relaxed);
 
         Ok(rx)
@@ -201,13 +208,26 @@ impl BroadcastHub {
     }
 
     /// Subscribe a new connection. Returns `Err(ConnectionLimitExceeded)` if at capacity.
+    ///
+    /// H5 / T2-2 fix: the limit check and the counter increment are performed
+    /// atomically via `compare_exchange` (`fetch_update`). Previously the
+    /// load-then-add pattern allowed a burst of N concurrent subscribes to
+    /// each observe `count < max` and all proceed → final count > max.
     pub fn subscribe(&self) -> Result<broadcast::Receiver<WebSocketMessage>, WebSocketError> {
         if let Some(max) = self.max_connections {
-            if self.connection_count.load(Ordering::Relaxed) >= max {
-                return Err(WebSocketError::ConnectionLimitExceeded(max));
-            }
+            // Atomically: if current < max, set to current+1; else fail.
+            self.connection_count
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    if current < max {
+                        Some(current + 1)
+                    } else {
+                        None
+                    }
+                })
+                .map_err(|_| WebSocketError::ConnectionLimitExceeded(max))?;
+        } else {
+            self.connection_count.fetch_add(1, Ordering::Relaxed);
         }
-        self.connection_count.fetch_add(1, Ordering::Relaxed);
         Ok(self.sender.subscribe())
     }
 
@@ -780,5 +800,80 @@ mod tests {
         detector.check_lag(); // Critical
         detector.check_lag(); // Critical again
         assert_eq!(detector.total_lag_events(), 2);
+    }
+
+    // ── H5 / T2-2: connection-limit race regression tests ───
+
+    /// 200 concurrent subscribes against a `BroadcastHub` with `max=50`
+    /// must yield exactly 50 successes and 150 `ConnectionLimitExceeded`.
+    /// Pre-fix: load-then-add could let count exceed 50.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn ws_broadcast_concurrent_subscribes_respect_max() {
+        const MAX: usize = 50;
+        const CONCURRENT: usize = 200;
+
+        let hub = Arc::new(BroadcastHub::new(Some(MAX)));
+
+        let mut handles = Vec::with_capacity(CONCURRENT);
+        for _ in 0..CONCURRENT {
+            let h = hub.clone();
+            handles.push(tokio::spawn(async move { h.subscribe() }));
+        }
+
+        let mut successes = 0usize;
+        let mut failures = 0usize;
+        for handle in handles {
+            match handle.await.expect("task panicked") {
+                Ok(_) => successes += 1,
+                Err(WebSocketError::ConnectionLimitExceeded(_)) => failures += 1,
+                Err(other) => panic!("unexpected error: {other:?}"),
+            }
+        }
+
+        assert_eq!(successes, MAX, "exactly MAX subscribes should succeed");
+        assert_eq!(failures, CONCURRENT - MAX);
+        assert_eq!(hub.active_connections(), MAX);
+    }
+
+    /// 200 concurrent registers against a `ConnectionRegistry` with `max=50`
+    /// must yield exactly 50 successes and 150 `ConnectionLimitExceeded`.
+    /// Pre-fix: count load was outside the write lock — the insert could
+    /// push the registry past its limit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn ws_direct_concurrent_registers_respect_max() {
+        const MAX: usize = 50;
+        const CONCURRENT: usize = 200;
+
+        let registry = Arc::new(ConnectionRegistry::new(Some(MAX)));
+
+        let mut handles = Vec::with_capacity(CONCURRENT);
+        for _ in 0..CONCURRENT {
+            let r = registry.clone();
+            handles.push(tokio::spawn(async move {
+                let info = ConnectionInfo {
+                    id: ConnectionId::new(),
+                    view_id: "view-x".to_string(),
+                    connected_at: chrono::Utc::now(),
+                    session_id: None,
+                    path_params: HashMap::new(),
+                };
+                r.register(info).await
+            }));
+        }
+
+        let mut successes = 0usize;
+        let mut failures = 0usize;
+        for handle in handles {
+            match handle.await.expect("task panicked") {
+                Ok(_) => successes += 1,
+                Err(WebSocketError::ConnectionLimitExceeded(_)) => failures += 1,
+                Err(other) => panic!("unexpected error: {other:?}"),
+            }
+        }
+
+        assert_eq!(successes, MAX, "exactly MAX registers should succeed");
+        assert_eq!(failures, CONCURRENT - MAX);
+        assert_eq!(registry.active_connections(), MAX);
+        assert_eq!(registry.all_connection_ids().await.len(), MAX);
     }
 }

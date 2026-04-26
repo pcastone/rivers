@@ -128,7 +128,10 @@ fn do_http_request(
     let rt = get_rt_handle().map_err(|e| e.to_string())?;
 
     rt.block_on(async {
-        let client = reqwest::Client::new();
+        // Phase H6 / T2-6: shared client carries the outbound timeout policy.
+        // Without it, a stalled upstream pinned the V8 worker indefinitely
+        // (H2 only bounded the channel-recv side of the host bridge).
+        let client = crate::http_client::outbound_client();
         let mut builder = match method {
             "GET" => client.get(url),
             "POST" => client.post(url),

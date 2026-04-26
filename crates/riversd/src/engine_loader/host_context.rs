@@ -45,7 +45,11 @@ pub fn set_host_context(
         dataview_executor,
         storage_engine,
         driver_factory,
-        http_client: reqwest::Client::new(),
+        // Phase H7 / T2-7: timeout-bounded shared client. Without it, a
+        // stalled upstream pinned the dynamic engine worker indefinitely
+        // because `host_http_request` blocks on `recv()` for the spawned
+        // request future. Same policy as the V8 path (H6).
+        http_client: crate::http_client::outbound_client().clone(),
         rt_handle: tokio::runtime::Handle::current(),
     });
 }
@@ -68,6 +72,29 @@ pub fn set_ddl_whitelist(whitelist: Vec<String>) {
 /// used in whitelist entries.
 pub fn set_app_id_map(map: std::collections::HashMap<String, String>) {
     let _ = APP_ID_MAP.set(map);
+}
+
+/// Read the configured DDL whitelist, if one was set during startup.
+///
+/// Returns `None` when `set_ddl_whitelist` has not been called (e.g. tests
+/// that don't wire one). Returns `Some(vec)` otherwise — the vec may be
+/// empty when the operator configured no entries.
+///
+/// Mirrors the read pattern in `host_callbacks::host_ddl_execute` so the V8
+/// in-process callback (`ctx.ddl()`) and the dynamic-engine callback share
+/// a single source of whitelist state — there must not be two stores.
+pub fn ddl_whitelist() -> Option<Vec<String>> {
+    DDL_WHITELIST.get().cloned()
+}
+
+/// Resolve a ProcessPool entry_point name to the manifest app_id (UUID).
+///
+/// The ProcessPool dispatches with entry_point as `app_id`, but the DDL
+/// whitelist is keyed by the manifest UUID (`database@uuid`). When no
+/// mapping is configured, callers should fall back to the entry_point
+/// itself — same behavior as `host_callbacks::host_ddl_execute`.
+pub fn app_id_for_entry_point(entry_point: &str) -> Option<String> {
+    APP_ID_MAP.get().and_then(|m| m.get(entry_point).cloned())
 }
 
 // ── Host Callback Implementations ───────────────────────────────

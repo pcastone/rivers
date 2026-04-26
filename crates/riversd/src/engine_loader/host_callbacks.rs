@@ -493,9 +493,13 @@ pub(super) extern "C" fn host_log_message(
     if msg_ptr.is_null() || msg_len == 0 {
         return;
     }
-    let msg = unsafe {
-        std::str::from_utf8_unchecked(std::slice::from_raw_parts(msg_ptr, msg_len))
-    };
+    // SAFETY: ptr/len pair is guaranteed by the engine ABI to point to a valid
+    // byte buffer of exactly `msg_len` bytes for the duration of this call.
+    let slice = unsafe { std::slice::from_raw_parts(msg_ptr, msg_len) };
+    // Use lossy UTF-8 conversion: a buggy or malicious cdylib sending non-UTF-8
+    // bytes must not cause UB here. Invalid sequences become U+FFFD. The log
+    // path is not hot enough to need `from_utf8_unchecked`.
+    let msg = String::from_utf8_lossy(slice);
     match level {
         0 => tracing::trace!(target: "rivers.engine", "{}", msg),
         1 => tracing::debug!(target: "rivers.engine", "{}", msg),

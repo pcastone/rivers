@@ -194,7 +194,17 @@ pub struct EngineConfig {
 /// All callbacks use raw byte buffers (ptr + len) for input/output.
 /// Returns 0 on success, non-zero on error. Output buffers are allocated
 /// by the callee and freed via `free_buffer`.
+///
+/// # Copy invariant
+///
+/// Engine cdylibs read this struct by value across the FFI boundary
+/// (e.g. `*p` after a null-check). The `Copy` derive is load-bearing —
+/// it is a compile-time assertion that every field is bitwise-copyable.
+/// Adding a non-`Copy` field (e.g. `String`, `Vec`) here will fail to
+/// compile, which is exactly the static guard we want; do not work
+/// around that with `unsafe impl Copy`.
 #[repr(C)]
+#[derive(Copy, Clone)]
 pub struct HostCallbacks {
     /// Execute a DataView query. Input: JSON `{"name": "...", "params": {...}}`.
     /// Output: JSON result rows.

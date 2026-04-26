@@ -36,15 +36,26 @@ fn pool_cache() -> &'static Mutex<HashMap<String, mysql_async::Pool>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Hash-stable key for a connection tuple. Password is intentionally excluded
-/// — two datasources with the same host/port/db/user but different passwords
-/// should not share a pool, but that's an edge case; if it happens the pool
-/// auth will simply reject on first checkout and we'll re-create next time.
-/// Including the password would leak secret bytes into map keys.
+/// Hash-stable key for a connection tuple. Includes a SHA-256 fingerprint
+/// of the password (first 8 bytes hex, ~32 bits) so two datasources sharing
+/// host/port/db/user but with different passwords get isolated pools — the
+/// rotation / multi-tenant case. The earlier rationale "auth will simply
+/// reject and we'll re-create next time" was wrong: `get_or_create_pool`
+/// returns the cached pool unconditionally with no eviction, so the first
+/// password to land would win permanently.
+///
+/// Raw password bytes are never stored in the key — only the hash digest.
+/// 32 bits of fingerprint is far more than enough to distinguish a handful
+/// of credentials in a single-process cache; collision risk for distinct
+/// passwords is ~1 in 4 billion.
 fn pool_key(params: &ConnectionParams) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(params.password.as_bytes());
+    let pwd_fingerprint = hex::encode(&hasher.finalize()[..8]);
     format!(
-        "{}:{}/{}?u={}",
-        params.host, params.port, params.database, params.username
+        "{}:{}/{}?u={}#{}",
+        params.host, params.port, params.database, params.username, pwd_fingerprint,
     )
 }
 
@@ -65,6 +76,32 @@ fn get_or_create_pool(params: &ConnectionParams) -> Result<mysql_async::Pool, Dr
     let pool = mysql_async::Pool::new(opts);
     cache.insert(key, pool.clone());
     Ok(pool)
+}
+
+/// Evict a pool entry by params. Used on auth failure so the next `connect`
+/// rebuilds against fresh credentials (e.g., after rotation while the cache
+/// still holds the old pool).
+fn evict_pool(params: &ConnectionParams) -> Result<(), DriverError> {
+    let key = pool_key(params);
+    let mut cache = pool_cache()
+        .lock()
+        .map_err(|e| DriverError::Connection(format!("mysql pool cache poisoned: {e}")))?;
+    cache.remove(&key);
+    Ok(())
+}
+
+/// Detect MySQL auth-failure server errors:
+///   1045 ER_ACCESS_DENIED_ERROR    — access denied for user
+///   1044 ER_DBACCESS_DENIED_ERROR  — access denied for user to database
+///
+/// These are the codes that indicate stale/wrong credentials and warrant a
+/// pool eviction + retry. Other server errors (table not found, etc.) leave
+/// the pool intact.
+fn is_auth_error(err: &mysql_async::Error) -> bool {
+    matches!(
+        err,
+        mysql_async::Error::Server(srv) if srv.code == 1045 || srv.code == 1044
+    )
 }
 
 /// Supported field types for the MySQL driver.
@@ -98,12 +135,26 @@ impl DatabaseDriver for MysqlDriver {
         // teardown bug that killed mysql_async background tasks. That fix
         // landed separately; pooled connections are safe again and avoid
         // the full handshake per dataview call.
+        //
+        // H4: on first-checkout auth failure (stale pool from rotated
+        // credentials, or an OnceLock entry that was created with a wrong
+        // password), evict the cache entry and rebuild once. The pool key
+        // already separates by password fingerprint so this only fires when
+        // the live server password no longer matches what was used to seed
+        // the pool — typically rotation.
         let pool = get_or_create_pool(params)?;
-        let conn = pool
-            .get_conn()
-            .await
-            .map_err(|e| DriverError::Connection(format!("mysql checkout: {e}")))?;
-        Ok(Box::new(MysqlConnection { conn }))
+        match pool.get_conn().await {
+            Ok(conn) => Ok(Box::new(MysqlConnection { conn })),
+            Err(e) if is_auth_error(&e) => {
+                evict_pool(params)?;
+                let fresh = get_or_create_pool(params)?;
+                let conn = fresh.get_conn().await.map_err(|e| {
+                    DriverError::Connection(format!("mysql checkout (after auth retry): {e}"))
+                })?;
+                Ok(Box::new(MysqlConnection { conn }))
+            }
+            Err(e) => Err(DriverError::Connection(format!("mysql checkout: {e}"))),
+        }
     }
 
     fn needs_isolated_runtime(&self) -> bool {
@@ -799,6 +850,72 @@ mod tests {
         let a = pool_key(&params_for("h1", 3306, "u", "db1"));
         let b = pool_key(&params_for("h1", 3306, "u", "db1"));
         assert_eq!(a, b, "same params must produce same key");
+    }
+
+    #[test]
+    fn pool_key_distinguishes_passwords() {
+        // H4: same host/port/db/user, different passwords → different keys.
+        // Without this, password rotation or multi-tenant credentials sharing
+        // a logical user would collide on the first pool ever created.
+        let mut a = params_for("h1", 3306, "u", "db1");
+        a.password = "secret_a".into();
+        let mut b = params_for("h1", 3306, "u", "db1");
+        b.password = "secret_b".into();
+        assert_ne!(
+            pool_key(&a),
+            pool_key(&b),
+            "rotating a password must yield a distinct pool key"
+        );
+    }
+
+    #[test]
+    fn pool_key_stable_for_same_password() {
+        let mut a = params_for("h1", 3306, "u", "db1");
+        a.password = "shared".into();
+        let mut b = params_for("h1", 3306, "u", "db1");
+        b.password = "shared".into();
+        assert_eq!(
+            pool_key(&a),
+            pool_key(&b),
+            "same params + same password must produce same key"
+        );
+    }
+
+    #[test]
+    fn pool_key_does_not_leak_raw_password() {
+        // H4: raw password bytes must never appear in the cache key — only
+        // the hex-encoded SHA-256 fingerprint.
+        let mut p = params_for("h1", 3306, "u", "db1");
+        p.password = "supersecret_p@ssw0rd".into();
+        let key = pool_key(&p);
+        assert!(
+            !key.contains("supersecret_p@ssw0rd"),
+            "pool key must not contain raw password bytes: {key}"
+        );
+    }
+
+    #[test]
+    fn is_auth_error_matches_access_denied_codes() {
+        // H4: 1045 + 1044 are the MySQL access-denied codes that warrant
+        // pool eviction + retry. Other server errors should not trigger it.
+        let access_denied_user = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1045,
+            message: "Access denied for user".into(),
+            state: "28000".into(),
+        });
+        let access_denied_db = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1044,
+            message: "Access denied for user to database".into(),
+            state: "42000".into(),
+        });
+        let table_missing = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1146,
+            message: "Table doesn't exist".into(),
+            state: "42S02".into(),
+        });
+        assert!(is_auth_error(&access_denied_user));
+        assert!(is_auth_error(&access_denied_db));
+        assert!(!is_auth_error(&table_missing));
     }
 
     #[test]

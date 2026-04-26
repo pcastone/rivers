@@ -165,13 +165,26 @@ impl SseChannel {
     }
 
     /// Subscribe a new client. Returns receiver or error if at capacity.
+    ///
+    /// H5 / T2-2 fix: the limit check and the counter increment are performed
+    /// atomically via `compare_exchange` (`fetch_update`). Previously the
+    /// load-then-add pattern allowed a burst of N concurrent subscribes to
+    /// each observe `count < max` and all proceed → final count > max.
     pub fn subscribe(&self) -> Result<broadcast::Receiver<SseEvent>, SseError> {
         if let Some(max) = self.max_connections {
-            if self.connection_count.load(Ordering::Relaxed) >= max {
-                return Err(SseError::ConnectionLimitExceeded(max));
-            }
+            // Atomically: if current < max, set to current+1; else fail.
+            self.connection_count
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    if current < max {
+                        Some(current + 1)
+                    } else {
+                        None
+                    }
+                })
+                .map_err(|_| SseError::ConnectionLimitExceeded(max))?;
+        } else {
+            self.connection_count.fetch_add(1, Ordering::Relaxed);
         }
-        self.connection_count.fetch_add(1, Ordering::Relaxed);
         Ok(self.sender.subscribe())
     }
 
@@ -793,5 +806,38 @@ mod tests {
         let channel = SseChannel::new(None, 0, vec![]);
         let missed = channel.replay_since("1");
         assert!(missed.is_empty());
+    }
+
+    // ── H5 / T2-2: connection-limit race regression test ───
+
+    /// 200 concurrent subscribes against an `SseChannel` with `max=50`
+    /// must yield exactly 50 successes and 150 `ConnectionLimitExceeded`.
+    /// Pre-fix: load-then-add could let count exceed 50 under contention.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sse_concurrent_subscribes_respect_max() {
+        const MAX: usize = 50;
+        const CONCURRENT: usize = 200;
+
+        let channel = Arc::new(SseChannel::new(Some(MAX), 0, vec![]));
+
+        let mut handles = Vec::with_capacity(CONCURRENT);
+        for _ in 0..CONCURRENT {
+            let c = channel.clone();
+            handles.push(tokio::spawn(async move { c.subscribe() }));
+        }
+
+        let mut successes = 0usize;
+        let mut failures = 0usize;
+        for handle in handles {
+            match handle.await.expect("task panicked") {
+                Ok(_) => successes += 1,
+                Err(SseError::ConnectionLimitExceeded(_)) => failures += 1,
+                Err(other) => panic!("unexpected error: {other:?}"),
+            }
+        }
+
+        assert_eq!(successes, MAX, "exactly MAX subscribes should succeed");
+        assert_eq!(failures, CONCURRENT - MAX);
+        assert_eq!(channel.active_connections(), MAX);
     }
 }

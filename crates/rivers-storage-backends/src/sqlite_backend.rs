@@ -61,6 +61,16 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// H12/T2-2: Compute an absolute expiry timestamp from a base time and a
+/// TTL, saturating at `u64::MAX` instead of wrapping.
+///
+/// The previous implementation (`now_ms() + ttl`) wrapped on overflow: a
+/// TTL near `u64::MAX` (or any pathological value) produced a tiny
+/// expiry, evicting the entry immediately on the next `get()`.
+fn compute_expiry(now: u64, ttl: u64) -> u64 {
+    now.saturating_add(ttl)
+}
+
 #[async_trait]
 impl StorageEngine for SqliteStorageEngine {
     async fn get(&self, namespace: &str, key: &str) -> Result<Option<Bytes>, StorageError> {
@@ -116,7 +126,7 @@ impl StorageEngine for SqliteStorageEngine {
         let conn = Arc::clone(&self.conn);
         let ns = namespace.to_string();
         let k = key.to_string();
-        let expires_at = ttl_ms.map(|ttl| now_ms() + ttl);
+        let expires_at = ttl_ms.map(|ttl| compute_expiry(now_ms(), ttl));
 
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().map_err(|e| StorageError::Backend(format!("lock: {e}")))?;
@@ -210,7 +220,7 @@ impl StorageEngine for SqliteStorageEngine {
         let ns = namespace.to_string();
         let k = key.to_string();
         let now = now_ms();
-        let expires_at = ttl_ms.map(|ttl| now + ttl);
+        let expires_at = ttl_ms.map(|ttl| compute_expiry(now, ttl));
 
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().map_err(|e| StorageError::Backend(format!("lock: {e}")))?;
@@ -261,6 +271,25 @@ impl StorageEngine for SqliteStorageEngine {
 mod tests {
     use super::*;
     use rivers_core_config::storage::StorageEngine;
+
+    // ── H12/T2-2: TTL arithmetic must saturate on overflow ────────────
+
+    #[test]
+    fn ttl_overflow_saturates_at_u64_max() {
+        // ttl ≈ u64::MAX must not wrap into a tiny expiry.
+        assert_eq!(compute_expiry(100, u64::MAX), u64::MAX);
+        // base near u64::MAX + small ttl saturates instead of wrapping.
+        assert_eq!(compute_expiry(u64::MAX - 1, 100), u64::MAX);
+        // Both at MAX still saturates.
+        assert_eq!(compute_expiry(u64::MAX, u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn ttl_normal_addition_unaffected() {
+        // Regression: the saturating change must not skew normal values.
+        assert_eq!(compute_expiry(1_000, 5_000), 6_000);
+        assert_eq!(compute_expiry(0, 0), 0);
+    }
 
     /// Create an in-memory SQLite engine for tests (no file I/O needed).
     fn new_engine() -> SqliteStorageEngine {

@@ -359,3 +359,21 @@ Earlier misdiagnosis worth noting for the record: the CS0.2 revision (dated earl
 **Decision:** Report the dynamic engine `HOST_KEYSTORE` path as a cross-crate wiring gap, not as a small missing call-site nit.
 **Spec reference:** User request to catch `register_X`/caller-style wiring gaps spanning crates; dynamic build mode is a documented Rivers deployment mode.
 **Resolution:** `set_host_keystore()` has no runtime caller, and the one-shot global shape cannot represent app-scoped or hot-reloaded keystores even if called. The recommended resolution is shared resolver wiring or explicit dynamic-mode capability rejection.
+
+## 2026-04-25 — Phase H5 / T2-2: WS+SSE connection-limit race
+
+### H5.1 — Two strategies based on existing storage shape
+
+**File:** `crates/riversd/src/websocket.rs` (`BroadcastHub::subscribe`, `ConnectionRegistry::register`), `crates/riversd/src/sse.rs` (`SseChannel::subscribe`)
+**Decision:** Apply two different fix shapes depending on whether the structure has an associated map under a write lock.
+**Spec reference:** `rivers-view-layer-spec.md §6.4`, `§7.4`. Standard 4 (reuse what fits without contortions).
+**Resolution:**
+- `BroadcastHub` and `SseChannel` track only an `AtomicUsize` (no associated map), so the limit check + increment was rewritten as a single `compare_exchange` via `AtomicUsize::fetch_update`. The closure returns `Some(c+1)` when `c < max` and `None` otherwise; the `Err` branch maps to `ConnectionLimitExceeded`. AcqRel ordering pairs with the visible state the counter guards.
+- `ConnectionRegistry` already takes a `RwLock<HashMap>` write lock during insert. The fix moves the `count >= max` check inside the same `write().await` and uses `conns.len()` as the source of truth. The `AtomicUsize` counter is kept in sync purely as a fast `active_connections()` accessor — the limit decision no longer depends on it.
+
+### H5.2 — Concurrent regression tests use multi-thread tokio flavor
+
+**File:** `crates/riversd/src/websocket.rs` (test module), `crates/riversd/src/sse.rs` (test module)
+**Decision:** Add three `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]` regression tests (200 concurrent ops, max=50 → expect exactly 50 ok / 150 limit-exceeded).
+**Spec reference:** Standard 5 (push once more — verify the property holds, not just that the obvious case passes).
+**Resolution:** Single-threaded runtime cannot exhibit the race because tasks never preempt each other. Only the multi-thread flavor exercises true cross-thread contention on the atomic / write lock. All three tests pass on first run; one test also asserts `all_connection_ids().await.len() == MAX` to confirm the map size matches the counter.
