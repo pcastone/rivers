@@ -108,6 +108,19 @@ impl DynTransactionMap {
         map.contains_key(&(task_id, ds_name.to_string()))
     }
 
+    /// Snapshot the datasource names that have an active transaction for the
+    /// given task. Used by `host_dataview_execute` (I6) to enforce the
+    /// spec §6.2 cross-datasource rule: if the task already holds a txn on
+    /// a different datasource, the dataview call must reject rather than
+    /// silently use a fresh pool connection.
+    pub fn task_active_datasources(&self, task_id: TaskId) -> Vec<String> {
+        let map = self.inner.lock().expect("DynTxnMap mutex poisoned");
+        map.keys()
+            .filter(|(t, _)| *t == task_id)
+            .map(|(_, ds)| ds.clone())
+            .collect()
+    }
+
     /// Apply an async closure to the connection in place, then re-insert.
     /// Used by `host_dataview_execute` to thread the txn connection through
     /// `DataViewExecutor::execute(..., txn_conn = Some(&mut conn))` without

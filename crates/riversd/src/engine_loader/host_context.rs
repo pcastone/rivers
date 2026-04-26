@@ -23,7 +23,12 @@ pub(crate) const HOST_CALLBACK_TIMEOUT_MS: u64 = 30_000;
 // ── Host Context (OnceLock subsystem references) ────────────────
 
 /// Subsystem references for host callbacks. Set once after server init.
-pub(super) struct HostContext {
+///
+/// Visibility is `pub(crate)` (not `pub(super)`) so tests in
+/// `process_pool/mod.rs` can reach it via `HOST_CONTEXT_FOR_TESTS` to drive
+/// the I7 dispatch lifecycle. Production callers still go through the
+/// `set_host_context` setter; the struct fields remain `pub(super)`.
+pub(crate) struct HostContext {
     pub(super) dataview_executor: Arc<tokio::sync::RwLock<Option<Arc<rivers_runtime::DataViewExecutor>>>>,
     pub(super) storage_engine: Option<Arc<dyn rivers_runtime::rivers_core::storage::StorageEngine>>,
     pub(super) driver_factory: Option<Arc<rivers_runtime::rivers_core::DriverFactory>>,
@@ -105,6 +110,24 @@ pub(crate) fn current_task_id() -> Option<TaskId> {
 #[cfg(test)]
 pub(crate) fn set_current_task_id_for_test(id: Option<TaskId>) {
     CURRENT_TASK_ID.with(|c| c.set(id));
+}
+
+/// Test-only accessor for the `HostContext` `OnceLock`. Used by the I7
+/// dispatch tests (in `process_pool/mod.rs`) so the closure-driven engine
+/// runner can reach the `HostContext` without crossing the private
+/// `pub(super) HOST_CONTEXT` visibility boundary.
+#[cfg(test)]
+pub(crate) static HOST_CONTEXT_FOR_TESTS: &OnceLock<HostContext> = &HOST_CONTEXT;
+
+/// Test-only check whether `TASK_DS_CONFIGS` has an entry for
+/// `(task_id, namespaced_ds)`. Used by I7 dispatch tests to verify
+/// `TaskGuard::drop` cleared the per-task stash.
+#[cfg(test)]
+pub(crate) fn lookup_task_ds_for_test(
+    task_id: TaskId,
+    namespaced_ds: &str,
+) -> Option<(String, rivers_runtime::rivers_driver_sdk::ConnectionParams)> {
+    lookup_task_ds(task_id, namespaced_ds)
 }
 
 /// Setter for the dyn-engine commit-failure thread-local. Used by

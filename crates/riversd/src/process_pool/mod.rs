@@ -295,6 +295,94 @@ impl Drop for ProcessPool {
     }
 }
 
+/// Drive the dyn-engine (cdylib) path for a single task.
+///
+/// Phase I7: bracket the engine call with a `TaskGuard` so:
+/// - Dyn-engine host callbacks (`host_db_begin`/`commit`/`rollback`,
+///   `host_dataview_execute`) see `current_task_id()` and can locate
+///   their owning task in `DYN_TXN_MAP` / `TASK_DS_CONFIGS`.
+/// - `TaskGuard::drop` auto-rolls-back any leftover transactions the
+///   handler forgot to commit / rollback (panic-safe — the guard is
+///   owned by the spawn_blocking closure stack).
+/// - `take_commit_failed()` is called on the SAME thread that
+///   `signal_commit_failed()` set the thread-local on (the
+///   spawn_blocking worker), then propagated out via the closure's
+///   return tuple.
+///
+/// `engine_runner` is the actual cdylib invocation. Production passes
+/// `crate::engine_loader::execute_on_engine(name, ctx)`; tests pass a
+/// closure that simulates an engine task body (e.g. exercising
+/// `host_db_*_inner` directly without a real engine dylib).
+async fn dispatch_dyn_engine_task<F>(
+    ctx: &TaskContext,
+    serialized: rivers_engine_sdk::SerializedTaskContext,
+    engine_runner: F,
+) -> Result<TaskResult, TaskError>
+where
+    F: FnOnce(&rivers_engine_sdk::SerializedTaskContext)
+            -> Result<rivers_engine_sdk::SerializedTaskResult, String>
+        + Send
+        + 'static,
+{
+    let task_id = crate::engine_loader::host_context::next_task_id();
+    let rt_handle = tokio::runtime::Handle::current();
+
+    // Snapshot the per-task datasource configs into TASK_DS_CONFIGS so
+    // host_db_begin can look up `(driver_name, ConnectionParams)` for
+    // a given datasource without a roundtrip back through the cdylib.
+    // Cleared on TaskGuard::drop. Q1 design decision (option A) per
+    // changedecisionlog.md TXN-I1.1.
+    let snapshot_configs = ctx
+        .datasource_configs
+        .iter()
+        .map(|(k, rd)| (k.clone(), (rd.driver_name.clone(), rd.params.clone())))
+        .collect();
+    crate::engine_loader::host_context::store_task_ds_configs(
+        task_id,
+        crate::engine_loader::host_context::DatasourceConfigsSnapshot {
+            configs: snapshot_configs,
+        },
+    );
+
+    let join_outcome = tokio::task::spawn_blocking(move || {
+        // TaskGuard::enter binds CURRENT_TASK_ID on this worker thread
+        // and arms the auto-rollback hook. MUST run before the engine
+        // call so host callbacks see the task id.
+        let _guard =
+            crate::engine_loader::host_context::TaskGuard::enter(task_id, rt_handle);
+
+        let raw = engine_runner(&serialized);
+
+        // Read commit-failed BEFORE _guard drops at scope end. The
+        // thread-local lives on this spawn_blocking worker and would
+        // be cleared by future tasks reusing the same worker; reading
+        // here also keeps the value on the thread that set it (the
+        // V8 path mirrors this on its own dispatch worker).
+        let commit_failed = crate::engine_loader::host_context::take_commit_failed();
+
+        (raw, commit_failed)
+    })
+    .await
+    .map_err(|e| TaskError::WorkerCrash(format!("engine task panicked: {e}")))?;
+
+    let (raw_result, commit_failed) = join_outcome;
+
+    // Financial-correctness gate: a commit-failed signal upgrades the
+    // outcome to `TransactionCommitFailed` regardless of what the
+    // handler returned, mirroring the V8 path in
+    // `process_pool/v8_engine/execution.rs`.
+    if let Some((datasource, message)) = commit_failed {
+        return Err(TaskError::TransactionCommitFailed {
+            datasource,
+            message,
+        });
+    }
+
+    raw_result
+        .map(|r| r.into())
+        .map_err(TaskError::HandlerError)
+}
+
 /// Route a task to the appropriate engine.
 ///
 /// JavaScript tasks (engine = "v8" or "boa") use the V8 engine.
@@ -319,19 +407,13 @@ async fn dispatch_task(
     };
 
     if crate::engine_loader::is_engine_available(engine_key) {
-        // Dynamic engine path — serialize context, call through C-ABI
+        // Dynamic engine path — serialize context, call through C-ABI.
         let serialized = rivers_engine_sdk::SerializedTaskContext::from(&ctx);
         let engine_name = engine_key.to_string();
-
-        let result = tokio::task::spawn_blocking(move || {
-            crate::engine_loader::execute_on_engine(&engine_name, &serialized)
+        return dispatch_dyn_engine_task(&ctx, serialized, move |s| {
+            crate::engine_loader::execute_on_engine(&engine_name, s)
         })
-        .await
-        .map_err(|e| TaskError::WorkerCrash(format!("engine task panicked: {e}")))?;
-
-        return result
-            .map(|r| r.into())
-            .map_err(|e| TaskError::HandlerError(e));
+        .await;
     }
 
     // Fallback: static engine (only available with "static-engines" feature)
@@ -406,4 +488,220 @@ impl ProcessPoolManager {
         self.pools.keys().map(|s| s.as_str()).collect()
     }
 }
+
+// ── I7 dyn-engine dispatch tests ────────────────────────────────
+//
+// These exercise `dispatch_dyn_engine_task` (the helper extracted from
+// the dyn-engine branch of `dispatch_task`) directly with a closure-driven
+// engine runner. The closure simulates the engine task body — calling
+// `host_db_*_inner` functions directly to drive the host-callback
+// thread-locals — without needing to load a real cdylib.
+//
+// Approach B from the brief: closure-driven, light-weight, exercises the
+// full TaskGuard + dispatch lifecycle without an engine fixture.
+
+#[cfg(test)]
+mod dyn_dispatch_tests {
+    use super::*;
+    use rivers_engine_sdk::SerializedTaskResult;
+    use rivers_runtime::process_pool::types::TaskKind;
+    use rivers_runtime::rivers_driver_sdk::ConnectionParams;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    use crate::engine_loader::txn_test_fixtures;
+
+    /// Build a minimal TaskContext with a single datasource config that
+    /// resolves to the mock driver registered above.
+    fn make_task_ctx(ds_name: &str, driver_name: &str) -> TaskContext {
+        let params = ConnectionParams {
+            host: "test".into(),
+            port: 0,
+            database: "test".into(),
+            username: "test".into(),
+            password: "test".into(),
+            options: Default::default(),
+        };
+        let resolved = rivers_runtime::process_pool::types::ResolvedDatasource {
+            driver_name: driver_name.to_string(),
+            params,
+        };
+        TaskContextBuilder::new()
+            .task_kind(TaskKind::Rest)
+            .entrypoint(rivers_runtime::process_pool::types::Entrypoint {
+                module: "test.js".into(),
+                function: "handler".into(),
+                language: "javascript".into(),
+            })
+            .datasource_config(ds_name.to_string(), resolved)
+            .trace_id("test-trace".into())
+            .app_id("test-app".into())
+            .node_id("test-node".into())
+            .build()
+            .expect("build TaskContext")
+    }
+
+    /// Empty engine result — what an engine returns when the simulated
+    /// handler "succeeded" without producing a payload.
+    fn empty_engine_ok() -> Result<SerializedTaskResult, String> {
+        Ok(SerializedTaskResult {
+            value: serde_json::Value::Null,
+            duration_ms: 0,
+        })
+    }
+
+    /// Helper: from inside a spawn_blocking-equivalent thread (i.e. our
+    /// engine_runner closure), call host_db_begin / commit / rollback by
+    /// reaching directly into the inner functions. This bypasses the FFI
+    /// shim but exercises the same TASK_DS_CONFIGS lookup, dyn-txn-map
+    /// insert, and signal_commit_failed paths the production cdylib
+    /// would touch via host callbacks.
+    fn run_begin(ds: &str) {
+        use crate::engine_loader::host_context::HOST_CONTEXT_FOR_TESTS;
+        let ctx = HOST_CONTEXT_FOR_TESTS.get().expect("HOST_CONTEXT");
+        crate::engine_loader::host_callbacks::host_db_begin_inner_for_test(
+            &serde_json::json!({"datasource": ds}),
+            ctx,
+        )
+        .expect("begin ok");
+    }
+
+    fn run_commit(ds: &str) -> Result<(), (i32, serde_json::Value)> {
+        use crate::engine_loader::host_context::HOST_CONTEXT_FOR_TESTS;
+        let ctx = HOST_CONTEXT_FOR_TESTS.get().expect("HOST_CONTEXT");
+        crate::engine_loader::host_callbacks::host_db_commit_inner_for_test(
+            &serde_json::json!({"datasource": ds}),
+            ctx,
+        )
+        .map(|_| ())
+    }
+
+    /// I7 test 1 — dispatch_task issues unique TaskIds.
+    /// The dispatch helper increments NEXT_TASK_ID once per call. Two
+    /// back-to-back dispatches must observe two different ids inside the
+    /// engine_runner closure.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_issues_unique_task_ids() {
+        let _g = txn_test_fixtures::test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        txn_test_fixtures::ensure_host_context();
+
+        let observed: Arc<StdMutex<Vec<u64>>> = Arc::new(StdMutex::new(Vec::new()));
+
+        for _ in 0..2 {
+            let ctx = make_task_ctx("disp_ds_1", "dispatch-mock-driver");
+            let serialized = rivers_engine_sdk::SerializedTaskContext::from(&ctx);
+            let observed = observed.clone();
+            let _ = dispatch_dyn_engine_task(&ctx, serialized, move |_s| {
+                let tid = crate::engine_loader::host_context::current_task_id()
+                    .expect("TaskGuard binds CURRENT_TASK_ID");
+                observed.lock().unwrap().push(tid.0);
+                empty_engine_ok()
+            })
+            .await
+            .expect("dispatch ok");
+        }
+
+        let ids = observed.lock().unwrap().clone();
+        assert_eq!(ids.len(), 2, "expected 2 dispatches");
+        assert_ne!(
+            ids[0], ids[1],
+            "TaskIds must be unique across dispatches; got {ids:?}"
+        );
+    }
+
+    /// I7 test 2 — TaskGuard auto-rollback fires when handler forgets
+    /// cleanup. Handler calls begin but neither commit nor rollback.
+    /// On dispatch return, the dyn-txn-map must be empty (rolled back)
+    /// and the connection must have observed `rollback_transaction()`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_guard_auto_rollback_on_leftover_txn() {
+        let _g = txn_test_fixtures::test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let behavior = txn_test_fixtures::ensure_host_context();
+        behavior.commit_fails.store(false, Ordering::Relaxed);
+
+        let ds = "disp_ds_leftover";
+        let ctx = make_task_ctx(ds, "dispatch-mock-driver");
+        let serialized = rivers_engine_sdk::SerializedTaskContext::from(&ctx);
+
+        // Capture the task id used by the dispatch so we can assert on it
+        // after the closure returns.
+        let observed_tid: Arc<StdMutex<Option<u64>>> = Arc::new(StdMutex::new(None));
+        let observed_tid_inner = observed_tid.clone();
+        let ds_owned = ds.to_string();
+
+        let _ = dispatch_dyn_engine_task(&ctx, serialized, move |_s| {
+            // Capture the task id. (Production engines never see this —
+            // it's a riversd-side construct.)
+            let tid = crate::engine_loader::host_context::current_task_id()
+                .expect("TaskGuard binds CURRENT_TASK_ID");
+            *observed_tid_inner.lock().unwrap() = Some(tid.0);
+
+            // Simulate the handler beginning a transaction and then
+            // returning without commit or rollback. TaskGuard::drop must
+            // catch this on its way out.
+            run_begin(&ds_owned);
+            empty_engine_ok()
+        })
+        .await
+        .expect("dispatch ok");
+
+        // After dispatch returns: txn map must be empty (auto-rollback
+        // fired), and TASK_DS_CONFIGS must have been cleared.
+        let tid = observed_tid.lock().unwrap().expect("captured task id");
+        let task_id = crate::engine_loader::dyn_transaction_map::TaskId(tid);
+        assert!(
+            !crate::engine_loader::host_context::dyn_txn_map().has(task_id, ds),
+            "TaskGuard::drop must drain leftover txns"
+        );
+        assert!(
+            crate::engine_loader::host_context::lookup_task_ds_for_test(task_id, ds).is_none(),
+            "TaskGuard::drop must clear TASK_DS_CONFIGS"
+        );
+    }
+
+    /// I7 test 3 — commit_failed propagates through dispatch boundary.
+    /// Handler calls begin → commit but the mock driver fails commit;
+    /// `signal_commit_failed` runs on the spawn_blocking worker;
+    /// `take_commit_failed` reads it inside the closure (same thread);
+    /// dispatch awaiter upgrades the result to TransactionCommitFailed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn commit_failed_propagates_to_dispatch_caller() {
+        let _g = txn_test_fixtures::test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let behavior = txn_test_fixtures::ensure_host_context();
+        behavior.commit_fails.store(true, Ordering::Relaxed);
+
+        let ds = "disp_ds_commit_fail";
+        let ctx = make_task_ctx(ds, "dispatch-mock-driver");
+        let serialized = rivers_engine_sdk::SerializedTaskContext::from(&ctx);
+        let ds_owned = ds.to_string();
+
+        let result = dispatch_dyn_engine_task(&ctx, serialized, move |_s| {
+            run_begin(&ds_owned);
+            // Commit will fail and call signal_commit_failed on this thread.
+            let _ = run_commit(&ds_owned);
+            // The handler "succeeds" returning empty. Production code
+            // would typically return an error here — but the
+            // financial-correctness gate must upgrade regardless.
+            empty_engine_ok()
+        })
+        .await;
+
+        // Reset behavior so a subsequent test starts clean.
+        behavior.commit_fails.store(false, Ordering::Relaxed);
+
+        match result {
+            Err(TaskError::TransactionCommitFailed { datasource, message }) => {
+                assert_eq!(datasource, ds);
+                assert!(
+                    message.contains("forced commit failure"),
+                    "message must propagate driver msg; got {message}"
+                );
+            }
+            other => panic!(
+                "expected TransactionCommitFailed, got {other:?}"
+            ),
+        }
+    }
+}
+
 

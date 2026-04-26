@@ -12,6 +12,7 @@ use super::host_context::{
     current_task_id, dyn_txn_map, lookup_task_ds, signal_commit_failed, HostContext,
     HOST_CALLBACK_TIMEOUT_MS, HOST_CONTEXT, HOST_KEYSTORE,
 };
+use rivers_runtime::DataViewExecutor;
 // Re-import the module itself behind cfg(test) so the test submodule below
 // can reach sibling helpers via `super::host_context::*` paths. The
 // non-test build doesn't need this — production code uses fully-qualified
@@ -93,6 +94,12 @@ pub(super) extern "C" fn host_dataview_execute(
 
     let executor_lock = ctx.dataview_executor.clone();
 
+    // Phase I6 — capture the task id (if we're inside a TaskGuard scope) so
+    // the spawned future can route the call through DYN_TXN_MAP when an
+    // active transaction is present. `current_task_id()` reads the riversd
+    // `spawn_blocking` thread-local; the spawned tokio task does not see it.
+    let task_id = current_task_id();
+
     // Spawn execution on the Tokio runtime and wait for the result.
     // This is critical: some drivers (e.g. MongoDB, Elasticsearch) require a
     // Tokio reactor on the calling thread. `block_on()` alone doesn't set the
@@ -113,28 +120,22 @@ pub(super) extern "C" fn host_dataview_execute(
                     let guard = executor_lock.read().await;
                     guard.clone().ok_or_else(|| "DataViewExecutor not initialized".to_string())?
                 };
-                // Try the bare name first
-                match executor.execute(&name, params.clone(), "GET", &trace_id, None).await {
-                    Ok(r) => Ok(r),
-                    Err(rivers_runtime::DataViewError::NotFound { .. }) => {
-                        // DataViews are registered as "{entry_point}:{name}" — try with prefix
-                        if let Some(prefix) = &app_prefix {
-                            let namespaced = format!("{}:{}", prefix, name);
-                            executor.execute(&namespaced, params, "GET", &trace_id, None).await
-                                .map_err(|e| format!("{e:?}"))
-                        } else {
-                            // No prefix hint — scan for any match ending in ":{name}"
-                            let suffix = format!(":{}", name);
-                            if let Some(full_name) = executor.find_by_suffix(&suffix) {
-                                executor.execute(&full_name, params, "GET", &trace_id, None).await
-                                    .map_err(|e| format!("{e:?}"))
-                            } else {
-                                Err(format!("DataView '{}' not found (tried bare and namespaced)", name))
-                            }
-                        }
-                    }
-                    Err(e) => Err(format!("{e:?}")),
-                }
+                // Resolve the registered name: bare → "{prefix}:{name}" → ":{name}" suffix scan.
+                let resolved = resolve_dataview_name(&executor, &name, app_prefix.as_deref())
+                    .ok_or_else(|| format!(
+                        "DataView '{}' not found (tried bare and namespaced)",
+                        name
+                    ))?;
+
+                execute_dataview_with_optional_txn(
+                    executor,
+                    &resolved,
+                    params,
+                    &trace_id,
+                    task_id,
+                )
+                .await
+                .map_err(|e| format!("{e:?}"))
             }.await;
             let _ = tx.send(result);
         }
@@ -165,6 +166,160 @@ pub(super) extern "C" fn host_dataview_execute(
             -12
         }
     }
+}
+
+// ── dataview helpers (I6) ──────────────────────────────────────
+//
+// Phase I6: split the bare-vs-namespaced resolution and the
+// transaction routing into small helpers so the FFI shim above stays
+// linear and the txn-vs-no-txn branch is testable in isolation.
+
+/// Resolve the actually-registered DataView name from the user-facing
+/// name plus an optional app namespace hint.
+///
+/// Order: try the bare name first, then `"{app_prefix}:{name}"` if a
+/// prefix is supplied, then a `":{name}"` suffix scan over the registry.
+/// Returns the canonical key registered with the executor, or `None` when
+/// no match exists.
+fn resolve_dataview_name(
+    executor: &DataViewExecutor,
+    name: &str,
+    app_prefix: Option<&str>,
+) -> Option<String> {
+    if executor.datasource_for(name).is_some() {
+        return Some(name.to_string());
+    }
+    if let Some(prefix) = app_prefix {
+        let candidate = format!("{prefix}:{name}");
+        if executor.datasource_for(&candidate).is_some() {
+            return Some(candidate);
+        }
+    }
+    let suffix = format!(":{name}");
+    executor.find_by_suffix(&suffix)
+}
+
+/// Execute a (already-resolved) DataView, routing through the dyn-engine
+/// transaction map when one is active for the current task.
+///
+/// Spec §6.2: if a transaction is active on this task for a *different*
+/// datasource than the dataview's, reject with a `DataViewError::Driver`
+/// carrying a `TransactionError:` prefix — mirrors the V8 path's JS error
+/// in `process_pool/v8_engine/context.rs::ctx_dataview_callback`.
+///
+/// When no transaction is active for this task (or `task_id` is `None`),
+/// falls through to the normal pool-acquire path.
+///
+/// Takes `executor: Arc<DataViewExecutor>` (not `&DataViewExecutor`) because
+/// `DynTransactionMap::with_conn_mut` is HRTB on the closure lifetime
+/// (`for<'a> ...`), which forces any non-`'static` borrow captured by the
+/// closure to be `'static`. Cloning the `Arc` into the closure satisfies
+/// that without bending the executor's API.
+async fn execute_dataview_with_optional_txn(
+    executor: Arc<DataViewExecutor>,
+    resolved_name: &str,
+    params: HashMap<String, rivers_runtime::rivers_driver_sdk::QueryValue>,
+    trace_id: &str,
+    task_id: Option<super::dyn_transaction_map::TaskId>,
+) -> Result<rivers_runtime::dataview_engine::DataViewResponse, rivers_runtime::DataViewError> {
+    // Without a TaskId we can never have an active txn — go straight to
+    // the non-txn path. Identical to the V8 "TASK_TRANSACTION = None" case.
+    let Some(tid) = task_id else {
+        return executor
+            .execute(resolved_name, params, "GET", trace_id, None)
+            .await;
+    };
+
+    // Fast-path: no transactions active for this task at all.
+    let active_dses = dyn_txn_map().task_active_datasources(tid);
+    if active_dses.is_empty() {
+        return executor
+            .execute(resolved_name, params, "GET", trace_id, None)
+            .await;
+    }
+
+    // Look up the dataview's configured datasource for cross-DS enforcement.
+    let dv_ds = match executor.datasource_for(resolved_name) {
+        Some(ds) => ds,
+        None => {
+            // Should be unreachable — caller already resolved the name —
+            // but defer to the non-txn path so the executor produces the
+            // canonical NotFound error for consistency.
+            return executor
+                .execute(resolved_name, params, "GET", trace_id, None)
+                .await;
+        }
+    };
+
+    // Spec §6.2: if any active txn datasource differs from the dataview's,
+    // reject. Today the dyn map permits only one txn per (task, ds), but
+    // the loop is correct for the multi-ds future shape.
+    if !active_dses.iter().any(|ds| ds == &dv_ds) {
+        let other = active_dses.first().cloned().unwrap_or_default();
+        return Err(rivers_runtime::DataViewError::Driver(format!(
+            "TransactionError: dataview \"{resolved_name}\" uses datasource \"{dv_ds}\" \
+             which differs from active transaction datasource \"{other}\""
+        )));
+    }
+
+    // Active txn for the matching datasource — thread the held connection
+    // through. `with_conn_mut` removes the entry under the lock, drops the
+    // lock, runs the closure's future, then re-inserts (lock not held
+    // across the await — see DynTransactionMap docs).
+    let ds_for_closure = dv_ds.clone();
+    let resolved_owned = resolved_name.to_string();
+    let trace_owned = trace_id.to_string();
+    let executor_for_closure = executor.clone();
+    let outcome = dyn_txn_map()
+        .with_conn_mut(tid, &dv_ds, move |conn| {
+            let exec = executor_for_closure;
+            let resolved = resolved_owned;
+            let trace = trace_owned;
+            Box::pin(async move {
+                exec.execute(&resolved, params, "GET", &trace, Some(conn))
+                    .await
+            })
+        })
+        .await;
+    match outcome {
+        Some(r) => r,
+        None => {
+            // Race: the txn entry vanished between snapshot and lookup
+            // (commit/rollback raced on a different thread). Surface a
+            // clear error rather than silently using a fresh pool conn —
+            // a fresh conn would NOT be in the txn and writes would land
+            // outside the user's expected scope.
+            Err(rivers_runtime::DataViewError::Driver(format!(
+                "TransactionError: transaction connection for '{ds_for_closure}' \
+                 unavailable (raced with commit/rollback)"
+            )))
+        }
+    }
+}
+
+// ── test-only re-exports for cross-module integration tests ────
+//
+// I7 dispatch tests in `process_pool/mod.rs` need to drive the same
+// `host_db_*_inner` paths that the FFI shim drives, but they live in a
+// different module so the private `fn host_db_*_inner` signatures aren't
+// reachable. Thin re-exports under #[cfg(test)] keep production code
+// untouched while letting the dispatch tests run begin/commit through
+// the same code paths the production cdylib would.
+
+#[cfg(test)]
+pub(crate) fn host_db_begin_inner_for_test(
+    input: &serde_json::Value,
+    ctx: &super::host_context::HostContext,
+) -> Result<serde_json::Value, (i32, serde_json::Value)> {
+    host_db_begin_inner(input, ctx)
+}
+
+#[cfg(test)]
+pub(crate) fn host_db_commit_inner_for_test(
+    input: &serde_json::Value,
+    ctx: &super::host_context::HostContext,
+) -> Result<serde_json::Value, (i32, serde_json::Value)> {
+    host_db_commit_inner(input, ctx)
 }
 
 // ── store_get ───────────────────────────────────────────────────
@@ -1388,8 +1543,7 @@ mod tests {
     use rivers_runtime::rivers_driver_sdk::{
         Connection, ConnectionParams, DatabaseDriver, DriverError, Query, QueryResult,
     };
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, OnceLock};
 
     use super::host_context::{
@@ -1397,95 +1551,19 @@ mod tests {
         DatasourceConfigsSnapshot,
     };
     use super::super::dyn_transaction_map::TaskId;
+    use super::super::txn_test_fixtures;
 
-    /// Behavior knobs for the mock connection — set per test to force the
-    /// `commit_transaction` path to fail.
-    #[derive(Default)]
-    struct MockConnBehavior {
-        commit_fails: AtomicBool,
-    }
-
-    struct MockConn {
-        behavior: Arc<MockConnBehavior>,
-    }
-
-    #[async_trait]
-    impl Connection for MockConn {
-        async fn execute(&mut self, _q: &Query) -> Result<QueryResult, DriverError> {
-            Ok(QueryResult {
-                rows: vec![],
-                affected_rows: 0,
-                last_insert_id: None,
-                column_names: None,
-            })
-        }
-        async fn ping(&mut self) -> Result<(), DriverError> {
-            Ok(())
-        }
-        fn driver_name(&self) -> &str {
-            "mock-txn"
-        }
-        async fn begin_transaction(&mut self) -> Result<(), DriverError> {
-            Ok(())
-        }
-        async fn commit_transaction(&mut self) -> Result<(), DriverError> {
-            if self.behavior.commit_fails.load(Ordering::Relaxed) {
-                Err(DriverError::Transaction("forced commit failure".into()))
-            } else {
-                Ok(())
-            }
-        }
-        async fn rollback_transaction(&mut self) -> Result<(), DriverError> {
-            Ok(())
-        }
-    }
-
-    struct MockDriver {
-        behavior: Arc<MockConnBehavior>,
-    }
-
-    #[async_trait]
-    impl DatabaseDriver for MockDriver {
-        fn name(&self) -> &str {
-            "mock-txn-driver"
-        }
-        async fn connect(
-            &self,
-            _params: &ConnectionParams,
-        ) -> Result<Box<dyn Connection>, DriverError> {
-            Ok(Box::new(MockConn {
-                behavior: self.behavior.clone(),
-            }))
-        }
-        fn supports_transactions(&self) -> bool {
-            true
-        }
-    }
-
-    /// Behavior knob shared between the mock driver and tests. Tests flip
-    /// `commit_fails` on the same `Arc` to force the failure path.
-    static SHARED_BEHAVIOR: once_cell::sync::Lazy<Arc<MockConnBehavior>> =
-        once_cell::sync::Lazy::new(|| Arc::new(MockConnBehavior::default()));
-
-    /// Process-wide guard around HOST_CONTEXT setup. `OnceLock` semantics
-    /// mean we can only `set` once — gate it through a `OnceLock<()>` so all
-    /// tests funnel through the same init.
-    static SETUP: OnceLock<()> = OnceLock::new();
-
-    /// Initialize HOST_CONTEXT exactly once with a DriverFactory containing
-    /// our mock driver. Subsequent calls are no-ops.
+    /// Shared behavior + setup come from `engine_loader::txn_test_fixtures`
+    /// so the I3-I6 tests in this file and the I7 dispatch tests in
+    /// `process_pool/mod.rs` can share one `HOST_CONTEXT` init (the OnceLock
+    /// only fires once per test binary).
     fn ensure_host_context() {
-        SETUP.get_or_init(|| {
-            let mut factory = DriverFactory::new();
-            factory.register_database_driver(Arc::new(MockDriver {
-                behavior: SHARED_BEHAVIOR.clone(),
-            }));
-            super::host_context::set_host_context(
-                Arc::new(tokio::sync::RwLock::new(None)),
-                None,
-                Some(Arc::new(factory)),
-            );
-        });
+        let _ = txn_test_fixtures::ensure_host_context();
+    }
+
+    /// Behavior knob — forwarded from the shared fixture.
+    fn shared_behavior() -> Arc<txn_test_fixtures::SharedConnBehavior> {
+        txn_test_fixtures::behavior()
     }
 
     /// Build a per-test datasource snapshot pointing `ds_name` at
@@ -1518,18 +1596,19 @@ mod tests {
     }
 
     /// Tests share a single mock driver, so they cannot reliably run in
-    /// parallel when each toggles the shared `commit_fails` knob. A test
-    /// mutex serializes the txn lifecycle. Each test claims the lock for its
-    /// duration so the behavior knob and CURRENT_TASK_ID thread-local don't
-    /// collide.
-    static TEST_LOCK: once_cell::sync::Lazy<StdMutex<()>> =
-        once_cell::sync::Lazy::new(|| StdMutex::new(()));
+    /// parallel when each toggles the shared `commit_fails` knob. The
+    /// shared lock from `txn_test_fixtures` serializes I3-I6 here AND
+    /// the I7 dispatch tests in `process_pool/mod.rs` so the behavior knob
+    /// and CURRENT_TASK_ID thread-local don't collide across modules.
+    fn TEST_LOCK() -> &'static std::sync::Mutex<()> {
+        txn_test_fixtures::test_lock()
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn begin_then_commit_happy_path() {
-        let _g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = TEST_LOCK().lock().unwrap_or_else(|p| p.into_inner());
         ensure_host_context();
-        SHARED_BEHAVIOR.commit_fails.store(false, Ordering::Relaxed);
+        shared_behavior().commit_fails.store(false, Ordering::Relaxed);
 
         let task = fresh_task_id();
         let ds = "pg_happy";
@@ -1581,9 +1660,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn begin_then_rollback() {
-        let _g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = TEST_LOCK().lock().unwrap_or_else(|p| p.into_inner());
         ensure_host_context();
-        SHARED_BEHAVIOR.commit_fails.store(false, Ordering::Relaxed);
+        shared_behavior().commit_fails.store(false, Ordering::Relaxed);
 
         let task = fresh_task_id();
         let ds = "pg_rollback";
@@ -1625,10 +1704,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn begin_then_commit_fails_signals_commit_failed() {
-        let _g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = TEST_LOCK().lock().unwrap_or_else(|p| p.into_inner());
         ensure_host_context();
         // Force the commit path to fail.
-        SHARED_BEHAVIOR.commit_fails.store(true, Ordering::Relaxed);
+        shared_behavior().commit_fails.store(true, Ordering::Relaxed);
 
         let task = fresh_task_id();
         let ds = "pg_commit_fails";
@@ -1657,7 +1736,7 @@ mod tests {
         .unwrap();
 
         // Reset behavior so the next test starts clean.
-        SHARED_BEHAVIOR.commit_fails.store(false, Ordering::Relaxed);
+        shared_behavior().commit_fails.store(false, Ordering::Relaxed);
 
         let (commit, cf) = outcome;
         let (code, body) = commit.expect_err("commit must fail");
@@ -1679,5 +1758,316 @@ mod tests {
         // After commit, the entry must be gone (take() removed it before
         // commit_transaction ran).
         assert!(!dyn_txn_map().has(task, ds));
+    }
+
+    // ── I6 tests: dataview-in-txn vs no-txn routing ────────────────
+    //
+    // These cover `execute_dataview_with_optional_txn`, the helper that
+    // sits between `host_dataview_execute` and `DataViewExecutor::execute`.
+    // The unit-level pattern here is: pre-insert a mock connection into
+    // `DYN_TXN_MAP` (skipping `host_db_begin`), bind the test task id, and
+    // verify the executor used the inserted conn (its per-conn counter
+    // advanced) vs a fresh `factory.connect(...)` conn (the inserted
+    // conn's counter stays at 0 and the driver's "connect count" advances).
+
+    use rivers_runtime::dataview_engine::{DataViewExecutor, DataViewRegistry};
+    use rivers_runtime::tiered_cache::{DataViewCache, NoopDataViewCache};
+    use rivers_runtime::DataViewConfig;
+
+    /// Per-connection execute counter shared between MockTxnConn and the
+    /// test that inserts it into DYN_TXN_MAP, so the test can verify the
+    /// closure inside `with_conn_mut` actually saw THIS connection.
+    #[derive(Default)]
+    struct ExecCounter(std::sync::atomic::AtomicU64);
+
+    impl ExecCounter {
+        fn get(&self) -> u64 {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    /// Mock connection for I6 tests. Each instance carries an ExecCounter
+    /// so the test can tell connections apart.
+    struct DvMockConn {
+        counter: Arc<ExecCounter>,
+    }
+
+    #[async_trait]
+    impl Connection for DvMockConn {
+        async fn execute(&mut self, _q: &Query) -> Result<QueryResult, DriverError> {
+            self.counter.0.fetch_add(1, Ordering::Relaxed);
+            Ok(QueryResult {
+                rows: vec![],
+                affected_rows: 0,
+                last_insert_id: None,
+                column_names: None,
+            })
+        }
+        async fn ping(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
+        fn driver_name(&self) -> &str {
+            "dv-mock"
+        }
+        async fn begin_transaction(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
+        async fn commit_transaction(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
+        async fn rollback_transaction(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
+    }
+
+    /// Driver that returns connections sharing one "fresh-conn" counter so
+    /// the test can detect when the executor went around the txn map and
+    /// acquired a fresh pool connection instead.
+    struct DvMockDriver {
+        fresh_counter: Arc<ExecCounter>,
+        connect_count: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    #[async_trait]
+    impl DatabaseDriver for DvMockDriver {
+        fn name(&self) -> &str {
+            "dv-mock-driver"
+        }
+        async fn connect(
+            &self,
+            _params: &ConnectionParams,
+        ) -> Result<Box<dyn Connection>, DriverError> {
+            self.connect_count.fetch_add(1, Ordering::Relaxed);
+            Ok(Box::new(DvMockConn {
+                counter: self.fresh_counter.clone(),
+            }))
+        }
+        fn supports_transactions(&self) -> bool {
+            true
+        }
+    }
+
+    /// Bare-minimum DataViewConfig pointing at `datasource`. Only `name`
+    /// and `datasource` are load-bearing for our test path; the executor
+    /// takes the GET branch with an empty statement and the mock conn's
+    /// `execute` returns empty rows regardless.
+    fn make_dv_config(name: &str, datasource: &str) -> DataViewConfig {
+        DataViewConfig {
+            name: name.into(),
+            datasource: datasource.into(),
+            query: Some(String::new()),
+            parameters: vec![],
+            return_schema: None,
+            get_query: Some(String::new()),
+            post_query: None,
+            put_query: None,
+            delete_query: None,
+            get_schema: None,
+            post_schema: None,
+            put_schema: None,
+            delete_schema: None,
+            get_parameters: vec![],
+            post_parameters: vec![],
+            put_parameters: vec![],
+            delete_parameters: vec![],
+            streaming: false,
+            circuit_breaker_id: None,
+            prepared: false,
+            query_params: Default::default(),
+            caching: None,
+            invalidates: vec![],
+            validate_result: false,
+            strict_parameters: false,
+            max_rows: 1000,
+        }
+    }
+
+    /// Build a DataViewExecutor wired to `DvMockDriver` and a single
+    /// dataview definition.
+    fn build_test_executor(
+        dataview_name: &str,
+        ds: &str,
+    ) -> (
+        Arc<DataViewExecutor>,
+        Arc<ExecCounter>,
+        Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        let fresh_counter = Arc::new(ExecCounter::default());
+        let connect_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut factory = rivers_runtime::rivers_core::DriverFactory::new();
+        factory.register_database_driver(Arc::new(DvMockDriver {
+            fresh_counter: fresh_counter.clone(),
+            connect_count: connect_count.clone(),
+        }));
+
+        let mut registry = DataViewRegistry::new();
+        registry.register(make_dv_config(dataview_name, ds));
+
+        // Connection params for this datasource. The "driver" option steers
+        // DataViewExecutor::execute to look up the right driver in the
+        // factory; without it the executor would fall back to using
+        // `config.datasource` as the driver name.
+        let mut options = std::collections::HashMap::new();
+        options.insert("driver".to_string(), "dv-mock-driver".to_string());
+        let params = ConnectionParams {
+            host: "test".into(),
+            port: 0,
+            database: "test".into(),
+            username: "test".into(),
+            password: "test".into(),
+            options,
+        };
+        let mut params_map = std::collections::HashMap::new();
+        params_map.insert(ds.to_string(), params);
+
+        let cache: Arc<dyn DataViewCache> = Arc::new(NoopDataViewCache);
+        let exec = DataViewExecutor::new(
+            registry,
+            Arc::new(factory),
+            Arc::new(params_map),
+            cache,
+        );
+        (Arc::new(exec), fresh_counter, connect_count)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dataview_in_txn_uses_txn_conn() {
+        let _g = TEST_LOCK().lock().unwrap_or_else(|p| p.into_inner());
+        let task = fresh_task_id();
+        let ds = "dv_pg_in_txn";
+        let (executor, fresh_counter, connect_count) =
+            build_test_executor("list_records", ds);
+
+        // Pre-seat the txn map with a connection whose counter we can
+        // distinguish from any fresh pool conn. This skips host_db_begin
+        // because the helper under test is the dataview-side wiring, not
+        // the begin path (covered by I3 tests).
+        let txn_counter = Arc::new(ExecCounter::default());
+        dyn_txn_map()
+            .insert(
+                task,
+                ds,
+                Box::new(DvMockConn {
+                    counter: txn_counter.clone(),
+                }),
+            )
+            .expect("seed txn map");
+
+        let result = super::execute_dataview_with_optional_txn(
+            executor,
+            "list_records",
+            std::collections::HashMap::new(),
+            "test-trace",
+            Some(task),
+        )
+        .await
+        .expect("dataview execute ok");
+        assert_eq!(result.query_result.affected_rows, 0);
+
+        // The TXN conn's counter must have advanced.
+        assert_eq!(
+            txn_counter.get(),
+            1,
+            "txn conn should have been used"
+        );
+        // No fresh pool connection should have been acquired.
+        assert_eq!(
+            connect_count.load(Ordering::Relaxed),
+            0,
+            "factory.connect must NOT have been called when txn is active"
+        );
+        assert_eq!(
+            fresh_counter.get(),
+            0,
+            "no fresh pool conn was created, so its counter must be 0"
+        );
+
+        // Map entry must still be present (with_conn_mut re-inserts after
+        // running the closure).
+        assert!(dyn_txn_map().has(task, ds), "txn entry must be retained");
+
+        // Cleanup: drain so test leaves no residue for the next test.
+        let _ = dyn_txn_map().drain_task(task);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dataview_no_txn_uses_fresh_conn() {
+        let _g = TEST_LOCK().lock().unwrap_or_else(|p| p.into_inner());
+        let task = fresh_task_id();
+        let ds = "dv_pg_no_txn";
+        let (executor, fresh_counter, connect_count) =
+            build_test_executor("list_records", ds);
+
+        // Sanity: no txn for this task.
+        assert!(!dyn_txn_map().has(task, ds));
+
+        let _ = super::execute_dataview_with_optional_txn(
+            executor,
+            "list_records",
+            std::collections::HashMap::new(),
+            "test-trace",
+            Some(task),
+        )
+        .await
+        .expect("dataview execute ok");
+
+        assert_eq!(
+            connect_count.load(Ordering::Relaxed),
+            1,
+            "factory.connect must be called exactly once when no txn is active"
+        );
+        assert_eq!(
+            fresh_counter.get(),
+            1,
+            "fresh conn's counter advances on the non-txn path"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dataview_cross_datasource_in_txn_rejects() {
+        let _g = TEST_LOCK().lock().unwrap_or_else(|p| p.into_inner());
+        let task = fresh_task_id();
+        let dv_ds = "dv_ds_a";
+        let other_ds = "dv_ds_b";
+        let (executor, _fresh, connect_count) =
+            build_test_executor("list_records", dv_ds);
+
+        // Pre-seat a txn on the OTHER datasource — dataview wants dv_ds.
+        let txn_counter = Arc::new(ExecCounter::default());
+        dyn_txn_map()
+            .insert(
+                task,
+                other_ds,
+                Box::new(DvMockConn {
+                    counter: txn_counter.clone(),
+                }),
+            )
+            .expect("seed txn map");
+
+        let err = super::execute_dataview_with_optional_txn(
+            executor,
+            "list_records",
+            std::collections::HashMap::new(),
+            "test-trace",
+            Some(task),
+        )
+        .await
+        .expect_err("cross-datasource call must reject");
+
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("TransactionError")
+                && msg.contains(dv_ds)
+                && msg.contains(other_ds),
+            "error must mention both datasources; got {msg}"
+        );
+        // Crucially: no fresh pool conn was acquired (rejection happens
+        // before factory.connect).
+        assert_eq!(connect_count.load(Ordering::Relaxed), 0);
+        // The seeded txn conn was never used either — it stays at 0.
+        assert_eq!(txn_counter.get(), 0);
+
+        // Cleanup.
+        let _ = dyn_txn_map().drain_task(task);
     }
 }
