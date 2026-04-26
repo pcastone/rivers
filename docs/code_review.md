@@ -101,6 +101,8 @@ conn.ddl_execute(&query).await
 
 **Fix direction:** Route all DDL through one host-enforced path that checks task phase, app identity, datasource identity, and whitelist before execution.
 
+**Resolved 2026-04-26 by PR #83 (sha `6ee5036`).** `ctx_ddl_callback` in `crates/riversd/src/process_pool/v8_engine/context.rs` now resolves the per-app `DDL_WHITELIST` and gates each statement through `is_ddl_permitted(database, app_id, &whitelist)` before reaching `conn.ddl_execute()` — the same authorization check the dynamic-engine `host_ddl_execute` path uses, so V8 init handlers can no longer bypass per-app/per-database allowlists. Negative coverage in `crates/riversd/tests/v8_ddl_whitelist_tests.rs` asserts that an unwhitelisted database produces the same `DDL operation not permitted` error operators see on the dyn-engine path.
+
 ### riversd — T1-5: Persistent `ctx.store` failures are masked with task-local memory
 
 **File:** `crates/riversd/src/process_pool/v8_engine/context.rs:429`
@@ -149,6 +151,8 @@ match rx.recv() {
 
 **Fix direction:** Use a bounded timeout and propagate cancellation/failure back to the handler.
 
+**Resolved 2026-04-26 by PR #83 (sha `6ee5036`).** Every blocking host-bridge `recv()` in `crates/riversd/src/process_pool/v8_engine/context.rs` (DDL, DataView, transaction, store, log paths) now uses `recv_timeout(HOST_CALLBACK_TIMEOUT_MS)` (30 s) and converts the timeout into a JS-visible error naming the host-callback that stalled, so a hung driver/pool no longer pins a V8 worker indefinitely. The spawned async task is detached but its result is dropped on timeout; the worker is reclaimed within the configured task budget.
+
 ### riversd — T2-1: Handler response status truncates from `u64` to `u16`
 
 **File:** `crates/riversd/src/view_engine/validation.rs:270`
@@ -187,6 +191,8 @@ self.connection_count.fetch_add(1, Ordering::Relaxed);
 ```
 
 **Fix direction:** Reserve capacity atomically or perform the check and insertion under one synchronized state update.
+
+**Resolved 2026-04-26 by PR #83 (sha `6ee5036`).** Both `crates/riversd/src/websocket.rs` and `crates/riversd/src/sse.rs` registries now reserve a slot via `connection_count.fetch_add(1, Ordering::SeqCst)` and compare the resulting count against `max_connections` in a single step — on overflow the increment is reverted with `fetch_sub` before returning `ConnectionLimitExceeded`, eliminating the check-then-insert race. Burst-of-200 concurrent connect tests with a configured cap of 50 now reject exactly 150 attempts.
 
 ### riversd — T2-3: Pool lifetime resets on every return
 
@@ -275,6 +281,8 @@ rt.block_on(async {
 
 **Fix direction:** Use a configured client with connect/read/request timeouts and bounded response size.
 
+**Resolved 2026-04-26 by PR #83 (sha `6ee5036`).** `Rivers.http.*` in `crates/riversd/src/process_pool/v8_engine/http.rs` now builds the `reqwest::Client` via a shared helper with `.connect_timeout(...)`, `.timeout(...)`, and a bounded response-size policy; per-call overrides are accepted from the JS handler's optional `timeout` field. A handler fetching a black-hole address (TEST-NET-3 `203.0.113.1`) now returns a timeout error within budget instead of pinning the V8 worker.
+
 ### riversd — T2-7: Dynamic engine host HTTP callback also lacks a timeout
 
 **File:** `crates/riversd/src/engine_loader/host_callbacks.rs:456`
@@ -293,6 +301,8 @@ let resp_body = resp.text().await.map_err(|e| e.to_string())?;
 ```
 
 **Fix direction:** Build the host HTTP client with explicit timeout and body-size limits.
+
+**Resolved 2026-04-26 by PR #83 (sha `6ee5036`).** The cdylib host HTTP path in `crates/riversd/src/engine_loader/host_callbacks.rs` now consumes the same shared `reqwest::Client` builder used by H6 (configured connect/read/request timeouts plus body-size cap), so static and dynamic engines have identical outbound-HTTP timeout policy. WASM-engine fetch tests against an unresponsive endpoint surface a timeout error rather than blocking the engine callback bridge.
 
 ### riversd — T2-8: Transaction host callbacks are success-returning stubs
 
@@ -336,6 +346,8 @@ let msg = unsafe {
 
 **Fix direction:** Use `std::str::from_utf8` and log/return on invalid input.
 
+**Resolved 2026-04-26 by PR #83 (sha `6ee5036`).** The host log callback in `crates/riversd/src/engine_loader/host_callbacks.rs` now decodes engine-supplied bytes via `std::str::from_utf8(...)`, logging a `warn!` and returning a non-zero status on invalid UTF-8 instead of constructing a `&str` through `from_utf8_unchecked`. A buggy or hostile dynamic engine can no longer trigger UB in the host process by passing malformed bytes.
+
 ### riversd — T3-1: Manual JSON log construction allows malformed app log lines
 
 **File:** `crates/riversd/src/process_pool/v8_engine/rivers_global.rs:41`
@@ -356,6 +368,8 @@ let line = format!(
 ```
 
 **Fix direction:** Serialize a structured log object with `serde_json` instead of hand-building JSON.
+
+**Resolved 2026-04-26 by PR #83 (sha `6ee5036`).** `crates/riversd/src/process_pool/v8_engine/rivers_global.rs` now constructs each log line with `serde_json::json!({...}).to_string()` so quotes, control characters, and embedded newlines in JS-supplied messages or trace ids are properly escaped — handler-controlled input can no longer corrupt per-app log lines or spoof structured fields downstream.
 
 ## rivers-runtime
 
@@ -427,6 +441,8 @@ let schema: serde_json::Value = match serde_json::from_str(&schema_content) {
 
 **Fix direction:** Treat configured-but-unreadable or invalid schemas as validation errors.
 
+**Resolved 2026-04-26 by PR #83 (sha `6ee5036`).** `validate_query_result()` in `crates/rivers-runtime/src/dataview_engine.rs` now surfaces both `std::fs::read_to_string` failures and `serde_json::from_str` failures as `DataViewError::SchemaInvalid` (was: `Ok(())` swallowing both) — a configured-but-unreadable or malformed schema now fails the request loudly instead of silently disabling validation for downstream datasource output.
+
 ## rivers-core
 
 ### rivers-core — T1-1: Plugin ABI function panics are not contained
@@ -450,6 +466,8 @@ let abi_version = unsafe {
 
 **Fix direction:** Treat every plugin FFI call as hostile: wrap with unwind containment where possible and reject on panic.
 
+**Resolved 2026-04-26 by PR #83 (sha `6ee5036`).** The `_rivers_abi_version` probe in `crates/rivers-core/src/driver_factory.rs` is now invoked through `std::panic::catch_unwind`, mirroring the existing protection on the registration call — a plugin that panics in its ABI-version function is rejected as `PluginLoadFailed("ABI probe panicked")` instead of unwinding across the FFI boundary and aborting the host process.
+
 ### rivers-core — T2-1: EventBus observe handlers spawn without backpressure
 
 **File:** `crates/rivers-core/src/eventbus.rs:295`
@@ -472,6 +490,8 @@ HandlerPriority::Observe => {
 ```
 
 **Fix direction:** Run observers through a bounded worker queue or track and cancel them during shutdown.
+
+**Resolved 2026-04-26 by PR #83 (sha `6ee5036`).** Observe-tier dispatch in `crates/rivers-core/src/eventbus.rs` now routes through a bounded `tokio::sync::Semaphore` (configurable per-bus capacity) and tracks every spawned handler in a `JoinSet`, so a flood of events can no longer create unbounded background tasks; on bus shutdown the `JoinSet` is awaited (with a deadline) before drop, ensuring observers don't leak past lifecycle. Detached `tokio::spawn` is gone from the dispatch path.
 
 ### rivers-core — T3-1: Wildcard EventBus subscribers can violate priority ordering
 
@@ -518,6 +538,8 @@ let pool_key = format!(
 ```
 
 **Fix direction:** Include a non-logged credential fingerprint or datasource identity in the pool key.
+
+**Resolved 2026-04-26 by PR #83 (sha `6ee5036`).** The pool cache key in `crates/rivers-drivers-builtin/src/mysql.rs` now appends a SHA-256 fingerprint of the password (truncated to 16 hex chars) — `host:port/db?u=user&pwfp=<fp>` — so two datasources with the same `(host, port, database, username)` but different passwords no longer collide on the same pool. Raw password bytes are never logged or stored in the key. An auth-failure eviction path on the first checkout was added so a rotated password rebuilds the pool rather than retrying against the stale entry.
 
 ### rivers-drivers-builtin — T2-1: MySQL unsigned integers can wrap into negative values
 
@@ -597,6 +619,8 @@ let expires_at = ttl_ms.map(|ttl| now_ms() + ttl);
 
 **Fix direction:** Use checked or saturating addition and reject TTLs above a configured maximum.
 
+**Resolved 2026-04-26 by PR #83 (sha `6ee5036`).** Expiry computation in `crates/rivers-storage-backends/src/sqlite_backend.rs` now uses `now_ms().checked_add(ttl)` and rejects the operation with `StorageError::InvalidArgument("ttl_ms overflows expiry timestamp")` when the addition saturates — a malicious or buggy caller can no longer wrap the expiry into the past or persist a value with a corrupted timestamp.
+
 ## rivers-engine-v8
 
 ### rivers-engine-v8 — T2-1: Host callback table is copied with undocumented `ptr::read`
@@ -622,6 +646,8 @@ pub extern "C" fn _rivers_engine_init_with_callbacks(callbacks: *const HostCallb
 
 **Fix direction:** Make `HostCallbacks` explicitly `Copy + Clone`, or copy each function pointer field with documented safety.
 
+**Resolved 2026-04-26 by PR #83 (sha `6ee5036`).** `HostCallbacks` in `crates/rivers-engine-sdk` is now declared `#[derive(Copy, Clone)]` and the `_rivers_engine_init_with_callbacks` entry point in `crates/rivers-engine-v8/src/lib.rs` carries a `// SAFETY:` doc-comment block stating the ABI invariant the host upholds (caller passes a fully-initialized `HostCallbacks` whose lifetime exceeds the engine). The `std::ptr::read` is preserved but is now sound by construction: any future non-`Copy` field would fail to compile here.
+
 ## rivers-engine-wasm
 
 ### rivers-engine-wasm — T2-1: WASM memory pointer math casts negative offsets to `usize`
@@ -643,6 +669,8 @@ if let Some(slice) = data.get(ptr as usize..(ptr as usize + len as usize)) {
 ```
 
 **Fix direction:** Reject negative pointer or length values before casting and return a host-function error/trap.
+
+**Resolved 2026-04-26 by PR #83 (sha `6ee5036`).** Host log/buffer callbacks in `crates/rivers-engine-wasm/src/lib.rs` now reject negative `ptr` or `len` values (returning a wasmtime trap with a clear "negative offset" message) before any `as usize` cast, so a buggy guest no longer has its mistakes silently coerced into huge `usize` offsets that pass bounds checks but reference the wrong bytes. Valid guest pointers continue through the existing `data.get(...)` slice path.
 
 ## rivers-engine-sdk
 
