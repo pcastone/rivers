@@ -52,7 +52,11 @@ pub extern "C" fn _rivers_engine_init() -> i32 {
 #[no_mangle]
 pub extern "C" fn _rivers_engine_init_with_callbacks(callbacks: *const HostCallbacks) -> i32 {
     if !callbacks.is_null() {
-        let cb = unsafe { std::ptr::read(callbacks) };
+        // SAFETY: Caller (riversd) guarantees `callbacks` points to a valid,
+        // initialized `HostCallbacks` for the duration of this call.
+        // `HostCallbacks: Copy` is enforced at the type level, so `*p` is
+        // a sound bitwise read.
+        let cb = unsafe { *callbacks };
         let _ = HOST_CALLBACKS.set(cb);
     }
     _rivers_engine_init()
@@ -252,33 +256,15 @@ fn execute_wasm(ctx: SerializedTaskContext) -> Result<SerializedTaskResult, Stri
     let mut linker = wasmtime::Linker::new(&engine);
 
     linker.func_wrap("rivers", "log_info", |mut caller: wasmtime::Caller<'_, wasmtime::StoreLimits>, ptr: i32, len: i32| {
-        if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
-            let data = memory.data(&caller);
-            if let Some(slice) = data.get(ptr as usize..(ptr as usize + len as usize)) {
-                let msg = String::from_utf8_lossy(slice);
-                log_to_host(2, &msg);
-            }
-        }
+        wasm_log_helper(&mut caller, 2, ptr, len);
     }).map_err(|e| format!("linker log_info: {e}"))?;
 
     linker.func_wrap("rivers", "log_warn", |mut caller: wasmtime::Caller<'_, wasmtime::StoreLimits>, ptr: i32, len: i32| {
-        if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
-            let data = memory.data(&caller);
-            if let Some(slice) = data.get(ptr as usize..(ptr as usize + len as usize)) {
-                let msg = String::from_utf8_lossy(slice);
-                log_to_host(3, &msg);
-            }
-        }
+        wasm_log_helper(&mut caller, 3, ptr, len);
     }).map_err(|e| format!("linker log_warn: {e}"))?;
 
     linker.func_wrap("rivers", "log_error", |mut caller: wasmtime::Caller<'_, wasmtime::StoreLimits>, ptr: i32, len: i32| {
-        if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
-            let data = memory.data(&caller);
-            if let Some(slice) = data.get(ptr as usize..(ptr as usize + len as usize)) {
-                let msg = String::from_utf8_lossy(slice);
-                log_to_host(4, &msg);
-            }
-        }
+        wasm_log_helper(&mut caller, 4, ptr, len);
     }).map_err(|e| format!("linker log_error: {e}"))?;
 
     // Instantiate
@@ -313,6 +299,65 @@ fn execute_wasm(ctx: SerializedTaskContext) -> Result<SerializedTaskResult, Stri
         value: return_val,
         duration_ms: start.elapsed().as_millis() as u64,
     })
+}
+
+/// Convert a WASM-supplied i32 offset/length into a host-side `usize`,
+/// rejecting negative values.
+///
+/// The naive `as usize` cast wraps negative `i32` values to large positive
+/// `usize` values, which then either silently fail an OOB bounds check or,
+/// in unchecked code paths, would risk an out-of-bounds memory read.
+/// Routing through `usize::try_from` makes the negative-offset case a
+/// type-checked `None` we can surface explicitly.
+fn checked_offset(offset: i32) -> Option<usize> {
+    usize::try_from(offset).ok()
+}
+
+/// Read a WASM memory slice at `(ptr, len)` after validating the offsets
+/// are non-negative, then forward the resulting UTF-8-lossy string to the
+/// host log channel at the requested level. A negative `ptr` or `len`,
+/// missing exported memory, or an OOB slice is logged as a warning and
+/// the original log call is dropped — never silently misread.
+fn wasm_log_helper(
+    caller: &mut wasmtime::Caller<'_, wasmtime::StoreLimits>,
+    level: u8,
+    ptr: i32,
+    len: i32,
+) {
+    let (Some(start), Some(length)) = (checked_offset(ptr), checked_offset(len)) else {
+        log_to_host(
+            3,
+            &format!(
+                "wasm log dropped: negative memory offset ptr={ptr} len={len}"
+            ),
+        );
+        return;
+    };
+    let Some(end) = start.checked_add(length) else {
+        log_to_host(
+            3,
+            &format!(
+                "wasm log dropped: offset overflow ptr={ptr} len={len}"
+            ),
+        );
+        return;
+    };
+    let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
+        return;
+    };
+    let data = memory.data(&caller);
+    let Some(slice) = data.get(start..end) else {
+        log_to_host(
+            3,
+            &format!(
+                "wasm log dropped: out-of-bounds slice ptr={ptr} len={len} mem_size={}",
+                data.len()
+            ),
+        );
+        return;
+    };
+    let msg = String::from_utf8_lossy(slice);
+    log_to_host(level, &msg);
 }
 
 /// Log via host callbacks if available, otherwise use tracing directly.
@@ -390,6 +435,28 @@ mod tests {
     #[test]
     fn abi_version_matches() {
         assert_eq!(_rivers_engine_abi_version(), ENGINE_ABI_VERSION);
+    }
+
+    #[test]
+    fn checked_offset_rejects_negative() {
+        assert_eq!(checked_offset(-1), None);
+        assert_eq!(checked_offset(i32::MIN), None);
+    }
+
+    #[test]
+    fn checked_offset_accepts_non_negative() {
+        assert_eq!(checked_offset(0), Some(0));
+        assert_eq!(checked_offset(42), Some(42));
+        assert_eq!(checked_offset(i32::MAX), Some(i32::MAX as usize));
+    }
+
+    #[test]
+    fn host_callbacks_is_copy() {
+        // Compile-time assertion: HostCallbacks must remain bitwise-copyable so
+        // that `_rivers_engine_init_with_callbacks`'s `*p` read is sound. If
+        // any field becomes non-Copy this test (and the trait bound) fail.
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<HostCallbacks>();
     }
 
     #[test]
