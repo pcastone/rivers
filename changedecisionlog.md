@@ -527,3 +527,34 @@ Shared test fixtures:
 - Full `cargo test -p riversd` — every binary green, no failures.
 
 **Resolution method:** test-driven. Built the e2e tests, watched them fail with the stale-runtime cancellation, traced the failure to `Handle::current()` capture timing inside `OnceLock`, fixed by introducing the long-lived fixture runtime, re-ran — all 5 tests green plus all prior tests still green. No behavior change in production code paths; only cfg-test surface widened minimally and dev-dep added (`rusqlite`).
+
+## VERSIONING-1.1 — Workspace version policy + UTC build-stamp (2026-04-26)
+
+**Files affected:**
+- `Cargo.toml` — workspace `[package].version` switches from plain SemVer (`0.54.2`) to SemVer + build metadata (`0.54.2+HHMMDDMMYY` with the build stamp refreshed on every PR).
+- `scripts/bump-version.sh` — new portable bash + awk script that bumps the right component and refreshes the UTC stamp.
+- `Justfile` — three new recipes (`bump`, `bump-patch`, `bump-minor`).
+- `.github/workflows/version-check.yml` — CI gate fails any PR to `main` whose workspace version is unchanged from base.
+- `CLAUDE.md` — new "Versioning" section documenting format, bump rules, and CI enforcement.
+
+**Decision 1: SemVer build metadata over a 4th dot component.**
+The user's preferred display form was `0.55.0.HHMMDDMMYY` (4 dot-separated parts). Cargo's SemVer parser accepts only 3 dots; a literal 4th part fails parsing. SemVer 2.0 build metadata (`+HHMMDDMMYY`) carries the same identity, is Cargo-compatible, is preserved through `cargo deploy`, and is widely understood by tooling. The dotted display form is preserved in operator-facing surfaces (riversd banner, riversctl) — only `Cargo.toml` uses `+`.
+
+**Decision 2: UTC for the build stamp, not local time.**
+A globally distributed contributor base produces inconsistent stamps under local-time (Tokyo dev's stamp is "tomorrow" from California's perspective; DST adds further ambiguity). UTC is deterministic, monotonic-per-clock, and matches every other server-log convention. The script enforces this via `date -u`.
+
+**Decision 3: 10-digit stamp `HHMMDDMMYY` over 8 (HHDDMMYY) or 12 (HHMMSSDDMMYY).**
+The 8-char form caused PR collisions when two PRs landed within the same hour (real concern for active contributor pairs). The 12-char form (with seconds) is overkill — collisions within a minute imply a near-simultaneous double-merge that the tooling should reject anyway. Minute-level resolution is the sweet spot.
+
+**Decision 4: Naming convention for bump components.**
+The user's plain-language mapping ("major change", "code fix") doesn't match strict SemVer naming because Rivers is pre-1.0 — what they call "major" is the SemVer MINOR position; "code fix" is the SemVer PATCH position. The Justfile recipes use `bump-minor` and `bump-patch` to match Cargo/SemVer naming so that `cargo`-aware tooling sees expected semantics. The CLAUDE.md doc explains the policy in user-friendly terms ("major change" → `bump-minor`; "code fix" → `bump-patch`) so the team's mental model is preserved.
+
+**Decision 5: CI gate is binary (must-bump-or-fail), not heuristic (must-bump-when-X-changes).**
+A heuristic gate that exempts "doc-only" or "config-only" PRs adds maintenance burden (which paths are doc-only? does `tasks.md` count? what about Cargo.lock?) and creates surprise when a PR slips into the "must-bump" lane after a path-list edit. A flat "every PR bumps" rule is dumb-simple, costs ~3 seconds of `just bump` per PR, and makes the policy easy to teach.
+
+**Decision 6: No pre-commit hook.**
+Pre-commit hooks fire on every WIP commit during a feature branch; the bump only matters at PR-merge time. CI is the right boundary. Local `just bump` remains available for the contributor to run before pushing.
+
+**Spec reference:** SemVer 2.0 §10 (build metadata: optional, `+`-prefixed, alphanumerics + hyphen, no semantic effect on precedence). User-facing policy lives in CLAUDE.md "Versioning" section.
+
+**Resolution method:** spec-aligned design + portable shell tooling + CI gate. Validated by running the bump script three times locally (`build`, `patch`, `minor`) and confirming each produced the right transition: `0.54.2 → 0.54.2+1118260426`, `0.54.2+… → 0.54.3+…`, `0.54.3+… → 0.55.0+…`. CI gate validated at PR merge time on this very PR (which applies its own build-only seed bump).
