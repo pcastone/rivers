@@ -282,6 +282,119 @@ However, if a batch is very large (thousands of rows), consider splitting it int
 
 ---
 
+## Inline SQL: `Rivers.db.query` and `Rivers.db.execute`
+
+DataViews are the primary way to declare and reuse parameterized queries.
+For escape-hatch cases where a handler needs to issue raw SQL that doesn't
+fit a DataView (ad-hoc reports, dynamic schema introspection, one-off
+maintenance queries), use `Rivers.db.query()` and `Rivers.db.execute()`.
+
+Both functions take a datasource name (which must be declared in the
+view's `[[datasources]]` block, same capability gate as `ctx.dataview`),
+a SQL statement, and an optional positional parameter array.
+
+### `Rivers.db.query(datasource, sql, params?)`
+
+For SELECT-style reads. Returns
+`{ rows, affected_rows, last_insert_id }`.
+
+```javascript
+function listRecentOrders(ctx) {
+    var since = ctx.request.query.since || "2026-01-01";
+
+    var result = Rivers.db.query(
+        "postgres-orders",
+        "SELECT id, customer_id, amount FROM orders WHERE created_at >= $1 ORDER BY created_at DESC LIMIT 100",
+        [since]
+    );
+
+    ctx.resdata = {
+        count: result.affected_rows,
+        orders: result.rows,
+    };
+}
+```
+
+Both `?` (MySQL/SQLite style) and `$1, $2, ...` (Postgres style)
+placeholders work — Rivers translates them to whichever form the
+target driver expects, so you can write SQL in your driver's natural
+dialect.
+
+### `Rivers.db.execute(datasource, sql, params?)`
+
+For INSERT/UPDATE/DELETE writes. Returns
+`{ affected_rows, last_insert_id }` (no `rows`). Use this when you don't
+need a result set back — the wire-level shape is smaller and the intent
+is explicit.
+
+```javascript
+function archiveOldOrders(ctx) {
+    var cutoff = ctx.request.body.cutoff;
+
+    var result = Rivers.db.execute(
+        "postgres-orders",
+        "UPDATE orders SET status = 'archived' WHERE created_at < $1 AND status = 'closed'",
+        [cutoff]
+    );
+
+    Rivers.log.info("archived orders", { count: result.affected_rows });
+
+    ctx.resdata = { archived: result.affected_rows };
+}
+```
+
+### Inside a transaction
+
+Both functions honor an active transaction on the same datasource —
+calls inside `Rivers.db.begin(name) ... Rivers.db.commit(name)` (or
+inside `ctx.transaction(name, fn)`) route through the held connection,
+so the writes are rolled back together if anything throws:
+
+```javascript
+function transferFunds(ctx) {
+    var body = ctx.request.body;
+
+    Rivers.db.begin("postgres-accounts");
+    try {
+        Rivers.db.execute(
+            "postgres-accounts",
+            "UPDATE accounts SET balance = balance - $1 WHERE id = $2",
+            [body.amount, body.from],
+        );
+        Rivers.db.execute(
+            "postgres-accounts",
+            "UPDATE accounts SET balance = balance + $1 WHERE id = $2",
+            [body.amount, body.to],
+        );
+        Rivers.db.commit("postgres-accounts");
+        ctx.resdata = { ok: true };
+    } catch (e) {
+        Rivers.db.rollback("postgres-accounts");
+        throw e;
+    }
+}
+```
+
+Calling `Rivers.db.query` or `Rivers.db.execute` against a different
+datasource while a transaction is active throws a `TransactionError` —
+a transaction binds to a single datasource, by design.
+
+### When to prefer DataViews
+
+DataViews stay the right choice for queries that:
+
+- Run on every request (caching kicks in).
+- Need declarative parameter validation against a JSON schema.
+- Are reused across multiple handlers.
+- Need to be discoverable in `app.toml` rather than buried in handler
+  code.
+
+`Rivers.db.query` and `Rivers.db.execute` are the right choice for raw
+SQL that genuinely doesn't fit the DataView shape — variably-shaped
+ad-hoc queries, multi-table reports, or migration-flavored cleanups.
+
+---
+
 ## Auto-Rollback
 
 If your handler exits without committing an active transaction, Rivers automatically rolls back all uncommitted changes and logs a warning.

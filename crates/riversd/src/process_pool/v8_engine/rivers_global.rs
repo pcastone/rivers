@@ -81,7 +81,286 @@ fn write_to_app_log(app: &str, level: &str, msg: &str, fields: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::build_app_log_line;
+    use super::{build_app_log_line, rewrite_positional_placeholders};
+
+    // ── Bug 2: Rivers.db.query / Rivers.db.execute placeholder rewriter ──
+    // The rewriter is the only piece of new logic that doesn't already
+    // have coverage via the DataView engine's `translate_params` path
+    // (`crates/rivers-driver-sdk/tests/param_translation_tests.rs`).
+    // These tests pin down the contract: `?` and `$N` map to engine-
+    // canonical `$_pN`, string literals are not rewritten, identifier-
+    // adjacent `$` is left alone, and the count return value tracks
+    // the maximum index seen — including sparse indices like `$1, $3`.
+
+    #[test]
+    fn rewrites_question_marks_to_underscored_named_placeholders() {
+        let (out, n) =
+            rewrite_positional_placeholders("SELECT * FROM t WHERE a = ? AND b = ?");
+        assert_eq!(out, "SELECT * FROM t WHERE a = $_p1 AND b = $_p2");
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn rewrites_dollar_numeric_to_underscored_named_placeholders() {
+        let (out, n) =
+            rewrite_positional_placeholders("SELECT * FROM t WHERE id = $1 AND x = $2");
+        assert_eq!(out, "SELECT * FROM t WHERE id = $_p1 AND x = $_p2");
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn preserves_string_literals_with_question_marks_and_dollars() {
+        // `?` and `$1` inside `'...'` must be left alone.
+        let (out, n) = rewrite_positional_placeholders(
+            "INSERT INTO t (msg) VALUES ('what ? $1 ?') /* trailing */",
+        );
+        assert_eq!(
+            out,
+            "INSERT INTO t (msg) VALUES ('what ? $1 ?') /* trailing */"
+        );
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn handles_doubled_quote_escape_inside_string_literal() {
+        // SQL `''` is an escaped quote inside a string. The `?` here
+        // is still inside the literal, so must not be rewritten.
+        let (out, n) = rewrite_positional_placeholders(
+            "SELECT * FROM t WHERE name = 'O''Rourke?' AND id = ?",
+        );
+        assert_eq!(
+            out,
+            "SELECT * FROM t WHERE name = 'O''Rourke?' AND id = $_p1"
+        );
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn leaves_identifier_adjacent_dollar_alone() {
+        // `col$1` is an identifier, not a placeholder. Same for `t.$1`.
+        // The simple identifier-adjacency rule treats `_$1` as a
+        // continuation of the identifier and leaves it alone.
+        let (out, n) = rewrite_positional_placeholders("SELECT col$1 FROM t");
+        assert_eq!(out, "SELECT col$1 FROM t");
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn sparse_dollar_numeric_tracks_max_index() {
+        // Handler uses `$1` and `$3` but skips `$2`. Rewriter must
+        // report a count of 3 so the caller fills the gap with Null.
+        let (out, n) = rewrite_positional_placeholders("SELECT $1, $3 FROM t");
+        assert_eq!(out, "SELECT $_p1, $_p3 FROM t");
+        assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn empty_sql_yields_no_placeholders() {
+        let (out, n) = rewrite_positional_placeholders("");
+        assert_eq!(out, "");
+        assert_eq!(n, 0);
+    }
+
+    // ── Bug 2: integration tests for Rivers.db.query / Rivers.db.execute ──
+    // Drive `db_query_or_execute_core` directly against an SQLite tempfile
+    // so we exercise the full SQL parameter pipeline (rewrite ↦
+    // translate_params ↦ SqliteConnection::execute ↦ result marshal)
+    // without needing a V8 isolate. SQLite is registered as a real
+    // built-in driver, so the path is identical to production minus
+    // the V8 argument parsing layer.
+
+    use std::sync::Arc;
+
+    fn rivers_db_test_factory()
+        -> Arc<rivers_runtime::rivers_core::DriverFactory>
+    {
+        let mut factory = rivers_runtime::rivers_core::DriverFactory::new();
+        factory.register_database_driver(Arc::new(
+            rivers_runtime::rivers_core::drivers::SqliteDriver,
+        ));
+        Arc::new(factory)
+    }
+
+    fn rivers_db_test_resolved(db_path: &str)
+        -> rivers_runtime::process_pool::types::ResolvedDatasource
+    {
+        let mut options = std::collections::HashMap::new();
+        options.insert("driver".to_string(), "sqlite".to_string());
+        let params = rivers_runtime::rivers_driver_sdk::ConnectionParams {
+            host: String::new(),
+            port: 0,
+            database: db_path.to_string(),
+            username: String::new(),
+            password: String::new(),
+            options,
+        };
+        rivers_runtime::process_pool::types::ResolvedDatasource {
+            driver_name: "sqlite".to_string(),
+            params,
+        }
+    }
+
+    fn rivers_db_test_db_with_table() -> tempfile::NamedTempFile {
+        let f = tempfile::Builder::new()
+            .prefix("rivers-db-bug2-")
+            .suffix(".sqlite")
+            .tempfile()
+            .expect("tempfile");
+        let conn = rusqlite::Connection::open(f.path()).expect("open");
+        conn.execute(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+            [],
+        )
+        .expect("create table");
+        drop(conn);
+        f
+    }
+
+    /// Rivers.db.query returns rows after seed INSERTs round-trip.
+    /// Validates the Query→QueryResult marshal path: rows present,
+    /// affected_rows tracks count, last_insert_id is None for SELECT.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rivers_db_query_returns_rows() {
+        let temp = rivers_db_test_db_with_table();
+        // Seed 3 rows out-of-band so the SELECT result is deterministic.
+        let conn = rusqlite::Connection::open(temp.path()).expect("open");
+        conn.execute("INSERT INTO t (name) VALUES ('alice')", [])
+            .unwrap();
+        conn.execute("INSERT INTO t (name) VALUES ('bob')", []).unwrap();
+        conn.execute("INSERT INTO t (name) VALUES ('carol')", [])
+            .unwrap();
+        drop(conn);
+
+        let factory = rivers_db_test_factory();
+        let resolved = rivers_db_test_resolved(temp.path().to_str().unwrap());
+
+        let result = super::db_query_or_execute_core(
+            factory,
+            resolved,
+            "ds",
+            "SELECT id, name FROM t ORDER BY id",
+            vec![],
+            None,
+            super::DbCallKind::Query,
+        )
+        .await
+        .expect("query ok");
+
+        let rows = result["rows"].as_array().expect("rows array");
+        assert_eq!(rows.len(), 3, "three seeded rows expected");
+        assert_eq!(rows[0]["name"], "alice");
+        assert_eq!(rows[1]["name"], "bob");
+        assert_eq!(rows[2]["name"], "carol");
+        assert_eq!(result["affected_rows"], 3);
+        assert!(result.get("last_insert_id").is_some());
+    }
+
+    /// Rivers.db.execute INSERTs and returns affected_rows + last_insert_id.
+    /// Also validates the positional-array → `?`-rewrite path: SQLite
+    /// uses DollarNamed style, so `?` becomes `$_p1, $_p2` and binds
+    /// straight through `bind_params`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rivers_db_execute_inserts_and_returns_affected() {
+        use rivers_runtime::rivers_driver_sdk::types::QueryValue;
+
+        let temp = rivers_db_test_db_with_table();
+        let factory = rivers_db_test_factory();
+        let resolved = rivers_db_test_resolved(temp.path().to_str().unwrap());
+
+        let result = super::db_query_or_execute_core(
+            factory,
+            resolved,
+            "ds",
+            "INSERT INTO t (id, name) VALUES (?, ?)",
+            vec![QueryValue::Integer(42), QueryValue::String("dave".into())],
+            None,
+            super::DbCallKind::Execute,
+        )
+        .await
+        .expect("execute ok");
+
+        // execute() drops `rows`; only affected_rows + last_insert_id.
+        assert!(
+            result.get("rows").is_none(),
+            "Rivers.db.execute must not include 'rows' (Bug 2 contract)"
+        );
+        assert_eq!(result["affected_rows"], 1);
+        assert_eq!(result["last_insert_id"], "42");
+
+        // Verify the row landed via a fresh out-of-band reader.
+        let conn = rusqlite::Connection::open(temp.path()).expect("open");
+        let name: String = conn
+            .query_row("SELECT name FROM t WHERE id = ?", [42i64], |r| r.get(0))
+            .expect("select");
+        assert_eq!(name, "dave");
+    }
+
+    /// Inside an active transaction on the same datasource, an INSERT
+    /// via Rivers.db.execute must route through the txn connection;
+    /// rolling back must discard the row. An out-of-band reader is
+    /// the ground-truth oracle: if the row reaches disk after rollback,
+    /// the txn-routing was wrong.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rivers_db_execute_in_transaction_uses_txn_conn_and_rolls_back() {
+        use rivers_runtime::rivers_driver_sdk::types::QueryValue;
+
+        let temp = rivers_db_test_db_with_table();
+        let db_path = temp.path().to_owned();
+        let factory = rivers_db_test_factory();
+        let resolved = rivers_db_test_resolved(db_path.to_str().unwrap());
+
+        // Open a connection through the factory and BEGIN a transaction
+        // on it — this is the connection Rivers.db.execute must reuse.
+        let txn_map = Arc::new(crate::transaction::TransactionMap::new());
+        {
+            let conn = factory
+                .connect(&resolved.driver_name, &resolved.params)
+                .await
+                .expect("connect");
+            txn_map.begin("ds", conn).await.expect("begin");
+        }
+
+        // Execute INSERT inside the transaction. txn argument forces
+        // the core to route through the held connection rather than
+        // acquire a fresh one from the factory.
+        let result = super::db_query_or_execute_core(
+            Arc::clone(&factory),
+            resolved.clone(),
+            "ds",
+            "INSERT INTO t (id, name) VALUES (?, ?)",
+            vec![QueryValue::Integer(7), QueryValue::String("eve".into())],
+            Some((Arc::clone(&txn_map), "ds".to_string())),
+            super::DbCallKind::Execute,
+        )
+        .await
+        .expect("txn execute ok");
+        assert_eq!(result["affected_rows"], 1);
+
+        // Pre-rollback: an out-of-band reader must see ZERO rows
+        // (the txn connection holds the write — txn isolation).
+        let pre = rusqlite::Connection::open(&db_path).unwrap();
+        let pre_count: i64 = pre
+            .query_row("SELECT COUNT(*) FROM t WHERE id = ?", [7i64], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            pre_count, 0,
+            "pre-rollback: outside reader must not see uncommitted row"
+        );
+        drop(pre);
+
+        // Rollback discards the write.
+        txn_map.rollback("ds").await.expect("rollback");
+
+        // Post-rollback: the row never existed.
+        let post = rusqlite::Connection::open(&db_path).unwrap();
+        let post_count: i64 = post
+            .query_row("SELECT COUNT(*) FROM t WHERE id = ?", [7i64], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            post_count, 0,
+            "post-rollback: row must be discarded — txn-routing failed if 1"
+        );
+    }
 
     /// H15/T3-1: log line round-trips through serde_json even when the
     /// message and app name contain quotes, newlines, and control chars.
@@ -770,6 +1049,19 @@ pub(super) fn inject_rivers_global(
     let db_batch_key = v8_str(scope, "batch")?;
     db_obj.set(scope, db_batch_key.into(), db_batch_fn.into());
 
+    // Bug 2 (case-rivers-db-query-missing.md) — install Rivers.db.query
+    // and Rivers.db.execute. Both are documented in
+    // rivers-processpool-runtime-spec-v2.md §5.2 but were never installed.
+    let db_query_fn = v8::Function::new(scope, db_query_callback)
+        .ok_or_else(|| TaskError::Internal("failed to create Rivers.db.query".into()))?;
+    let db_query_key = v8_str(scope, "query")?;
+    db_obj.set(scope, db_query_key.into(), db_query_fn.into());
+
+    let db_execute_fn = v8::Function::new(scope, db_execute_callback)
+        .ok_or_else(|| TaskError::Internal("failed to create Rivers.db.execute".into()))?;
+    let db_execute_key = v8_str(scope, "execute")?;
+    db_obj.set(scope, db_execute_key.into(), db_execute_fn.into());
+
     let db_key = v8_str(scope, "db")?;
     rivers_obj.set(scope, db_key.into(), db_obj.into());
 
@@ -1133,4 +1425,415 @@ fn db_batch_callback(
             rv.set(parsed);
         }
     }
+}
+
+// ── Rivers.db.query / Rivers.db.execute (Bug 2) ───────────────────────────
+// Documented in rivers-processpool-runtime-spec-v2.md §5.2 but never
+// installed prior to this change. Closes
+// docs/bugs/case-rivers-db-query-missing.md.
+//
+// Both callbacks accept (datasource, sql, params?). `params` is a
+// positional JS array. Index N (0-based) becomes parameter `_pN+1`,
+// then translate_params (the same helper the DataView engine uses
+// in `dataview_engine.rs:850-872`) rewrites the SQL into the driver's
+// native placeholder style and rebuilds the parameters HashMap with
+// zero-padded numeric keys for positional drivers.
+//
+// To bridge the gap between the user's natural placeholder choice
+// (`?` for MySQL/SQLite, `$1`/`$2` for Postgres) and the engine's
+// `$name` convention, we rewrite both forms into `$_pN` *before*
+// calling `translate_params`. This means a handler can write SQL in
+// the dialect of its target driver and the bindings line up.
+//
+// Connection routing mirrors `db_batch_callback` exactly:
+//   1. If TASK_TRANSACTION is active and matches the call's
+//      datasource → use the txn connection via TransactionMap
+//      take/return.
+//   2. If TASK_TRANSACTION is active but the datasource MISMATCHES
+//      → throw a JS TransactionError (cross-datasource inside txn).
+//   3. Otherwise → acquire a fresh connection via
+//      `factory.connect(driver, params)`.
+//
+// Returns are sync values, not Promises. Spec §5.2's `Promise<...>`
+// annotation is aspirational — `db_batch_callback` already returns
+// sync values, and we match it to keep the surface internally
+// consistent.
+
+/// Convert a JS positional placeholder SQL string into the engine's
+/// `$name` form by replacing every `?` and `$N` (where N is a positive
+/// integer literal) with `$_pK` (K = 1..=count). Returns the rewritten
+/// SQL plus the number of placeholders detected.
+///
+/// Rules (kept narrow on purpose so handlers see predictable behavior):
+/// - `?` is a placeholder *unless* it appears inside a single-quoted
+///   string literal. We track quote state to avoid rewriting `'?'` etc.
+/// - `$N` is a placeholder *unless* preceded by an identifier
+///   character (treats `$column$tag` and identifier-style dollars as
+///   non-placeholders) or immediately followed by an alphanumeric
+///   character (e.g. `$tag$ ... $tag$` in Postgres dollar-quoted
+///   strings remains untouched because `$tag` starts with a letter,
+///   not a digit; this rewriter only matches `$<digits>`).
+/// - String literals (`'...'`) suppress placeholder detection. SQL
+///   `''`-escape sequences inside literals stay inside the literal.
+///
+/// This is intentionally simpler than a full SQL parser. Drivers that
+/// need exotic placeholder forms can use the existing
+/// `ctx.datasource(name).fromQuery(sql).build({...})` named-object API.
+fn rewrite_positional_placeholders(sql: &str) -> (String, usize) {
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len() + 8);
+    let mut count: usize = 0;
+    let mut in_string = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            out.push(c as char);
+            if c == b'\'' {
+                // SQL escapes a literal quote by doubling: `''`.
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    out.push('\'');
+                    i += 2;
+                    continue;
+                }
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'\'' {
+            in_string = true;
+            out.push('\'');
+            i += 1;
+            continue;
+        }
+        if c == b'?' {
+            count += 1;
+            out.push_str(&format!("$_p{count}"));
+            i += 1;
+            continue;
+        }
+        if c == b'$' {
+            // Only digits → numeric placeholder. Letter/underscore →
+            // user-named placeholder, leave alone (lets handlers mix
+            // positional with named if they really want).
+            let prev_is_ident = i > 0
+                && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+            if !prev_is_ident {
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > i + 1 {
+                    // Got `$<digits>` — treat as positional.
+                    let n_str = std::str::from_utf8(&bytes[i + 1..j]).unwrap_or("0");
+                    let n: usize = n_str.parse().unwrap_or(0);
+                    if n >= 1 {
+                        // `count` tracks the maximum index seen so the
+                        // params array can be sized correctly. Numeric
+                        // `$N` is allowed to skip indexes (`$1, $3`)
+                        // — handlers that do that get `Null` for the
+                        // missing slot.
+                        if n > count {
+                            count = n;
+                        }
+                        out.push_str(&format!("$_p{n}"));
+                        i = j;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(c as char);
+        i += 1;
+    }
+    (out, count)
+}
+
+/// Common implementation behind Rivers.db.query and Rivers.db.execute.
+///
+/// `kind` selects the Result shape — `Query` keeps `rows`, `Execute`
+/// drops it for the INSERT/UPDATE/DELETE callers.
+#[derive(Clone, Copy)]
+pub(crate) enum DbCallKind {
+    Query,
+    Execute,
+}
+
+/// Async core of `Rivers.db.query` / `Rivers.db.execute`. Pulls the
+/// V8 host context out of the public surface so it can be exercised
+/// directly against a real SQLite database in unit tests.
+///
+/// `txn` (if Some) is the `(map, datasource)` of an active transaction
+/// for the current task. The caller is responsible for the cross-DS
+/// reject — passing a mismatched (txn_ds, ds_name) here will simply
+/// fail to find the connection and surface a "connection unavailable"
+/// error. The V8 wrapper performs the cross-DS check before calling
+/// in to keep the user-facing error message specific.
+pub(crate) async fn db_query_or_execute_core(
+    factory: std::sync::Arc<rivers_runtime::rivers_core::DriverFactory>,
+    resolved: rivers_runtime::process_pool::types::ResolvedDatasource,
+    ds_name: &str,
+    sql_in: &str,
+    positional_params: Vec<rivers_runtime::rivers_driver_sdk::types::QueryValue>,
+    txn: Option<(std::sync::Arc<crate::transaction::TransactionMap>, String)>,
+    kind: DbCallKind,
+) -> Result<serde_json::Value, String> {
+    use rivers_runtime::rivers_driver_sdk::types::{Query, QueryValue};
+    use std::collections::HashMap;
+
+    if sql_in.trim().is_empty() {
+        return Err("sql is required".into());
+    }
+
+    // Build the params HashMap from the positional vec.
+    let mut params: HashMap<String, QueryValue> = positional_params
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| (format!("_p{}", i + 1), v))
+        .collect();
+
+    // Rewrite `?` and `$N` to engine-canonical `$_pN` so `translate_params`
+    // (which only matches `$alpha`) can do the per-driver finalization.
+    let (rewritten_sql, max_index) = rewrite_positional_placeholders(sql_in);
+
+    // Backfill missing positions (e.g. handler used `$3` without `$2`)
+    // with explicit nulls so the bound list is dense.
+    for n in 1..=max_index {
+        let key = format!("_p{n}");
+        params.entry(key).or_insert(QueryValue::Null);
+    }
+
+    // Per-driver placeholder translation. Mirrors the DataView engine
+    // pre-execute step at dataview_engine.rs:850-872.
+    let mut final_sql = rewritten_sql;
+    let mut final_params: HashMap<String, QueryValue> = params;
+    if let Some(driver) = factory.get_driver(&resolved.driver_name) {
+        let style = driver.param_style();
+        if style != rivers_runtime::rivers_driver_sdk::ParamStyle::None {
+            let (rewritten, ordered) = rivers_runtime::rivers_driver_sdk::translate_params(
+                &final_sql,
+                &final_params,
+                style,
+            );
+            final_sql = rewritten;
+            if style == rivers_runtime::rivers_driver_sdk::ParamStyle::DollarPositional
+                || style == rivers_runtime::rivers_driver_sdk::ParamStyle::QuestionPositional
+            {
+                final_params.clear();
+                for (i, (_k, v)) in ordered.into_iter().enumerate() {
+                    final_params.insert(format!("{:03}", i + 1), v);
+                }
+            }
+        }
+    }
+
+    let mut query = Query::new(ds_name, &final_sql);
+    query.parameters = final_params;
+
+    let query_result = if let Some((map, ds)) = txn {
+        // Take the connection out of the txn map for the duration
+        // of the call, then return it so the same map can drive
+        // subsequent calls or commit/rollback. (Same protocol as
+        // db_batch_callback uses.)
+        if let Some(mut conn) = map.take_connection(&ds).await {
+            let res = conn
+                .execute(&query)
+                .await
+                .map_err(|e| format!("query failed: {e}"));
+            map.return_connection(&ds, conn).await;
+            res?
+        } else {
+            return Err(format!(
+                "TransactionError: connection for datasource '{ds}' is unavailable \
+                 (race with commit/rollback?)"
+            ));
+        }
+    } else {
+        let mut conn = factory
+            .connect(&resolved.driver_name, &resolved.params)
+            .await
+            .map_err(|e| format!("connection failed: {e}"))?;
+        conn.execute(&query)
+            .await
+            .map_err(|e| format!("query failed: {e}"))?
+    };
+
+    let json = match kind {
+        DbCallKind::Query => serde_json::json!({
+            "rows": query_result.rows,
+            "affected_rows": query_result.affected_rows,
+            "last_insert_id": query_result.last_insert_id,
+        }),
+        DbCallKind::Execute => serde_json::json!({
+            "affected_rows": query_result.affected_rows,
+            "last_insert_id": query_result.last_insert_id,
+        }),
+    };
+    Ok(json)
+}
+
+fn db_query_or_execute(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    rv: &mut v8::ReturnValue,
+    kind: DbCallKind,
+) {
+    let cb_name = match kind {
+        DbCallKind::Query => "Rivers.db.query",
+        DbCallKind::Execute => "Rivers.db.execute",
+    };
+
+    // Arg 0: datasource name.
+    let ds_name = args.get(0).to_rust_string_lossy(scope);
+    if ds_name.is_empty() {
+        db_throw(scope, &format!("{cb_name}: datasource name is required"));
+        return;
+    }
+
+    // Arg 1: SQL statement.
+    let sql_val = args.get(1);
+    if sql_val.is_undefined() || sql_val.is_null() {
+        db_throw(scope, &format!("{cb_name}: sql is required"));
+        return;
+    }
+    let sql_in = sql_val.to_rust_string_lossy(scope);
+    if sql_in.trim().is_empty() {
+        db_throw(scope, &format!("{cb_name}: sql is required"));
+        return;
+    }
+
+    // Capability: datasource must be declared in the task's view config.
+    let is_declared = TASK_DS_CONFIGS.with(|c| c.borrow().contains_key(&ds_name));
+    if !is_declared {
+        db_throw(
+            scope,
+            &format!("CapabilityError: datasource '{ds_name}' not declared in view config"),
+        );
+        return;
+    }
+
+    // Cross-datasource reject inside an active transaction. Done at the
+    // V8 layer (not the core) so the user-facing message is specific
+    // about which datasource is mismatched. Same wording style as the
+    // existing db_commit/rollback callbacks.
+    let txn_state: Option<(std::sync::Arc<crate::transaction::TransactionMap>, String)> =
+        TASK_TRANSACTION.with(|t| {
+            t.borrow().as_ref().map(|s| (s.map.clone(), s.datasource.clone()))
+        });
+    if let Some((_, ref txn_ds)) = txn_state {
+        if txn_ds != &ds_name {
+            db_throw(
+                scope,
+                &format!(
+                    "TransactionError: active transaction is on \"{txn_ds}\", not \"{ds_name}\" — \
+                     {cb_name} cannot route across datasources inside a transaction"
+                ),
+            );
+            return;
+        }
+    }
+
+    // Arg 2: optional positional params array.
+    let params_val = args.get(2);
+    let positional = build_positional_params_vec_from_v8(scope, params_val);
+
+    let resolved = match TASK_DS_CONFIGS.with(|c| c.borrow().get(&ds_name).cloned()) {
+        Some(r) => r,
+        None => {
+            db_throw(scope, &format!("{cb_name}: datasource \"{ds_name}\" not found in task config"));
+            return;
+        }
+    };
+    let factory = match TASK_DRIVER_FACTORY.with(|f| f.borrow().clone()) {
+        Some(f) => f,
+        None => {
+            db_throw(scope, &format!("{cb_name}: driver factory not available"));
+            return;
+        }
+    };
+
+    let rt = match get_rt_handle() {
+        Ok(r) => r,
+        Err(e) => {
+            db_throw(scope, &format!("{cb_name}: {e}"));
+            return;
+        }
+    };
+
+    let result = rt.block_on(db_query_or_execute_core(
+        factory,
+        resolved,
+        &ds_name,
+        &sql_in,
+        positional,
+        txn_state,
+        kind,
+    ));
+
+    let json = match result {
+        Ok(j) => j,
+        Err(e) => {
+            db_throw(scope, &format!("{cb_name} error: {e}"));
+            return;
+        }
+    };
+
+    let json_str = serde_json::to_string(&json).unwrap_or_else(|_| "null".into());
+    if let Some(v8_s) = v8::String::new(scope, &json_str) {
+        if let Some(parsed) = v8::json::parse(scope, v8_s.into()) {
+            rv.set(parsed);
+        } else {
+            rv.set(v8::null(scope).into());
+        }
+    }
+}
+
+/// Materialize a V8 array into a Vec<QueryValue> in array order.
+/// Non-array / nullish args yield an empty vec — same surface as
+/// omitting the argument.
+fn build_positional_params_vec_from_v8(
+    scope: &mut v8::HandleScope,
+    val: v8::Local<v8::Value>,
+) -> Vec<rivers_runtime::rivers_driver_sdk::types::QueryValue> {
+    if val.is_undefined() || val.is_null() {
+        return Vec::new();
+    }
+    if !val.is_array() {
+        return Vec::new();
+    }
+    if let Some(json_str) = v8::json::stringify(scope, val) {
+        let s = json_str.to_rust_string_lossy(scope);
+        if let Ok(serde_json::Value::Array(arr)) = serde_json::from_str::<serde_json::Value>(&s) {
+            return arr
+                .into_iter()
+                .map(super::datasource::json_to_query_value)
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+/// `Rivers.db.query(datasource, sql, params?)` — execute a SQL statement
+/// and return `{ rows, affected_rows, last_insert_id }`.
+///
+/// Documented in rivers-processpool-runtime-spec-v2.md §5.2; closes
+/// docs/bugs/case-rivers-db-query-missing.md (Bug 2).
+fn db_query_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    db_query_or_execute(scope, args, &mut rv, DbCallKind::Query);
+}
+
+/// `Rivers.db.execute(datasource, sql, params?)` — same as `query` but
+/// returns `{ affected_rows, last_insert_id }` (no rows). For
+/// INSERT/UPDATE/DELETE.
+fn db_execute_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    db_query_or_execute(scope, args, &mut rv, DbCallKind::Execute);
 }
