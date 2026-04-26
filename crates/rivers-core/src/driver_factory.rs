@@ -276,6 +276,32 @@ pub fn load_plugins(
     results
 }
 
+/// Convert a panic payload (as returned by `catch_unwind`) into a human
+/// readable string. Recognizes the two common payload types (`String` and
+/// `&'static str`) and falls back to a generic message for anything else.
+fn panic_payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
+/// Call an FFI function pointer with panic containment. Used for plugin ABI
+/// probes so that a malformed plugin cannot unwind across the FFI boundary.
+///
+/// `AssertUnwindSafe` is appropriate when the closure only invokes a raw
+/// `extern "C"` function pointer — there is no captured Rust state that
+/// could be left in an inconsistent state by a panic.
+fn call_ffi_with_panic_containment<R>(
+    f: impl FnOnce() -> R,
+) -> Result<R, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .map_err(|p| panic_payload_to_string(&p))
+}
+
 /// Load a single plugin shared library.
 ///
 /// Per spec §7.2-§7.3:
@@ -302,12 +328,28 @@ fn load_single_plugin(
     };
 
     // Check ABI version (spec §7.2)
-    let abi_version = match unsafe { lib.get::<unsafe extern "C" fn() -> u32>(b"_rivers_abi_version") } {
-        Ok(func) => unsafe { func() },
+    //
+    // The probe itself is wrapped in `catch_unwind` so that a malformed plugin
+    // whose `_rivers_abi_version` panics cannot unwind across the FFI boundary
+    // (UB). On panic: emit `PluginLoadFailed` (via the caller's existing
+    // PluginLoadResult::Failed handling) and reject the plugin so riversd
+    // continues booting. `AssertUnwindSafe` is sound here because the
+    // captured `func` is a raw fn pointer with no captured state.
+    let abi_func = match unsafe { lib.get::<unsafe extern "C" fn() -> u32>(b"_rivers_abi_version") } {
+        Ok(func) => func,
         Err(_) => {
             return PluginLoadResult::Failed {
                 path: path_str,
                 reason: "missing _rivers_abi_version symbol".to_string(),
+            };
+        }
+    };
+    let abi_version = match call_ffi_with_panic_containment(|| unsafe { abi_func() }) {
+        Ok(v) => v,
+        Err(msg) => {
+            return PluginLoadResult::Failed {
+                path: path_str,
+                reason: format!("_rivers_abi_version panicked: {}", msg),
             };
         }
     };
@@ -380,13 +422,10 @@ fn load_single_plugin(
             // Keep the library alive even on panic
             std::mem::forget(lib);
 
-            let reason = if let Some(s) = panic_info.downcast_ref::<String>() {
-                format!("plugin panicked during registration: {}", s)
-            } else if let Some(s) = panic_info.downcast_ref::<&str>() {
-                format!("plugin panicked during registration: {}", s)
-            } else {
-                "plugin panicked during registration (unknown payload)".to_string()
-            };
+            let reason = format!(
+                "plugin panicked during registration: {}",
+                panic_payload_to_string(&panic_info)
+            );
 
             PluginLoadResult::Failed {
                 path: path_str,
@@ -547,5 +586,50 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("nonexistent"));
+    }
+
+    // ── H3: panic containment for plugin ABI probe ──
+
+    #[test]
+    fn ffi_panic_with_string_payload_is_contained() {
+        let result: Result<u32, String> =
+            call_ffi_with_panic_containment(|| -> u32 {
+                panic!("plugin go boom");
+            });
+        let err = result.expect_err("panic should be caught");
+        assert!(
+            err.contains("plugin go boom"),
+            "panic message should be preserved, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ffi_panic_with_string_owned_payload_is_contained() {
+        let result: Result<u32, String> =
+            call_ffi_with_panic_containment(|| -> u32 {
+                // String (owned) payload, distinct downcast branch
+                panic!("{}", String::from("owned panic"));
+            });
+        let err = result.expect_err("panic should be caught");
+        assert!(
+            err.contains("owned panic"),
+            "owned-string panic message should be preserved, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ffi_no_panic_passes_through() {
+        let result = call_ffi_with_panic_containment(|| 42u32);
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn ffi_panic_with_non_string_payload_falls_back() {
+        let result: Result<(), String> =
+            call_ffi_with_panic_containment(|| {
+                std::panic::panic_any(12345u32);
+            });
+        let err = result.expect_err("panic should be caught");
+        assert_eq!(err, "non-string panic payload");
     }
 }
