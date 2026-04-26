@@ -16,3 +16,7 @@ mod conformance_crud_lifecycle {
 mod conformance_param_binding {
     include!("conformance/param_binding.rs");
 }
+
+mod conformance_h18_mysql_uint {
+    include!("conformance/h18_mysql_uint.rs");
+}

@@ -460,7 +460,10 @@ pub fn zero_value_for_type(param_type: &str) -> QueryValue {
 pub fn matches_param_type(value: &QueryValue, param_type: &str) -> bool {
     match param_type.to_lowercase().as_str() {
         "string" | "uuid" | "date" => matches!(value, QueryValue::String(_)),
-        "integer" => matches!(value, QueryValue::Integer(_)),
+        // Per H18: schema "integer" accepts both signed (Integer) and
+        // unsigned (UInt) variants — the variant choice is a driver-side
+        // representation detail, not a user-facing schema concern.
+        "integer" => matches!(value, QueryValue::Integer(_) | QueryValue::UInt(_)),
         "float" | "decimal" => matches!(value, QueryValue::Float(_)),
         "boolean" => matches!(value, QueryValue::Boolean(_)),
         "array" => matches!(value, QueryValue::Array(_)),
@@ -520,6 +523,10 @@ pub fn coerce_param_type(value: &QueryValue, target_type: &str) -> Option<QueryV
         }
         // Integer → Float/Decimal (always lossless for reasonable values)
         (QueryValue::Integer(i), "float" | "decimal") => Some(QueryValue::Float(*i as f64)),
+        // UInt → Float/Decimal (lossless for reasonable values; precision loss
+        // mirrors the signed-Integer case above 2⁵³ but is not silent — the
+        // value still flows through, the caller asked for float).
+        (QueryValue::UInt(u), "float" | "decimal") => Some(QueryValue::Float(*u as f64)),
         _ => None,
     }
 }
@@ -530,6 +537,7 @@ pub fn query_value_type_name(value: &QueryValue) -> &str {
         QueryValue::Null => "null",
         QueryValue::Boolean(_) => "boolean",
         QueryValue::Integer(_) => "integer",
+        QueryValue::UInt(_) => "uinteger",
         QueryValue::Float(_) => "float",
         QueryValue::String(_) => "string",
         QueryValue::Array(_) => "array",

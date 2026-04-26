@@ -560,17 +560,10 @@ fn json_to_query_value(val: &serde_json::Value) -> QueryValue {
 }
 
 fn query_value_to_json(val: &QueryValue) -> serde_json::Value {
-    match val {
-        QueryValue::Null => serde_json::Value::Null,
-        QueryValue::Boolean(b) => serde_json::Value::Bool(*b),
-        QueryValue::Integer(i) => serde_json::json!(i),
-        QueryValue::Float(f) => serde_json::json!(f),
-        QueryValue::String(s) => serde_json::Value::String(s.clone()),
-        QueryValue::Array(a) => {
-            serde_json::Value::Array(a.iter().map(query_value_to_json).collect())
-        }
-        QueryValue::Json(v) => v.clone(),
-    }
+    // Delegates to QueryValue's threshold-aware Serialize impl (H18.1) so
+    // BIGINT-sized integers stringify rather than getting silently rounded
+    // by JS clients that read CouchDB documents.
+    serde_json::to_value(val).unwrap_or(serde_json::Value::Null)
 }
 
 fn json_object_to_row(doc: &serde_json::Value) -> HashMap<String, QueryValue> {

@@ -179,7 +179,7 @@ impl Connection for PostgresConnection {
             // Read operations — return rows
             // -----------------------------------------------------------------
             "select" | "query" | "get" | "find" => {
-                let params = build_params(&query.parameters);
+                let params = build_params(&query.parameters)?;
                 let param_refs: Vec<&(dyn ToSql + Sync)> =
                     params.iter().map(|p| &**p as &(dyn ToSql + Sync)).collect();
 
@@ -211,7 +211,7 @@ impl Connection for PostgresConnection {
             // Insert/Create — check for RETURNING clause
             // -----------------------------------------------------------------
             "insert" | "create" => {
-                let params = build_params(&query.parameters);
+                let params = build_params(&query.parameters)?;
                 let param_refs: Vec<&(dyn ToSql + Sync)> =
                     params.iter().map(|p| &**p as &(dyn ToSql + Sync)).collect();
 
@@ -253,7 +253,7 @@ impl Connection for PostgresConnection {
             // Update
             // -----------------------------------------------------------------
             "update" => {
-                let params = build_params(&query.parameters);
+                let params = build_params(&query.parameters)?;
                 let param_refs: Vec<&(dyn ToSql + Sync)> =
                     params.iter().map(|p| &**p as &(dyn ToSql + Sync)).collect();
 
@@ -275,7 +275,7 @@ impl Connection for PostgresConnection {
             // Delete / DDL
             // -----------------------------------------------------------------
             "delete" | "del" | "drop" | "truncate" => {
-                let params = build_params(&query.parameters);
+                let params = build_params(&query.parameters)?;
                 let param_refs: Vec<&(dyn ToSql + Sync)> =
                     params.iter().map(|p| &**p as &(dyn ToSql + Sync)).collect();
 
@@ -340,7 +340,7 @@ impl Connection for PostgresConnection {
     }
 
     async fn ddl_execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
-        let params = build_params(&query.parameters);
+        let params = build_params(&query.parameters)?;
         let param_refs: Vec<&(dyn ToSql + Sync)> =
             params.iter().map(|p| &**p as &(dyn ToSql + Sync)).collect();
 
@@ -388,21 +388,26 @@ fn build_pg_config(params: &ConnectionParams) -> tokio_postgres::Config {
 /// Keys are sorted alphabetically. The DataView engine uses zero-padded
 /// numeric keys ("001", "002") for positional styles, so alphabetical
 /// sort preserves the correct positional binding order.
-fn build_params(parameters: &HashMap<String, QueryValue>) -> Vec<Box<dyn ToSql + Sync + Send>> {
+fn build_params(
+    parameters: &HashMap<String, QueryValue>,
+) -> Result<Vec<Box<dyn ToSql + Sync + Send>>, DriverError> {
     let mut keys: Vec<&String> = parameters.keys().collect();
     keys.sort();
 
     keys.into_iter()
-        .map(|key| {
-            let val = &parameters[key];
-            query_value_to_sql(val)
-        })
+        .map(|key| query_value_to_sql(&parameters[key]))
         .collect()
 }
 
 /// Convert a `QueryValue` to a boxed `ToSql` for parameter binding.
-fn query_value_to_sql(val: &QueryValue) -> Box<dyn ToSql + Sync + Send> {
-    match val {
+///
+/// Postgres has no native unsigned-64 binding. For `QueryValue::UInt`, values
+/// that fit in `i64` bind as `i64`; values that exceed `i64::MAX` return an
+/// explicit `DriverError` rather than silently truncating. Callers needing
+/// to bind values above `i64::MAX` against `numeric`/text columns should
+/// convert to `QueryValue::String` upstream.
+fn query_value_to_sql(val: &QueryValue) -> Result<Box<dyn ToSql + Sync + Send>, DriverError> {
+    Ok(match val {
         QueryValue::Null => Box::new(None::<String>),
         QueryValue::Boolean(b) => Box::new(*b),
         QueryValue::Integer(i) => {
@@ -413,6 +418,15 @@ fn query_value_to_sql(val: &QueryValue) -> Box<dyn ToSql + Sync + Send> {
                 Box::new(*i)
             }
         }
+        QueryValue::UInt(u) => {
+            let i = i64::try_from(*u).map_err(|_| {
+                DriverError::Connection(format!(
+                    "postgres binding overflow: u64 value {u} exceeds i64 range \
+                     — use a string parameter for BIGINT-style/numeric columns"
+                ))
+            })?;
+            Box::new(i)
+        }
         QueryValue::Float(f) => Box::new(*f),
         QueryValue::String(s) => Box::new(s.clone()),
         QueryValue::Json(v) => Box::new(v.clone()),
@@ -420,7 +434,7 @@ fn query_value_to_sql(val: &QueryValue) -> Box<dyn ToSql + Sync + Send> {
             // Serialize arrays as JSON strings.
             Box::new(serde_json::to_string(arr).unwrap_or_default())
         }
-    }
+    })
 }
 
 /// Convert postgres rows into `Vec<HashMap<String, QueryValue>>`.

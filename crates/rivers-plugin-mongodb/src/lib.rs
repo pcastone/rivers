@@ -314,11 +314,28 @@ fn params_to_document(params: &HashMap<String, QueryValue>) -> Document {
 }
 
 /// Convert a QueryValue to a BSON value.
+///
+/// `UInt` maps to `Bson::Int64` when the value fits in `i64`. Above
+/// `i64::MAX`, BSON's `Int64` cannot represent it; we fall back to
+/// `Bson::Decimal128` (parsed from the decimal text representation), and
+/// if that fails for any reason, to `Bson::String` carrying the decimal
+/// digits — value-preserving rather than silently truncating.
 fn query_value_to_bson(value: &QueryValue) -> Bson {
     match value {
         QueryValue::Null => Bson::Null,
         QueryValue::Boolean(b) => Bson::Boolean(*b),
         QueryValue::Integer(i) => Bson::Int64(*i),
+        QueryValue::UInt(u) => {
+            if let Ok(i) = i64::try_from(*u) {
+                Bson::Int64(i)
+            } else {
+                let s = u.to_string();
+                match s.parse::<bson::Decimal128>() {
+                    Ok(d) => Bson::Decimal128(d),
+                    Err(_) => Bson::String(s),
+                }
+            }
+        }
         QueryValue::Float(f) => Bson::Double(*f),
         QueryValue::String(s) => Bson::String(s.clone()),
         QueryValue::Array(arr) => {

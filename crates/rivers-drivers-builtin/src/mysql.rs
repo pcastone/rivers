@@ -349,6 +349,7 @@ impl Connection for MysqlConnection {
                         .and_then(|r| r.get("id"))
                         .map(|v| match v {
                             QueryValue::Integer(n) => n.to_string(),
+                            QueryValue::UInt(u) => u.to_string(),
                             QueryValue::String(s) => s.clone(),
                             other => format!("{:?}", other),
                         });
@@ -509,6 +510,8 @@ fn query_value_to_mysql(val: &QueryValue) -> mysql_async::Value {
         QueryValue::Null => mysql_async::Value::NULL,
         QueryValue::Boolean(b) => mysql_async::Value::from(*b),
         QueryValue::Integer(i) => mysql_async::Value::from(*i),
+        // BIGINT UNSIGNED round-trip: lossless via mysql_async's native UInt.
+        QueryValue::UInt(u) => mysql_async::Value::UInt(*u),
         QueryValue::Float(f) => mysql_async::Value::from(*f),
         QueryValue::String(s) => mysql_async::Value::from(s.clone()),
         QueryValue::Array(arr) => {
@@ -532,7 +535,7 @@ fn mysql_row_to_map(
     let mut map = HashMap::new();
     for (i, col) in columns.iter().enumerate() {
         let name = col.name_str().to_string();
-        let value = mysql_value_to_query_value(row, i);
+        let value = mysql_value_to_query_value(row, i, col);
         map.insert(name, value);
     }
     map
@@ -540,8 +543,18 @@ fn mysql_row_to_map(
 
 /// Convert a single column value from a MySQL row to `QueryValue`.
 ///
-/// We try progressively more general types: i64, f64, String, bytes.
-fn mysql_value_to_query_value(row: &mysql_async::Row, idx: usize) -> QueryValue {
+/// We try progressively more general types: i64/u64, f64, String, bytes.
+/// The column metadata is used to disambiguate `BIGINT UNSIGNED` (and other
+/// unsigned integer types) which the text protocol delivers as `Bytes` —
+/// without the column flags we'd silently fall back to `i64` parsing and
+/// truncate values above `i64::MAX`. Per H18.2.
+fn mysql_value_to_query_value(
+    row: &mysql_async::Row,
+    idx: usize,
+    column: &mysql_async::Column,
+) -> QueryValue {
+    use mysql_async::consts::{ColumnFlags, ColumnType};
+
     // Check for NULL first.
     if let Some(mysql_async::Value::NULL) = row.as_ref(idx) {
         return QueryValue::Null;
@@ -553,17 +566,59 @@ fn mysql_value_to_query_value(row: &mysql_async::Row, idx: usize) -> QueryValue 
         None => return QueryValue::Null,
     };
 
+    let is_unsigned = column.flags().contains(ColumnFlags::UNSIGNED_FLAG);
+    let is_integer_col = matches!(
+        column.column_type(),
+        ColumnType::MYSQL_TYPE_TINY
+            | ColumnType::MYSQL_TYPE_SHORT
+            | ColumnType::MYSQL_TYPE_INT24
+            | ColumnType::MYSQL_TYPE_LONG
+            | ColumnType::MYSQL_TYPE_LONGLONG,
+    );
+
     match raw {
         mysql_async::Value::NULL => QueryValue::Null,
-        mysql_async::Value::Int(i) => QueryValue::Integer(*i),
-        mysql_async::Value::UInt(u) => QueryValue::Integer(*u as i64),
+        // mysql_async's binary-protocol `Value::Int` carries values from
+        // `BIGINT UNSIGNED` columns whenever they fit in `i64`. Use the
+        // column's UNSIGNED flag to route these to `UInt`, so callers see a
+        // consistent variant for the column regardless of magnitude.
+        mysql_async::Value::Int(i) => {
+            if is_integer_col && is_unsigned && *i >= 0 {
+                QueryValue::UInt(*i as u64)
+            } else {
+                QueryValue::Integer(*i)
+            }
+        }
+        mysql_async::Value::UInt(u) => QueryValue::UInt(*u),
         mysql_async::Value::Float(f) => QueryValue::Float(*f as f64),
         mysql_async::Value::Double(d) => QueryValue::Float(*d),
         mysql_async::Value::Bytes(b) => {
             let s = String::from_utf8_lossy(b).to_string();
-            // Try to parse as number if it looks numeric
+
+            // H18.2: when the column is an unsigned integer type, parse as
+            // u64 so values above i64::MAX (e.g. BIGINT UNSIGNED rows near
+            // u64::MAX) survive the text protocol. The column-metadata path
+            // is the canonical disambiguator — without it, the Bytes branch
+            // would silently fall back to i64 and lose the unsigned semantic
+            // even for small values.
+            if is_integer_col && is_unsigned {
+                if let Ok(u) = s.parse::<u64>() {
+                    return QueryValue::UInt(u);
+                }
+                // Fall through to the legacy paths if the bytes don't parse
+                // as u64 (shouldn't happen for unsigned int columns, but we
+                // never silently corrupt — degrade to String preserves the
+                // raw decimal text).
+            }
+
+            // Signed-or-unknown integer columns: preserve legacy i64 path,
+            // but when an unsigned column above i64::MAX overflows i64
+            // parsing, retry as u64 so we still get a faithful UInt.
             if let Ok(i) = s.parse::<i64>() {
                 return QueryValue::Integer(i);
+            }
+            if let Ok(u) = s.parse::<u64>() {
+                return QueryValue::UInt(u);
             }
             if let Ok(f) = s.parse::<f64>() {
                 // Only use float if it has a decimal point (avoid "42" → 42.0)
@@ -801,6 +856,20 @@ mod tests {
             query_value_to_mysql(&QueryValue::String("hello".into())),
             mysql_async::Value::from("hello".to_string()),
         );
+    }
+
+    #[test]
+    fn query_value_to_mysql_uint_round_trip() {
+        // H18.2: UInt round-trips losslessly to mysql_async::Value::UInt,
+        // including values above i64::MAX which the pre-H18 i64 cast would
+        // have silently corrupted.
+        for val in [0u64, 42, 9_007_199_254_740_991, 9_007_199_254_740_992, u64::MAX] {
+            assert_eq!(
+                query_value_to_mysql(&QueryValue::UInt(val)),
+                mysql_async::Value::UInt(val),
+                "UInt({val}) should map to Value::UInt({val})",
+            );
+        }
     }
 
     #[test]

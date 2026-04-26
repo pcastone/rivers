@@ -206,11 +206,15 @@ pub(crate) fn format_field_value(v: &serde_json::Value) -> String {
 }
 
 /// Format a QueryValue as an InfluxDB field value.
+///
+/// `UInt` uses the line-protocol `u` suffix (e.g. `42u`) — lossless and
+/// idiomatic for unsigned 64-bit fields.
 pub(crate) fn format_query_value_as_field(v: &QueryValue) -> String {
     match v {
         QueryValue::Null => "\"\"".to_string(),
         QueryValue::Boolean(b) => b.to_string(),
         QueryValue::Integer(i) => format!("{i}i"),
+        QueryValue::UInt(u) => format!("{u}u"),
         QueryValue::Float(f) => f.to_string(),
         QueryValue::String(s) => format!("\"{}\"", s.replace('"', "\\\"")),
         QueryValue::Array(_) | QueryValue::Json(_) => {
