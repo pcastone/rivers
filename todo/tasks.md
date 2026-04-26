@@ -541,13 +541,11 @@ These are not separate phases — they are the verification bar for the work abo
 
 Two T2 items the gap audit could not resolve from grep alone — verify before claiming done or open:
 
-- [ ] **H16 — riversd T2-4: Pool capacity accounting may ignore the return queue.**
-  Re-read `crates/riversd/src/pool.rs` end-to-end after Phase D changes (D1 collapsed dual-counter state into a single mutex-protected `PoolState`, which likely closed this). Verdict: verify, then either close as duplicate of D1 or open a focused fix.
-  Validation: walk through `acquire`/`release`/`drop`/the `idle_return` queue; confirm a single source of truth for `total_in_pool`.
+- [x] **H16 — riversd T2-4: Pool capacity accounting may ignore the return queue.**
+  Verified 2026-04-25 against `crates/riversd/src/pool.rs` (post-Phase D, commit `1f01873`): closed by Phase D commit `2dfbb7b` (D1). The pool now has a single `state: Arc<StdMutex<PoolState>>` (line 502) holding both the `idle: VecDeque<PooledConnection>` and a unified `total: usize` counter that "includes idle connections, checked-out (active) connections, and any in-flight create reservations" (line 95-97 doc comment). All mutators take the same lock: `acquire` reserves a slot via `state.total += 1` under the lock before the create `.await` (line 598), `PoolGuard::drop` decrements via the same lock (line 179), `PoolGuard::take` decrements (line 157), `health_check` decrements by failure count (line 755), `drain` decrements by dropped idle count (line 792). There is no separate atomic, no async-mutex idle queue, and no sync return queue — the dual-counter shape the original T2-4 cited has been removed. Capacity check at line 596 (`state.total < self.config.max_size`) reads the same field every release path writes. CLOSED — no source change required.
 
-- [ ] **H17 — riversd T2-5: Pool health check holds idle mutex across `.await`.**
-  Re-read `ConnectionPool::health_check` (or equivalent). If `idle.lock().await` is held while pinging a connection, the entire pool stalls during a slow ping.
-  Validation: Drain the idle queue into a local `Vec`, drop the lock, then ping. Re-insert healthy connections under a fresh lock acquisition. Test: stall a single connection's `ping`; assert other acquires proceed.
+- [x] **H17 — riversd T2-5: Pool health check holds idle mutex across `.await`.**
+  Verified 2026-04-25 against `crates/riversd/src/pool.rs::ConnectionPool::health_check` (lines 717-768): the function drains the idle queue into a local `VecDeque` under the state lock at lines 720-723 (`std::mem::take(&mut state.idle)`), drops the lock when the closure ends, then iterates `to_check.pop_front()` calling `pooled.conn.ping().await` with NO lock held (lines 729-744), and finally re-acquires the lock at line 749 to re-insert healthy entries and decrement `total`. The lock type is `std::sync::Mutex` (not `tokio::Mutex`), so holding it across `.await` would not even compile — the structural guarantee is enforced by the type system. The pattern matches the recommended fix exactly. CLOSED — no source change required.
 
 ### Cross-cutting
 
@@ -562,7 +560,7 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 4. **H10** before **H8** — schema validation hard-fail is straightforward; transaction stubs need a design decision first.
 5. **H3, H9, H13, H14** — all small unsafe/FFI hardening; can land in one PR.
 6. **H11** — concurrency cap on Observe dispatch; needs the new config knob.
-7. **H5, H12, H15, H16, H17** — schedule per quarter as hardening.
+7. **H5, H12, H15** — schedule per quarter as hardening. (H16, H17 verified closed 2026-04-25 — both resolved by Phase D commit `2dfbb7b`; no source change required.)
 
 
   Trace how user-controlled parameters become stdin, argv, env, working directory, and process command.

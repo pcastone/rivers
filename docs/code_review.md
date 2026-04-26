@@ -212,6 +212,8 @@ self.pool.return_connection(PooledConnection {
 
 ### riversd — T2-4: Pool capacity accounting ignores the return queue
 
+**Resolved 2026-04-25 by Phase D commit `2dfbb7b` (D1)** — verified Phase H (H16). The pool now keeps a single `Arc<StdMutex<PoolState>>` holding both `idle: VecDeque<PooledConnection>` and a unified `total: usize` counter (idle + active + in-flight create reservations). `acquire`, `PoolGuard::drop`, `PoolGuard::take`, `health_check`, and `drain` all mutate `total` under the same lock, so capacity checks see every release path. The dual-counter / `idle_return` shape this finding cited no longer exists.
+
 **File:** `crates/riversd/src/pool.rs:517`
 **Severity:** Tier 2
 **Category:** Connection pool / race condition
@@ -231,6 +233,8 @@ if total < self.config.max_connections {
 **Fix direction:** Include the return queue in accounting or collapse pool state into one synchronized structure.
 
 ### riversd — T2-5: Pool health checks hold the idle mutex across network I/O
+
+**Resolved 2026-04-25 by Phase D commit `2dfbb7b` (D1)** — verified Phase H (H17). `ConnectionPool::health_check` (current `crates/riversd/src/pool.rs:717-768`) drains the idle queue under the state lock via `std::mem::take(&mut state.idle)`, drops the lock at the closure end, calls `pooled.conn.ping().await` with no lock held, then re-acquires the lock to re-insert healthy entries and decrement `total`. The state lock is `std::sync::Mutex` (not `tokio::Mutex`), so holding it across `.await` is structurally prevented at compile time.
 
 **File:** `crates/riversd/src/pool.rs:668`
 **Severity:** Tier 2

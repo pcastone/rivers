@@ -408,3 +408,9 @@ Plan correction: task 4.3 said "thread via closure capture (not thread-local)." 
 | `docs/review/rivers-keystore-engine.md` | Added the per-crate Tier 1/2/3 review for the application keystore engine | User request to write output to `docs/review/{{crate}}`; app-keystore role/risk list in the request | Report includes 3 Tier 1 findings, 3 Tier 2 findings, 2 Tier 3 findings, repeated-pattern/shared-fix notes, clean areas, coverage gaps, bug-density assessment, and recommended fix order |
 | `todo/tasks.md` | Marked the approved RKE review tasks complete with concise validation notes | AGENTS.md workflow rule 3 | Source/test reads, runtime/CLI/docs reads, security sweeps, validation, report writing, logs, and final whitespace/diff checks are complete |
 | `changedecisionlog.md` | Logged the report path/basis plus the multi-keystore and dynamic-callback cross-crate inclusion decisions | AGENTS.md workflow rule 5 | Decisions are traceable for CB drift detection |
+
+# 2026-04-25 — Phase H verification: H16 + H17 closed
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `todo/tasks.md` | Marked H16 (T2-4 capacity accounting) and H17 (T2-5 health-check lock) as `[x]` with file:line evidence after re-reading `crates/riversd/src/pool.rs` end-to-end | `docs/code_review.md` Tier-2 findings T2-4, T2-5; Phase D commit `2dfbb7b` (D1) | Both findings verified closed by Phase D's pool rewrite. No source change required. |

@@ -108,3 +108,16 @@ SerializedDirectDatasource>` field at that point. Flagged as a latent follow-up.
 **Reason:** every sibling driver tutorial in `docs/guide/tutorials/` uses the
 `datasource-*.md` prefix. Following the existing convention improves discoverability.
 **Resolution:** docs still cross-referenced from the feature inventory and the spec.
+
+---
+
+### H16 / H17 — Phase D pool rewrite closed both T2 pool findings
+
+**File:** `crates/riversd/src/pool.rs`
+**Spec reference:** `docs/code_review.md` Tier-2 findings T2-4 (capacity accounting) and T2-5 (health-check lock); Phase D commit `2dfbb7b` (D1)
+**Decision:** close H16 and H17 without source changes after structural re-read.
+**Reason:**
+- T2-4: post-D1 the pool has a single `Arc<StdMutex<PoolState>>` (line 502) holding both `idle: VecDeque<PooledConnection>` and `total: usize`. `acquire`/`PoolGuard::drop`/`PoolGuard::take`/`health_check`/`drain` all read and write `total` under the same lock. The dual-counter shape the original review cited (separate atomics + sync return queue) no longer exists. Capacity check at line 596 reads the same field every release path writes.
+- T2-5: `health_check` (lines 717-768) drains the idle queue under the lock via `std::mem::take(&mut state.idle)` (lines 720-723), drops the lock at the closure end, calls `pooled.conn.ping().await` with no lock held (lines 729-744), then re-acquires the lock to re-insert healthy entries (lines 749-756). The lock is `std::sync::Mutex` (not `tokio::Mutex`), so holding it across `.await` would not even compile.
+
+**Resolution:** marked both tasks `[x]` in `todo/tasks.md` with file:line evidence. No edits to `pool.rs`. Update to `docs/code_review.md` to annotate T2-4/T2-5 as resolved is tracked by H-X.1.
