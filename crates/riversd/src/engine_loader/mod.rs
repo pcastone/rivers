@@ -9,6 +9,7 @@ mod registry;
 mod loader;
 mod host_context;
 mod host_callbacks;
+mod dyn_transaction_map;
 
 pub use loaded_engine::LoadedEngine;
 pub use registry::{get_engine, is_engine_available, execute_on_engine, loaded_engines};

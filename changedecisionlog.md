@@ -415,3 +415,27 @@ Earlier misdiagnosis worth noting for the record: the CS0.2 revision (dated earl
 - **I8:** Integration tests against `192.168.2.209` PostgreSQL: commit-visible, rollback-invisible, panic-auto-rolled-back, cross-datasource error, nested-rejection, commit-failure-upgrades-to-`TransactionCommitFailed`.
 
 Full plan with type sketches and risks: `docs/superpowers/plans/2026-04-25-phase-i-dyn-transactions.md`.
+
+## TXN-I2.1 — DynTransactionMap + TaskId/TaskGuard infrastructure landed (2026-04-25)
+
+**Files affected:**
+- `crates/riversd/src/engine_loader/dyn_transaction_map.rs` (NEW)
+- `crates/riversd/src/engine_loader/mod.rs` (added `mod dyn_transaction_map;`)
+- `crates/riversd/src/engine_loader/host_context.rs` (added DYN_TXN_MAP, TaskId issuer, TaskGuard, TASK_DS_CONFIGS, DYN_TASK_COMMIT_FAILED + accessors)
+
+**Spec reference:** TXN-I1.1 decisions 1–4 + open questions 6.1 (option A) and 6.2 (option A).
+
+**Resolution method:**
+- **Sibling module, not extension** of `crates/riversd/src/transaction.rs`. The existing `TransactionMap` is per-request (one map per request) and used by V8 via an `Arc<TransactionMap>` pinned to a worker thread. The dyn-engine path needs a single process-wide map keyed by `(TaskId, ds_name)` because callbacks run on a riversd-side `spawn_blocking` worker shared across the lifetime of riversd. Forcing the V8 map to take a `TaskId` would make every V8 caller carry an unused id and risk subtle behaviour changes; a sibling type isolates the new shape and keeps V8 untouched.
+- `DynTransactionMap` uses `std::sync::Mutex` (not `tokio::sync::Mutex`). The `with_conn_mut` method takes the connection out under the lock, drops the lock, runs the closure's future, then re-acquires the lock to re-insert. The sync mutex is **never** held across `.await`.
+- `with_conn_mut` uses HRTB on the closure's lifetime (`for<'a> F: FnOnce(&'a mut Box<dyn Connection>) -> Pin<Box<dyn Future<Output=R> + Send + 'a>>`) so call sites can pass `|conn| Box::pin(async move { conn.execute(...).await })` naturally.
+- `TaskGuard::drop` runs auto-rollback by spawning each per-datasource rollback as its own `tokio::spawn` task and awaiting the `JoinHandle`. This contains panics from one rollback so they cannot prevent the others.
+- `TaskGuard` captures `tokio::runtime::Handle` at `::enter` time so `Drop` can `block_on` even though it's invoked synchronously. Safe because `TaskGuard` is built only inside `spawn_blocking` workers (not tokio runtime workers).
+- Per-task datasource configs stash uses `RwLock<Option<HashMap<TaskId, _>>>` so it can be a `static`. Reads dominate writes (one `lookup_task_ds` per `host_db_begin`, two writes per task lifecycle).
+- `DYN_TASK_COMMIT_FAILED` thread-local mirrors V8's `TASK_COMMIT_FAILED` shape exactly so `dispatch_task` post-processing in I7 can use the same upgrade pattern as `execute_js_task`.
+
+**Validation:** `cargo check -p riversd` clean; 6/6 unit tests pass (`engine_loader::dyn_transaction_map::tests::*` — insert/take round-trip, duplicate insert errors, take-unknown returns None, drain_task scoped per-task, with_conn_mut observes mutation across calls, with_conn_mut returns None when missing).
+
+**Deviation from plan:** plan §3.1 named the new file `transaction_map.rs`; landed it as `dyn_transaction_map.rs` to make the dyn-vs-V8 distinction visible at first glance and avoid name-collision risk with `crate::transaction` (the V8-shared map). Decisions 1–4 unchanged.
+
+**Note for I3 implementer:** the brief specified `TASK_DS_CONFIGS` keyed by `"{entry_point}:{ds_name}"`. That's the V8 convention — confirm against `SerializedTaskContext::from(&ctx)` before wiring `host_db_begin` so the lookup key matches what `dispatch_task` will populate.
