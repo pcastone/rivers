@@ -10,6 +10,16 @@ use rivers_engine_sdk::HostCallbacks;
 use super::dyn_transaction_map::{DynTransactionMap, TaskId};
 use super::host_callbacks;
 
+/// Maximum wall-time budget for any single async operation invoked from a
+/// host callback (commit, rollback, driver `connect`, etc.). Mirrors the
+/// V8-side limit per `process_pool/v8_engine/context.rs` H2 — kept in a
+/// single place so V8 and the dyn-engine cdylib path can't drift.
+///
+/// 30 seconds is a deliberately generous budget: Postgres commit on a slow
+/// link should never approach it under steady-state, but a hung driver or
+/// a broken socket must not pin the worker indefinitely. Phase H2.
+pub(crate) const HOST_CALLBACK_TIMEOUT_MS: u64 = 30_000;
+
 // ── Host Context (OnceLock subsystem references) ────────────────
 
 /// Subsystem references for host callbacks. Set once after server init.
@@ -87,6 +97,14 @@ pub(crate) fn next_task_id() -> TaskId {
 /// `TaskGuard` scope.
 pub(crate) fn current_task_id() -> Option<TaskId> {
     CURRENT_TASK_ID.with(|c| c.get())
+}
+
+/// Test-only setter for `CURRENT_TASK_ID`. Lets unit tests bind a task id
+/// without a full `TaskGuard` (which would also schedule auto-rollback on
+/// drop — undesirable inside tokio tests because `Drop` calls `block_on`).
+#[cfg(test)]
+pub(crate) fn set_current_task_id_for_test(id: Option<TaskId>) {
+    CURRENT_TASK_ID.with(|c| c.set(id));
 }
 
 /// Setter for the dyn-engine commit-failure thread-local. Used by
