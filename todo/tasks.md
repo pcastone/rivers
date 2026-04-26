@@ -628,14 +628,38 @@ ORIGINAL ENTRY:
 - [ ] **H18 — rivers-drivers-builtin T2-1: MySQL unsigned integers wrap into negative on `i64` cast.**
   **File:** `crates/rivers-drivers-builtin/src/mysql.rs:559` (`mysql_async::Value::UInt(u)` matched and emitted as `QueryValue::Integer(*u as i64)`).
   Values above `i64::MAX` (~9.2×10¹⁸) wrap to negative numbers — silently corrupts results from `BIGINT UNSIGNED` columns at scale (snowflake ids, large counters, monotonic timestamps).
-  Fix shape:
-  - Range-check the cast: `if *u > i64::MAX as u64 { ... }` and route the over-range case through either:
-    1. A new `QueryValue::UInt(u64)` variant (cleanest but ripples through serialization, JSON marshalling, schema validation) — likely too much scope for a single fix.
-    2. `QueryValue::String` carrying the decimal representation, with a per-column or per-datasource config flag controlling the policy.
-  - Decision needed: variant addition vs. string fallback. Log in `changedecisionlog.md`.
-  Validation:
-  - Test against the MySQL test cluster (192.168.2.215-217): create a table with `BIGINT UNSIGNED PRIMARY KEY`, insert a value > `i64::MAX` (e.g., `18446744073709551610`), assert the dataview returns the original value losslessly (string or new variant — both acceptable depending on the decision).
-  - Negative test: existing `BIGINT UNSIGNED` values within `i64::MAX` continue to round-trip as `Integer`.
+
+  **Resolved approach (2026-04-25):** match the de-facto industry standard for large 64-bit integers in JSON APIs (Twitter snowflakes, Stripe IDs, GitHub IDs, Discord, Mastodon, MongoDB Extended JSON). **Two-layer fix:**
+
+  1. **Add `QueryValue::UInt(u64)` variant** in `crates/rivers-driver-sdk/src/types.rs:12`. Preserves the type at the driver→runtime boundary; mirrors `mysql_async::Value::UInt(u64)`, `sqlx`'s separate `I64`/`U64`, and `diesel`'s `Bigint`/`Unsigned<Bigint>`. Touch every match arm on `QueryValue` — minimum: `crates/rivers-drivers-builtin/src/{mysql,postgres,sqlite}.rs`, the four `fn query_value_to_json` helpers (`crates/rivers-plugin-elasticsearch/src/lib.rs:387`, `crates/rivers-plugin-couchdb/src/lib.rs:562`, `crates/rivers-plugin-neo4j/src/lib.rs:318`, `crates/riversd/src/process_pool/v8_engine/direct_dispatch.rs:150`), `crates/rivers-runtime/src/dataview_engine.rs` (parameter validation + result marshalling), and any schema-validation match arms.
+
+  2. **JSON serialization: stringify above `Number.MAX_SAFE_INTEGER` (2⁵³−1 = 9_007_199_254_740_991).** Below the threshold emit as a JSON number; at-or-above emit as a JSON string. Apply to **both** `Integer(i64)` (when `|v| > 2⁵³−1`) and `UInt(u64)` (when `v > 2⁵³−1`). Replace `QueryValue`'s current `#[derive(Serialize)] #[serde(untagged)]` with a custom `Serialize` impl in `types.rs`. Keep `Deserialize` derived (untagged) — handlers send numbers; the precision-loss issue is on the *outbound* path.
+
+  This **per-value** policy (Twitter / Stripe / Discord pattern) keeps small IDs and counters as natural JSON numbers and only stringifies when JS clients would silently lose precision via IEEE-754 double rounding. The alternative **per-column always-string** policy can be layered on later as a schema attribute (e.g. `"jsonNumberMode": "string"`) without breaking the per-value default.
+
+  ### Sub-tasks
+
+  - [ ] **H18.1 — Add the variant + custom Serialize.**
+    `crates/rivers-driver-sdk/src/types.rs`: add `UInt(u64)`. Replace `#[derive(Serialize)]` with a manual `impl Serialize for QueryValue` that emits a JSON string for `Integer` when `|v| > 2⁵³−1` and for `UInt` when `v > 2⁵³−1`; otherwise emits a JSON number. Constants: `const SAFE_INT_MAX: i64 = 9_007_199_254_740_991;` and `const SAFE_UINT_MAX: u64 = 9_007_199_254_740_991;`. Document the threshold + rationale in the doc comment on the enum.
+    Validation: round-trip unit tests in `types.rs` cover `Integer(0)`, `Integer(2⁵³−2)` → number, `Integer(2⁵³)` → string, `Integer(-2⁵³)` → string, `UInt(0)`, `UInt(2⁵³−1)` → number, `UInt(2⁵³)` → string, `UInt(u64::MAX)` → string `"18446744073709551615"`.
+
+  - [ ] **H18.2 — Switch MySQL driver to emit `UInt`.**
+    `crates/rivers-drivers-builtin/src/mysql.rs:559`: change `QueryValue::Integer(*u as i64)` → `QueryValue::UInt(*u)`. Remove the lossy cast.
+    Validation: integration test against MySQL cluster (192.168.2.215-217) on a `BIGINT UNSIGNED PRIMARY KEY` table with rows `0`, `42`, `9_007_199_254_740_991`, `9_007_199_254_740_992`, `18_446_744_073_709_551_610`. Dataview returns: first three as JSON numbers, last two as JSON strings.
+
+  - [ ] **H18.3 — Update remaining `QueryValue` match-arm sites.**
+    Each of: `crates/rivers-drivers-builtin/src/{postgres,sqlite}.rs` (no native u64 source — the new variant is just one more arm that's never produced); the four `query_value_to_json` helpers (elasticsearch, couchdb, neo4j, direct_dispatch); `crates/rivers-runtime/src/dataview_engine.rs` (param validation + result marshalling); schema-validation match arms (find via `grep -rn "match.*QueryValue\b" crates --include='*.rs'`).
+    For helpers that produce JSON, delete any local stringify logic — the custom `Serialize` is the single source of truth. (Helpers that produce non-JSON wire formats — e.g. neo4j Cypher params — should still match the new variant explicitly.)
+    Validation: `cargo check --workspace` clean; per-driver integration tests still pass.
+
+  - [ ] **H18.4 — Schema-spec note.**
+    Add a paragraph to `docs/arch/rivers-schema-spec-v2.md` (or wherever JSON marshalling is documented) describing the >2⁵³−1 stringification rule. Reference Twitter / Stripe as prior art. Note that the threshold is `Number.MAX_SAFE_INTEGER`, not `i64::MAX` (the JS-precision boundary, not the Rust-type boundary).
+
+  - [ ] **H18.5 — Decision log entry.**
+    Append `MYSQL-H18.1` to `changedecisionlog.md` covering: per-value vs per-column choice; threshold = 2⁵³−1; custom Serialize over `#[serde(untagged)]`; deserializer left untagged because the issue is outbound-only.
+
+  - [ ] **H18.6 — Cross-finding annotation.**
+    When H18 lands, annotate `docs/code_review.md` rivers-drivers-builtin T2-1 with `Resolved YYYY-MM-DD by <commit-sha>` (mirrors I-X.1 / I-FU1 pattern).
 
 - [ ] **H9 — riversd T2-9: Engine log callback uses `std::str::from_utf8_unchecked`.**
   **File:** `crates/riversd/src/engine_loader/host_callbacks.rs:497`.
