@@ -59,7 +59,7 @@ The `DatabaseDriver` + `Connection` contract is normalized around five fundament
 
 In practice, ops 4 and 5 are expressed differently per driver:
 
-- **Transactions** — drivers that support them set `supports_transactions() → true`. Transaction state is managed via `Query { operation: "begin" | "commit" | "rollback" }`.
+- **Transactions** — drivers that support them set `supports_transactions() → true`. Transaction state is managed via `Connection::begin_transaction / commit_transaction / rollback_transaction` on the driver trait. Both the V8 and dynamic-engine cdylib host paths exercise these methods (Phase I, 2026-04-25): V8 via `process_pool/v8_engine/context.rs::ctx_transaction_callback` with a thread-local `TASK_TRANSACTION`, and the dyn-engine via `engine_loader::dyn_transaction_map::DynTransactionMap` keyed by `(TaskId, datasource)` with a `TaskGuard`-driven auto-rollback hook on `dispatch_task` exit. See `rivers-data-layer-spec.md §6.8` for the lifecycle.
 - **Streaming** — broker drivers express this through `BrokerConsumer::receive()`, not through `DatabaseDriver`. The two traits are kept separate precisely because streaming is a continuous lifecycle, not a discrete operation.
 
 The `Query` struct carries the op:

@@ -101,6 +101,10 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 tempfile = { workspace = true }
 tower = { workspace = true }
+# Phase I8 — direct rusqlite handle for e2e durability assertions
+# (re-open the SQLite tempfile from outside the dispatch to verify
+# committed rows persisted / rolled-back rows did not).
+rusqlite = { workspace = true }
 
 # ── RPM packaging (cargo-generate-rpm) ────────────────────────────
 #

@@ -5969,6 +5969,7 @@ dependencies = [
  "rivers-plugin-rabbitmq",
  "rivers-plugin-redis-streams",
  "rivers-runtime",
+ "rusqlite",
  "rustls 0.23.37",
  "serde",
  "serde_json",

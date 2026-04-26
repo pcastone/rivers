@@ -315,6 +315,8 @@ write_output(out_ptr, out_len, &result);
 
 **Fix direction:** Return an explicit unsupported error until the TransactionMap and batch execution are actually wired.
 
+**Resolved 2026-04-25 by Phase I (this PR — branch `feature/phase-i-dyn-transactions`).** Phase I implemented the dyn-engine transaction map (`crates/riversd/src/engine_loader/dyn_transaction_map.rs::DynTransactionMap`), wired `host_db_begin`, `host_db_commit`, and `host_db_rollback` to begin/commit/rollback on real `Connection`s through the map (host_callbacks.rs:1062-1473), threaded `txn_conn` through `host_dataview_execute` via `execute_dataview_with_optional_txn` and `DynTransactionMap::with_conn_mut` (host_callbacks.rs:218-298), and added the `TaskGuard`-driven auto-rollback hook in `process_pool/mod.rs::dispatch_dyn_engine_task` (mod.rs:316-384). Mirrors V8 `ctx_transaction_callback` semantics including the financial-correctness commit-failure upgrade (`signal_commit_failed` → `TaskError::TransactionCommitFailed`) and the `HOST_CALLBACK_TIMEOUT_MS` (30s) budget on commit/rollback. The three `TODO: Wire to TransactionMap in Task 8` comments are removed; `host_db_batch` retains a clarifying comment that it is a DataView batch-execute primitive (each call its own transaction), not a transaction wrapper. Spec coverage in `docs/arch/rivers-data-layer-spec.md §6.8`. End-to-end coverage on real SQLite in `crates/riversd/src/process_pool/mod.rs::dyn_e2e_tests` (5 cases: commit persists, rollback discards, auto-rollback on engine error, cross-DS rejection, two-task isolation).
+
 ### riversd — T2-9: Engine log callback trusts UTF-8 with `from_utf8_unchecked`
 
 **File:** `crates/riversd/src/engine_loader/host_callbacks.rs:496`

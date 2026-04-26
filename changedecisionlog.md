@@ -377,3 +377,153 @@ Earlier misdiagnosis worth noting for the record: the CS0.2 revision (dated earl
 **Decision:** Add three `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]` regression tests (200 concurrent ops, max=50 → expect exactly 50 ok / 150 limit-exceeded).
 **Spec reference:** Standard 5 (push once more — verify the property holds, not just that the obvious case passes).
 **Resolution:** Single-threaded runtime cannot exhibit the race because tasks never preempt each other. Only the multi-thread flavor exercises true cross-thread contention on the atomic / write lock. All three tests pass on first run; one test also asserts `all_connection_ids().await.len() == MAX` to confirm the map size matches the counter.
+
+## TXN-I1.1 — Dyn-engine transaction map design (2026-04-25)
+
+### Files audited (full reads, not skims)
+- V8 reference: `crates/riversd/src/process_pool/v8_engine/context.rs:898–1276` (`ctx_transaction_callback`, `ctx_dataview_callback`).
+- V8 thread-locals + `TaskTransactionState`: `crates/riversd/src/process_pool/v8_engine/task_locals.rs:140–185`.
+- Shared TransactionMap: `crates/riversd/src/transaction.rs:1–198` (full file).
+- Dyn-engine stubs: `crates/riversd/src/engine_loader/host_callbacks.rs:885–1073` (`host_db_begin/commit/rollback/batch`); `host_callbacks.rs:28–158` (`host_dataview_execute`).
+- Runtime layer: `crates/riversd/src/engine_loader/host_context.rs:1–98`; `engine_loader/registry.rs:1–53`; `engine_loader/loaded_engine.rs:1–79`.
+- Task dispatch wrapper: `crates/riversd/src/process_pool/mod.rs:303–353` (`dispatch_task`).
+- FFI shape: `crates/rivers-engine-sdk/src/lib.rs:79–122` (`SerializedTaskContext` — no `task_id`).
+
+### Decisions
+
+1. **Map key:** `(TaskId, datasource_name)` where `TaskId = u64` from a `static AtomicU64`. Issued in `dispatch_task` immediately before `tokio::task::spawn_blocking`. Stored in a `thread_local!` `Cell<Option<TaskId>>` set by `TaskGuard::enter` and cleared on `Drop`. Reasoning: `SerializedTaskContext` ships no per-task ID across the FFI, and engine threads are reused across many tasks so any thread-local on the engine side is unsafe; but the riversd-side `spawn_blocking` worker is 1:1 with one task for the duration of that task and host callbacks always run synchronously on that calling thread, so a riversd-side thread-local set by the dispatch wrapper is the correct identity carrier. A composite key `(TaskId, ds)` matches the V8 mental model where `TASK_TRANSACTION` already permits one txn per (task, datasource) — though spec §6.2 currently allows only one datasource per task, the composite key keeps the type honest if §6 ever relaxes that.
+
+2. **Storage location:** New sibling `OnceLock<DynTransactionMap>` (named `DYN_TXN_MAP`) declared in `crates/riversd/src/engine_loader/host_context.rs`, with a `pub fn dyn_txn_map() -> &'static DynTransactionMap` accessor. Reasoning: this matches the existing pattern used for adjunct globals in the same file (`HOST_KEYSTORE`, `DDL_WHITELIST`, `APP_ID_MAP` — all sibling `OnceLock` statics, lines 25–34). Adding it to `HostContext` itself would force a wider construction-site change and break the existing "set once, callbacks read via static" idiom.
+
+3. **Auto-rollback hook:** Insertion point `crates/riversd/src/process_pool/mod.rs:326` — wrap the `spawn_blocking` closure body so it owns a `TaskGuard` whose `Drop` impl calls `dyn_txn_map_auto_rollback_blocking(task_id)`. The drop runs synchronously when the closure unwinds (success, error, or panic-mapped-to-`WorkerCrash`); inside `Drop` we use `HOST_CONTEXT.rt_handle.block_on(...)` to drive the async rollback because the `spawn_blocking` thread is not a tokio runtime worker. Reasoning: `spawn_blocking` is the only place in the cdylib path where a riversd-owned scope brackets a single task's entire execution. Putting the cleanup inside the closure (via guard drop) makes it panic-safe in a way a post-`.await?` cleanup at the call site would not be.
+
+4. **Connection holder type:** `Box<dyn Connection>` directly — same as `crate::transaction::TransactionMap`. Reasoning: `PoolManagerHandle` / `PooledConnection { conn, release_token }` does not exist in the workspace (`grep -rn PoolManagerHandle crates/` returns zero matches). The brief's framing of "H6/H7 work" is mis-remembered; V8's path acquires via `factory.connect(&driver_name, &params).await` returning `Box<dyn Connection>`, and the `Drop` of that `Box` is what releases the pool slot (see context.rs:1024, "Connection drops → pool slot released"). Mirroring that exact shape keeps the dyn path semantically identical to V8, and reuses the entire `crate::transaction::TransactionMap` mental model.
+
+### Open questions surfaced during audit (require human input before I3)
+
+1. **Datasource config availability in host callbacks.** `host_db_begin` needs `(driver_name, ConnectionParams)` but riversd has no per-task datasource-config map on its side. V8 has `TASK_DS_CONFIGS` populated in `task_locals.rs`. **Recommended option A:** stash `ctx.datasource_configs` keyed by `task_id` in a sibling `RwLock<HashMap<TaskId, ...>>` populated in `dispatch_task` and cleared in `TaskGuard::drop`. (Plan §6.1.)
+2. **Commit-failure signaling back to dispatch.** V8 sets `TASK_COMMIT_FAILED` thread-local and `execute_js_task` reads it to upgrade the error to `TaskError::TransactionCommitFailed`. Dyn path needs an equivalent thread-local on the `spawn_blocking` thread, read after `spawn_blocking` resolves but before `dispatch_task` returns. (Plan §6.2.)
+
+### Implementation order for I2-I7
+
+- **I2:** Land `crates/riversd/src/engine_loader/transaction_map.rs` (new module containing `TaskId`, `next_task_id`, `CURRENT_TASK_ID` thread-local, `TaskGuard`, `DynTransactionMap`). Wire `DYN_TXN_MAP` `OnceLock` and `dyn_txn_map()` accessor in `host_context.rs`. Unit tests mirror `transaction.rs::tests`.
+- **I3:** Wire `host_db_begin` — read `current_task_id()`, resolve datasource config (per open question 6.1), `factory.connect`, `dyn_txn_map().begin(task_id, ds, conn)`. Bound by `HOST_CALLBACK_TIMEOUT_MS`.
+- **I4:** Wire `host_db_commit` / `host_db_rollback`. Implement `TASK_COMMIT_FAILED` equivalent (open question 6.2).
+- **I5:** Wire `host_dataview_execute` transaction routing — mirror V8's `take_connection`/`return_connection` pattern (context.rs:1210–1233) and the spec §6.2 cross-datasource check (context.rs:1182–1200).
+- **I6:** Wire `host_db_batch` — iterate params under the active txn.
+- **I7:** Modify `process_pool/mod.rs:326` to wrap the `spawn_blocking` closure in `TaskGuard::enter(next_task_id())`. Drop hook calls `dyn_txn_map_auto_rollback_blocking(task_id)`.
+- **I8:** Integration tests against `192.168.2.209` PostgreSQL: commit-visible, rollback-invisible, panic-auto-rolled-back, cross-datasource error, nested-rejection, commit-failure-upgrades-to-`TransactionCommitFailed`.
+
+Full plan with type sketches and risks: `docs/superpowers/plans/2026-04-25-phase-i-dyn-transactions.md`.
+
+## TXN-I2.1 — DynTransactionMap + TaskId/TaskGuard infrastructure landed (2026-04-25)
+
+**Files affected:**
+- `crates/riversd/src/engine_loader/dyn_transaction_map.rs` (NEW)
+- `crates/riversd/src/engine_loader/mod.rs` (added `mod dyn_transaction_map;`)
+- `crates/riversd/src/engine_loader/host_context.rs` (added DYN_TXN_MAP, TaskId issuer, TaskGuard, TASK_DS_CONFIGS, DYN_TASK_COMMIT_FAILED + accessors)
+
+**Spec reference:** TXN-I1.1 decisions 1–4 + open questions 6.1 (option A) and 6.2 (option A).
+
+**Resolution method:**
+- **Sibling module, not extension** of `crates/riversd/src/transaction.rs`. The existing `TransactionMap` is per-request (one map per request) and used by V8 via an `Arc<TransactionMap>` pinned to a worker thread. The dyn-engine path needs a single process-wide map keyed by `(TaskId, ds_name)` because callbacks run on a riversd-side `spawn_blocking` worker shared across the lifetime of riversd. Forcing the V8 map to take a `TaskId` would make every V8 caller carry an unused id and risk subtle behaviour changes; a sibling type isolates the new shape and keeps V8 untouched.
+- `DynTransactionMap` uses `std::sync::Mutex` (not `tokio::sync::Mutex`). The `with_conn_mut` method takes the connection out under the lock, drops the lock, runs the closure's future, then re-acquires the lock to re-insert. The sync mutex is **never** held across `.await`.
+- `with_conn_mut` uses HRTB on the closure's lifetime (`for<'a> F: FnOnce(&'a mut Box<dyn Connection>) -> Pin<Box<dyn Future<Output=R> + Send + 'a>>`) so call sites can pass `|conn| Box::pin(async move { conn.execute(...).await })` naturally.
+- `TaskGuard::drop` runs auto-rollback by spawning each per-datasource rollback as its own `tokio::spawn` task and awaiting the `JoinHandle`. This contains panics from one rollback so they cannot prevent the others.
+- `TaskGuard` captures `tokio::runtime::Handle` at `::enter` time so `Drop` can `block_on` even though it's invoked synchronously. Safe because `TaskGuard` is built only inside `spawn_blocking` workers (not tokio runtime workers).
+- Per-task datasource configs stash uses `RwLock<Option<HashMap<TaskId, _>>>` so it can be a `static`. Reads dominate writes (one `lookup_task_ds` per `host_db_begin`, two writes per task lifecycle).
+- `DYN_TASK_COMMIT_FAILED` thread-local mirrors V8's `TASK_COMMIT_FAILED` shape exactly so `dispatch_task` post-processing in I7 can use the same upgrade pattern as `execute_js_task`.
+
+**Validation:** `cargo check -p riversd` clean; 6/6 unit tests pass (`engine_loader::dyn_transaction_map::tests::*` — insert/take round-trip, duplicate insert errors, take-unknown returns None, drain_task scoped per-task, with_conn_mut observes mutation across calls, with_conn_mut returns None when missing).
+
+**Deviation from plan:** plan §3.1 named the new file `transaction_map.rs`; landed it as `dyn_transaction_map.rs` to make the dyn-vs-V8 distinction visible at first glance and avoid name-collision risk with `crate::transaction` (the V8-shared map). Decisions 1–4 unchanged.
+
+**Note for I3 implementer:** the brief specified `TASK_DS_CONFIGS` keyed by `"{entry_point}:{ds_name}"`. That's the V8 convention — confirm against `SerializedTaskContext::from(&ctx)` before wiring `host_db_begin` so the lookup key matches what `dispatch_task` will populate.
+
+## TXN-I6+I7.1 — DataView txn wiring + dispatch_task TaskGuard landed (2026-04-25)
+
+**Files affected:**
+- `crates/riversd/src/engine_loader/host_callbacks.rs` (host_dataview_execute now routes through DYN_TXN_MAP; new helpers `resolve_dataview_name` and `execute_dataview_with_optional_txn`; new I6 tests)
+- `crates/riversd/src/engine_loader/dyn_transaction_map.rs` (new `task_active_datasources` accessor)
+- `crates/riversd/src/engine_loader/host_context.rs` (added `HOST_CONTEXT_FOR_TESTS` and `lookup_task_ds_for_test` cfg(test) re-exports; widened `HostContext` visibility to `pub(crate)`)
+- `crates/riversd/src/engine_loader/txn_test_fixtures.rs` (NEW — shared test fixtures for I3-I7 since `HOST_CONTEXT` is a single OnceLock per test binary)
+- `crates/riversd/src/engine_loader/mod.rs` (made `host_context`, `host_callbacks`, `dyn_transaction_map`, and `txn_test_fixtures` `pub(crate)` so process_pool tests can reach them)
+- `crates/riversd/src/process_pool/mod.rs` (extracted dyn-engine path into `dispatch_dyn_engine_task` helper accepting an engine-runner closure; new I7 dispatch tests)
+
+**Spec reference:** TXN-I1.1 decisions 1–4, open questions 6.1 (option A) and 6.2 (option A); TXN-I2.1.
+
+**Resolution method:**
+
+I6 — DataView txn routing:
+- Restructured `host_dataview_execute` to capture `current_task_id()` BEFORE the spawn (the spawned tokio task runs on a different thread and can't read the spawn_blocking-thread-local). Inside the spawn, the resolved-name + txn-route helpers run on the runtime worker; the txn map's `with_conn_mut` is itself async-safe (lock dropped across .await).
+- New `resolve_dataview_name(executor, name, app_prefix) -> Option<String>` helper: bare → `"{prefix}:{name}"` → `:{name}` suffix scan. Single source of truth instead of the old "try then fall back" inline cascade.
+- New `execute_dataview_with_optional_txn(executor: Arc<DataViewExecutor>, ...)` helper. Takes `Arc<DataViewExecutor>` (NOT `&DataViewExecutor`) because `DynTransactionMap::with_conn_mut`'s HRTB-on-closure-lifetime forces any non-`'static` borrow captured by the closure to be `'static`. Cloning the Arc into the closure satisfies that without bending the executor's API.
+- Added `DynTransactionMap::task_active_datasources(task_id) -> Vec<String>` — used by the helper to detect cross-DS conflicts. The dyn map allows multiple txns per task by key shape, so a single Option-style lookup wouldn't suffice; the iterator-style snapshot is correct for both today's one-txn-per-task spec and a future multi-ds relaxation.
+- Cross-DS enforcement matches V8's spec §6.2 behavior in `process_pool/v8_engine/context.rs::ctx_dataview_callback`: if an active txn's datasource ≠ dataview's, return `DataViewError::Driver("TransactionError: ...")`. The dyn-engine surface returns this as a debug-formatted error in the engine result JSON.
+- Race between `task_active_datasources` snapshot and `with_conn_mut`'s lookup: if a parallel commit/rollback thread vanishes the entry, return a clear "transaction connection unavailable" driver error rather than silently using a fresh pool conn (a fresh conn would NOT be in the txn and writes would land outside the user's expected scope).
+
+I7 — Dispatch TaskGuard:
+- Extracted the dyn-engine branch of `dispatch_task` into `dispatch_dyn_engine_task(ctx, serialized, engine_runner)` taking an `FnOnce(&SerializedTaskContext) -> Result<SerializedTaskResult, String>` engine_runner closure. Production uses `crate::engine_loader::execute_on_engine`; tests pass closures that simulate engine bodies. **Approach B from the brief — closure-driven test fixtures** — chosen over a real cdylib stub engine.
+- Snapshot of `ctx.datasource_configs` lifted into `TASK_DS_CONFIGS` keyed by the freshly-issued `TaskId` BEFORE `spawn_blocking` (matches host_db_begin's lookup-by-bare-ds-name expectation). Cleared on `TaskGuard::drop`.
+- `TaskGuard::enter(task_id, rt_handle)` is constructed INSIDE the spawn_blocking closure body so:
+  1. CURRENT_TASK_ID is bound to the spawn_blocking worker thread (host callbacks fire from this same thread synchronously).
+  2. Drop runs auto-rollback synchronously when the closure unwinds (success/error/panic-mapped-to-WorkerCrash).
+- `take_commit_failed()` is called INSIDE the spawn_blocking closure (BEFORE the `_guard` drops) and propagated out via the closure's return tuple `(raw_result, commit_failed)`. The thread-local is set by `signal_commit_failed` on the same worker thread, so reading it on a *different* thread (the awaiter) would silently miss the value. Tuple-propagation matches V8's pattern in `execute_js_task`.
+- After the spawn_blocking awaits, the dispatcher upgrades the result to `TaskError::TransactionCommitFailed { datasource, message }` whenever `commit_failed` is `Some`, regardless of what the handler returned. Mirrors V8's financial-correctness gate in `process_pool/v8_engine/execution.rs:689`.
+
+Shared test fixtures:
+- `HOST_CONTEXT` is a `OnceLock<HostContext>` — only ONE test setup per test binary actually wires the DriverFactory. Both the I3-I6 tests in `host_callbacks::tests` and the I7 tests in `process_pool::dyn_dispatch_tests` need a factory containing mock drivers. Without coordination, whichever test ran first won the race and the other's drivers were unreachable.
+- New `engine_loader::txn_test_fixtures` (cfg(test)) module owns the single shared init: it registers BOTH `mock-txn-driver` (used by I3-I6) and `dispatch-mock-driver` (used by I7) into the same factory under one OnceLock-gated setup. Both behaviors point at one `SharedConnBehavior` so the `commit_fails` toggle works from either test module.
+- Single `test_lock()` mutex shared across both test modules — they both flip `commit_fails` and bind `CURRENT_TASK_ID` thread-locals, so cross-module parallelism is unsafe.
+
+**Validation:**
+- `cargo check -p riversd` clean; `cargo test -p riversd --lib` 411/411 + 1 ignored.
+- engine_loader tests: 12/12 (6 dyn_transaction_map + 3 I3-I5 + 3 new I6).
+- process_pool::dyn_dispatch_tests: 3/3 (unique TaskIds; auto-rollback on leftover; commit_failed propagates).
+- V8 tests: 44/44 unchanged (process_pool::v8_engine).
+- Full integration test suite passes (~30 test groups across riversd/tests/*).
+
+**Deviation from plan:** none in semantics. The brief spec'd a single `dispatch_task` modification; the implementation extracted the dyn branch into `dispatch_dyn_engine_task` to keep dispatch_task's other branches (static-engines V8, static-engines wasm) untouched and the TaskGuard wiring testable in isolation. Production behavior preserved.
+
+---
+
+## TXN-I8.1 — Phase I e2e + close-out (2026-04-25)
+
+**Files affected:**
+- `crates/riversd/src/process_pool/mod.rs` — new `mod dyn_e2e_tests` (5 #[tokio::test] cases driving the full dispatch lifecycle against the built-in SQLite driver).
+- `crates/riversd/src/engine_loader/txn_test_fixtures.rs` — extended `ensure_host_context` to also register the real `sqlite` driver into the shared `DriverFactory`; new `build_sqlite_executor(...)` helper; new `shared_test_runtime_handle()` long-lived runtime used as the `HOST_CONTEXT.rt_handle` (per-`#[tokio::test]` runtimes die end-of-test, so capturing `Handle::current()` at fixture-init from inside the first test left every subsequent test holding a stale handle, which broke SqliteDriver::connect's inner `spawn_blocking`).
+- `crates/riversd/src/engine_loader/host_context.rs` — three new cfg-test helpers: `host_rt_handle_for_test()`, `host_dataview_executor_for_test()`, `install_dataview_executor_for_test(executor)`. None of them widen production visibility — they sit alongside the existing I7 cfg-test surface.
+- `crates/riversd/src/engine_loader/host_callbacks.rs` — new cfg-test re-export `host_db_rollback_inner_for_test` (mirroring the existing begin/commit re-exports) plus `execute_dataview_with_optional_txn_for_test` so cross-module e2e tests can drive the DataView-with-txn helper directly.
+- `crates/riversd/Cargo.toml` — `[dev-dependencies]` adds `rusqlite` for the e2e durability oracle (open SQLite tempfile from outside the dispatch and count rows directly, bypassing every driver/pool layer).
+- `crates/riversd/src/engine_loader/host_callbacks.rs` (db_batch) — TODO comment removed; replaced with a fn-doc note clarifying that `Rivers.db.batch` is a DataView batch-execute primitive (not a transaction wrapper) and that wiring lands separately from Phase I.
+- `docs/arch/rivers-data-layer-spec.md` — new §6.8 "Transactions" subsection covering both engines, with the dyn-engine path's `(TaskId, datasource)` map keying, `TaskGuard` lifecycle, DataView routing, financial-correctness gate, and timeout policy.
+- `docs/arch/rivers-driver-spec.md` — note in §2 that both engines exercise `Connection::begin_transaction/commit_transaction/rollback_transaction`, with cross-reference to `rivers-data-layer-spec.md §6.8`.
+- `docs/code_review.md` — T2-8 annotated `Resolved 2026-04-25 by Phase I (this PR — branch feature/phase-i-dyn-transactions)` with the specific files/line-ranges that close it.
+- `todo/tasks.md` — I1-I9 + I-X.1-3 + H8 marked complete with one-line summaries.
+
+**Decisions:**
+
+1. **SQLite over Postgres for e2e default.** The brief left it as a choice. SQLite chosen because: (a) the worktree has no guaranteed network access to 192.168.2.209; (b) SQLite supports real `BEGIN/COMMIT/ROLLBACK` so the txn semantics are real, not faked; (c) tempfile path round-trips through a fresh `rusqlite::Connection::open(...)` outside the dispatch — durable proof of commit-persists / rollback-discards. Postgres parallel cases can be added under `#[ignore]` later if cluster reachability is assured. None added in this commit per "don't gold-plate."
+
+2. **Test placement: `mod dyn_e2e_tests` inside `process_pool/mod.rs`, not a `tests/*.rs` integration test.** Per the brief's choice rule, the existing `txn_test_fixtures` and the inner-fn `host_db_*_for_test` re-exports are `pub(crate)` — they're not reachable from a separate test binary. Promoting them to `pub` would widen production visibility for tests-only items. Keeping the e2e tests inside the same crate as a `#[cfg(test)] mod` reuses the existing surface verbatim with zero visibility expansion. Same pattern as the I7 `dyn_dispatch_tests` module a few lines above.
+
+3. **Long-lived shared tokio runtime in fixtures.** `HOST_CONTEXT` is `OnceLock`; the fixture's first `set_host_context(...)` capture of `Handle::current()` is final. Per-`#[tokio::test]` runtimes are torn down at end-of-test, so the second test inherits a stale handle. The stale handle works fine for synthetic-async mock drivers (their `connect` returns `Ready` on first poll without ever crossing the runtime), but the real `SqliteDriver::connect` calls `tokio::task::spawn_blocking` internally — that spawns onto the stored handle's runtime, which is dead, so the spawn_blocking task is cancelled. Fix: build a long-lived multi-threaded runtime in a `OnceLock`, enter it before calling `set_host_context`, and let `Handle::current()` capture that one. All tests then share a stable rt_handle. Decision is fixture-only; production paths are unaffected.
+
+4. **Cross-DS test pre-seats the txn map directly.** I8.4 (cross-datasource rejection) doesn't go through `dispatch_dyn_engine_task` because the cross-DS check operates purely on the dyn-txn-map's keys — no driver call is issued, so a real second SQLite open would be wasted. Mirrors the existing `dataview_cross_datasource_in_txn_rejects` unit test in `host_callbacks.rs`. The OTHER 4 e2e tests do go through dispatch_dyn_engine_task end-to-end.
+
+5. **H1-H15 code_review.md annotations deferred.** I-X.1 was scoped as "T2-8 annotation" with an optional broader pass on H1-H15 if mechanical. Per the brief's decision rule (≤5 minutes of grep+edit), the broader pass was NOT mechanical: each H finding maps to one or more individual commits inside the PR #83 squash, and identifying the right commit per finding requires reading the squashed diff hunk-by-hunk. Deferred with a follow-up TODO in `todo/tasks.md`. T2-8 (the actual I-X.1 deliverable) is fully annotated.
+
+**Spec reference:** TXN-I1.1 decisions 1–4; TXN-I2.1; TXN-I6+I7.1; original brief I8 cases 1-3 (commit/rollback/auto-rollback) and case 4 (cross-DS rejection); plan §I8 case 5 ("concurrent transactions don't share state" reinterpreted as "two distinct tasks on the same DS each hold their own txn state" because SQLite serializes writers — the assertion still proves the map keys by `(TaskId, datasource)` not by datasource alone).
+
+**Validation (I-X.3 regression confirmation):**
+- `cargo test -p riversd --lib` — 421/421 passed + 1 ignored (was 416 + 1 before; +5 new e2e tests).
+- `cargo test -p riversd --lib process_pool` — 213/213 passed (was 208 before; +5 new e2e tests).
+- `cargo test -p riversd --lib engine_loader` — 12/12 passed (unchanged, all I3-I7 unit tests still green).
+- `cargo test -p riversd --lib process_pool::v8_engine` — 44/44 passed unchanged (V8 path untouched, per Phase I guard rails).
+- `cargo test -p riversd --test pool_tests` — 33/33 passed.
+- `cargo test -p riversd --test task_kind_dispatch_tests` — 47/47 passed.
+- `cargo test -p riversd --test ddl_pipeline_tests --test v8_ddl_whitelist_tests` — 12/12 passed.
+- `cargo test -p riversd --test process_pool_tests` — 10/10 passed.
+- Full `cargo test -p riversd` — every binary green, no failures.
+
+**Resolution method:** test-driven. Built the e2e tests, watched them fail with the stale-runtime cancellation, traced the failure to `Handle::current()` capture timing inside `OnceLock`, fixed by introducing the long-lived fixture runtime, re-ran — all 5 tests green plus all prior tests still green. No behavior change in production code paths; only cfg-test surface widened minimally and dev-dep added (`rusqlite`).

@@ -844,7 +844,12 @@ fn throw_js_error(scope: &mut v8::HandleScope, message: &str) {
 ///
 /// TODO(H2 follow-up): make this configurable via `[runtime.process_pools.*]`
 /// once the task-locals plumbing carries pool config to V8 worker callbacks.
-const HOST_CALLBACK_TIMEOUT_MS: u64 = 30_000;
+///
+/// Phase I3+I4+I5: the canonical definition lives in
+/// `crate::engine_loader::HOST_CALLBACK_TIMEOUT_MS` so the V8 and dyn-engine
+/// cdylib paths share a single source of truth. Aliased here so the rest of
+/// this file is unchanged.
+const HOST_CALLBACK_TIMEOUT_MS: u64 = crate::engine_loader::HOST_CALLBACK_TIMEOUT_MS;
 
 /// Bound an `async` future against `HOST_CALLBACK_TIMEOUT_MS` while running
 /// it on the supplied tokio handle.
