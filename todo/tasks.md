@@ -411,7 +411,160 @@ These are not separate phases — they are the verification bar for the work abo
 ### Decisions logged
 
 7 controller decisions resolved against the open-decision list (B1.3, B3.2, C1.3, D2.1, E2.2, F4.3, G_R4.1). Rationale captured in `changedecisionlog.md`.
-- [ ] **RXE1.3 — Check command invocation safety.**
+
+---
+
+## Phase H — Residual code-review gaps (post-2026-04-25 audit)
+
+> **Source:** Fresh gap analysis 2026-04-25 (PM) against `docs/code_review.md` (current 725-line review with Tier-based finding IDs — T1=blocker, T2=correctness, T3=hardening) on `origin/main` at `42103fc`. Phases A–G closed the 24 P0/P1/P2 findings from the prior review pass; the following items are either **still open** in the current review document or were partially addressed and have a verified residual gap.
+>
+> **Verified directly by reading source on 2026-04-25:** H4 (`mysql.rs:44–49` — password still excluded from pool key with broken rationale), H11 (`eventbus.rs:458–471` — `Observe` handlers still `tokio::spawn` unbounded). Other items inherited verdicts from the gap report; verify before starting.
+
+### Tier 1 — production blockers (4)
+
+- [ ] **H1 — riversd T1-4: V8 `ctx.ddl()` bypasses the DDL whitelist path.**
+  **File:** `crates/riversd/src/process_pool/v8_engine/context.rs:614–722` (`ctx_ddl_callback`).
+  Phase B1 gated `ctx.ddl()` to `ApplicationInit` (good), but the callback then calls `factory.connect()` and `conn.ddl_execute()` directly, never consulting `DDL_WHITELIST` the way the dynamic-engine path (`engine_loader/host_callbacks.rs`) does. An init handler can run any DDL the connecting user has permission for, regardless of the per-app/per-database allowlist.
+  Validation:
+  - Init handler calling `ctx.ddl("DROP TABLE …")` against a database **not** in `app.manifest.init.ddl_whitelist` rejects with the same `DDL operation not permitted` error the dynamic-engine path produces.
+  - Whitelisted DDL still succeeds.
+  - Unit test alongside the existing B1 negative tests.
+
+- [ ] **H2 — riversd T1-6: Synchronous V8 host bridge has no timeout.**
+  **File:** `crates/riversd/src/process_pool/v8_engine/context.rs:708–722` (and analogous `recv()` sites in adjacent host callbacks).
+  The pattern is `tokio::spawn(async move { … tx.send(...) }); rx.recv()` (blocking). If the spawned task stalls (driver hang, pool starvation), `recv()` waits forever and pins the V8 worker.
+  Validation:
+  - Wrap each blocking `recv()` in a deadline derived from the configured task timeout (use `recv_timeout` on a `std::sync::mpsc` or convert to a `tokio::sync::oneshot` with `tokio::time::timeout`).
+  - On timeout: throw a JS error with the budget value and the host-callback name. Cancel the spawned task if possible.
+  - Test: handler invokes a host callback that intentionally never replies; assert worker reclaims within `task_timeout_ms + 100ms`.
+
+- [ ] **H3 — rivers-core T1-1: Plugin ABI version probe not panic-contained.**
+  **File:** `crates/rivers-core/src/driver_factory.rs:305–312` (call to `_rivers_abi_version`).
+  The plugin registration call (line 348–351) is wrapped in `catch_unwind`, but the prior ABI-version probe is a raw FFI call. A panic from a malformed plugin unwinds across the FFI boundary → undefined behavior.
+  Validation:
+  - Wrap the ABI-version probe in `std::panic::catch_unwind`. On panic, treat as `PluginLoadFailed` with a clear "ABI probe panicked" error.
+  - Test: load a stub plugin whose `_rivers_abi_version` panics; loader rejects it with `PluginLoadFailed`, riversd does not abort.
+
+- [ ] **H4 — rivers-drivers-builtin T1-1: MySQL pool cache key omits password.**
+  **File:** `crates/rivers-drivers-builtin/src/mysql.rs:39–49` (`pool_key`).
+  Two datasources with same `(host, port, database, username)` but different passwords end up sharing whichever pool got created first. The doc-comment rationale ("auth will reject and we'll re-create next time") is wrong — `get_or_create_pool` returns the cached pool unconditionally; nothing evicts on auth failure. Result: rotated/separate-tenant credentials silently fail or, worse, route to the wrong account.
+  Validation:
+  - Hash the password (e.g. `sha256` truncated to 8 bytes hex) and append to the key. Never include raw password bytes.
+  - Add an eviction path on first auth-failure: if the cached pool's first checkout returns an auth error, evict and rebuild.
+  - Test: register two datasources with same host/db/user, different passwords; both connect successfully and route to their own credentials.
+  - Test: rotate password on a datasource (re-register `ConnectionParams`); old pool is evicted on next checkout failure.
+
+### Tier 2 — correctness / contract (10)
+
+- [ ] **H5 — riversd T2-2: Connection-limit race in WebSocket and SSE registries.**
+  **Files:** `crates/riversd/src/websocket.rs:105–121`, `crates/riversd/src/sse.rs` (analogous block).
+  Limit check at line 105–107 reads count, branch decides allow, insertion+increment at 113–121 are non-atomic. Burst connects can exceed `max_connections`.
+  Validation:
+  - Reserve a slot atomically (e.g. `compare_exchange` on an `AtomicU64` count, or move the check inside the same write-lock that performs the insert).
+  - Test: 200 concurrent WS connects with `max_connections=50`; assert exactly 50 succeed and 150 are rejected.
+
+- [ ] **H6 — riversd T2-6: V8 outbound HTTP host callback has no timeout.**
+  **File:** `crates/riversd/src/process_pool/v8_engine/http.rs:131` (`reqwest::Client::new()` with no timeout config).
+  An external endpoint that never closes the response pins a worker for the lifetime of the V8 task — which itself has no timeout for sync host bridges (H2).
+  Validation:
+  - Build the client with `.timeout(Duration::from_millis(default_outbound_timeout))`. Default config-driven, log on construction.
+  - Per-request override via handler-supplied `timeout` field on the fetch call.
+  - Test: handler `await ctx.http.fetch("http://203.0.113.1/")` (TEST-NET-3) returns a timeout error within budget; worker freed.
+
+- [ ] **H7 — riversd T2-7: Dynamic engine HTTP host callback also lacks timeout.**
+  **File:** `crates/riversd/src/engine_loader/host_callbacks.rs` (search for `.send().await`).
+  Mirror the H6 fix on the dynamic-engine path. Use the same shared client builder so static and dynamic engines have identical outbound timeout policy.
+  Validation: Same pattern as H6, exercised through the wasm engine path.
+
+- [ ] **H8 — riversd T2-8: Transaction host callbacks are stubs.**
+  **File:** `crates/riversd/src/engine_loader/host_callbacks.rs:920–922` (transaction begin/commit/rollback).
+  Stubs return `{"ok": true}` without doing any work. Handler code that calls `ctx.transaction(...)` believes a transaction succeeded when nothing happened.
+  Validation:
+  - Decision needed: implement (route through `ConnectionPool` checkout + driver `begin/commit/rollback`) or remove and throw `Error("transaction host callback not yet implemented")`. Log decision in `changedecisionlog.md`.
+  - Stubs that silently lie are the worst option — pick one direction, not the current state.
+  - If implementing: integration test on faker datasource (or postgres against 192.168.2.209) that begin → write → rollback leaves no row; begin → write → commit persists.
+
+- [ ] **H9 — riversd T2-9: Engine log callback uses `std::str::from_utf8_unchecked`.**
+  **File:** `crates/riversd/src/engine_loader/host_callbacks.rs:497`.
+  Callback receives a `(ptr, len)` from a cdylib engine and constructs a `&str` without validation. A buggy or malicious engine can pass invalid UTF-8 → UB downstream (e.g. when the string lands in `tracing::info!` formatting).
+  Validation:
+  - Replace with `std::str::from_utf8(...).unwrap_or("<invalid utf-8>")` or `String::from_utf8_lossy`. The log path is not hot enough to need the unsafe variant.
+  - Test: feed a non-UTF-8 byte sequence through the callback; assert the log line shows the placeholder, no UB.
+
+- [ ] **H10 — rivers-runtime T2-2: Result schema validation silently disables itself.**
+  **File:** `crates/rivers-runtime/src/dataview_engine.rs:1337–1343` (`validate_query_result`).
+  When `return_schema` points at a missing or malformed file, the function logs a warning and returns `Ok(())` — the result passes through unvalidated. A bundle that ships with a typo'd schema path quietly serves untrusted driver output.
+  Validation:
+  - Treat missing/malformed schema as a hard error. Bundle validation (4-layer pipeline) should already reject bundles with bad schema paths; if so, runtime can `unwrap` the schema lookup. If not, runtime returns `DataViewError::SchemaUnavailable` with the bundle-relative path.
+  - Test: bundle with `return_schema = "schemas/missing.json"` fails at load; a runtime call against a DataView with valid schema but malformed JSON returns 500 with sanitized path.
+
+- [ ] **H11 — rivers-core T2-1: `Observe`-tier EventBus handlers spawn unbounded.**
+  **File:** `crates/rivers-core/src/eventbus.rs:458–471`.
+  Verified open: every event with N `Observe` subscribers `tokio::spawn`s N futures with no concurrency cap. A burst of events (e.g. circuit-breaker flapping) can flood the runtime. G_R2 added subscription handles + bounded broadcast for the *subscription* layer but didn't touch this dispatch fan-out.
+  Validation:
+  - Per-event bounded concurrency (e.g. a `Semaphore` shared across `Observe` dispatches per event-type, configurable via `[base.eventbus] observe_concurrency = 64`).
+  - On semaphore exhaustion: drop with a `rivers_eventbus_observe_dropped_total` counter increment, NOT block the event-dispatch loop.
+  - Test: publish 1000 events against a slow Observe subscriber; assert active spawn count never exceeds the cap; assert dropped counter increments.
+
+- [ ] **H12 — rivers-storage-backends T2-2: SQLite TTL arithmetic overflow.**
+  **File:** `crates/rivers-storage-backends/src/sqlite_backend.rs:119`.
+  `now_ms() + ttl` without `checked_add` — a TTL near `u64::MAX` (or a clock-skew jump) wraps to a tiny expiry, causing premature eviction.
+  Validation:
+  - Use `now_ms.saturating_add(ttl_ms)`. Any caller passing `u64::MAX` deserves to be capped, not wrapped.
+  - Test: `set(key, value, ttl=u64::MAX)` then immediate `get` returns the value (not None).
+
+- [ ] **H13 — rivers-engine-v8 T2-1: `HostCallbacks` copied via `ptr::read` without `Copy`/`Clone`.**
+  **File:** `crates/rivers-engine-v8/src/lib.rs:46`.
+  `ptr::read` makes a bitwise copy without invoking `Clone`; if `HostCallbacks` ever gains a non-`Copy` field this becomes UB. Currently safe because all fields are function pointers, but the safety invariant is undocumented.
+  Validation:
+  - Add a `#[derive(Copy, Clone)]` on `HostCallbacks` (asserts at compile time that all fields are `Copy`), then use `*ptr` instead of `ptr::read`.
+  - If derive isn't possible because of a future field: SAFETY comment explaining the invariant + a static assertion.
+  - Test: trivial cargo check after the change; static_assert holds.
+
+- [ ] **H14 — rivers-engine-wasm T2-1: signed-to-unsigned offset cast in WASM memory bridge.**
+  **File:** `crates/rivers-engine-wasm/src/lib.rs:257, 267, 277`.
+  `as usize` on an `i32` offset wraps a negative value to a huge positive — out-of-bounds memory read on a misbehaving WASM module.
+  Validation:
+  - `usize::try_from(offset_i32).map_err(|_| WasmError::InvalidOffset)?` at each site, or wrap in a helper.
+  - Test: synthesize a wasm module that calls a host import with a negative offset; assert the host returns the structured error rather than panicking or reading wild memory.
+
+### Tier 3 — hardening (1)
+
+- [ ] **H15 — riversd T3-1: Manual JSON log construction in `rivers_global.rs`.**
+  **File:** `crates/riversd/src/process_pool/v8_engine/rivers_global.rs:41, 43`.
+  `format!()` with manual JSON-string interpolation can produce malformed lines if a value contains an unescaped quote or control character. Per-app log files become unparseable.
+  Validation:
+  - Replace with `serde_json::json!({ ... }).to_string()`.
+  - Test: log a value containing `"` and `\n`; assert the resulting log line is valid JSON.
+
+### Verification deferred to Phase H follow-ups
+
+Two T2 items the gap audit could not resolve from grep alone — verify before claiming done or open:
+
+- [ ] **H16 — riversd T2-4: Pool capacity accounting may ignore the return queue.**
+  Re-read `crates/riversd/src/pool.rs` end-to-end after Phase D changes (D1 collapsed dual-counter state into a single mutex-protected `PoolState`, which likely closed this). Verdict: verify, then either close as duplicate of D1 or open a focused fix.
+  Validation: walk through `acquire`/`release`/`drop`/the `idle_return` queue; confirm a single source of truth for `total_in_pool`.
+
+- [ ] **H17 — riversd T2-5: Pool health check holds idle mutex across `.await`.**
+  Re-read `ConnectionPool::health_check` (or equivalent). If `idle.lock().await` is held while pinging a connection, the entire pool stalls during a slow ping.
+  Validation: Drain the idle queue into a local `Vec`, drop the lock, then ping. Re-insert healthy connections under a fresh lock acquisition. Test: stall a single connection's `ping`; assert other acquires proceed.
+
+### Cross-cutting
+
+- [ ] **H-X.1 — Update `docs/code_review.md` after each H-task lands** with a "Resolved YYYY-MM-DD by `<commit-sha>`" annotation under the relevant Tier finding. Keeps the review document the single source of truth.
+- [ ] **H-X.2 — Canary regression run** after H1+H2+H4 land (the three highest-impact). 135/135 must remain green.
+
+### Sequencing
+
+1. **H4** first — MySQL tenant isolation is a security defect masquerading as a perf optimization. Small change, high impact.
+2. **H1+H2** as a pair — both touch `v8_engine/context.rs` and the dynamic-engine path. H1 closes the whitelist bypass; H2 prevents host-bridge stalls from pinning workers. Bundle.
+3. **H6+H7** as a pair — both add HTTP timeouts on outbound calls; share the client-builder helper.
+4. **H10** before **H8** — schema validation hard-fail is straightforward; transaction stubs need a design decision first.
+5. **H3, H9, H13, H14** — all small unsafe/FFI hardening; can land in one PR.
+6. **H11** — concurrency cap on Observe dispatch; needs the new config knob.
+7. **H5, H12, H15, H16, H17** — schedule per quarter as hardening.
+
+
   Trace how user-controlled parameters become stdin, argv, env, working directory, and process command.
   Validation: explicitly cover shell invocation, argument separation, template substitution, env inheritance/sanitization, stdout/stderr limits, and timeout behavior.
 
