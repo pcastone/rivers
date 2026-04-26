@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 /// Universal value type crossing the driver boundary.
 ///
 /// Every parameter and result column is a `QueryValue`.
 /// The `Json` variant handles arbitrary structured payloads
 /// (InfluxDB batch writes, Kafka message bodies, MongoDB documents, etc.).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum QueryValue {
     /// SQL NULL or absent value.
@@ -15,15 +15,75 @@ pub enum QueryValue {
     /// Boolean true/false.
     Boolean(bool),
     /// Signed 64-bit integer.
+    ///
+    /// JSON representation: emitted as a JSON number if `|v| ≤ 2⁵³−1`
+    /// (`Number.MAX_SAFE_INTEGER`), otherwise as a JSON string. This avoids
+    /// silent precision loss in JS clients (IEEE-754 double rounds above 2⁵³).
+    /// Per Twitter / Stripe / GitHub / Discord convention.
     Integer(i64),
     /// 64-bit floating point number.
     Float(f64),
+    /// Unsigned 64-bit integer, used for `BIGINT UNSIGNED` columns and
+    /// other unsigned-source values that don't fit in `Integer(i64)`.
+    ///
+    /// JSON representation: same threshold as `Integer` — emitted as a
+    /// JSON number when `v ≤ 2⁵³−1`, else as a JSON string. Per H18.
+    UInt(u64),
     /// UTF-8 string value.
     String(String),
     /// Ordered list of values.
     Array(Vec<QueryValue>),
     /// Arbitrary structured JSON payload.
     Json(serde_json::Value),
+}
+
+/// JS `Number.MAX_SAFE_INTEGER` (2⁵³−1). Integers whose magnitude exceeds
+/// this value lose precision in JavaScript clients, so we serialize them
+/// as JSON strings. Per Twitter snowflake / Stripe ID / GitHub ID
+/// convention; see `todo/tasks.md` H18 + `docs/code_review.md` T2-1.
+///
+/// The signed and unsigned forms are kept side-by-side to document the
+/// symmetry; `Integer` checks magnitude via `i64::unsigned_abs()` against
+/// `SAFE_UINT_MAX`, so `SAFE_INT_MAX` is reference-only.
+#[allow(dead_code)]
+const SAFE_INT_MAX: i64 = 9_007_199_254_740_991;
+const SAFE_UINT_MAX: u64 = 9_007_199_254_740_991;
+
+impl serde::Serialize for QueryValue {
+    fn serialize<S>(&self, ser: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            QueryValue::Null => ser.serialize_none(),
+            QueryValue::Boolean(b) => ser.serialize_bool(*b),
+            QueryValue::Integer(v) => {
+                if v.unsigned_abs() > SAFE_UINT_MAX {
+                    ser.serialize_str(&v.to_string())
+                } else {
+                    ser.serialize_i64(*v)
+                }
+            }
+            QueryValue::UInt(v) => {
+                if *v > SAFE_UINT_MAX {
+                    ser.serialize_str(&v.to_string())
+                } else {
+                    ser.serialize_u64(*v)
+                }
+            }
+            QueryValue::Float(v) => ser.serialize_f64(*v),
+            QueryValue::String(s) => ser.serialize_str(s),
+            QueryValue::Array(arr) => {
+                use serde::ser::SerializeSeq;
+                let mut seq = ser.serialize_seq(Some(arr.len()))?;
+                for v in arr {
+                    seq.serialize_element(v)?;
+                }
+                seq.end()
+            }
+            QueryValue::Json(v) => v.serialize(ser),
+        }
+    }
 }
 
 /// Normalized query model passed from DataView engine to driver.
@@ -219,7 +279,9 @@ impl QueryValue {
     pub fn estimated_bytes(&self) -> usize {
         match self {
             QueryValue::Null | QueryValue::Boolean(_) => std::mem::size_of::<Self>(),
-            QueryValue::Integer(_) | QueryValue::Float(_) => std::mem::size_of::<Self>(),
+            QueryValue::Integer(_) | QueryValue::Float(_) | QueryValue::UInt(_) => {
+                std::mem::size_of::<Self>()
+            }
             QueryValue::String(s) => std::mem::size_of::<Self>() + s.len(),
             QueryValue::Array(a) => {
                 std::mem::size_of::<Self>() + a.iter().map(|v| v.estimated_bytes()).sum::<usize>()
@@ -237,5 +299,106 @@ fn estimate_json_bytes(v: &serde_json::Value) -> usize {
         serde_json::Value::Object(o) => {
             24 + o.iter().map(|(k, v)| k.len() + 16 + estimate_json_bytes(v)).sum::<usize>()
         }
+    }
+}
+
+#[cfg(test)]
+mod h18_serialize_tests {
+    use super::*;
+
+    fn ser(v: &QueryValue) -> serde_json::Value {
+        serde_json::to_value(v).unwrap()
+    }
+
+    #[test]
+    fn integer_below_safe_max_emits_number() {
+        assert_eq!(ser(&QueryValue::Integer(0)), serde_json::json!(0));
+        assert_eq!(ser(&QueryValue::Integer(42)), serde_json::json!(42));
+        assert_eq!(
+            ser(&QueryValue::Integer(9_007_199_254_740_991)), // 2^53 - 1
+            serde_json::json!(9_007_199_254_740_991_i64),
+        );
+    }
+
+    #[test]
+    fn integer_above_safe_max_emits_string() {
+        assert_eq!(
+            ser(&QueryValue::Integer(9_007_199_254_740_992)), // 2^53
+            serde_json::json!("9007199254740992"),
+        );
+        assert_eq!(
+            ser(&QueryValue::Integer(i64::MAX)),
+            serde_json::json!(i64::MAX.to_string()),
+        );
+    }
+
+    #[test]
+    fn integer_below_negative_safe_max_emits_string() {
+        assert_eq!(
+            ser(&QueryValue::Integer(-9_007_199_254_740_992)),
+            serde_json::json!("-9007199254740992"),
+        );
+        assert_eq!(
+            ser(&QueryValue::Integer(i64::MIN)),
+            serde_json::json!(i64::MIN.to_string()),
+        );
+    }
+
+    #[test]
+    fn integer_at_negative_safe_max_emits_number() {
+        // -(2^53 - 1) is still safe.
+        assert_eq!(
+            ser(&QueryValue::Integer(-9_007_199_254_740_991)),
+            serde_json::json!(-9_007_199_254_740_991_i64),
+        );
+    }
+
+    #[test]
+    fn uint_below_safe_max_emits_number() {
+        assert_eq!(ser(&QueryValue::UInt(0)), serde_json::json!(0_u64));
+        assert_eq!(
+            ser(&QueryValue::UInt(9_007_199_254_740_991)),
+            serde_json::json!(9_007_199_254_740_991_u64),
+        );
+    }
+
+    #[test]
+    fn uint_above_safe_max_emits_string() {
+        assert_eq!(
+            ser(&QueryValue::UInt(9_007_199_254_740_992)),
+            serde_json::json!("9007199254740992"),
+        );
+        assert_eq!(
+            ser(&QueryValue::UInt(u64::MAX)),
+            serde_json::json!("18446744073709551615"),
+        );
+    }
+
+    #[test]
+    fn other_variants_unchanged() {
+        assert_eq!(ser(&QueryValue::Null), serde_json::json!(null));
+        assert_eq!(ser(&QueryValue::Boolean(true)), serde_json::json!(true));
+        assert_eq!(ser(&QueryValue::Float(1.5)), serde_json::json!(1.5));
+        assert_eq!(ser(&QueryValue::String("hi".into())), serde_json::json!("hi"));
+        assert_eq!(
+            ser(&QueryValue::Array(vec![QueryValue::Integer(1), QueryValue::Integer(2)])),
+            serde_json::json!([1, 2]),
+        );
+        assert_eq!(
+            ser(&QueryValue::Json(serde_json::json!({"k": "v"}))),
+            serde_json::json!({"k": "v"}),
+        );
+    }
+
+    #[test]
+    fn array_of_large_uints_stringifies_per_element() {
+        // Each element gets the threshold check independently.
+        assert_eq!(
+            ser(&QueryValue::Array(vec![
+                QueryValue::UInt(42),
+                QueryValue::UInt(u64::MAX),
+            ])),
+            serde_json::json!([42, "18446744073709551615"]),
+        );
     }
 }
