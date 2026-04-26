@@ -536,6 +536,8 @@ Value::UInt(u) => QueryValue::Integer(*u as i64),
 
 **Fix direction:** Represent oversized unsigned values as decimal strings or a JSON number type that preserves range.
 
+**Resolved 2026-04-26 by Phase H18 — see commits on `feature/h18-mysql-uint`.** Added `QueryValue::UInt(u64)` variant in `rivers-driver-sdk` (commit `31a7d64`) with a custom `Serialize` impl that emits values ≤ `Number.MAX_SAFE_INTEGER` (2⁵³−1) as JSON numbers and larger values as JSON strings — same threshold rule applies to `QueryValue::Integer`. MySQL driver now emits `Value::UInt(u)` as `QueryValue::UInt(u)` (lossless) and binds `UInt` round-trip without truncation (commit `cfaca16`); 11 dependent crates rippled with explicit overflow handling on bind paths (Postgres/SQLite use `i64::try_from` and surface `DriverError::Connection`; MongoDB chains through `Decimal128`; InfluxDB emits the native `u`-suffixed line-protocol field). Live integration test `h18_mysql_uint_round_trip` against MySQL @ 192.168.2.215 verifies five representative values across the threshold (0, 42, 2⁵³−1, 2⁵³, 18_446_744_073_709_551_610) round-trip losslessly. Schema-spec coverage in `docs/arch/rivers-schema-spec-v2.md` §"Large integers and JSON precision". Decision rationale in `changedecisionlog.md::MYSQL-H18.1`.
+
 ### rivers-drivers-builtin — T2-2: PostgreSQL connection strings are built by interpolation
 
 **File:** `crates/rivers-drivers-builtin/src/postgres.rs:44`

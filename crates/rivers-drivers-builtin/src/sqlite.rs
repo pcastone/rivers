@@ -478,7 +478,9 @@ impl Connection for SqliteConnection {
 /// Each parameter key is prefixed with `:` if not already present.
 /// Keys are sorted to ensure deterministic binding order (HashMap iteration is
 /// unordered; sorted keys make positional `$001, $002, …` bindings correct).
-fn bind_params(parameters: &HashMap<String, QueryValue>) -> Vec<(String, Box<dyn rusqlite::types::ToSql>)> {
+fn bind_params(
+    parameters: &HashMap<String, QueryValue>,
+) -> Result<Vec<(String, Box<dyn rusqlite::types::ToSql>)>, DriverError> {
     let mut keys: Vec<&String> = parameters.keys().collect();
     keys.sort();
     keys.into_iter()
@@ -493,6 +495,18 @@ fn bind_params(parameters: &HashMap<String, QueryValue>) -> Vec<(String, Box<dyn
                 QueryValue::Null => Box::new(rusqlite::types::Null),
                 QueryValue::Boolean(b) => Box::new(*b),
                 QueryValue::Integer(i) => Box::new(*i),
+                // SQLite INTEGER is 64-bit signed; bind UInt as i64 if it fits,
+                // else fail with an explicit overflow error rather than silently
+                // truncating to i64.
+                QueryValue::UInt(u) => {
+                    let i = i64::try_from(*u).map_err(|_| {
+                        DriverError::Connection(format!(
+                            "sqlite binding overflow: u64 value {u} exceeds i64 range \
+                             — SQLite INTEGER is 64-bit signed; pass as a string for TEXT columns"
+                        ))
+                    })?;
+                    Box::new(i)
+                }
                 QueryValue::Float(f) => Box::new(*f),
                 QueryValue::String(s) => Box::new(s.clone()),
                 QueryValue::Array(arr) => {
@@ -502,7 +516,7 @@ fn bind_params(parameters: &HashMap<String, QueryValue>) -> Vec<(String, Box<dyn
                     Box::new(serde_json::to_string(v).unwrap_or_default())
                 }
             };
-            (name, boxed)
+            Ok((name, boxed))
         })
         .collect()
 }
@@ -517,7 +531,7 @@ fn execute_query(
         .prepare(statement)
         .map_err(|e| DriverError::Query(format!("sqlite prepare: {}", e)))?;
 
-    let bound = bind_params(parameters);
+    let bound = bind_params(parameters)?;
     let param_slice: Vec<(&str, &dyn rusqlite::types::ToSql)> = bound
         .iter()
         .map(|(name, val)| (name.as_str(), val.as_ref() as &dyn rusqlite::types::ToSql))
@@ -571,7 +585,7 @@ fn execute_insert(
         .prepare(statement)
         .map_err(|e| DriverError::Query(format!("sqlite prepare: {}", e)))?;
 
-    let bound = bind_params(parameters);
+    let bound = bind_params(parameters)?;
     let param_slice: Vec<(&str, &dyn rusqlite::types::ToSql)> = bound
         .iter()
         .map(|(name, val)| (name.as_str(), val.as_ref() as &dyn rusqlite::types::ToSql))
@@ -601,7 +615,7 @@ fn execute_write(
         .prepare(statement)
         .map_err(|e| DriverError::Query(format!("sqlite prepare: {}", e)))?;
 
-    let bound = bind_params(parameters);
+    let bound = bind_params(parameters)?;
     let param_slice: Vec<(&str, &dyn rusqlite::types::ToSql)> = bound
         .iter()
         .map(|(name, val)| (name.as_str(), val.as_ref() as &dyn rusqlite::types::ToSql))

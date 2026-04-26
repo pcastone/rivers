@@ -109,7 +109,7 @@ impl Connection for CassandraConnection {
 
 impl CassandraConnection {
     async fn exec_query(&self, query: &Query) -> Result<QueryResult, DriverError> {
-        let values = build_named_values(&query.parameters);
+        let values = build_named_values(&query.parameters)?;
 
         let prepared = self
             .session
@@ -146,7 +146,7 @@ impl CassandraConnection {
     }
 
     async fn exec_write(&self, query: &Query) -> Result<QueryResult, DriverError> {
-        let values = build_named_values(&query.parameters);
+        let values = build_named_values(&query.parameters)?;
 
         let prepared = self
             .session
@@ -171,23 +171,36 @@ impl CassandraConnection {
 /// column-name matching in scylla 0.14+. This avoids the previous
 /// alphabetical-sort approach that silently corrupted data when CQL
 /// positional `?` placeholders didn't match alphabetical parameter order. (AP16)
-fn build_named_values(parameters: &HashMap<String, QueryValue>) -> HashMap<String, CqlValue> {
+fn build_named_values(
+    parameters: &HashMap<String, QueryValue>,
+) -> Result<HashMap<String, CqlValue>, DriverError> {
     parameters
         .iter()
-        .map(|(k, v)| (k.clone(), query_value_to_cql(v)))
+        .map(|(k, v)| query_value_to_cql(v).map(|cql| (k.clone(), cql)))
         .collect()
 }
 
-fn query_value_to_cql(val: &QueryValue) -> CqlValue {
-    match val {
+fn query_value_to_cql(val: &QueryValue) -> Result<CqlValue, DriverError> {
+    Ok(match val {
         QueryValue::Null => CqlValue::Empty,
         QueryValue::Boolean(b) => CqlValue::Boolean(*b),
         QueryValue::Integer(i) => CqlValue::BigInt(*i),
+        // Cassandra has no native unsigned 64. Bind as BigInt(i64) when it
+        // fits, else error rather than silently truncating.
+        QueryValue::UInt(u) => {
+            let i = i64::try_from(*u).map_err(|_| {
+                DriverError::Connection(format!(
+                    "cassandra binding overflow: u64 value {u} exceeds i64 range \
+                     — Cassandra `bigint` is 64-bit signed; use a `varint` or text column"
+                ))
+            })?;
+            CqlValue::BigInt(i)
+        }
         QueryValue::Float(f) => CqlValue::Double(*f),
         QueryValue::String(s) => CqlValue::Text(s.clone()),
         QueryValue::Array(_) => CqlValue::Text(serde_json::to_string(val).unwrap_or_default()),
         QueryValue::Json(v) => CqlValue::Text(serde_json::to_string(v).unwrap_or_default()),
-    }
+    })
 }
 
 fn cql_value_to_query_value(val: Option<&CqlValue>) -> QueryValue {
@@ -244,12 +257,37 @@ mod tests {
 
     #[test]
     fn query_value_to_cql_string() {
-        assert!(matches!(query_value_to_cql(&QueryValue::String("hi".into())), CqlValue::Text(ref s) if s == "hi"));
+        assert!(matches!(
+            query_value_to_cql(&QueryValue::String("hi".into())).unwrap(),
+            CqlValue::Text(ref s) if s == "hi",
+        ));
     }
 
     #[test]
     fn query_value_to_cql_integer() {
-        assert!(matches!(query_value_to_cql(&QueryValue::Integer(42)), CqlValue::BigInt(42)));
+        assert!(matches!(
+            query_value_to_cql(&QueryValue::Integer(42)).unwrap(),
+            CqlValue::BigInt(42),
+        ));
+    }
+
+    #[test]
+    fn query_value_to_cql_uint_in_range() {
+        assert!(matches!(
+            query_value_to_cql(&QueryValue::UInt(42)).unwrap(),
+            CqlValue::BigInt(42),
+        ));
+    }
+
+    #[test]
+    fn query_value_to_cql_uint_overflow_errors() {
+        let err = query_value_to_cql(&QueryValue::UInt(u64::MAX)).unwrap_err();
+        match err {
+            DriverError::Connection(msg) => {
+                assert!(msg.contains("u64 value"), "expected overflow message, got: {msg}");
+            }
+            other => panic!("expected DriverError::Connection, got {other:?}"),
+        }
     }
 
     #[test]
@@ -267,7 +305,7 @@ mod tests {
         let mut p = HashMap::new();
         p.insert("z".into(), QueryValue::Integer(2));
         p.insert("a".into(), QueryValue::Integer(1));
-        let v = build_named_values(&p);
+        let v = build_named_values(&p).unwrap();
         assert!(matches!(v.get("a"), Some(CqlValue::BigInt(1))));
         assert!(matches!(v.get("z"), Some(CqlValue::BigInt(2))));
     }

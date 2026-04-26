@@ -157,18 +157,14 @@ impl EventBusConnection {
     }
 
     /// Build a JSON payload from query parameters for publishing.
+    ///
+    /// Delegates to `QueryValue`'s threshold-aware `Serialize` impl (H18.1)
+    /// so large integers (`|v| > 2⁵³−1`) are stringified rather than emitted
+    /// as JSON numbers that JS consumers would silently round.
     fn build_payload(query: &Query) -> serde_json::Value {
         let mut map = serde_json::Map::new();
         for (k, v) in &query.parameters {
-            let json_val = match v {
-                QueryValue::Null => serde_json::Value::Null,
-                QueryValue::Boolean(b) => serde_json::Value::Bool(*b),
-                QueryValue::Integer(i) => serde_json::json!(*i),
-                QueryValue::Float(f) => serde_json::json!(*f),
-                QueryValue::String(s) => serde_json::Value::String(s.clone()),
-                QueryValue::Array(arr) => serde_json::json!(arr),
-                QueryValue::Json(j) => j.clone(),
-            };
+            let json_val = serde_json::to_value(v).unwrap_or(serde_json::Value::Null);
             map.insert(k.clone(), json_val);
         }
         serde_json::Value::Object(map)

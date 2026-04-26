@@ -384,18 +384,13 @@ fn params_to_json(params: &HashMap<String, QueryValue>) -> serde_json::Value {
 }
 
 /// Convert a QueryValue to a serde_json::Value.
+///
+/// Delegates to `QueryValue`'s threshold-aware `Serialize` impl (H18.1).
+/// Large integers (`|v| > 2⁵³−1`) are emitted as JSON strings rather than
+/// numbers — Elasticsearch indexes both, and JS clients consuming the
+/// search response would otherwise silently round high-precision IDs.
 fn query_value_to_json(value: &QueryValue) -> serde_json::Value {
-    match value {
-        QueryValue::Null => serde_json::Value::Null,
-        QueryValue::Boolean(b) => serde_json::Value::Bool(*b),
-        QueryValue::Integer(i) => serde_json::json!(i),
-        QueryValue::Float(f) => serde_json::json!(f),
-        QueryValue::String(s) => serde_json::Value::String(s.clone()),
-        QueryValue::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(query_value_to_json).collect())
-        }
-        QueryValue::Json(v) => v.clone(),
-    }
+    serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
 }
 
 /// Convert a serde_json::Value to a QueryValue.

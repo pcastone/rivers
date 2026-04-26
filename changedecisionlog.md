@@ -558,3 +558,49 @@ Pre-commit hooks fire on every WIP commit during a feature branch; the bump only
 **Spec reference:** SemVer 2.0 §10 (build metadata: optional, `+`-prefixed, alphanumerics + hyphen, no semantic effect on precedence). User-facing policy lives in CLAUDE.md "Versioning" section.
 
 **Resolution method:** spec-aligned design + portable shell tooling + CI gate. Validated by running the bump script three times locally (`build`, `patch`, `minor`) and confirming each produced the right transition: `0.54.2 → 0.54.2+1118260426`, `0.54.2+… → 0.54.3+…`, `0.54.3+… → 0.55.0+…`. CI gate validated at PR merge time on this very PR (which applies its own build-only seed bump).
+
+## MYSQL-H18.1 — QueryValue::UInt + 2⁵³−1 JSON stringify threshold (2026-04-26)
+
+**Files affected:**
+- `crates/rivers-driver-sdk/src/types.rs` — added `UInt(u64)` variant + custom `Serialize` with threshold logic.
+- `crates/rivers-drivers-builtin/src/mysql.rs` — emit `UInt` for `Value::UInt` source instead of lossy `as i64` cast; bind `UInt` round-trips losslessly.
+- `crates/rivers-drivers-builtin/src/{postgres,sqlite}.rs` — bind `UInt` via `i64::try_from` with explicit overflow error.
+- `crates/rivers-drivers-builtin/src/eventbus.rs` — JSON payload helper collapses to `serde_json::to_value` (delegates to threshold-aware Serialize).
+- `crates/rivers-plugin-{cassandra,couchdb,elasticsearch,influxdb,mongodb,neo4j}/src/lib.rs` (and `influxdb/src/protocol.rs`, `neo4j/src/lib.rs:251 + :319`) — match arms updated per natural target representation; JSON helpers collapse to Serialize.
+- `crates/rivers-runtime/src/dataview_engine.rs` — `query_value_type_name`, `matches_param_type`, `coerce_param_type` extended for `UInt`.
+- `crates/riversd/src/process_pool/v8_engine/direct_dispatch.rs` — `query_value_to_json` collapses to Serialize.
+- `crates/rivers-drivers-builtin/tests/conformance/h18_mysql_uint.rs` — live integration test against 192.168.2.215 covering 5 representative `BIGINT UNSIGNED` values across the threshold.
+- `docs/arch/rivers-schema-spec-v2.md` — H18.4 schema-spec note.
+
+**Decision 1: Per-value stringify, not per-column.**
+Twitter / Stripe / GitHub / Discord / Mastodon / MongoDB Extended JSON all stringify integers above `Number.MAX_SAFE_INTEGER` per-value. The same column may emit JSON numbers for small rows and JSON strings for huge rows. This is dumb-simple to implement (one threshold check in `Serialize`) and matches the only case that actually matters (precision loss in JS clients). Per-column always-string can be layered on later as a schema attribute without breaking the per-value default.
+
+**Decision 2: New `UInt(u64)` variant rather than overloading `Integer(i64)`.**
+`mysql_async::Value::UInt(u64)` IS the source type — preserving it in `QueryValue` is the lossless choice. Casting to `i64` and detecting "this was secretly unsigned" later requires either a side channel (column metadata) or a magic-value sentinel; both are fragile. `sqlx` (`I64`/`U64`) and `diesel` (`Bigint`/`Unsigned<Bigint>`) both have separate variants for the same reason.
+
+**Decision 3: Custom `Serialize` over `#[derive(Serialize)] #[serde(untagged)]`.**
+`untagged` would emit `UInt(u64::MAX)` as a JSON number, which `serde_json::Number` accepts but JS clients silently truncate. Custom `Serialize` is the point of enforcement — every JSON-out boundary in the codebase that goes through `serde_json::to_value(&qv)` (or the per-helper delegation collapsed in H18.3) gets the threshold for free.
+
+**Decision 4: `Deserialize` left untagged.**
+Handlers send numbers; the precision-loss issue is on the *outbound* path. If a handler ever sends a stringified large integer, `Deserialize` parses it as `String`, which is correct: string-to-int conversion is the handler's call. We don't need a fancy "accept either form" deserializer.
+
+**Decision 5: No silent truncation in any driver bind path.**
+Postgres / SQLite / Cassandra / Mongo / Neo4j have no native u64 source. The bind path uses `i64::try_from(u)`; on `Err`, returns a `DriverError::Connection` naming the unsigned-overflow case. Honest fail-fast over "did the result look right" debugging. MongoDB additionally chains through `Decimal128::from_str` (BSON-native arbitrary-precision decimal) before falling back to string, since the BSON helper is non-fallible — value preservation always wins.
+
+**Decision 6: InfluxDB uses `u`-suffixed line-protocol field.**
+Native, lossless, idiomatic. `format!("{u}u")` matches Influx's documented convention for unsigned 64-bit fields.
+
+**Decision 7: JSON helpers collapse to `serde_json::to_value(&qv)` where possible.**
+Several plugin helpers (couchdb, elasticsearch, eventbus, riversd direct_dispatch, neo4j) had hand-rolled JSON shape that turned out to be functionally identical to the H18.1 `Serialize`. Replacing the explicit match with delegation gives single-source-of-truth threshold behavior across every JSON-out boundary, AND fixes a pre-existing inconsistency where these helpers emitted JSON numbers for `Integer` above 2⁵³−1 (the helper bypassed the never-actually-existed Serialize). H18.1 unified the rule; H18.3 propagated it to every helper.
+
+**Spec reference:** `docs/code_review.md` finding rivers-drivers-builtin T2-1; SemVer 2.0 §10 (build metadata; not directly relevant here but the threshold formatting matches the team's existing JSON-string-for-large-integer convention).
+
+**Resolution method:** test-driven. H18.1 unit tests covered the threshold around 2⁵³ for both signed and unsigned. H18.2 + H18.3 ran live against MySQL @ 192.168.2.215 with five representative values (`0`, `42`, `2⁵³−1`, `2⁵³`, `18_446_744_073_709_551_610`); all five round-tripped losslessly at the Rust layer; JSON serialization stringified only the last two as expected. All pre-existing per-crate test suites still green (workspace test pass count unchanged plus 11 new tests).
+
+**Validation:**
+- `cargo check --workspace --tests` clean
+- `cargo test -p rivers-driver-sdk --lib h18_serialize_tests` — 8 passed
+- `cargo test -p rivers-drivers-builtin --lib mysql` — 24 passed
+- `cargo test -p rivers-runtime --lib` — 197 passed
+- `cargo test -p riversd --lib` — 416 + 1 ignored (unchanged)
+- `RIVERS_TEST_CLUSTER=1 cargo test -p rivers-drivers-builtin --test conformance_tests mysql_bigint_unsigned_round_trip` — passed live

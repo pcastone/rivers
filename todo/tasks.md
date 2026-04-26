@@ -625,7 +625,7 @@ ORIGINAL ENTRY:
 
 > **Source:** Post-Phase H gap re-scan (after PR #83 was opened) found one Tier-2 finding from `docs/code_review.md` that was not on the original Phase H list. Tracked here so it doesn't get lost; can land independently of Phase I.
 
-- [ ] **H18 — rivers-drivers-builtin T2-1: MySQL unsigned integers wrap into negative on `i64` cast.**
+- [x] **H18 — rivers-drivers-builtin T2-1: MySQL unsigned integers wrap into negative on `i64` cast.**
   **File:** `crates/rivers-drivers-builtin/src/mysql.rs:559` (`mysql_async::Value::UInt(u)` matched and emitted as `QueryValue::Integer(*u as i64)`).
   Values above `i64::MAX` (~9.2×10¹⁸) wrap to negative numbers — silently corrupts results from `BIGINT UNSIGNED` columns at scale (snowflake ids, large counters, monotonic timestamps).
 
@@ -639,26 +639,26 @@ ORIGINAL ENTRY:
 
   ### Sub-tasks
 
-  - [ ] **H18.1 — Add the variant + custom Serialize.**
+  - [x] **H18.1 — Add the variant + custom Serialize.**
     `crates/rivers-driver-sdk/src/types.rs`: add `UInt(u64)`. Replace `#[derive(Serialize)]` with a manual `impl Serialize for QueryValue` that emits a JSON string for `Integer` when `|v| > 2⁵³−1` and for `UInt` when `v > 2⁵³−1`; otherwise emits a JSON number. Constants: `const SAFE_INT_MAX: i64 = 9_007_199_254_740_991;` and `const SAFE_UINT_MAX: u64 = 9_007_199_254_740_991;`. Document the threshold + rationale in the doc comment on the enum.
     Validation: round-trip unit tests in `types.rs` cover `Integer(0)`, `Integer(2⁵³−2)` → number, `Integer(2⁵³)` → string, `Integer(-2⁵³)` → string, `UInt(0)`, `UInt(2⁵³−1)` → number, `UInt(2⁵³)` → string, `UInt(u64::MAX)` → string `"18446744073709551615"`.
 
-  - [ ] **H18.2 — Switch MySQL driver to emit `UInt`.**
+  - [x] **H18.2 — Switch MySQL driver to emit `UInt`.**
     `crates/rivers-drivers-builtin/src/mysql.rs:559`: change `QueryValue::Integer(*u as i64)` → `QueryValue::UInt(*u)`. Remove the lossy cast.
     Validation: integration test against MySQL cluster (192.168.2.215-217) on a `BIGINT UNSIGNED PRIMARY KEY` table with rows `0`, `42`, `9_007_199_254_740_991`, `9_007_199_254_740_992`, `18_446_744_073_709_551_610`. Dataview returns: first three as JSON numbers, last two as JSON strings.
 
-  - [ ] **H18.3 — Update remaining `QueryValue` match-arm sites.**
+  - [x] **H18.3 — Update remaining `QueryValue` match-arm sites.**
     Each of: `crates/rivers-drivers-builtin/src/{postgres,sqlite}.rs` (no native u64 source — the new variant is just one more arm that's never produced); the four `query_value_to_json` helpers (elasticsearch, couchdb, neo4j, direct_dispatch); `crates/rivers-runtime/src/dataview_engine.rs` (param validation + result marshalling); schema-validation match arms (find via `grep -rn "match.*QueryValue\b" crates --include='*.rs'`).
     For helpers that produce JSON, delete any local stringify logic — the custom `Serialize` is the single source of truth. (Helpers that produce non-JSON wire formats — e.g. neo4j Cypher params — should still match the new variant explicitly.)
     Validation: `cargo check --workspace` clean; per-driver integration tests still pass.
 
-  - [ ] **H18.4 — Schema-spec note.**
+  - [x] **H18.4 — Schema-spec note.**
     Add a paragraph to `docs/arch/rivers-schema-spec-v2.md` (or wherever JSON marshalling is documented) describing the >2⁵³−1 stringification rule. Reference Twitter / Stripe as prior art. Note that the threshold is `Number.MAX_SAFE_INTEGER`, not `i64::MAX` (the JS-precision boundary, not the Rust-type boundary).
 
-  - [ ] **H18.5 — Decision log entry.**
+  - [x] **H18.5 — Decision log entry.**
     Append `MYSQL-H18.1` to `changedecisionlog.md` covering: per-value vs per-column choice; threshold = 2⁵³−1; custom Serialize over `#[serde(untagged)]`; deserializer left untagged because the issue is outbound-only.
 
-  - [ ] **H18.6 — Cross-finding annotation.**
+  - [x] **H18.6 — Cross-finding annotation.**
     When H18 lands, annotate `docs/code_review.md` rivers-drivers-builtin T2-1 with `Resolved YYYY-MM-DD by <commit-sha>` (mirrors I-X.1 / I-FU1 pattern).
 
 - [ ] **H9 — riversd T2-9: Engine log callback uses `std::str::from_utf8_unchecked`.**

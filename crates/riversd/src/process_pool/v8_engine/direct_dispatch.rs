@@ -148,19 +148,11 @@ fn row_to_json(row: &HashMap<String, QueryValue>) -> serde_json::Value {
 }
 
 fn query_value_to_json(v: QueryValue) -> serde_json::Value {
-    match v {
-        QueryValue::Null => serde_json::Value::Null,
-        QueryValue::Boolean(b) => serde_json::Value::Bool(b),
-        QueryValue::Integer(i) => serde_json::Value::Number(i.into()),
-        QueryValue::Float(f) => serde_json::Number::from_f64(f)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        QueryValue::String(s) => serde_json::Value::String(s),
-        QueryValue::Array(vs) => {
-            serde_json::Value::Array(vs.into_iter().map(query_value_to_json).collect())
-        }
-        QueryValue::Json(j) => j,
-    }
+    // Per H18: delegate to QueryValue's threshold-aware Serialize so the V8
+    // direct-dispatch path never hands a JS handler a silently-rounded
+    // Number for a value above 2⁵³−1 — the canonical Serialize emits a JSON
+    // string in that case.
+    serde_json::to_value(&v).unwrap_or(serde_json::Value::Null)
 }
 
 fn throw_type_error(scope: &mut v8::HandleScope, msg: &str) {

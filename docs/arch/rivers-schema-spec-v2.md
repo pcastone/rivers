@@ -97,6 +97,39 @@ Schema files are JSON with a `fields` array. Each field entry carries:
 | `url` | String validated as URL |
 | `json` | Arbitrary JSON value |
 
+### Large integers and JSON precision
+
+`QueryValue::Integer(i64)` and `QueryValue::UInt(u64)` are emitted as JSON
+numbers when their magnitude is at most `Number.MAX_SAFE_INTEGER`
+(2⁵³−1 = 9_007_199_254_740_991). Above that threshold, both variants
+are emitted as JSON **strings** carrying the decimal representation.
+
+This per-value policy avoids silent precision loss in JavaScript clients
+(IEEE-754 double rounds above 2⁵³ — a typical snowflake ID would be
+silently truncated to a different value). It matches the convention used
+by Twitter (snowflake IDs as strings), Stripe (all object IDs), GitHub
+(IDs since ~2018), Discord, and Mastodon.
+
+Practical implications for handler authors:
+
+- A `BIGINT UNSIGNED` MySQL column can return either a JSON number or a
+  JSON string depending on row magnitude. Handler code that parses the
+  value should accept both forms (e.g. `Number(x) || BigInt(x)` or
+  `typeof x === 'string' ? BigInt(x) : x` depending on intended usage).
+- Round-trip: a stringified large integer sent BACK through a handler as a
+  parameter is treated as `QueryValue::String` by default. To bind it as
+  an unsigned integer for a query parameter, parse it server-side or use
+  the schema's parameter type to coerce.
+- Datasource-level "always stringify" mode (per-column) is not currently
+  supported but can be added as a schema attribute (e.g.
+  `"jsonNumberMode": "string"`) without breaking the per-value default.
+
+The threshold applies at serialize time (driver result → JSON for the
+handler) and at JSON-out boundaries (DataView response, ctx.dataview
+return value, Rivers.db.execute output). Driver bind paths (handler →
+driver query parameter) preserve the type — `QueryValue::UInt(u)` stays
+unsigned all the way to the wire.
+
 ---
 
 ## 3. Driver Schema Attributes

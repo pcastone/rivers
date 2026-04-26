@@ -255,6 +255,18 @@ fn build_cypher(query: &Query) -> Result<neo4rs::Query, DriverError> {
             }
             QueryValue::Boolean(b) => { cypher = cypher.param(key.as_str(), *b); }
             QueryValue::Integer(i) => { cypher = cypher.param(key.as_str(), *i); }
+            // Bolt protocol's Integer is i64-only. Bind UInt as i64 if it
+            // fits, otherwise return an explicit overflow error rather than
+            // silently truncating.
+            QueryValue::UInt(u) => {
+                let i = i64::try_from(*u).map_err(|_| {
+                    DriverError::Connection(format!(
+                        "neo4j binding overflow: u64 value {u} exceeds i64 range \
+                         — Bolt Integer is 64-bit signed; bind as a string literal instead"
+                    ))
+                })?;
+                cypher = cypher.param(key.as_str(), i);
+            }
             QueryValue::Float(f) => { cypher = cypher.param(key.as_str(), *f); }
             QueryValue::String(s) => { cypher = cypher.param(key.as_str(), s.clone()); }
             QueryValue::Array(_) | QueryValue::Json(_) => {
@@ -315,16 +327,10 @@ fn row_to_map(row: &neo4rs::Row) -> HashMap<String, QueryValue> {
 }
 
 /// Convert QueryValue to serde_json::Value for Node property serialization.
+///
+/// Delegates to `QueryValue`'s threshold-aware `Serialize` impl (H18.1).
 fn query_value_to_json(val: &QueryValue) -> serde_json::Value {
-    match val {
-        QueryValue::Null => serde_json::Value::Null,
-        QueryValue::Boolean(b) => serde_json::Value::Bool(*b),
-        QueryValue::Integer(i) => serde_json::json!(*i),
-        QueryValue::Float(f) => serde_json::json!(*f),
-        QueryValue::String(s) => serde_json::Value::String(s.clone()),
-        QueryValue::Array(a) => serde_json::json!(a),
-        QueryValue::Json(v) => v.clone(),
-    }
+    serde_json::to_value(val).unwrap_or(serde_json::Value::Null)
 }
 
 /// Check if a Cypher statement contains a RETURN clause.
