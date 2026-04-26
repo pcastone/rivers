@@ -377,3 +377,41 @@ Earlier misdiagnosis worth noting for the record: the CS0.2 revision (dated earl
 **Decision:** Add three `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]` regression tests (200 concurrent ops, max=50 → expect exactly 50 ok / 150 limit-exceeded).
 **Spec reference:** Standard 5 (push once more — verify the property holds, not just that the obvious case passes).
 **Resolution:** Single-threaded runtime cannot exhibit the race because tasks never preempt each other. Only the multi-thread flavor exercises true cross-thread contention on the atomic / write lock. All three tests pass on first run; one test also asserts `all_connection_ids().await.len() == MAX` to confirm the map size matches the counter.
+
+## TXN-I1.1 — Dyn-engine transaction map design (2026-04-25)
+
+### Files audited (full reads, not skims)
+- V8 reference: `crates/riversd/src/process_pool/v8_engine/context.rs:898–1276` (`ctx_transaction_callback`, `ctx_dataview_callback`).
+- V8 thread-locals + `TaskTransactionState`: `crates/riversd/src/process_pool/v8_engine/task_locals.rs:140–185`.
+- Shared TransactionMap: `crates/riversd/src/transaction.rs:1–198` (full file).
+- Dyn-engine stubs: `crates/riversd/src/engine_loader/host_callbacks.rs:885–1073` (`host_db_begin/commit/rollback/batch`); `host_callbacks.rs:28–158` (`host_dataview_execute`).
+- Runtime layer: `crates/riversd/src/engine_loader/host_context.rs:1–98`; `engine_loader/registry.rs:1–53`; `engine_loader/loaded_engine.rs:1–79`.
+- Task dispatch wrapper: `crates/riversd/src/process_pool/mod.rs:303–353` (`dispatch_task`).
+- FFI shape: `crates/rivers-engine-sdk/src/lib.rs:79–122` (`SerializedTaskContext` — no `task_id`).
+
+### Decisions
+
+1. **Map key:** `(TaskId, datasource_name)` where `TaskId = u64` from a `static AtomicU64`. Issued in `dispatch_task` immediately before `tokio::task::spawn_blocking`. Stored in a `thread_local!` `Cell<Option<TaskId>>` set by `TaskGuard::enter` and cleared on `Drop`. Reasoning: `SerializedTaskContext` ships no per-task ID across the FFI, and engine threads are reused across many tasks so any thread-local on the engine side is unsafe; but the riversd-side `spawn_blocking` worker is 1:1 with one task for the duration of that task and host callbacks always run synchronously on that calling thread, so a riversd-side thread-local set by the dispatch wrapper is the correct identity carrier. A composite key `(TaskId, ds)` matches the V8 mental model where `TASK_TRANSACTION` already permits one txn per (task, datasource) — though spec §6.2 currently allows only one datasource per task, the composite key keeps the type honest if §6 ever relaxes that.
+
+2. **Storage location:** New sibling `OnceLock<DynTransactionMap>` (named `DYN_TXN_MAP`) declared in `crates/riversd/src/engine_loader/host_context.rs`, with a `pub fn dyn_txn_map() -> &'static DynTransactionMap` accessor. Reasoning: this matches the existing pattern used for adjunct globals in the same file (`HOST_KEYSTORE`, `DDL_WHITELIST`, `APP_ID_MAP` — all sibling `OnceLock` statics, lines 25–34). Adding it to `HostContext` itself would force a wider construction-site change and break the existing "set once, callbacks read via static" idiom.
+
+3. **Auto-rollback hook:** Insertion point `crates/riversd/src/process_pool/mod.rs:326` — wrap the `spawn_blocking` closure body so it owns a `TaskGuard` whose `Drop` impl calls `dyn_txn_map_auto_rollback_blocking(task_id)`. The drop runs synchronously when the closure unwinds (success, error, or panic-mapped-to-`WorkerCrash`); inside `Drop` we use `HOST_CONTEXT.rt_handle.block_on(...)` to drive the async rollback because the `spawn_blocking` thread is not a tokio runtime worker. Reasoning: `spawn_blocking` is the only place in the cdylib path where a riversd-owned scope brackets a single task's entire execution. Putting the cleanup inside the closure (via guard drop) makes it panic-safe in a way a post-`.await?` cleanup at the call site would not be.
+
+4. **Connection holder type:** `Box<dyn Connection>` directly — same as `crate::transaction::TransactionMap`. Reasoning: `PoolManagerHandle` / `PooledConnection { conn, release_token }` does not exist in the workspace (`grep -rn PoolManagerHandle crates/` returns zero matches). The brief's framing of "H6/H7 work" is mis-remembered; V8's path acquires via `factory.connect(&driver_name, &params).await` returning `Box<dyn Connection>`, and the `Drop` of that `Box` is what releases the pool slot (see context.rs:1024, "Connection drops → pool slot released"). Mirroring that exact shape keeps the dyn path semantically identical to V8, and reuses the entire `crate::transaction::TransactionMap` mental model.
+
+### Open questions surfaced during audit (require human input before I3)
+
+1. **Datasource config availability in host callbacks.** `host_db_begin` needs `(driver_name, ConnectionParams)` but riversd has no per-task datasource-config map on its side. V8 has `TASK_DS_CONFIGS` populated in `task_locals.rs`. **Recommended option A:** stash `ctx.datasource_configs` keyed by `task_id` in a sibling `RwLock<HashMap<TaskId, ...>>` populated in `dispatch_task` and cleared in `TaskGuard::drop`. (Plan §6.1.)
+2. **Commit-failure signaling back to dispatch.** V8 sets `TASK_COMMIT_FAILED` thread-local and `execute_js_task` reads it to upgrade the error to `TaskError::TransactionCommitFailed`. Dyn path needs an equivalent thread-local on the `spawn_blocking` thread, read after `spawn_blocking` resolves but before `dispatch_task` returns. (Plan §6.2.)
+
+### Implementation order for I2-I7
+
+- **I2:** Land `crates/riversd/src/engine_loader/transaction_map.rs` (new module containing `TaskId`, `next_task_id`, `CURRENT_TASK_ID` thread-local, `TaskGuard`, `DynTransactionMap`). Wire `DYN_TXN_MAP` `OnceLock` and `dyn_txn_map()` accessor in `host_context.rs`. Unit tests mirror `transaction.rs::tests`.
+- **I3:** Wire `host_db_begin` — read `current_task_id()`, resolve datasource config (per open question 6.1), `factory.connect`, `dyn_txn_map().begin(task_id, ds, conn)`. Bound by `HOST_CALLBACK_TIMEOUT_MS`.
+- **I4:** Wire `host_db_commit` / `host_db_rollback`. Implement `TASK_COMMIT_FAILED` equivalent (open question 6.2).
+- **I5:** Wire `host_dataview_execute` transaction routing — mirror V8's `take_connection`/`return_connection` pattern (context.rs:1210–1233) and the spec §6.2 cross-datasource check (context.rs:1182–1200).
+- **I6:** Wire `host_db_batch` — iterate params under the active txn.
+- **I7:** Modify `process_pool/mod.rs:326` to wrap the `spawn_blocking` closure in `TaskGuard::enter(next_task_id())`. Drop hook calls `dyn_txn_map_auto_rollback_blocking(task_id)`.
+- **I8:** Integration tests against `192.168.2.209` PostgreSQL: commit-visible, rollback-invisible, panic-auto-rolled-back, cross-datasource error, nested-rejection, commit-failure-upgrades-to-`TransactionCommitFailed`.
+
+Full plan with type sketches and risks: `docs/superpowers/plans/2026-04-25-phase-i-dyn-transactions.md`.
