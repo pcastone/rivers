@@ -1323,25 +1323,128 @@ mod tests {
         let v = QueryValue::String("19.99".into());
         assert!(matches!(coerce_param_type(&v, "decimal"), Some(QueryValue::Float(_))));
     }
+
+    // ── validate_query_result hard-fail tests (H10 / T2-2) ────────
+
+    #[test]
+    fn validate_query_result_missing_schema_file_errors() {
+        let result = rivers_driver_sdk::types::QueryResult::empty();
+        let err = validate_query_result(&result, "schemas/does_not_exist.json")
+            .expect_err("missing schema file must hard-fail, not silently pass");
+        match err {
+            DataViewError::SchemaFileNotFound { path } => {
+                assert!(
+                    path.contains("schemas/does_not_exist.json"),
+                    "error should reference the missing path, got: {}",
+                    path
+                );
+            }
+            other => panic!("expected SchemaFileNotFound, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_query_result_malformed_schema_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let schema_path = dir.path().join("broken.schema.json");
+        std::fs::write(&schema_path, "{not valid json").unwrap();
+        let result = rivers_driver_sdk::types::QueryResult::empty();
+
+        let err = validate_query_result(&result, schema_path.to_str().unwrap())
+            .expect_err("malformed schema JSON must hard-fail, not silently pass");
+        match err {
+            DataViewError::SchemaFileParseError { reason, .. } => {
+                // serde_json error string mentions the parse failure
+                assert!(
+                    !reason.is_empty(),
+                    "parse error reason should be populated"
+                );
+            }
+            other => panic!("expected SchemaFileParseError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_query_result_valid_schema_passes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let schema_path = dir.path().join("contact.schema.json");
+        std::fs::write(
+            &schema_path,
+            r#"{"fields":[{"name":"id","required":true},{"name":"name","required":true}]}"#,
+        )
+        .unwrap();
+
+        let mut row = std::collections::HashMap::new();
+        row.insert("id".to_string(), QueryValue::Integer(1));
+        row.insert("name".to_string(), QueryValue::String("Alice".into()));
+        let result = rivers_driver_sdk::types::QueryResult {
+            rows: vec![row],
+            affected_rows: 1,
+            last_insert_id: None,
+            column_names: None,
+        };
+
+        validate_query_result(&result, schema_path.to_str().unwrap())
+            .expect("valid schema with all required fields should pass");
+    }
+
+    #[test]
+    fn validate_query_result_missing_required_field_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let schema_path = dir.path().join("contact.schema.json");
+        std::fs::write(
+            &schema_path,
+            r#"{"fields":[{"name":"id","required":true},{"name":"email","required":true}]}"#,
+        )
+        .unwrap();
+
+        let mut row = std::collections::HashMap::new();
+        row.insert("id".to_string(), QueryValue::Integer(1));
+        // email missing
+        let result = rivers_driver_sdk::types::QueryResult {
+            rows: vec![row],
+            affected_rows: 1,
+            last_insert_id: None,
+            column_names: None,
+        };
+
+        let err = validate_query_result(&result, schema_path.to_str().unwrap())
+            .expect_err("row missing a required field should fail validation");
+        assert!(matches!(err, DataViewError::Schema { .. }));
+    }
 }
 
 /// Validate query result rows against a schema file's required fields.
 ///
 /// Loads the schema JSON, extracts `fields[].name` where `required = true`,
 /// and checks that every result row contains those fields.
+///
+/// Hard-fails (H10 / T2-2) when the schema file is missing or its JSON is
+/// malformed: a typo'd `return_schema` path used to silently bypass result
+/// validation, serving untrusted driver output to clients. Bundle-load
+/// existence checks (`validate_existence::validate_schema_files`) catch the
+/// common case at validate time; this guard provides defense in depth for
+/// on-disk corruption between load and request.
+///
+/// `schema_path` is expected to be bundle-relative (the bundle loader
+/// normalizes paths before this point), so the surfaced error message does
+/// not leak absolute deploy paths. The `None` case for `return_schema` is a
+/// bundle-author choice and never reaches this function.
 fn validate_query_result(
     result: &rivers_driver_sdk::types::QueryResult,
     schema_path: &str,
 ) -> Result<(), DataViewError> {
-    // Load and parse schema file
-    let schema_json = match std::fs::read_to_string(schema_path) {
-        Ok(s) => s,
-        Err(_) => return Ok(()), // Schema file not found — skip validation
-    };
-    let schema: serde_json::Value = match serde_json::from_str(&schema_json) {
-        Ok(v) => v,
-        Err(_) => return Ok(()), // Malformed schema — skip validation
-    };
+    // Load and parse schema file — hard-fail on missing or malformed.
+    let schema_json = std::fs::read_to_string(schema_path).map_err(|e| {
+        DataViewError::SchemaFileNotFound {
+            path: format!("{}: {}", schema_path, e),
+        }
+    })?;
+    let schema: serde_json::Value =
+        serde_json::from_str(&schema_json).map_err(|e| DataViewError::SchemaFileParseError {
+            path: schema_path.to_string(),
+            reason: e.to_string(),
+        })?;
 
     // Extract required field names from schema
     let required_fields: Vec<&str> = schema
