@@ -284,7 +284,21 @@ struct EventBusInner {
     /// created by [`EventBus::subscribe_broadcast`]. Exceeding this triggers
     /// a warning at publish time so leaks surface in logs.
     max_broadcast_subscribers: usize,
+    /// H11/T2-1: cap on concurrent in-flight Observe-tier dispatches.
+    /// Bounds `tokio::spawn` fan-out so a burst of events × N observers
+    /// cannot flood the runtime. When the semaphore is exhausted the
+    /// dispatch is dropped (never blocks the publish loop) and
+    /// `observe_dropped` is incremented for diagnostics.
+    /// TODO(H11 follow-up): expose capacity via [`base.eventbus`] config.
+    observe_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Counter of Observe dispatches dropped because `observe_semaphore`
+    /// was exhausted. Visible through [`EventBus::observe_dropped`].
+    observe_dropped: std::sync::atomic::AtomicU64,
 }
+
+/// H11/T2-1: default cap on concurrent Observe-tier dispatches.
+/// TODO(H11 follow-up): make this configurable via [`base.eventbus`].
+pub const DEFAULT_OBSERVE_CONCURRENCY: usize = 64;
 
 /// In-process pub/sub EventBus with priority-tiered dispatch.
 ///
@@ -319,13 +333,31 @@ impl EventBus {
 
     /// Create a new EventBus with a custom broadcast subscriber cap.
     pub fn with_max_broadcast_subscribers(max: usize) -> Self {
+        Self::with_caps(max, DEFAULT_OBSERVE_CONCURRENCY)
+    }
+
+    /// H11/T2-1: Create an EventBus with both broadcast and Observe-dispatch
+    /// caps explicitly. Tests use this to drive the Observe semaphore into
+    /// saturation deterministically.
+    pub fn with_caps(max_broadcast_subscribers: usize, observe_concurrency: usize) -> Self {
         Self {
             inner: Arc::new(EventBusInner {
                 topics: RwLock::new(HashMap::new()),
                 next_id: std::sync::atomic::AtomicU64::new(1),
-                max_broadcast_subscribers: max,
+                max_broadcast_subscribers,
+                observe_semaphore: Arc::new(tokio::sync::Semaphore::new(observe_concurrency)),
+                observe_dropped: std::sync::atomic::AtomicU64::new(0),
             }),
         }
+    }
+
+    /// H11/T2-1: Number of Observe-tier dispatches dropped because the
+    /// per-bus concurrency cap was saturated. Internal diagnostic — used by
+    /// tests today; metrics wiring is a follow-up.
+    pub fn observe_dropped(&self) -> u64 {
+        self.inner
+            .observe_dropped
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Subscribe a handler that lives for as long as the returned
@@ -456,18 +488,43 @@ impl EventBus {
                     }
                 }
                 HandlerPriority::Observe => {
-                    let handler = Arc::clone(handler);
-                    let event_clone = event.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = handler.handle(&event_clone).await {
-                            tracing::warn!(
+                    // H11/T2-1: bound Observe fan-out via per-bus semaphore.
+                    // try_acquire_owned never blocks the dispatch loop —
+                    // saturation drops the spawn and bumps observe_dropped.
+                    let permit = self.inner.observe_semaphore.clone().try_acquire_owned();
+                    match permit {
+                        Ok(permit) => {
+                            let handler = Arc::clone(handler);
+                            let event_clone = event.clone();
+                            tokio::spawn(async move {
+                                let _permit = permit; // released on task completion
+                                if let Err(e) = handler.handle(&event_clone).await {
+                                    tracing::warn!(
+                                        handler = handler.name(),
+                                        event_type = %event_clone.event_type,
+                                        error = %e,
+                                        "Observe-tier handler failed (non-fatal)"
+                                    );
+                                }
+                            });
+                        }
+                        Err(_) => {
+                            self.inner
+                                .observe_dropped
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            #[cfg(feature = "metrics")]
+                            metrics::counter!(
+                                "rivers_eventbus_observe_dropped_total",
+                                "event_type" => event.event_type.clone()
+                            )
+                            .increment(1);
+                            tracing::debug!(
+                                event_type = %event.event_type,
                                 handler = handler.name(),
-                                event_type = %event_clone.event_type,
-                                error = %e,
-                                "Observe-tier handler failed (non-fatal)"
+                                "Observe dispatch dropped: concurrency limit reached"
                             );
                         }
-                    });
+                    }
                 }
             }
         }

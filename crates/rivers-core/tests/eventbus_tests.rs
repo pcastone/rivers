@@ -430,3 +430,137 @@ async fn broadcast_forwarder_warns_when_exceeding_max_subscribers() {
     assert!(errors.is_empty());
     assert_eq!(sender.receiver_count(), 3);
 }
+
+// ── H11/T2-1: Observe-tier dispatch concurrency cap ──────────────────
+
+/// Slow Observe handler: bumps `running` while in flight, releases on
+/// completion. Used to exercise the per-bus Observe semaphore.
+struct SlowObserveHandler {
+    running: Arc<AtomicU32>,
+    peak: Arc<AtomicU32>,
+    /// Channel that gates handler completion; tests drop the sender to
+    /// release all in-flight handlers at once.
+    gate: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl EventHandler for SlowObserveHandler {
+    async fn handle(&self, _event: &Event) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+        // Update high-water mark.
+        let mut current_peak = self.peak.load(Ordering::SeqCst);
+        while now > current_peak {
+            match self.peak.compare_exchange(
+                current_peak,
+                now,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current_peak = observed,
+            }
+        }
+        // Park until released.
+        self.gate.notified().await;
+        self.running.fetch_sub(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn name(&self) -> &str {
+        "slow-observe"
+    }
+}
+
+#[tokio::test]
+async fn observe_dispatch_is_capped_by_semaphore() {
+    // Cap of 4: regardless of how many events we publish, at most 4
+    // SlowObserveHandler tasks should be in flight at once.
+    let bus = EventBus::with_caps(rivers_core::eventbus::DEFAULT_MAX_BROADCAST_SUBSCRIBERS, 4);
+    let running = Arc::new(AtomicU32::new(0));
+    let peak = Arc::new(AtomicU32::new(0));
+    let gate = Arc::new(tokio::sync::Notify::new());
+
+    bus.subscribe_static(
+        "test.observe.cap",
+        Arc::new(SlowObserveHandler {
+            running: running.clone(),
+            peak: peak.clone(),
+            gate: gate.clone(),
+        }),
+        HandlerPriority::Observe,
+    )
+    .await;
+
+    // Publish 200 events. With cap=4, only 4 spawns can fit; the rest
+    // must be dropped (NEVER block the dispatch loop).
+    for _ in 0..200 {
+        bus.publish(&test_event("test.observe.cap")).await;
+    }
+
+    // Give spawned tasks a moment to start and hit the gate.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let in_flight = running.load(Ordering::SeqCst);
+    let high_water = peak.load(Ordering::SeqCst);
+    let dropped = bus.observe_dropped();
+
+    assert!(
+        in_flight <= 4,
+        "in_flight={in_flight} exceeded cap of 4"
+    );
+    assert!(
+        high_water <= 4,
+        "high-water={high_water} exceeded cap of 4"
+    );
+    assert!(
+        dropped > 0,
+        "expected some dropped Observe dispatches, got 0 (in_flight={in_flight})"
+    );
+    // 200 publishes - up to 4 spawned = at least 196 dropped.
+    assert!(
+        dropped >= 196,
+        "expected >=196 dropped, got {dropped} (in_flight={in_flight})"
+    );
+
+    // Release all handlers so the test exits cleanly.
+    gate.notify_waiters();
+}
+
+#[tokio::test]
+async fn observe_dispatch_does_not_block_publish_when_saturated() {
+    // Even with the semaphore fully saturated, publish() must return
+    // promptly — the contract is "drop, never block."
+    let bus = EventBus::with_caps(rivers_core::eventbus::DEFAULT_MAX_BROADCAST_SUBSCRIBERS, 1);
+    let running = Arc::new(AtomicU32::new(0));
+    let peak = Arc::new(AtomicU32::new(0));
+    let gate = Arc::new(tokio::sync::Notify::new());
+
+    bus.subscribe_static(
+        "test.observe.nonblock",
+        Arc::new(SlowObserveHandler {
+            running: running.clone(),
+            peak: peak.clone(),
+            gate: gate.clone(),
+        }),
+        HandlerPriority::Observe,
+    )
+    .await;
+
+    // Saturate the semaphore.
+    bus.publish(&test_event("test.observe.nonblock")).await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    // 50 more publishes while semaphore is full — must complete in well
+    // under a second total. (If it blocked we'd be stuck on the gate.)
+    let start = std::time::Instant::now();
+    for _ in 0..50 {
+        bus.publish(&test_event("test.observe.nonblock")).await;
+    }
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "publish loop took {elapsed:?} — Observe dispatch appears to be blocking"
+    );
+    assert!(bus.observe_dropped() >= 50);
+
+    gate.notify_waiters();
+}

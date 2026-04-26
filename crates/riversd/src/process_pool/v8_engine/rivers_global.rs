@@ -33,16 +33,107 @@ fn current_app_name() -> String {
     })
 }
 
+/// Build a JSON log line for the per-app log.
+///
+/// H15/T3-1: previously constructed JSON via `format!` with manual quoting,
+/// which produced malformed lines whenever `app`, `level`, or `msg`
+/// contained a `"`, `\n`, or any control character. We now build the
+/// outer object with `serde_json::json!` so escaping is correct by
+/// construction. `fields` is already a JSON-serialized object string
+/// produced by V8's `JSON.stringify`, so we parse it back into a
+/// `serde_json::Value` and embed it as a nested value rather than
+/// concatenating it as text.
+fn build_app_log_line(timestamp: &str, app: &str, level: &str, msg: &str, fields: &str) -> String {
+    if fields.is_empty() {
+        serde_json::json!({
+            "timestamp": timestamp,
+            "level": level,
+            "app": app,
+            "message": msg,
+        })
+        .to_string()
+    } else {
+        // `fields` is JSON produced by V8's JSON.stringify. If it somehow
+        // fails to parse (shouldn't happen, but don't drop the log line),
+        // fall back to embedding it as a string so the line is still
+        // valid JSON.
+        let fields_value: serde_json::Value = serde_json::from_str(fields)
+            .unwrap_or_else(|_| serde_json::Value::String(fields.to_string()));
+        serde_json::json!({
+            "timestamp": timestamp,
+            "level": level,
+            "app": app,
+            "message": msg,
+            "fields": fields_value,
+        })
+        .to_string()
+    }
+}
+
 /// Write a structured log line to the app's per-app log file (in addition to tracing).
 fn write_to_app_log(app: &str, level: &str, msg: &str, fields: &str) {
     if let Some(router) = rivers_runtime::rivers_core::app_log_router::global_router() {
         let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let line = if fields.is_empty() {
-            format!(r#"{{"timestamp":"{timestamp}","level":"{level}","app":"{app}","message":"{msg}"}}"#)
-        } else {
-            format!(r#"{{"timestamp":"{timestamp}","level":"{level}","app":"{app}","message":"{msg}","fields":{fields}}}"#)
-        };
+        let line = build_app_log_line(&timestamp, app, level, msg, fields);
         router.write(app, &line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_app_log_line;
+
+    /// H15/T3-1: log line round-trips through serde_json even when the
+    /// message and app name contain quotes, newlines, and control chars.
+    #[test]
+    fn build_app_log_line_no_fields_round_trips_with_problematic_chars() {
+        let line = build_app_log_line(
+            "2026-04-25T00:00:00.000Z",
+            "app\"with\\quote",
+            "INFO",
+            "msg with \"quotes\", newline\n, and tab\t and \x01 control",
+            "",
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&line).expect("log line must be valid JSON");
+        assert_eq!(parsed["level"], "INFO");
+        assert_eq!(parsed["app"], "app\"with\\quote");
+        assert_eq!(
+            parsed["message"],
+            "msg with \"quotes\", newline\n, and tab\t and \x01 control"
+        );
+        assert!(parsed.get("fields").is_none());
+    }
+
+    #[test]
+    fn build_app_log_line_with_fields_embeds_object_not_string() {
+        let line = build_app_log_line(
+            "2026-04-25T00:00:00.000Z",
+            "app",
+            "WARN",
+            "msg",
+            r#"{"k":"v with \"quote\" and \n newline","n":42}"#,
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&line).expect("log line must be valid JSON");
+        assert_eq!(parsed["fields"]["k"], "v with \"quote\" and \n newline");
+        assert_eq!(parsed["fields"]["n"], 42);
+    }
+
+    #[test]
+    fn build_app_log_line_with_malformed_fields_falls_back_to_string() {
+        // If `fields` is somehow not valid JSON, the helper must still
+        // produce a parseable line — embedding the raw text as a string.
+        let line = build_app_log_line(
+            "2026-04-25T00:00:00.000Z",
+            "app",
+            "ERROR",
+            "msg",
+            "this is not json",
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&line).expect("log line must be valid JSON");
+        assert_eq!(parsed["fields"], "this is not json");
     }
 }
 
