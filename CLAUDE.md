@@ -71,8 +71,8 @@ Example: a PR cut at 23:25 UTC on 26 April 2026 → `2325260426`. Workspace
 | Change kind | What bumps | Recipe |
 |-------------|-----------|--------|
 | Any PR (default — docs, config, dependency churn, build-system tweaks) | `+build` only | `just bump` |
-| Code fix (bug fix in shipped code, tightening, refactor that changes runtime behavior) | `PATCH` and `+build` | `just bump-patch` |
-| Major change (new feature, breaking config change, public API surface) | `MINOR` and `+build`; `PATCH` resets to 0 | `just bump-minor` |
+| Code fix (bug fix in shipped code, closing a documented-but-missing API, tightening, refactor that changes runtime behavior) | `PATCH` and `+build` | `just bump-patch` |
+| Major change — **genuinely new conceptual capability** (new datasource type, new engine, new bundle structure, breaking config) | `MINOR` and `+build`; `PATCH` resets to 0 | `just bump-minor` |
 
 The bump runs from the workspace root (`./scripts/bump-version.sh`). The
 script computes the UTC stamp, edits the workspace `[package]` version
@@ -93,7 +93,8 @@ only the final state matters at merge.
 
 - A PR full of unrelated micro-fixes is still one PR — one `bump-patch`.
 - A PR that only renames a private symbol or refactors comments is a `just bump` (build-only).
-- A PR that adds a new datasource type, changes the bundle layout, or alters a handler-visible API is a `bump-minor`.
+- A PR that closes a **documented-but-missing** method (e.g. spec advertises `Rivers.db.query`, implementation doesn't install it; or a helper method that the docs/tutorial promised but the code never shipped) is a `bump-patch` — it's filling a gap, not adding new ground.
+- A PR that introduces **genuinely new ground** — a datasource type that didn't exist before, a new engine, a new bundle layout, a breaking config change — is a `bump-minor`.
 - When in doubt, prefer the lower bump. CI enforces *some* bump; reviewers can ask for a higher bump if the change warrants it.
 
 ## GOAL
