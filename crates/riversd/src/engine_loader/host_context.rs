@@ -45,7 +45,11 @@ pub fn set_host_context(
         dataview_executor,
         storage_engine,
         driver_factory,
-        http_client: reqwest::Client::new(),
+        // Phase H7 / T2-7: timeout-bounded shared client. Without it, a
+        // stalled upstream pinned the dynamic engine worker indefinitely
+        // because `host_http_request` blocks on `recv()` for the spawned
+        // request future. Same policy as the V8 path (H6).
+        http_client: crate::http_client::outbound_client().clone(),
         rt_handle: tokio::runtime::Handle::current(),
     });
 }
