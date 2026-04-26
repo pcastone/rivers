@@ -679,3 +679,32 @@ The fix order in section "Recommended Fix Order" combines RXE-T1-1, RXE-T2-5, an
 **Spec reference:** `docs/review_inc/rivers-per-crate-focus-blocks.md` section 1 (rivers-plugin-exec focus axes); `docs/review/rivers-keystore-engine.md` and `docs/review/rivers-lockbox-engine.md` (format template).
 
 **Resolution method:** source-grounded read of every production source file (13 files, 3375 LOC) plus `tests/integration_test.rs` (379 lines) plus `crates/rivers-driver-sdk/src/traits.rs` (645 lines) plus the focus block. Mechanical sweeps run before findings drafted (panics, unsafe/FFI, casts, format!, libc/setuid/setgroups, env_clear, plugin entry points). `cargo check -p rivers-plugin-exec` clean. `cargo test -p rivers-plugin-exec --lib` green: 93 passed / 0 failed / 2 ignored. No code modified — read-only audit.
+
+---
+
+## 2026-04-26 — Bug 2: Rivers.db.query / Rivers.db.execute (V8 static engine)
+
+**File affected:** `crates/riversd/src/process_pool/v8_engine/rivers_global.rs` (+ `docs/guide/tutorials/tutorial-transactions.md`).
+
+**Decision 1: Sync return value, not a Promise — match the existing `db_batch_callback`.**
+Spec §5.2 of `rivers-processpool-runtime-spec-v2.md` annotates both methods as `Promise<...>`. The existing `db_batch_callback` returns synchronous values via `rt.block_on`, and `ctx_datasource_build_callback` (the closer template for raw-SQL execution) does the same. Returning a sync value here keeps the surface internally consistent — a handler that today does `Rivers.db.batch(...)` works the same as one that does `Rivers.db.query(...)`. The spec's `Promise<>` annotation is treated as aspirational. If/when the entire `Rivers.db.*` surface migrates to real Promises (separate tracked work), all four methods move together.
+
+**Decision 2: Positional `params: any[]` is rewritten via `$_pN` named placeholders before driver translate_params.**
+Spec says `params?: any[]`. The DataView engine's existing pre-execute step (`crates/rivers-runtime/src/dataview_engine.rs:850-872`) only knows how to translate `$name` placeholders. To reuse that helper without forking the per-driver param logic, the V8 layer rewrites both `?` and `$N` literal placeholders in user SQL into `$_pN` form (with positional-array entries keyed `_p1, _p2, ...`) before calling `translate_params`. After translate_params runs, params are repacked into the same `001, 002, ...` zero-padded keys the DataView engine uses for `DollarPositional` / `QuestionPositional` styles. Net effect: handlers can write SQL in the natural dialect of their target driver (Postgres `$1, $2`, MySQL/SQLite `?`) and the bindings line up.
+
+**Decision 3: Cross-datasource reject inside an active transaction throws at the V8 layer, not the core.**
+The async core (`db_query_or_execute_core`) takes an `Option<(TransactionMap, datasource)>` argument. If the caller's datasource doesn't match the txn's datasource, the V8 wrapper synthesizes a `TransactionError: active transaction is on "X", not "Y" — Rivers.db.query/execute cannot route across datasources` error before calling the core. The reason: the existing `db_commit_callback` / `db_rollback_callback` use that exact error wording, and putting it at the V8 layer means tests of the core can use the txn route directly without needing to hit a synthesized error path.
+
+**Decision 4: Async core extracted as `db_query_or_execute_core` for direct unit-test against SQLite.**
+The full V8 callback path (`v8::FunctionCallbackArguments` + `HandleScope`) is hard to drive in a unit test without an isolate. The approach: V8 wrapper does argument parsing and capability checks, then calls a pure-async `db_query_or_execute_core(factory, resolved, ds, sql, positional_params, txn, kind)` that returns `Result<serde_json::Value, String>`. Unit tests drive the core against an SQLite tempfile, exercising: (a) SELECT returning rows, (b) INSERT returning `affected_rows + last_insert_id`, (c) INSERT inside a `TransactionMap`-held connection followed by rollback, with an out-of-band SQLite reader as ground-truth oracle. The V8 wrapper itself is a small marshal layer with no novel logic.
+
+**Decision 5: Dynamic-engine V8 path (`crates/rivers-engine-v8/src/execution.rs`) is a separate follow-up.**
+That path also installs `Rivers.db.{begin,commit,rollback,batch}` but routes via `HOST_CALLBACKS` FFI (struct in `rivers-engine-sdk`). Adding query/execute there requires extending the `HostCallbacks` struct + a new `host_db_query` / `host_db_execute` FFI shim in `crates/riversd/src/engine_loader/host_callbacks.rs` (which currently has `host_db_begin/commit/rollback` but not `host_db_batch` either — so the dyn engine path is already behind the host on `db.batch`). Per the bug-2 instruction set, this PR is scoped to the static engine V8 path only. The dyn-engine gap is recorded here so it isn't lost.
+
+**Decision 6: `bump-patch` rather than `bump-minor`.**
+Per the tightened versioning policy in `CLAUDE.md` "Versioning": "A PR that closes a documented-but-missing method (...) is a bump-patch — it's filling a gap, not adding new ground." Spec §5.2 already advertises both methods; this PR closes the gap. Pre-bump: `0.55.1+1947260426`. Post-bump: `0.55.2+2004260426`.
+
+**Spec reference:** `docs/arch/rivers-processpool-runtime-spec-v2.md` §5.2 (lines 281-296), §4.2 (line 210); `docs/bugs/case-rivers-db-query-missing.md` (full filing).
+
+**Resolution method:** source-grounded read of `rivers_global.rs:700-1136` (existing `db_*_callback` implementations as templates), `dataview_engine.rs:840-872` (canonical translate_params usage), `crates/rivers-driver-sdk/src/lib.rs:90-185` (`translate_params`), `crates/rivers-driver-sdk/src/traits.rs:440-590` (`Connection::execute`, `DatabaseDriver::connect`, `ParamStyle`), `crates/rivers-drivers-builtin/src/{sqlite,postgres}.rs` (per-driver param handling). New unit tests: 7 placeholder rewriter tests + 3 SQLite e2e tests = 10 new lib tests. Full suite: `cargo test -p riversd --lib` → 426 passed / 0 failed / 6 ignored. `cargo check -p riversd` clean.
+
