@@ -611,6 +611,24 @@ These are not separate phases — they are the verification bar for the work abo
 - [ ] **I-X.2** — log a decision-log entry for every non-obvious choice (auto-rollback semantics, timeout-on-rollback policy, map-key shape).
 - [ ] **I-X.3** — re-run the H Tier 1 + Tier 2 regression suites after I lands; make sure the V8 transaction path is still untouched.
 
+---
+
+## Phase H follow-up — missed during 2026-04-25 batch
+
+> **Source:** Post-Phase H gap re-scan (after PR #83 was opened) found one Tier-2 finding from `docs/code_review.md` that was not on the original Phase H list. Tracked here so it doesn't get lost; can land independently of Phase I.
+
+- [ ] **H18 — rivers-drivers-builtin T2-1: MySQL unsigned integers wrap into negative on `i64` cast.**
+  **File:** `crates/rivers-drivers-builtin/src/mysql.rs:559` (`mysql_async::Value::UInt(u)` matched and emitted as `QueryValue::Integer(*u as i64)`).
+  Values above `i64::MAX` (~9.2×10¹⁸) wrap to negative numbers — silently corrupts results from `BIGINT UNSIGNED` columns at scale (snowflake ids, large counters, monotonic timestamps).
+  Fix shape:
+  - Range-check the cast: `if *u > i64::MAX as u64 { ... }` and route the over-range case through either:
+    1. A new `QueryValue::UInt(u64)` variant (cleanest but ripples through serialization, JSON marshalling, schema validation) — likely too much scope for a single fix.
+    2. `QueryValue::String` carrying the decimal representation, with a per-column or per-datasource config flag controlling the policy.
+  - Decision needed: variant addition vs. string fallback. Log in `changedecisionlog.md`.
+  Validation:
+  - Test against the MySQL test cluster (192.168.2.215-217): create a table with `BIGINT UNSIGNED PRIMARY KEY`, insert a value > `i64::MAX` (e.g., `18446744073709551610`), assert the dataview returns the original value losslessly (string or new variant — both acceptable depending on the decision).
+  - Negative test: existing `BIGINT UNSIGNED` values within `i64::MAX` continue to round-trip as `Integer`.
+
 - [ ] **H9 — riversd T2-9: Engine log callback uses `std::str::from_utf8_unchecked`.**
   **File:** `crates/riversd/src/engine_loader/host_callbacks.rs:497`.
   Callback receives a `(ptr, len)` from a cdylib engine and constructs a `&str` without validation. A buggy or malicious engine can pass invalid UTF-8 → UB downstream (e.g. when the string lands in `tracing::info!` formatting).
