@@ -98,11 +98,39 @@ pub(crate) fn behavior() -> Arc<SharedConnBehavior> {
         .clone()
 }
 
-/// Idempotent `HOST_CONTEXT` setup. Registers BOTH the legacy
-/// `mock-txn-driver` (for I3-I5 tests) and `dispatch-mock-driver` (for
-/// I7 tests) into the same factory before installing it into the
-/// `HOST_CONTEXT` `OnceLock`. Subsequent calls are no-ops because
-/// `set_host_context` itself uses `OnceLock::set`.
+/// Long-lived multi-threaded tokio runtime used as the rt_handle in
+/// `HOST_CONTEXT`. Each `#[tokio::test]` spins up its own runtime that
+/// dies at end-of-test, so capturing `Handle::current()` at fixture-init
+/// time gives a stale handle by the second test. Phase I8's SQLite
+/// driver uses `tokio::task::spawn_blocking` inside its async `connect`
+/// — running that on a stale runtime cancels the inner task. The fix:
+/// install our own runtime that survives the entire test binary.
+fn shared_test_runtime_handle() -> tokio::runtime::Handle {
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(4)
+            .thread_name("rivers-fixture-rt")
+            .build()
+            .expect("build fixture tokio runtime")
+    })
+    .handle()
+    .clone()
+}
+
+/// Idempotent `HOST_CONTEXT` setup. Registers the legacy
+/// `mock-txn-driver` (for I3-I5 tests), `dispatch-mock-driver` (for
+/// I7 tests), AND the real built-in `sqlite` driver (for I8 e2e tests)
+/// into the same factory before installing it into the `HOST_CONTEXT`
+/// `OnceLock`. Subsequent calls are no-ops because `set_host_context`
+/// itself uses `OnceLock::set`.
+///
+/// SQLite registration is co-located here (rather than in a separate
+/// fixture) because `HOST_CONTEXT` is a `OnceLock` — only one fixture
+/// init wins per test binary, and Phase I8 e2e tests need both the
+/// mock drivers (kept for I3-I7 tests' commit-fail behavior) and a
+/// real durable driver wired through the same factory.
 pub(crate) fn ensure_host_context() -> Arc<SharedConnBehavior> {
     static SETUP: OnceLock<()> = OnceLock::new();
     let beh = behavior();
@@ -116,6 +144,17 @@ pub(crate) fn ensure_host_context() -> Arc<SharedConnBehavior> {
             behavior: beh.clone(),
             name: "dispatch-mock-driver",
         }));
+        // I8 — register real SQLite for e2e durability tests. Driver
+        // name is "sqlite"; e2e tests construct ConnectionParams whose
+        // `database` field is the temp-file path.
+        factory.register_database_driver(Arc::new(
+            rivers_runtime::rivers_core::drivers::SqliteDriver,
+        ));
+        // Enter the shared fixture runtime BEFORE calling set_host_context
+        // so its `Handle::current()` capture binds to the long-lived
+        // runtime instead of whichever per-test runtime is on stack.
+        let handle = shared_test_runtime_handle();
+        let _enter = handle.enter();
         super::host_context::set_host_context(
             Arc::new(tokio::sync::RwLock::new(None)),
             None,
@@ -123,6 +162,91 @@ pub(crate) fn ensure_host_context() -> Arc<SharedConnBehavior> {
         );
     });
     beh
+}
+
+/// I8 e2e helper — build a `DataViewExecutor` wired to the registered
+/// `sqlite` driver and a single dataview definition. The executor is
+/// returned wrapped in `Arc` so tests can install it into `HOST_CONTEXT`
+/// via `host_context::install_dataview_executor_for_test(...)`.
+///
+/// `dataview_name` becomes the registered name; `query` is the raw SQL
+/// (taken verbatim — no parameter coercion done here, callers wire any
+/// `$name` placeholders to match SqliteDriver's `DollarNamed` style).
+/// `db_path` is the SQLite path passed as the `database` field in
+/// `ConnectionParams` — typically a tempfile path so e2e durability
+/// assertions can re-open it from outside the dispatch.
+pub(crate) fn build_sqlite_executor(
+    dataview_name: &str,
+    query: &str,
+    db_path: &str,
+) -> Arc<rivers_runtime::DataViewExecutor> {
+    use rivers_runtime::dataview::{DataViewConfig, DataViewParameterConfig};
+    use rivers_runtime::dataview_engine::{DataViewExecutor, DataViewRegistry};
+    use rivers_runtime::rivers_driver_sdk::ConnectionParams;
+    use rivers_runtime::tiered_cache::{DataViewCache, NoopDataViewCache};
+    use std::collections::HashMap;
+
+    let factory = super::host_context::HOST_CONTEXT
+        .get()
+        .expect("HOST_CONTEXT must be set first (call ensure_host_context())")
+        .driver_factory
+        .clone()
+        .expect("driver factory present");
+
+    let mut registry = DataViewRegistry::new();
+    registry.register(DataViewConfig {
+        name: dataview_name.into(),
+        datasource: "sqlite_e2e".into(),
+        query: Some(query.to_string()),
+        parameters: vec![],
+        return_schema: None,
+        get_query: Some(query.to_string()),
+        post_query: Some(query.to_string()),
+        put_query: Some(query.to_string()),
+        delete_query: Some(query.to_string()),
+        get_schema: None,
+        post_schema: None,
+        put_schema: None,
+        delete_schema: None,
+        get_parameters: Vec::<DataViewParameterConfig>::new(),
+        post_parameters: Vec::<DataViewParameterConfig>::new(),
+        put_parameters: Vec::<DataViewParameterConfig>::new(),
+        delete_parameters: Vec::<DataViewParameterConfig>::new(),
+        streaming: false,
+        circuit_breaker_id: None,
+        prepared: false,
+        query_params: Default::default(),
+        caching: None,
+        invalidates: vec![],
+        validate_result: false,
+        strict_parameters: false,
+        max_rows: 1000,
+    });
+
+    // Connection params for the registered "sqlite_e2e" datasource.
+    // The `driver` option steers DataViewExecutor::execute to the
+    // "sqlite" driver registered above; without it the executor falls
+    // back to using the datasource id as the driver name.
+    let mut options = HashMap::new();
+    options.insert("driver".to_string(), "sqlite".to_string());
+    let params = ConnectionParams {
+        host: String::new(),
+        port: 0,
+        database: db_path.to_string(),
+        username: String::new(),
+        password: String::new(),
+        options,
+    };
+    let mut params_map = HashMap::new();
+    params_map.insert("sqlite_e2e".to_string(), params);
+
+    let cache: Arc<dyn DataViewCache> = Arc::new(NoopDataViewCache);
+    Arc::new(DataViewExecutor::new(
+        registry,
+        factory,
+        Arc::new(params_map),
+        cache,
+    ))
 }
 
 /// Process-wide test mutex. Tests share the `SharedConnBehavior` flags

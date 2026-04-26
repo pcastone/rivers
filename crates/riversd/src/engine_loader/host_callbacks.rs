@@ -322,6 +322,29 @@ pub(crate) fn host_db_commit_inner_for_test(
     host_db_commit_inner(input, ctx)
 }
 
+#[cfg(test)]
+pub(crate) fn host_db_rollback_inner_for_test(
+    input: &serde_json::Value,
+    ctx: &super::host_context::HostContext,
+) -> Result<serde_json::Value, (i32, serde_json::Value)> {
+    host_db_rollback_inner(input, ctx)
+}
+
+/// Phase I8 — drive `execute_dataview_with_optional_txn` (the helper that
+/// `host_dataview_execute` delegates to) directly from cross-module e2e
+/// tests. Returns the same `DataViewResponse` / `DataViewError` shape the
+/// FFI shim wraps; tests assert on `.query_result.affected_rows` etc.
+#[cfg(test)]
+pub(crate) async fn execute_dataview_with_optional_txn_for_test(
+    executor: Arc<rivers_runtime::DataViewExecutor>,
+    resolved_name: &str,
+    params: HashMap<String, rivers_runtime::rivers_driver_sdk::QueryValue>,
+    trace_id: &str,
+    task_id: Option<super::dyn_transaction_map::TaskId>,
+) -> Result<rivers_runtime::dataview_engine::DataViewResponse, rivers_runtime::DataViewError> {
+    execute_dataview_with_optional_txn(executor, resolved_name, params, trace_id, task_id).await
+}
+
 // ── store_get ───────────────────────────────────────────────────
 
 pub(super) extern "C" fn host_store_get(
@@ -1479,7 +1502,15 @@ fn host_db_rollback_inner(
 /// Input: JSON `{"dataview": "...", "params": [{...}, {...}]}`
 /// Output: JSON array of results or error
 ///
-/// TODO: Wire to full batch execution in Task 8 when DataView engine integration is complete.
+/// Note (Phase I): `Rivers.db.batch` is a DataView batch-execute primitive,
+/// not a transaction wrapper. Each `dataview` invocation under the same
+/// `batch` call would land as N independent DataView executes (each its
+/// own transaction at the driver level). To run a batch *inside* a
+/// transaction, the caller wraps it in `Rivers.db.begin(ds)` /
+/// `Rivers.db.commit(ds)` explicitly and the DataView execute path
+/// (`host_dataview_execute`) routes through the held connection. The
+/// batch primitive itself remains a stub pending DataView batch wiring
+/// at the engine layer (separate from the transaction work).
 pub(super) extern "C" fn host_db_batch(
     input_ptr: *const u8, input_len: usize,
     out_ptr: *mut *mut u8, out_len: *mut usize,
@@ -1520,7 +1551,8 @@ pub(super) extern "C" fn host_db_batch(
         }
     };
 
-    // TODO: Wire to full batch execution in Task 8
+    // Stub — see fn-doc above. Phase I scope is transactions; the
+    // DataView batch-execute primitive lands separately.
     tracing::debug!(dataview = %dataview, count = params.len(), "Rivers.db.batch (stub)");
     let result = serde_json::json!({"ok": true, "dataview": dataview, "count": params.len()});
     write_output(out_ptr, out_len, &result);

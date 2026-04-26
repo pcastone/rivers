@@ -704,4 +704,482 @@ mod dyn_dispatch_tests {
     }
 }
 
+// ── I8 dyn-engine end-to-end tests ───────────────────────────────
+//
+// These exercise the FULL dyn-engine transaction lifecycle against a
+// real driver (built-in SQLite, durable temp-file backend) by driving
+// `dispatch_dyn_engine_task` with closures that simulate cdylib task
+// bodies. Each closure synchronously calls `host_db_begin_inner_for_test`
+// → `execute_dataview_with_optional_txn_for_test` → `host_db_commit_inner_for_test`
+// (or rollback) — the same code paths the production V8/WASM cdylibs hit
+// via FFI shims, just without the C-ABI roundtrip.
+//
+// SQLite backend rationale (per Phase I plan §I8):
+//   1. Real durable storage — proves commit-persists / rollback-discards
+//      on bytes the test re-opens from outside the dispatch.
+//   2. No network dependency — the worktree may not have access to the
+//      Postgres test cluster (192.168.2.209). Postgres parallel cases
+//      can be added later under #[ignore] when cluster reachability is
+//      assured.
+//   3. `supports_transactions() → true` and the SQLite driver implements
+//      `begin_transaction/commit_transaction/rollback_transaction` natively
+//      via BEGIN/COMMIT/ROLLBACK, so the txn semantics are real.
+//
+// The shared txn_test_fixtures::ensure_host_context now registers the
+// "sqlite" driver alongside the mock drivers so all I3-I8 tests share
+// a single `HOST_CONTEXT` `OnceLock` init (its first writer wins).
+#[cfg(test)]
+mod dyn_e2e_tests {
+    use super::*;
+    use rivers_engine_sdk::SerializedTaskResult;
+    use rivers_runtime::process_pool::types::TaskKind;
+    use rivers_runtime::rivers_driver_sdk::{ConnectionParams, QueryValue};
+    use std::collections::HashMap;
 
+    use crate::engine_loader::host_context::{
+        host_dataview_executor_for_test, host_rt_handle_for_test,
+        install_dataview_executor_for_test,
+    };
+    use crate::engine_loader::txn_test_fixtures;
+
+    /// Open a fresh rusqlite handle to `db_path` outside any txn and
+    /// count rows in `t`. Used by commit-persists / rollback-discards
+    /// assertions that need to bypass the txn-held connection.
+    fn count_rows_outside_txn(db_path: &std::path::Path, table: &str) -> i64 {
+        // Use a tiny, single-purpose connection — no pool, no driver SDK.
+        // This is the ground-truth oracle: if the bytes are on disk, this
+        // reader sees them; if they're rolled back, it does not.
+        let conn = rusqlite::Connection::open(db_path)
+            .expect("open sqlite for read-back");
+        conn.query_row(
+            &format!("SELECT COUNT(*) FROM {table}"),
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .expect("count query")
+    }
+
+    /// Create the `t(name)` table on a fresh tempfile and return the path.
+    /// Each e2e test gets its own tempfile so concurrent test runs don't
+    /// contend on the SQLite write lock.
+    fn fresh_sqlite_with_table() -> tempfile::NamedTempFile {
+        let f = tempfile::Builder::new()
+            .prefix("rivers-i8-e2e-")
+            .suffix(".sqlite")
+            .tempfile()
+            .expect("create tempfile");
+        let conn = rusqlite::Connection::open(f.path()).expect("open tempfile");
+        conn.execute(
+            "CREATE TABLE t (name TEXT NOT NULL)",
+            [],
+        )
+        .expect("create table");
+        drop(conn);
+        f
+    }
+
+    /// Build a TaskContext whose datasource map points "sqlite_e2e" at
+    /// the "sqlite" driver with `db_path` as the database. The
+    /// dispatch_dyn_engine_task helper snapshots this map into
+    /// TASK_DS_CONFIGS keyed by the entry-point-namespaced datasource
+    /// id; the inner host_db_begin_inner_for_test call must use the
+    /// same namespaced form to look it up.
+    fn make_e2e_task_ctx(db_path: &str) -> TaskContext {
+        let mut options = HashMap::new();
+        options.insert("driver".to_string(), "sqlite".to_string());
+        let params = ConnectionParams {
+            host: String::new(),
+            port: 0,
+            database: db_path.to_string(),
+            username: String::new(),
+            password: String::new(),
+            options,
+        };
+        let resolved = rivers_runtime::process_pool::types::ResolvedDatasource {
+            driver_name: "sqlite".to_string(),
+            params,
+        };
+        TaskContextBuilder::new()
+            .task_kind(TaskKind::Rest)
+            .entrypoint(rivers_runtime::process_pool::types::Entrypoint {
+                module: "test.js".into(),
+                function: "handler".into(),
+                language: "javascript".into(),
+            })
+            .datasource_config("sqlite_e2e".to_string(), resolved)
+            .trace_id("e2e-trace".into())
+            .app_id("test-app".into())
+            .node_id("test-node".into())
+            .build()
+            .expect("build TaskContext")
+    }
+
+    /// `dispatch_dyn_engine_task` snapshots `ctx.datasource_configs`
+    /// verbatim into `TASK_DS_CONFIGS` (no namespace transformation —
+    /// see `process_pool/mod.rs:335-339`). So the same key the test
+    /// passes to `TaskContextBuilder::datasource_config(...)` is the
+    /// key `host_db_begin_inner_for_test` must look up. Trivial helper
+    /// for clarity at call sites.
+    fn ds_lookup_key(ds: &str) -> String {
+        ds.to_string()
+    }
+
+    /// Shape a successful empty engine result.
+    fn empty_engine_ok() -> Result<SerializedTaskResult, String> {
+        Ok(SerializedTaskResult {
+            value: serde_json::Value::Null,
+            duration_ms: 0,
+        })
+    }
+
+    /// Helper used by every dispatch closure: drives begin →
+    /// execute_dataview_with_optional_txn_for_test → (caller-decided
+    /// commit/rollback). Returns the dataview affected_rows for assertions.
+    /// Runs on the spawn_blocking worker thread; uses `block_on` via the
+    /// host runtime handle to drive async fns.
+    fn drive_begin_then_dataview(
+        ds_key: &str,
+        dv_name: &str,
+    ) -> u64 {
+        use crate::engine_loader::host_callbacks::{
+            execute_dataview_with_optional_txn_for_test, host_db_begin_inner_for_test,
+        };
+        use crate::engine_loader::host_context::{
+            current_task_id, HOST_CONTEXT_FOR_TESTS,
+        };
+
+        let host_ctx = HOST_CONTEXT_FOR_TESTS.get().expect("HOST_CONTEXT");
+        let rt = host_rt_handle_for_test();
+
+        let begin = host_db_begin_inner_for_test(
+            &serde_json::json!({"datasource": ds_key}),
+            host_ctx,
+        )
+        .expect("begin ok");
+        assert_eq!(begin["ok"], true);
+
+        let task_id = current_task_id().expect("CURRENT_TASK_ID inside dispatch");
+        let exec = rt
+            .block_on(async { host_dataview_executor_for_test().await })
+            .expect("executor installed");
+        let resp = rt
+            .block_on(async {
+                execute_dataview_with_optional_txn_for_test(
+                    exec,
+                    dv_name,
+                    HashMap::<String, QueryValue>::new(),
+                    "e2e",
+                    Some(task_id),
+                )
+                .await
+            })
+            .expect("dataview execute ok");
+        resp.query_result.affected_rows
+    }
+
+    fn drive_commit(ds_key: &str) {
+        use crate::engine_loader::host_callbacks::host_db_commit_inner_for_test;
+        use crate::engine_loader::host_context::HOST_CONTEXT_FOR_TESTS;
+        let host_ctx = HOST_CONTEXT_FOR_TESTS.get().expect("HOST_CONTEXT");
+        let res = host_db_commit_inner_for_test(
+            &serde_json::json!({"datasource": ds_key}),
+            host_ctx,
+        )
+        .expect("commit ok");
+        assert_eq!(res["ok"], true);
+    }
+
+    fn drive_rollback(ds_key: &str) {
+        use crate::engine_loader::host_callbacks::host_db_rollback_inner_for_test;
+        use crate::engine_loader::host_context::HOST_CONTEXT_FOR_TESTS;
+        let host_ctx = HOST_CONTEXT_FOR_TESTS.get().expect("HOST_CONTEXT");
+        let res = host_db_rollback_inner_for_test(
+            &serde_json::json!({"datasource": ds_key}),
+            host_ctx,
+        )
+        .expect("rollback ok");
+        assert_eq!(res["ok"], true);
+    }
+
+    // I8.1 — Commit persists.
+    // Begin → execute INSERT dataview inside the txn → commit. A fresh
+    // SQLite connection opened OUTSIDE the dispatch must observe the row.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn e2e_commit_persists_on_sqlite() {
+        let _g = txn_test_fixtures::test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        txn_test_fixtures::ensure_host_context();
+
+        let temp = fresh_sqlite_with_table();
+        let db_path = temp.path().to_owned();
+        let executor = txn_test_fixtures::build_sqlite_executor(
+            "insert_t",
+            "INSERT INTO t (name) VALUES ('alice')",
+            db_path.to_str().unwrap(),
+        );
+        install_dataview_executor_for_test(executor).await;
+
+        let ctx = make_e2e_task_ctx(db_path.to_str().unwrap());
+        let serialized = rivers_engine_sdk::SerializedTaskContext::from(&ctx);
+        let ds_key = ds_lookup_key("sqlite_e2e");
+        let db_for_pre = db_path.clone();
+
+        let _ = dispatch_dyn_engine_task(&ctx, serialized, move |_s| {
+            let affected = drive_begin_then_dataview(&ds_key, "insert_t");
+            assert_eq!(affected, 1, "INSERT must report 1 affected row inside txn");
+
+            // Pre-commit: outside reader still sees zero rows (txn isolation).
+            let pre = count_rows_outside_txn(&db_for_pre, "t");
+            assert_eq!(
+                pre, 0,
+                "uncommitted row must not be visible to outside reader"
+            );
+
+            drive_commit(&ds_key);
+            empty_engine_ok()
+        })
+        .await
+        .expect("dispatch ok");
+
+        // Post-dispatch: the row is durable and visible to a fresh reader.
+        let post = count_rows_outside_txn(temp.path(), "t");
+        assert_eq!(post, 1, "committed row must persist on disk");
+    }
+
+    // I8.2 — Rollback discards.
+    // Begin → execute INSERT → rollback. Fresh reader sees zero rows.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn e2e_rollback_discards_on_sqlite() {
+        let _g = txn_test_fixtures::test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        txn_test_fixtures::ensure_host_context();
+
+        let temp = fresh_sqlite_with_table();
+        let db_path = temp.path().to_owned();
+        let executor = txn_test_fixtures::build_sqlite_executor(
+            "insert_t",
+            "INSERT INTO t (name) VALUES ('bob')",
+            db_path.to_str().unwrap(),
+        );
+        install_dataview_executor_for_test(executor).await;
+
+        let ctx = make_e2e_task_ctx(db_path.to_str().unwrap());
+        let serialized = rivers_engine_sdk::SerializedTaskContext::from(&ctx);
+        let ds_key = ds_lookup_key("sqlite_e2e");
+
+        let _ = dispatch_dyn_engine_task(&ctx, serialized, move |_s| {
+            let affected = drive_begin_then_dataview(&ds_key, "insert_t");
+            assert_eq!(affected, 1);
+            drive_rollback(&ds_key);
+            empty_engine_ok()
+        })
+        .await
+        .expect("dispatch ok");
+
+        // After rollback: no row.
+        let post = count_rows_outside_txn(temp.path(), "t");
+        assert_eq!(post, 0, "rolled-back row must not persist");
+    }
+
+    // I8.3 — Auto-rollback on engine error.
+    // Handler begins a txn, writes, then the engine_runner returns Err
+    // — TaskGuard::drop must auto-rollback the leftover txn so the
+    // INSERT does NOT land. Mirrors the V8 path's TaskLocals::drop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn e2e_auto_rollback_on_engine_error() {
+        let _g = txn_test_fixtures::test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        txn_test_fixtures::ensure_host_context();
+
+        let temp = fresh_sqlite_with_table();
+        let db_path = temp.path().to_owned();
+        let executor = txn_test_fixtures::build_sqlite_executor(
+            "insert_t",
+            "INSERT INTO t (name) VALUES ('carol')",
+            db_path.to_str().unwrap(),
+        );
+        install_dataview_executor_for_test(executor).await;
+
+        let ctx = make_e2e_task_ctx(db_path.to_str().unwrap());
+        let serialized = rivers_engine_sdk::SerializedTaskContext::from(&ctx);
+        let ds_key = ds_lookup_key("sqlite_e2e");
+
+        let result = dispatch_dyn_engine_task(&ctx, serialized, move |_s| {
+            let affected = drive_begin_then_dataview(&ds_key, "insert_t");
+            assert_eq!(affected, 1);
+
+            // Simulate an engine-level error WITHOUT calling commit/rollback.
+            // TaskGuard::drop's auto-rollback is the safety net.
+            Err::<SerializedTaskResult, String>(
+                "simulated handler failure".to_string(),
+            )
+        })
+        .await;
+
+        // Dispatch surfaces the engine error as TaskError::HandlerError.
+        match result {
+            Err(TaskError::HandlerError(msg)) => {
+                assert!(
+                    msg.contains("simulated handler failure"),
+                    "engine error must propagate; got {msg}"
+                );
+            }
+            other => panic!("expected HandlerError, got {other:?}"),
+        }
+
+        // Critical: auto-rollback fired, so the row is NOT in the DB.
+        let post = count_rows_outside_txn(temp.path(), "t");
+        assert_eq!(
+            post, 0,
+            "TaskGuard::drop auto-rollback must discard uncommitted writes"
+        );
+    }
+
+    // I8.4 — Cross-datasource rejection inside a txn.
+    // Begin a txn on ds-a; try to execute a dataview on ds-b. The
+    // execute_dataview_with_optional_txn helper enforces spec §6.2 and
+    // returns a Driver error containing "TransactionError:".
+    //
+    // Direct approach: skip dispatch_dyn_engine_task and pre-seat the
+    // txn map under a synthesized task id. Mirrors the existing
+    // `dataview_cross_datasource_in_txn_rejects` unit test pattern in
+    // host_callbacks.rs but uses a real SQLite-backed executor as the
+    // dataview's home datasource.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn e2e_cross_datasource_in_txn_rejects() {
+        use crate::engine_loader::dyn_transaction_map::TaskId;
+        use crate::engine_loader::host_context::{
+            dyn_txn_map, set_current_task_id_for_test,
+        };
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let _g = txn_test_fixtures::test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        txn_test_fixtures::ensure_host_context();
+
+        let temp = fresh_sqlite_with_table();
+        let db_path = temp.path().to_owned();
+        let executor = txn_test_fixtures::build_sqlite_executor(
+            "insert_t",
+            "INSERT INTO t (name) VALUES ('dave')",
+            db_path.to_str().unwrap(),
+        );
+        install_dataview_executor_for_test(executor).await;
+
+        // Synthesize a task id well above the production NEXT_TASK_ID
+        // counter so we don't collide with any concurrent dispatch.
+        static N: AtomicU64 = AtomicU64::new(2_000_000);
+        let task = TaskId(N.fetch_add(1, Ordering::Relaxed));
+
+        // Seed a fake txn on a DIFFERENT datasource. The cross-DS check
+        // operates purely on the map's keys — no driver call is issued —
+        // so a mock connection is sufficient.
+        set_current_task_id_for_test(Some(task));
+        let beh = txn_test_fixtures::behavior();
+        let other_conn: Box<dyn rivers_runtime::rivers_driver_sdk::Connection> =
+            Box::new(txn_test_fixtures::SharedMockConn { behavior: beh });
+        dyn_txn_map()
+            .insert(task, "other_ds", other_conn)
+            .expect("seed cross-DS txn");
+
+        let exec = host_dataview_executor_for_test()
+            .await
+            .expect("executor installed");
+
+        let err = crate::engine_loader::host_callbacks::execute_dataview_with_optional_txn_for_test(
+            exec,
+            "insert_t",
+            HashMap::<String, QueryValue>::new(),
+            "e2e",
+            Some(task),
+        )
+        .await
+        .expect_err("must reject cross-DS dataview inside txn");
+
+        match err {
+            rivers_runtime::DataViewError::Driver(msg) => {
+                assert!(
+                    msg.contains("TransactionError:"),
+                    "expected TransactionError prefix; got {msg}"
+                );
+                assert!(
+                    msg.contains("differs from active transaction"),
+                    "expected cross-DS phrasing; got {msg}"
+                );
+            }
+            other => panic!("expected Driver error, got {other:?}"),
+        }
+
+        // Cleanup so this task's txn doesn't leak into other tests.
+        let _ = dyn_txn_map().drain_task(task);
+        set_current_task_id_for_test(None);
+
+        // The dataview was REJECTED before any driver call — DB is empty.
+        let post = count_rows_outside_txn(temp.path(), "t");
+        assert_eq!(
+            post, 0,
+            "cross-DS rejection must occur before any write"
+        );
+    }
+
+    // I8.5 — Two distinct tasks on the same datasource each hold their
+    // own transaction state.
+    //
+    // SQLite serializes writers, so we run the dispatches sequentially —
+    // the goal is to verify the dyn-txn-map keys by (TaskId, datasource),
+    // NOT by datasource alone. Two tasks that target the same DS each get
+    // their own independent transaction state and both commits land.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn e2e_concurrent_txns_isolated_by_task_id() {
+        let _g = txn_test_fixtures::test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        txn_test_fixtures::ensure_host_context();
+
+        let temp = fresh_sqlite_with_table();
+        let db_path = temp.path().to_owned();
+
+        // First task: insert "alice".
+        let exec1 = txn_test_fixtures::build_sqlite_executor(
+            "insert_t",
+            "INSERT INTO t (name) VALUES ('alice')",
+            db_path.to_str().unwrap(),
+        );
+        install_dataview_executor_for_test(exec1).await;
+        let ctx1 = make_e2e_task_ctx(db_path.to_str().unwrap());
+        let serialized1 = rivers_engine_sdk::SerializedTaskContext::from(&ctx1);
+        let ds_key1 = ds_lookup_key("sqlite_e2e");
+        let _ = dispatch_dyn_engine_task(&ctx1, serialized1, move |_s| {
+            let _ = drive_begin_then_dataview(&ds_key1, "insert_t");
+            drive_commit(&ds_key1);
+            empty_engine_ok()
+        })
+        .await
+        .expect("dispatch 1 ok");
+
+        // Second task: same datasource, but a fresh executor with a
+        // different INSERT statement (the executor caches the dataview
+        // config from build time, so we rebuild). The dispatch helper
+        // issues a fresh TaskId, so the dyn-txn-map insert under
+        // (TaskId_2, "sqlite_e2e") is a separate slot from the first
+        // task's (already-committed-and-released) entry.
+        let exec2 = txn_test_fixtures::build_sqlite_executor(
+            "insert_t",
+            "INSERT INTO t (name) VALUES ('bob')",
+            db_path.to_str().unwrap(),
+        );
+        install_dataview_executor_for_test(exec2).await;
+        let ctx2 = make_e2e_task_ctx(db_path.to_str().unwrap());
+        let serialized2 = rivers_engine_sdk::SerializedTaskContext::from(&ctx2);
+        let ds_key2 = ds_lookup_key("sqlite_e2e");
+        let _ = dispatch_dyn_engine_task(&ctx2, serialized2, move |_s| {
+            let _ = drive_begin_then_dataview(&ds_key2, "insert_t");
+            drive_commit(&ds_key2);
+            empty_engine_ok()
+        })
+        .await
+        .expect("dispatch 2 ok");
+
+        // Both rows persist — the two tasks held independent txn state
+        // even though they targeted the same datasource.
+        let post = count_rows_outside_txn(temp.path(), "t");
+        assert_eq!(
+            post, 2,
+            "two distinct tasks committing on the same DS must both persist"
+        );
+    }
+}

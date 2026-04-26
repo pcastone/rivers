@@ -583,6 +583,36 @@ Error strings from validation failures and query errors are passed through to Ev
 
 Parameters are passed as `HashMap<String, QueryValue>` in `Query.parameters`. Drivers are responsible for parameterized binding to their native query interface. Rivers does not inspect or sanitize parameter values — the structural separation of statement from parameters is the security boundary.
 
+### 6.8 Transactions
+
+Both engines (V8 and the dynamic-engine cdylib path: V8/WASM via `librivers_engine_*.dylib`) expose the same handler API:
+
+```js
+await Rivers.db.begin("ds-name");
+const r = await Rivers.db.execute("dataview-name", params);  // routed through txn conn
+await Rivers.db.commit("ds-name");
+// or: await Rivers.db.rollback("ds-name");
+```
+
+The two paths share semantics but maintain transaction state differently because their threading models differ.
+
+#### V8 path (in-process)
+
+Implemented in `crates/riversd/src/process_pool/v8_engine/context.rs::ctx_transaction_callback`. V8 isolates pin to a worker thread for the entire task, so a thread-local `TASK_TRANSACTION: Option<TaskTransactionState>` carries the per-task `TransactionMap` (keyed by datasource name only — task identity is implicit in the pinned thread).
+
+#### Dynamic-engine path (cdylib via FFI)
+
+Implemented across `engine_loader/host_callbacks.rs` (`host_db_begin`, `host_db_commit`, `host_db_rollback`, `host_dataview_execute`), `engine_loader/dyn_transaction_map.rs` (the map type), and `process_pool/mod.rs::dispatch_dyn_engine_task` (lifecycle hook).
+
+Key differences from V8:
+- **Map keying.** `(TaskId, datasource_name)` — dyn-engine cdylib host callbacks fire from engine threads that aren't 1:1 with task identity, so the map can't rely on a thread-local on the engine side. Instead, riversd issues a fresh `TaskId` per `dispatch_task` invocation, binds it to the riversd-side `spawn_blocking` worker thread via `TaskGuard::enter`, and host callbacks read `current_task_id()` (a `spawn_blocking`-thread-local) when they fire synchronously from the engine's C-ABI call.
+- **Lifecycle.** `dispatch_dyn_engine_task` issues `TaskId`, snapshots the per-task datasource configs into `TASK_DS_CONFIGS` so `host_db_begin` can resolve `(driver_name, ConnectionParams)` without a roundtrip through the cdylib, then enters `TaskGuard`. The cdylib runs (calling `Rivers.db.begin/execute/commit/rollback` as host callbacks). On scope exit, `TaskGuard::drop` calls `DynTransactionMap::auto_rollback_all_for_task(task_id)` and clears `TASK_DS_CONFIGS` — guarantees no leaked transactions if the handler panics, errors out, or forgets to commit/rollback.
+- **DataView routing.** `host_dataview_execute` reads `current_task_id()` and consults `dyn_txn_map().task_active_datasources(tid)`. When a transaction is active for the dataview's datasource, the call is routed via `with_conn_mut` (lock-free during the await — the conn is removed under the lock, then re-inserted on closure return). When a transaction is active on a *different* datasource, the call is rejected with a `DataViewError::Driver` carrying a `TransactionError:` prefix (spec §6.2).
+- **Commit-failure financial-correctness gate.** Mirrors V8: on commit failure or commit timeout, `host_db_commit_inner` calls `signal_commit_failed(ds, msg)` to set a `spawn_blocking`-thread-local sentinel. After `spawn_blocking` resolves, `dispatch_dyn_engine_task` calls `take_commit_failed()` on the same thread and upgrades the result to `TaskError::TransactionCommitFailed { datasource, message }` regardless of what the handler returned.
+- **Timeouts.** `HOST_CALLBACK_TIMEOUT_MS` (30s) bounds commit and rollback driver calls. Exceeded budgets produce a warning log; the connection is abandoned (Drop releases the pool slot, the server-side txn is reaped by driver/server idle timeouts).
+
+The two paths converge on `Connection::begin_transaction / commit_transaction / rollback_transaction` as the underlying driver-trait methods (`crates/rivers-driver-sdk/src/traits.rs`). Built-in drivers (PostgreSQL, MySQL, SQLite) implement these natively via `BEGIN / COMMIT / ROLLBACK`; broker drivers and Redis return `DriverError::Unsupported` (their `supports_transactions()` returns `false`).
+
 ---
 
 ## 7. DataView Caching

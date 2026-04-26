@@ -484,3 +484,46 @@ Shared test fixtures:
 - Full integration test suite passes (~30 test groups across riversd/tests/*).
 
 **Deviation from plan:** none in semantics. The brief spec'd a single `dispatch_task` modification; the implementation extracted the dyn branch into `dispatch_dyn_engine_task` to keep dispatch_task's other branches (static-engines V8, static-engines wasm) untouched and the TaskGuard wiring testable in isolation. Production behavior preserved.
+
+---
+
+## TXN-I8.1 — Phase I e2e + close-out (2026-04-25)
+
+**Files affected:**
+- `crates/riversd/src/process_pool/mod.rs` — new `mod dyn_e2e_tests` (5 #[tokio::test] cases driving the full dispatch lifecycle against the built-in SQLite driver).
+- `crates/riversd/src/engine_loader/txn_test_fixtures.rs` — extended `ensure_host_context` to also register the real `sqlite` driver into the shared `DriverFactory`; new `build_sqlite_executor(...)` helper; new `shared_test_runtime_handle()` long-lived runtime used as the `HOST_CONTEXT.rt_handle` (per-`#[tokio::test]` runtimes die end-of-test, so capturing `Handle::current()` at fixture-init from inside the first test left every subsequent test holding a stale handle, which broke SqliteDriver::connect's inner `spawn_blocking`).
+- `crates/riversd/src/engine_loader/host_context.rs` — three new cfg-test helpers: `host_rt_handle_for_test()`, `host_dataview_executor_for_test()`, `install_dataview_executor_for_test(executor)`. None of them widen production visibility — they sit alongside the existing I7 cfg-test surface.
+- `crates/riversd/src/engine_loader/host_callbacks.rs` — new cfg-test re-export `host_db_rollback_inner_for_test` (mirroring the existing begin/commit re-exports) plus `execute_dataview_with_optional_txn_for_test` so cross-module e2e tests can drive the DataView-with-txn helper directly.
+- `crates/riversd/Cargo.toml` — `[dev-dependencies]` adds `rusqlite` for the e2e durability oracle (open SQLite tempfile from outside the dispatch and count rows directly, bypassing every driver/pool layer).
+- `crates/riversd/src/engine_loader/host_callbacks.rs` (db_batch) — TODO comment removed; replaced with a fn-doc note clarifying that `Rivers.db.batch` is a DataView batch-execute primitive (not a transaction wrapper) and that wiring lands separately from Phase I.
+- `docs/arch/rivers-data-layer-spec.md` — new §6.8 "Transactions" subsection covering both engines, with the dyn-engine path's `(TaskId, datasource)` map keying, `TaskGuard` lifecycle, DataView routing, financial-correctness gate, and timeout policy.
+- `docs/arch/rivers-driver-spec.md` — note in §2 that both engines exercise `Connection::begin_transaction/commit_transaction/rollback_transaction`, with cross-reference to `rivers-data-layer-spec.md §6.8`.
+- `docs/code_review.md` — T2-8 annotated `Resolved 2026-04-25 by Phase I (this PR — branch feature/phase-i-dyn-transactions)` with the specific files/line-ranges that close it.
+- `todo/tasks.md` — I1-I9 + I-X.1-3 + H8 marked complete with one-line summaries.
+
+**Decisions:**
+
+1. **SQLite over Postgres for e2e default.** The brief left it as a choice. SQLite chosen because: (a) the worktree has no guaranteed network access to 192.168.2.209; (b) SQLite supports real `BEGIN/COMMIT/ROLLBACK` so the txn semantics are real, not faked; (c) tempfile path round-trips through a fresh `rusqlite::Connection::open(...)` outside the dispatch — durable proof of commit-persists / rollback-discards. Postgres parallel cases can be added under `#[ignore]` later if cluster reachability is assured. None added in this commit per "don't gold-plate."
+
+2. **Test placement: `mod dyn_e2e_tests` inside `process_pool/mod.rs`, not a `tests/*.rs` integration test.** Per the brief's choice rule, the existing `txn_test_fixtures` and the inner-fn `host_db_*_for_test` re-exports are `pub(crate)` — they're not reachable from a separate test binary. Promoting them to `pub` would widen production visibility for tests-only items. Keeping the e2e tests inside the same crate as a `#[cfg(test)] mod` reuses the existing surface verbatim with zero visibility expansion. Same pattern as the I7 `dyn_dispatch_tests` module a few lines above.
+
+3. **Long-lived shared tokio runtime in fixtures.** `HOST_CONTEXT` is `OnceLock`; the fixture's first `set_host_context(...)` capture of `Handle::current()` is final. Per-`#[tokio::test]` runtimes are torn down at end-of-test, so the second test inherits a stale handle. The stale handle works fine for synthetic-async mock drivers (their `connect` returns `Ready` on first poll without ever crossing the runtime), but the real `SqliteDriver::connect` calls `tokio::task::spawn_blocking` internally — that spawns onto the stored handle's runtime, which is dead, so the spawn_blocking task is cancelled. Fix: build a long-lived multi-threaded runtime in a `OnceLock`, enter it before calling `set_host_context`, and let `Handle::current()` capture that one. All tests then share a stable rt_handle. Decision is fixture-only; production paths are unaffected.
+
+4. **Cross-DS test pre-seats the txn map directly.** I8.4 (cross-datasource rejection) doesn't go through `dispatch_dyn_engine_task` because the cross-DS check operates purely on the dyn-txn-map's keys — no driver call is issued, so a real second SQLite open would be wasted. Mirrors the existing `dataview_cross_datasource_in_txn_rejects` unit test in `host_callbacks.rs`. The OTHER 4 e2e tests do go through dispatch_dyn_engine_task end-to-end.
+
+5. **H1-H15 code_review.md annotations deferred.** I-X.1 was scoped as "T2-8 annotation" with an optional broader pass on H1-H15 if mechanical. Per the brief's decision rule (≤5 minutes of grep+edit), the broader pass was NOT mechanical: each H finding maps to one or more individual commits inside the PR #83 squash, and identifying the right commit per finding requires reading the squashed diff hunk-by-hunk. Deferred with a follow-up TODO in `todo/tasks.md`. T2-8 (the actual I-X.1 deliverable) is fully annotated.
+
+**Spec reference:** TXN-I1.1 decisions 1–4; TXN-I2.1; TXN-I6+I7.1; original brief I8 cases 1-3 (commit/rollback/auto-rollback) and case 4 (cross-DS rejection); plan §I8 case 5 ("concurrent transactions don't share state" reinterpreted as "two distinct tasks on the same DS each hold their own txn state" because SQLite serializes writers — the assertion still proves the map keys by `(TaskId, datasource)` not by datasource alone).
+
+**Validation (I-X.3 regression confirmation):**
+- `cargo test -p riversd --lib` — 421/421 passed + 1 ignored (was 416 + 1 before; +5 new e2e tests).
+- `cargo test -p riversd --lib process_pool` — 213/213 passed (was 208 before; +5 new e2e tests).
+- `cargo test -p riversd --lib engine_loader` — 12/12 passed (unchanged, all I3-I7 unit tests still green).
+- `cargo test -p riversd --lib process_pool::v8_engine` — 44/44 passed unchanged (V8 path untouched, per Phase I guard rails).
+- `cargo test -p riversd --test pool_tests` — 33/33 passed.
+- `cargo test -p riversd --test task_kind_dispatch_tests` — 47/47 passed.
+- `cargo test -p riversd --test ddl_pipeline_tests --test v8_ddl_whitelist_tests` — 12/12 passed.
+- `cargo test -p riversd --test process_pool_tests` — 10/10 passed.
+- Full `cargo test -p riversd` — every binary green, no failures.
+
+**Resolution method:** test-driven. Built the e2e tests, watched them fail with the stale-runtime cancellation, traced the failure to `Handle::current()` capture timing inside `OnceLock`, fixed by introducing the long-lived fixture runtime, re-ran — all 5 tests green plus all prior tests still green. No behavior change in production code paths; only cfg-test surface widened minimally and dev-dep added (`rusqlite`).

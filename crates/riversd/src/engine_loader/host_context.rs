@@ -130,6 +130,53 @@ pub(crate) fn lookup_task_ds_for_test(
     lookup_task_ds(task_id, namespaced_ds)
 }
 
+/// Test-only sync accessor for the runtime handle stashed in `HOST_CONTEXT`.
+/// Phase I8 e2e tests run inside `dispatch_dyn_engine_task` closures (on
+/// `spawn_blocking` workers) and need a runtime handle to `block_on` the
+/// `execute_dataview_with_optional_txn` future without deadlocking.
+#[cfg(test)]
+pub(crate) fn host_rt_handle_for_test() -> tokio::runtime::Handle {
+    HOST_CONTEXT
+        .get()
+        .expect("host_rt_handle_for_test: HOST_CONTEXT must be set first")
+        .rt_handle
+        .clone()
+}
+
+/// Test-only async accessor for the installed `DataViewExecutor`.
+/// Phase I8 e2e tests need to grab the executor handle so they can drive
+/// `execute_dataview_with_optional_txn_for_test` directly.
+#[cfg(test)]
+pub(crate) async fn host_dataview_executor_for_test()
+-> Option<Arc<rivers_runtime::DataViewExecutor>> {
+    let ctx = HOST_CONTEXT
+        .get()
+        .expect("host_dataview_executor_for_test: HOST_CONTEXT must be set first");
+    ctx.dataview_executor.read().await.clone()
+}
+
+/// Test-only async installer for the DataViewExecutor inside `HOST_CONTEXT`.
+/// Phase I8 e2e tests need a real executor wired into the (already-set)
+/// `HostContext.dataview_executor` `RwLock` so `host_dataview_execute`
+/// (and its internal `execute_dataview_with_optional_txn` helper) hit
+/// real driver code instead of returning "DataViewExecutor not initialized".
+///
+/// The fixture calls `set_host_context(...)` first with
+/// `Arc::new(RwLock::new(None))`; this helper writes `Some(executor)` into
+/// that same lock so subsequent host-callback invocations resolve it.
+/// Idempotent — last writer wins.
+#[cfg(test)]
+pub(crate) async fn install_dataview_executor_for_test(
+    executor: Arc<rivers_runtime::DataViewExecutor>,
+) {
+    let ctx = HOST_CONTEXT.get().expect(
+        "install_dataview_executor_for_test: HOST_CONTEXT must be set first \
+         (call txn_test_fixtures::ensure_host_context())",
+    );
+    *ctx.dataview_executor.write().await = Some(executor);
+}
+
+
 /// Setter for the dyn-engine commit-failure thread-local. Used by
 /// `host_db_commit` (I4) when `commit_transaction()` errors or times out.
 pub(crate) fn signal_commit_failed(ds_name: String, reason: String) {
