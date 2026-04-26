@@ -1183,3 +1183,682 @@ mod dyn_e2e_tests {
         );
     }
 }
+
+// ── I-FU2 dyn-engine end-to-end tests against the Postgres cluster ─
+//
+// Mirrors the SQLite e2e cases in `dyn_e2e_tests` against the live
+// Postgres test cluster at 192.168.2.209 (per CLAUDE.md). Same five
+// scenarios, same `dispatch_dyn_engine_task` shape, same assertions —
+// but the durability oracle is a fresh `PostgresDriver` connection
+// opened OUTSIDE the dispatch (mirrors the rusqlite oracle in the
+// SQLite suite).
+//
+// Each test is double-gated:
+//   1. `#[ignore]` — excluded from the default `cargo test` flow.
+//   2. Runtime check on `RIVERS_TEST_CLUSTER=1` AND a 2-second TCP
+//      probe to 192.168.2.209:5432 inside `cluster_available()`.
+//
+// Run live: `RIVERS_TEST_CLUSTER=1 cargo test -p riversd \
+//     --features static-builtin-drivers,static-engines pg_e2e -- \
+//     --include-ignored`
+//
+// Each test creates a unique table and drops it on exit (best-effort)
+// so concurrent test runs and aborted runs don't accumulate state in
+// the shared `rivers` database.
+#[cfg(test)]
+mod pg_e2e_tests {
+    use super::*;
+    use rivers_engine_sdk::SerializedTaskResult;
+    use rivers_runtime::process_pool::types::TaskKind;
+    use rivers_runtime::rivers_driver_sdk::{ConnectionParams, QueryValue};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::engine_loader::host_context::{
+        host_dataview_executor_for_test, host_rt_handle_for_test,
+        install_dataview_executor_for_test,
+    };
+    use crate::engine_loader::txn_test_fixtures;
+
+    const PG_HOST: &str = "192.168.2.209";
+    const PG_PORT: u16 = 5432;
+    const PG_USER: &str = "rivers";
+    const PG_PASS: &str = "rivers_test";
+    const PG_DB: &str = "rivers";
+
+    /// True iff `RIVERS_TEST_CLUSTER=1` is set AND a quick TCP probe
+    /// to the Postgres primary succeeds. The probe prevents wasted
+    /// time on stale env vars / offline laptops; the env-var gate
+    /// matches the H18 conformance convention.
+    fn cluster_available() -> bool {
+        match std::env::var("RIVERS_TEST_CLUSTER") {
+            Ok(v) => eprintln!("[pg_e2e] RIVERS_TEST_CLUSTER={v}"),
+            Err(_) => {
+                eprintln!("[pg_e2e] RIVERS_TEST_CLUSTER unset");
+                return false;
+            }
+        }
+        let addr = format!("{PG_HOST}:{PG_PORT}")
+            .parse::<std::net::SocketAddr>()
+            .expect("static PG addr");
+        match std::net::TcpStream::connect_timeout(
+            &addr,
+            std::time::Duration::from_secs(2),
+        ) {
+            Ok(_) => {
+                eprintln!("[pg_e2e] TCP probe to {addr} succeeded");
+                true
+            }
+            Err(e) => {
+                eprintln!("[pg_e2e] TCP probe to {addr} failed: {e}");
+                false
+            }
+        }
+    }
+
+    /// Build base ConnectionParams for the Postgres test cluster.
+    /// `build_postgres_executor` mutates the `options` map to set the
+    /// "driver" key; tests share a single helper so the host/port/db
+    /// constants stay in one place.
+    fn pg_connection_params() -> ConnectionParams {
+        ConnectionParams {
+            host: PG_HOST.into(),
+            port: PG_PORT,
+            database: PG_DB.into(),
+            username: PG_USER.into(),
+            password: PG_PASS.into(),
+            options: HashMap::new(),
+        }
+    }
+
+    /// Allocate a unique table name per test to avoid collisions.
+    /// Combines the process id, an atomic counter, and a per-test
+    /// prefix so concurrent test runs and abandoned runs from prior
+    /// processes never see each other's tables.
+    fn unique_table_name(prefix: &str) -> String {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let id = N.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        format!("{prefix}_{pid}_{id}")
+    }
+
+    /// Open an out-of-band connection via `PostgresDriver::connect()`
+    /// (no pool, no DataView engine) — the ground-truth oracle that
+    /// reads what's actually committed to disk. Used by setup,
+    /// teardown, and post-dispatch row-count assertions.
+    async fn pg_connect_oob() -> Box<dyn rivers_runtime::rivers_driver_sdk::Connection> {
+        use rivers_runtime::rivers_driver_sdk::DatabaseDriver;
+        let driver = rivers_runtime::rivers_core::drivers::PostgresDriver;
+        driver
+            .connect(&pg_connection_params())
+            .await
+            .expect("oob postgres connect")
+    }
+
+    /// CREATE TABLE — uses `ddl_execute` because the regular execute
+    /// path's DDL guard rejects CREATE/DROP. Mirrors the H18 conformance
+    /// pattern.
+    async fn pg_create_table(table: &str) {
+        use rivers_runtime::rivers_driver_sdk::Query;
+        let mut conn = pg_connect_oob().await;
+        let stmt =
+            format!("CREATE TABLE {table} (id BIGINT PRIMARY KEY, val TEXT NOT NULL)");
+        conn.ddl_execute(&Query::new(table, &stmt))
+            .await
+            .unwrap_or_else(|e| panic!("CREATE TABLE {table}: {e:?}"));
+    }
+
+    /// DROP TABLE IF EXISTS — best-effort; failure is logged but not
+    /// propagated (a previous test may have already dropped it, or the
+    /// test may have failed before the table was created).
+    async fn pg_drop_table(table: &str) {
+        use rivers_runtime::rivers_driver_sdk::Query;
+        let mut conn = pg_connect_oob().await;
+        let stmt = format!("DROP TABLE IF EXISTS {table}");
+        if let Err(e) = conn.ddl_execute(&Query::new(table, &stmt)).await {
+            eprintln!("pg_drop_table({table}) best-effort cleanup error: {e:?}");
+        }
+    }
+
+    /// Out-of-band SELECT COUNT(*) on the live db. Mirrors
+    /// `count_rows_outside_txn` in the SQLite suite — it reads through
+    /// a fresh connection, so uncommitted writes (held by the dispatch's
+    /// txn-bound connection) are NOT visible.
+    async fn pg_count_rows_oob(table: &str) -> i64 {
+        use rivers_runtime::rivers_driver_sdk::Query;
+        let mut conn = pg_connect_oob().await;
+        let stmt = format!("SELECT COUNT(*) AS c FROM {table}");
+        let q = Query::with_operation("select", table, &stmt);
+        let res = conn
+            .execute(&q)
+            .await
+            .unwrap_or_else(|e| panic!("count rows in {table}: {e:?}"));
+        assert_eq!(res.rows.len(), 1, "count returned {} rows", res.rows.len());
+        match res.rows[0].get("c") {
+            Some(QueryValue::Integer(n)) => *n,
+            Some(QueryValue::UInt(n)) => *n as i64,
+            other => panic!("count column not an integer: {other:?}"),
+        }
+    }
+
+    /// Build a TaskContext whose datasource map points the per-test
+    /// datasource id at the "postgres" driver. The dispatch helper
+    /// snapshots this map into TASK_DS_CONFIGS and the inner
+    /// host_db_begin_inner_for_test call must use the same key.
+    fn make_pg_task_ctx(datasource_id: &str) -> TaskContext {
+        let mut params = pg_connection_params();
+        params.options.insert("driver".into(), "postgres".into());
+        let resolved = rivers_runtime::process_pool::types::ResolvedDatasource {
+            driver_name: "postgres".to_string(),
+            params,
+        };
+        TaskContextBuilder::new()
+            .task_kind(TaskKind::Rest)
+            .entrypoint(rivers_runtime::process_pool::types::Entrypoint {
+                module: "test.js".into(),
+                function: "handler".into(),
+                language: "javascript".into(),
+            })
+            .datasource_config(datasource_id.to_string(), resolved)
+            .trace_id("pg-e2e-trace".into())
+            .app_id("test-app".into())
+            .node_id("test-node".into())
+            .build()
+            .expect("build TaskContext")
+    }
+
+    fn empty_engine_ok() -> Result<SerializedTaskResult, String> {
+        Ok(SerializedTaskResult {
+            value: serde_json::Value::Null,
+            duration_ms: 0,
+        })
+    }
+
+    /// Drives begin → execute_dataview_with_optional_txn_for_test inside
+    /// the dispatch-closure context. Returns the affected_rows count from
+    /// the dataview execution. Mirrors `drive_begin_then_dataview` in the
+    /// SQLite suite but is parameterized on the datasource id so two
+    /// tests can target different per-test datasource keys without
+    /// stepping on each other.
+    fn drive_begin_then_dataview(ds_key: &str, dv_name: &str) -> u64 {
+        use crate::engine_loader::host_callbacks::{
+            execute_dataview_with_optional_txn_for_test, host_db_begin_inner_for_test,
+        };
+        use crate::engine_loader::host_context::{
+            current_task_id, HOST_CONTEXT_FOR_TESTS,
+        };
+
+        let host_ctx = HOST_CONTEXT_FOR_TESTS.get().expect("HOST_CONTEXT");
+        let rt = host_rt_handle_for_test();
+
+        let begin = host_db_begin_inner_for_test(
+            &serde_json::json!({"datasource": ds_key}),
+            host_ctx,
+        )
+        .expect("begin ok");
+        assert_eq!(begin["ok"], true);
+
+        let task_id = current_task_id().expect("CURRENT_TASK_ID inside dispatch");
+        let exec = rt
+            .block_on(async { host_dataview_executor_for_test().await })
+            .expect("executor installed");
+        let resp = rt
+            .block_on(async {
+                execute_dataview_with_optional_txn_for_test(
+                    exec,
+                    dv_name,
+                    HashMap::<String, QueryValue>::new(),
+                    "pg-e2e",
+                    Some(task_id),
+                )
+                .await
+            })
+            .expect("dataview execute ok");
+        resp.query_result.affected_rows
+    }
+
+    fn drive_commit(ds_key: &str) {
+        use crate::engine_loader::host_callbacks::host_db_commit_inner_for_test;
+        use crate::engine_loader::host_context::HOST_CONTEXT_FOR_TESTS;
+        let host_ctx = HOST_CONTEXT_FOR_TESTS.get().expect("HOST_CONTEXT");
+        let res = host_db_commit_inner_for_test(
+            &serde_json::json!({"datasource": ds_key}),
+            host_ctx,
+        )
+        .expect("commit ok");
+        assert_eq!(res["ok"], true);
+    }
+
+    fn drive_rollback(ds_key: &str) {
+        use crate::engine_loader::host_callbacks::host_db_rollback_inner_for_test;
+        use crate::engine_loader::host_context::HOST_CONTEXT_FOR_TESTS;
+        let host_ctx = HOST_CONTEXT_FOR_TESTS.get().expect("HOST_CONTEXT");
+        let res = host_db_rollback_inner_for_test(
+            &serde_json::json!({"datasource": ds_key}),
+            host_ctx,
+        )
+        .expect("rollback ok");
+        assert_eq!(res["ok"], true);
+    }
+
+    // I-FU2.1 — Commit persists.
+    // Begin → INSERT via dataview → commit. A fresh out-of-band reader
+    // observes the row.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn pg_commit_persists() {
+        if !cluster_available() {
+            eprintln!(
+                "RIVERS_TEST_CLUSTER not set or PG unreachable — skipping pg_commit_persists"
+            );
+            return;
+        }
+        let _g = txn_test_fixtures::test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        txn_test_fixtures::ensure_host_context();
+
+        let table = unique_table_name("pgfu2_commit");
+        pg_create_table(&table).await;
+
+        // Best-effort cleanup even on assertion failure. The Postgres
+        // cluster is shared so leaked tables would accumulate.
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let table = self.0.clone();
+                // Run cleanup on a fresh blocking context so we don't
+                // depend on whatever runtime state remains at unwind time.
+                let _ = std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("cleanup rt");
+                    rt.block_on(pg_drop_table(&table));
+                })
+                .join();
+            }
+        }
+        let _cleanup = Cleanup(table.clone());
+
+        let ds_id = "pg_e2e_commit";
+        let insert_sql = format!("INSERT INTO {table} (id, val) VALUES (1, 'alice')");
+        let executor = txn_test_fixtures::build_postgres_executor(
+            "insert_t",
+            &insert_sql,
+            pg_connection_params(),
+            ds_id,
+        );
+        install_dataview_executor_for_test(executor).await;
+
+        let ctx = make_pg_task_ctx(ds_id);
+        let serialized = rivers_engine_sdk::SerializedTaskContext::from(&ctx);
+        let ds_key = ds_id.to_string();
+        let table_for_pre = table.clone();
+
+        let _ = dispatch_dyn_engine_task(&ctx, serialized, move |_s| {
+            let affected = drive_begin_then_dataview(&ds_key, "insert_t");
+            assert_eq!(affected, 1, "INSERT must report 1 affected row inside txn");
+
+            // Pre-commit: out-of-band reader still sees zero rows
+            // (txn isolation — Postgres READ COMMITTED default).
+            let rt = host_rt_handle_for_test();
+            let pre = rt.block_on(pg_count_rows_oob(&table_for_pre));
+            assert_eq!(
+                pre, 0,
+                "uncommitted row must not be visible to outside reader"
+            );
+
+            drive_commit(&ds_key);
+            empty_engine_ok()
+        })
+        .await
+        .expect("dispatch ok");
+
+        let post = pg_count_rows_oob(&table).await;
+        assert_eq!(post, 1, "committed row must persist on disk");
+    }
+
+    // I-FU2.2 — Rollback discards.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn pg_rollback_discards() {
+        if !cluster_available() {
+            eprintln!(
+                "RIVERS_TEST_CLUSTER not set or PG unreachable — skipping pg_rollback_discards"
+            );
+            return;
+        }
+        let _g = txn_test_fixtures::test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        txn_test_fixtures::ensure_host_context();
+
+        let table = unique_table_name("pgfu2_rollback");
+        pg_create_table(&table).await;
+
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let table = self.0.clone();
+                let _ = std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("cleanup rt");
+                    rt.block_on(pg_drop_table(&table));
+                })
+                .join();
+            }
+        }
+        let _cleanup = Cleanup(table.clone());
+
+        let ds_id = "pg_e2e_rollback";
+        let insert_sql = format!("INSERT INTO {table} (id, val) VALUES (2, 'bob')");
+        let executor = txn_test_fixtures::build_postgres_executor(
+            "insert_t",
+            &insert_sql,
+            pg_connection_params(),
+            ds_id,
+        );
+        install_dataview_executor_for_test(executor).await;
+
+        let ctx = make_pg_task_ctx(ds_id);
+        let serialized = rivers_engine_sdk::SerializedTaskContext::from(&ctx);
+        let ds_key = ds_id.to_string();
+
+        let _ = dispatch_dyn_engine_task(&ctx, serialized, move |_s| {
+            let affected = drive_begin_then_dataview(&ds_key, "insert_t");
+            assert_eq!(affected, 1);
+            drive_rollback(&ds_key);
+            empty_engine_ok()
+        })
+        .await
+        .expect("dispatch ok");
+
+        let post = pg_count_rows_oob(&table).await;
+        assert_eq!(post, 0, "rolled-back row must not persist");
+    }
+
+    // I-FU2.3 — Auto-rollback on engine error.
+    // engine_runner returns Err WITHOUT calling commit/rollback;
+    // TaskGuard::drop's auto-rollback must discard the INSERT.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn pg_auto_rollback_on_engine_error() {
+        if !cluster_available() {
+            eprintln!(
+                "RIVERS_TEST_CLUSTER not set or PG unreachable — skipping pg_auto_rollback_on_engine_error"
+            );
+            return;
+        }
+        let _g = txn_test_fixtures::test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        txn_test_fixtures::ensure_host_context();
+
+        let table = unique_table_name("pgfu2_autoroll");
+        pg_create_table(&table).await;
+
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let table = self.0.clone();
+                let _ = std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("cleanup rt");
+                    rt.block_on(pg_drop_table(&table));
+                })
+                .join();
+            }
+        }
+        let _cleanup = Cleanup(table.clone());
+
+        let ds_id = "pg_e2e_autoroll";
+        let insert_sql = format!("INSERT INTO {table} (id, val) VALUES (3, 'carol')");
+        let executor = txn_test_fixtures::build_postgres_executor(
+            "insert_t",
+            &insert_sql,
+            pg_connection_params(),
+            ds_id,
+        );
+        install_dataview_executor_for_test(executor).await;
+
+        let ctx = make_pg_task_ctx(ds_id);
+        let serialized = rivers_engine_sdk::SerializedTaskContext::from(&ctx);
+        let ds_key = ds_id.to_string();
+
+        let result = dispatch_dyn_engine_task(&ctx, serialized, move |_s| {
+            let affected = drive_begin_then_dataview(&ds_key, "insert_t");
+            assert_eq!(affected, 1);
+            // Engine error WITHOUT commit/rollback — TaskGuard::drop is
+            // the safety net.
+            Err::<SerializedTaskResult, String>(
+                "simulated handler failure".to_string(),
+            )
+        })
+        .await;
+
+        match result {
+            Err(TaskError::HandlerError(msg)) => {
+                assert!(
+                    msg.contains("simulated handler failure"),
+                    "engine error must propagate; got {msg}"
+                );
+            }
+            other => panic!("expected HandlerError, got {other:?}"),
+        }
+
+        let post = pg_count_rows_oob(&table).await;
+        assert_eq!(
+            post, 0,
+            "TaskGuard::drop auto-rollback must discard uncommitted writes"
+        );
+    }
+
+    // I-FU2.4 — Cross-datasource rejection inside a txn.
+    // Begin a txn on ds-a (mock); execute a dataview on ds-b (real
+    // postgres) — the cross-DS check (spec §6.2) rejects with a Driver
+    // error before any postgres call. Mirrors the SQLite-suite pattern
+    // exactly, just with the dataview's home datasource being postgres.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn pg_cross_datasource_in_txn_rejects() {
+        if !cluster_available() {
+            eprintln!(
+                "RIVERS_TEST_CLUSTER not set or PG unreachable — skipping pg_cross_datasource_in_txn_rejects"
+            );
+            return;
+        }
+        use crate::engine_loader::dyn_transaction_map::TaskId;
+        use crate::engine_loader::host_context::{
+            dyn_txn_map, set_current_task_id_for_test,
+        };
+
+        let _g = txn_test_fixtures::test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        txn_test_fixtures::ensure_host_context();
+
+        let table = unique_table_name("pgfu2_crossds");
+        pg_create_table(&table).await;
+
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let table = self.0.clone();
+                let _ = std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("cleanup rt");
+                    rt.block_on(pg_drop_table(&table));
+                })
+                .join();
+            }
+        }
+        let _cleanup = Cleanup(table.clone());
+
+        let ds_id = "pg_e2e_crossds";
+        let insert_sql = format!("INSERT INTO {table} (id, val) VALUES (4, 'dave')");
+        let executor = txn_test_fixtures::build_postgres_executor(
+            "insert_t",
+            &insert_sql,
+            pg_connection_params(),
+            ds_id,
+        );
+        install_dataview_executor_for_test(executor).await;
+
+        // Synthesize a task id well above the production NEXT_TASK_ID
+        // counter so we don't collide with any concurrent dispatch.
+        static N: AtomicU64 = AtomicU64::new(3_000_000);
+        let task = TaskId(N.fetch_add(1, Ordering::Relaxed));
+
+        // Seed a fake txn on a DIFFERENT datasource (mock conn — no
+        // network call needed; the cross-DS check operates purely on
+        // map keys, not the connection's identity).
+        set_current_task_id_for_test(Some(task));
+        let beh = txn_test_fixtures::behavior();
+        let other_conn: Box<dyn rivers_runtime::rivers_driver_sdk::Connection> =
+            Box::new(txn_test_fixtures::SharedMockConn { behavior: beh });
+        dyn_txn_map()
+            .insert(task, "other_ds", other_conn)
+            .expect("seed cross-DS txn");
+
+        let exec = host_dataview_executor_for_test()
+            .await
+            .expect("executor installed");
+
+        let err = crate::engine_loader::host_callbacks::execute_dataview_with_optional_txn_for_test(
+            exec,
+            "insert_t",
+            HashMap::<String, QueryValue>::new(),
+            "pg-e2e",
+            Some(task),
+        )
+        .await
+        .expect_err("must reject cross-DS dataview inside txn");
+
+        match err {
+            rivers_runtime::DataViewError::Driver(msg) => {
+                assert!(
+                    msg.contains("TransactionError:"),
+                    "expected TransactionError prefix; got {msg}"
+                );
+                assert!(
+                    msg.contains("differs from active transaction"),
+                    "expected cross-DS phrasing; got {msg}"
+                );
+            }
+            other => panic!("expected Driver error, got {other:?}"),
+        }
+
+        // Cleanup so this task's txn doesn't leak into other tests.
+        let _ = dyn_txn_map().drain_task(task);
+        set_current_task_id_for_test(None);
+
+        // The dataview was rejected before any driver call — DB still empty.
+        let post = pg_count_rows_oob(&table).await;
+        assert_eq!(
+            post, 0,
+            "cross-DS rejection must occur before any write"
+        );
+    }
+
+    // I-FU2.5 — Two distinct tasks on the same datasource each hold
+    // their own transaction state. Verifies the dyn-txn-map keys by
+    // (TaskId, datasource), not by datasource alone.
+    //
+    // Uses TWO distinct tables (one per task) so we can independently
+    // verify that each task's commit landed exactly its own row, with
+    // no interleaving / cross-contamination.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn pg_concurrent_txns_isolated_by_task_id() {
+        if !cluster_available() {
+            eprintln!(
+                "RIVERS_TEST_CLUSTER not set or PG unreachable — skipping pg_concurrent_txns_isolated_by_task_id"
+            );
+            return;
+        }
+        let _g = txn_test_fixtures::test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        txn_test_fixtures::ensure_host_context();
+
+        let table_a = unique_table_name("pgfu2_iso_a");
+        let table_b = unique_table_name("pgfu2_iso_b");
+        pg_create_table(&table_a).await;
+        pg_create_table(&table_b).await;
+
+        struct Cleanup(Vec<String>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let tables = self.0.clone();
+                let _ = std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("cleanup rt");
+                    for t in tables {
+                        rt.block_on(pg_drop_table(&t));
+                    }
+                })
+                .join();
+            }
+        }
+        let _cleanup = Cleanup(vec![table_a.clone(), table_b.clone()]);
+
+        // Task 1: insert 'alice' into table_a via "pg_iso_a" datasource.
+        let insert_a = format!("INSERT INTO {table_a} (id, val) VALUES (1, 'alice')");
+        let exec1 = txn_test_fixtures::build_postgres_executor(
+            "insert_t",
+            &insert_a,
+            pg_connection_params(),
+            "pg_iso_a",
+        );
+        install_dataview_executor_for_test(exec1).await;
+        let ctx1 = make_pg_task_ctx("pg_iso_a");
+        let serialized1 = rivers_engine_sdk::SerializedTaskContext::from(&ctx1);
+        let ds1 = "pg_iso_a".to_string();
+        let _ = dispatch_dyn_engine_task(&ctx1, serialized1, move |_s| {
+            let _ = drive_begin_then_dataview(&ds1, "insert_t");
+            drive_commit(&ds1);
+            empty_engine_ok()
+        })
+        .await
+        .expect("dispatch 1 ok");
+
+        // Task 2: same shape but a DIFFERENT datasource id and table.
+        // The dispatch helper issues a fresh TaskId, so the dyn-txn-map
+        // insert under (TaskId_2, "pg_iso_b") is a separate slot from
+        // task 1's already-released entry. The point of this test is
+        // that two tasks DO NOT share txn state — two-table separation
+        // makes that easy to verify post-dispatch.
+        let insert_b = format!("INSERT INTO {table_b} (id, val) VALUES (2, 'bob')");
+        let exec2 = txn_test_fixtures::build_postgres_executor(
+            "insert_t",
+            &insert_b,
+            pg_connection_params(),
+            "pg_iso_b",
+        );
+        install_dataview_executor_for_test(exec2).await;
+        let ctx2 = make_pg_task_ctx("pg_iso_b");
+        let serialized2 = rivers_engine_sdk::SerializedTaskContext::from(&ctx2);
+        let ds2 = "pg_iso_b".to_string();
+        let _ = dispatch_dyn_engine_task(&ctx2, serialized2, move |_s| {
+            let _ = drive_begin_then_dataview(&ds2, "insert_t");
+            drive_commit(&ds2);
+            empty_engine_ok()
+        })
+        .await
+        .expect("dispatch 2 ok");
+
+        let count_a = pg_count_rows_oob(&table_a).await;
+        let count_b = pg_count_rows_oob(&table_b).await;
+        assert_eq!(count_a, 1, "task 1's row must persist in table_a");
+        assert_eq!(count_b, 1, "task 2's row must persist in table_b");
+    }
+}

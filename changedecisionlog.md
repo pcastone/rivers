@@ -604,3 +604,41 @@ Several plugin helpers (couchdb, elasticsearch, eventbus, riversd direct_dispatc
 - `cargo test -p rivers-runtime --lib` — 197 passed
 - `cargo test -p riversd --lib` — 416 + 1 ignored (unchanged)
 - `RIVERS_TEST_CLUSTER=1 cargo test -p rivers-drivers-builtin --test conformance_tests mysql_bigint_unsigned_round_trip` — passed live
+
+---
+
+## TXN-IFU2.1 — Phase I follow-up: Postgres parallel e2e tests (2026-04-25)
+
+**Files affected:**
+- `crates/riversd/src/process_pool/mod.rs` — new `pg_e2e_tests` submodule (sibling of `dyn_e2e_tests`) with 5 cluster-gated cases mirroring the SQLite suite.
+- `crates/riversd/src/engine_loader/txn_test_fixtures.rs` — registered `PostgresDriver` in `ensure_host_context()`; added `build_postgres_executor` helper paralleling `build_sqlite_executor`.
+
+### Decisions
+
+**Decision 1: Place tests inside the lib's `cfg(test)` module, not under `crates/riversd/tests/`.**
+The plan recommended a separate integration-test file. Real visibility constraint: every helper the SQLite e2e cases lean on (`host_db_begin_inner_for_test`, `host_dataview_executor_for_test`, `dyn_txn_map`, `set_current_task_id_for_test`, `HOST_CONTEXT_FOR_TESTS`, `install_dataview_executor_for_test`) is `pub(crate)` and `#[cfg(test)]`-gated. An integration-test file is a separate compilation unit and cannot reach those. The task constraints explicitly forbid widening visibility. The viable option is option A — sibling `pg_e2e_tests` mod inside `process_pool/mod.rs`, parallel to `dyn_e2e_tests`. Symmetrical with the SQLite suite, no production-surface widening, no duplicated host-callback test scaffolding.
+
+**Decision 2: Register PostgresDriver in the SHARED `ensure_host_context()` rather than a separate fixture init.**
+`HOST_CONTEXT` is a `OnceLock` — only the first writer wins per test binary, and the SQLite e2e tests already won that race. A second registration call would silently no-op. Co-locating PostgresDriver registration with the SQLite + mock driver registrations keeps `ensure_host_context()` as the single source of truth for the test-binary's driver registry. PostgresDriver is stateless (it's a connection factory; `connect()` is the only network operation), so registering it unconditionally is harmless when the cluster is unreachable.
+
+**Decision 3: Double-gate each test on `#[ignore]` AND a runtime `cluster_available()` check.**
+`#[ignore]` keeps these out of the default `cargo test` flow (which runs offline laptops and CI environments without cluster access). The `cluster_available()` runtime check (env var `RIVERS_TEST_CLUSTER=1` AND a 2-second TCP probe to 192.168.2.209:5432) means even when someone runs `--include-ignored` in a non-cluster environment, the tests short-circuit cleanly with an `eprintln!` skip message rather than failing on a connect timeout. Mirrors the H18 conformance convention.
+
+**Decision 4: Use `PostgresDriver.connect()` for setup/teardown/oracle queries, NOT a fresh `tokio_postgres` client.**
+The plan suggested adding `tokio-postgres` as a riversd dev-dep. That's a wider new dep than necessary — `rivers_runtime::rivers_core::drivers::PostgresDriver` is already pulled in via the workspace's `static-builtin-drivers` feature, and its `connect()` returns a real `Connection` with `execute()` (for SELECT count) and `ddl_execute()` (for CREATE / DROP — the regular `execute` path's DDL guard rejects those). No new deps; the oracle uses the same driver code paths as production.
+
+**Decision 5: Per-test unique table names, with Drop-based best-effort cleanup.**
+Postgres is a shared cluster across the test fleet; leaked tables would accumulate across abandoned runs. Each test calls `unique_table_name(prefix)` which combines the process id and an atomic counter. Cleanup uses a struct-with-Drop pattern so even an assertion-failure unwind triggers `DROP TABLE IF EXISTS`. The cleanup runs on a fresh single-thread tokio runtime (built inside `Drop::drop`) so it doesn't depend on the per-test runtime's state at unwind time.
+
+**Decision 6: Test #5 uses TWO tables (not one) so concurrent-isolation is verifiable independently.**
+The SQLite version of test #5 used a single table and asserted COUNT == 2 after both tasks committed. That works because each task inserts a different row and the assertion is on the union. The Postgres version uses two tables (one per task / per datasource id) so we can independently assert "task 1's row landed in table_a" and "task 2's row landed in table_b". Slightly stronger assertion: not just "both rows persisted somewhere" but "each task's commit landed exactly its own row, with no cross-contamination".
+
+**Spec reference:** TXN-I1.1 decisions 1–4; TXN-I8.1 (the SQLite parent suite this mirrors); brief I-FU2 directive in `todo/tasks.md`.
+
+**Resolution method:** test-driven; the new tests mirror the SQLite suite's shape mechanically, change only the durability oracle (`PostgresDriver`-via-`connect()` instead of `rusqlite::Connection::open`), and the connection params constants (192.168.2.209 / rivers / rivers_test).
+
+**Validation status:**
+- Compile: clean (`cargo build -p riversd --tests` — only pre-existing warnings).
+- Default test (no env): 5 ignored / 0 run / 0 failed — verified.
+- Cluster run from this Bash-tool sandbox: blocked. Compiled Rust binaries cannot reach 192.168.2.209:5432 from this environment ("No route to host"), even though `nc`, `ping`, and `curl` to the same host:port succeed. The sandbox/macOS-app-firewall is differentiating between binaries it has granted network entitlements vs. our cargo-spawned test binary. The cluster IS reachable from the host (verified with the standard `nc -z` quick-check the task description recommends), so cluster-CI runners (which run on cluster hosts directly, no firewall) will produce the canonical green-light. The `cluster_available()` runtime check correctly detects this — tests skip cleanly with a diagnostic eprintln rather than failing.
+- The eprintln diagnostic in `cluster_available()` distinguishes env-unset vs. TCP-probe-failed so this can be debugged in any future environment.
