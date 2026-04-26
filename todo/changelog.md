@@ -434,3 +434,11 @@ Plan correction: task 4.3 said "thread via closure capture (not thread-local)." 
 | File | Summary | Reference | Resolution |
 |------|---------|-----------|------------|
 | `todo/tasks.md` | Marked H16 (T2-4 capacity accounting) and H17 (T2-5 health-check lock) as `[x]` with file:line evidence after re-reading `crates/riversd/src/pool.rs` end-to-end | `docs/code_review.md` Tier-2 findings T2-4, T2-5; Phase D commit `2dfbb7b` (D1) | Both findings verified closed by Phase D's pool rewrite. No source change required. |
+
+# 2026-04-25 — `rivers-plugin-exec` per-crate review delivered
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `docs/review/rivers-plugin-exec.md` | Added the per-crate Tier 1/2/3 review for the exec driver plugin | RXE dispatch + `docs/review_inc/rivers-per-crate-focus-blocks.md` section 1 | Report includes 4 Tier 1 findings, 7 Tier 2 findings, 5 Tier 3 findings, repeated-pattern note, non-findings, coverage gaps, bug-density assessment, and recommended fix order. Source basis: full reads of all 13 source files (3375 LOC) + integration tests + driver-SDK trait file. Sweeps: panics (~140 hits, mostly tests), unsafe/FFI (3 unsafe blocks in executor + validator for `geteuid`/`getpwnam`), libc/setuid/setgroups (`setsid` in pre_exec, no `setgroups`), format! (~50 hits, all error messages with no shell construction), Command::new (1 hit, tokio + explicit argv). cargo check + cargo test --lib pass. |
+| `todo/tasks.md` | Marked RXE0.1–RXE2.3 as `[x]` with one-line completion notes | RXE dispatch | All 14 sub-tasks complete; review delivered as a single artifact at `docs/review/rivers-plugin-exec.md`. |
+| `changedecisionlog.md` | Logged RXE-1.1 covering single-crate scope, severity-tier definitions, T1-vs-T2 borderline calls, and combined fix-order rationale | RXE dispatch + AGENTS.md workflow rule 5 | Decisions traceable for CB drift detection. |

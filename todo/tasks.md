@@ -22,9 +22,7 @@
 
 ## Pending Tasks
 
-- [ ] **RXE0.1 — Read crate manifest and focus block.**
-  Read `crates/rivers-plugin-exec/Cargo.toml` and the `rivers-plugin-exec` block in `docs/review_inc/rivers-per-crate-focus-blocks.md`.
-  Validation: report grounding lists crate role, source files, dependencies, and high-risk review axes.
+- [x] **RXE0.1 — Read crate manifest and focus block.** Done 2026-04-25: read `Cargo.toml` (declares cdylib + rlib, depends on rivers-driver-sdk + tokio + sha2 + jsonschema + libc) and the section 1 focus block; report grounding section names crate role, source files, dependencies, and the 8 review axes.
 
 ## Phase A — Unblock boot & fail closed (P0-4, P0-1)
 
@@ -49,22 +47,13 @@
 - [x] **A2.4** 6 unit tests on `check_protected_views_have_session` in `bundle_loader::load`: rejects with no storage; rejects with storage but no session manager (forward-looking); allows when session manager present; allows public-only bundles; allows empty view set; rejects mixed bundles where one view is protected. All green. (Done 2026-04-24.)
 
 **Validate:** ✅ 6 unit tests + 2 integration tests green. Full `cargo test -p riversd --lib` = 345/345 + 1 ignored. Pre-existing failure in `cli_tests::version_string_contains_version` (hardcodes 0.50.1 vs current 0.55.0) flagged for separate cleanup; unrelated to Phase A.
-- [ ] **RXE0.2 — Run mechanical sweeps.**
-  Run review sweeps against `crates/rivers-plugin-exec/src`: panic paths, unsafe/FFI, discarded errors, lock usage, casts, format/query construction, unbounded collections, spawns, blocking calls, dead-code allowances, public API, and registration/bootstrap functions.
-  Validation: sweep output is inspected before findings are drafted; raw hits are not reported without source confirmation.
+- [x] **RXE0.2 — Run mechanical sweeps.** Done 2026-04-25: panics (~140 hits, all in test code; production has no `unwrap`/`expect`/`panic!`), unsafe/FFI (3 production unsafe blocks: `geteuid`, `getpwnam` in validator + executor, `kill -PGID`), no `let _ =` discards, no production `Mutex::`/`RwLock::` (concurrency uses `tokio::sync::Semaphore` Arc-shared), one cast `pid as i32` for the `kill` syscall, ~50 `format!` hits (all error messages, no shell construction), `Command::new` once via `tokio::process::Command`, plugin entry `_rivers_abi_version` + `_rivers_register_driver` gated on `plugin-exports`. No `dead_code` allows. Findings drafted only after full reads.
 
-- [ ] **RXE0.3 — Run compiler validation.**
-  Run `cargo check -p rivers-plugin-exec` and, if feasible without unrelated workspace breakage, `cargo test -p rivers-plugin-exec`.
-  Validation: report records exact commands and whether they passed or failed.
+- [x] **RXE0.3 — Run compiler validation.** Done 2026-04-25: `cargo check -p rivers-plugin-exec` clean, no warnings in this crate. `cargo test -p rivers-plugin-exec --lib` green: 93 passed / 0 failed / 2 ignored. The 2 ignored tests are `non_zero_exit_returns_error` and `empty_output_returns_error` (broken-pipe-on-Linux-CI per a tracked issue, unrelated to review).
 
-- [ ] **RXE1.1 — Read all production source files in full.**
-  Read every file under `crates/rivers-plugin-exec/src/` in full:
-  `lib.rs`, `schema.rs`, `template.rs`, `integrity.rs`, `executor.rs`, `config/{mod.rs,parser.rs,types.rs,validator.rs}`, and `connection/{mod.rs,driver.rs,exec_connection.rs,pipeline.rs}`.
-  Validation: no finding is based on grep alone.
+- [x] **RXE1.1 — Read all production source files in full.** Done 2026-04-25: read `lib.rs` (73), `schema.rs` (232), `template.rs` (209), `integrity.rs` (292), `executor.rs` (699), `config/{mod.rs,parser.rs,types.rs,validator.rs}` (11+354+199+401), and `connection/{mod.rs,driver.rs,exec_connection.rs,pipeline.rs}` (554+109+53+189). Every finding cites file:line.
 
-- [ ] **RXE1.2 — Check hash authorization and integrity modes.**
-  Trace configured command hash validation from parsing through startup validation and runtime execution.
-  Validation: explicitly cover TOCTOU risk, `each_time`, `startup_only`, `every:N`, counter behavior, symlink/file replacement behavior, and config reload implications if visible in this crate.
+- [x] **RXE1.2 — Check hash authorization and integrity modes.** Done 2026-04-25: traced `sha256` config field from `parser.rs:124` through validator (length/hex check at `validator.rs:108`) through `verify_at_startup` to `CommandIntegrity::verify`. Findings RXE-T1-1 (TOCTOU + symlink follow-through), RXE-T1-2 (`every:N` first-call gap, with the existing `every:3` test confirming the gap), RXE-T2-5 (concurrent verify race) document all integrity-mode implications.
 
 ## Phase B — Lock down V8 host capabilities (P0-2, P1-5, P1-8, P1-9)
 
@@ -740,33 +729,18 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 7. **H5, H12, H15** — schedule per quarter as hardening. (H16, H17 verified closed 2026-04-25 — both resolved by Phase D commit `2dfbb7b`; no source change required.)
 
 
-  Trace how user-controlled parameters become stdin, argv, env, working directory, and process command.
-  Validation: explicitly cover shell invocation, argument separation, template substitution, env inheritance/sanitization, stdout/stderr limits, and timeout behavior.
+- [x] **RXE1.3 — Check command invocation safety.** Done 2026-04-25: traced parameters into `stdin`/`args`/`env`/`cwd`/spawn. No shell invocation (verified: `Command::new` plus `cmd.args()`, no `sh -c`). Each placeholder produces exactly one argv slot via `template.rs`. `env_clear=true` default; warning when false. Stdin written as JSON bytes. `cwd = working_directory`. Stdout chunked-read with cap; **stderr single-read into 64 KB buffer (RXE-T2-1)**, **UTF-8 boundary slice can panic (RXE-T1-4)**, **stdout overflow check after extend (RXE-T2-2)**. Timeout fires SIGKILL at the process group. Schema-error formatting leaks the offending value (RXE-T2-4). working_directory parser default `/tmp` (RXE-T3-2) and validator does not check writability or symlink (RXE-T2-6).
 
-- [ ] **RXE1.4 — Check privilege drop and child lifecycle.**
-  Trace Unix-only isolation code and child cleanup.
-  Validation: explicitly cover `setgid`/`setuid` order, supplementary groups, process groups, timeout kill scope, zombie prevention, and shutdown/orphan behavior where source allows.
+- [x] **RXE1.4 — Check privilege drop and child lifecycle.** Done 2026-04-25: `pre_exec` calls `setsid` only, then std's `Command::uid/gid` apply uid/gid drop after. **`setgroups` is never called (RXE-T1-3)** — supplementary groups inherit. **No `umask`, no `RLIMIT_*`, no `sigprocmask` reset (RXE-T2-7)**. Process group: `setsid` makes child the PGID leader; SIGKILL via `kill(-pid)` reaches all descendants (verified by `timeout_kills_process` and `output_overflow_kills_process` tests). Zombie reaping handled by tokio. Shutdown/orphan: `kill_on_drop` set; if `riversd` SIGTERMs, tokio task drop fires SIGKILL — best-effort, recorded in coverage gaps. `nix_is_root()` called per-spawn (RXE-T3-3).
 
-- [ ] **RXE1.5 — Check concurrency and resource bounds.**
-  Trace global/per-command semaphores and any buffers/collections.
-  Validation: identify whether permits are acquired in a consistent order, released on all paths, and whether stdout/stderr/input/output sizes are bounded.
+- [x] **RXE1.5 — Check concurrency and resource bounds.** Done 2026-04-25: global `try_acquire` first (`pipeline.rs:91`), per-command second (`pipeline.rs:106`) — consistent order, no deadlock since both are non-blocking. RAII permits release on all paths including panic. Concurrency tests pass. Bounds: stdout has chunked-loop cap with off-by-up-to-8 KB overshoot (RXE-T2-2), stderr fixed 64 KB single-read (RXE-T2-1), stdin unbounded by params object size (acceptable since params come from validated handlers).
 
-- [ ] **RXE1.6 — Check driver-sdk contract compliance.**
-  Compare `ExecDriver` / `ExecConnection` behavior with `rivers-driver-sdk` expectations: `prepare`, `execute`, DDL behavior, errors, operation names, query values, connection lifecycle, transaction support, and plugin exports.
-  Validation: every contract issue cites both the exec implementation and the SDK contract source.
+- [x] **RXE1.6 — Check driver-sdk contract compliance.** Done 2026-04-25: read `crates/rivers-driver-sdk/src/traits.rs` in full. `Connection::execute` correctly calls `check_admin_guard` (`exec_connection.rs:33`) and rejects everything but `query`. `ddl_execute` left at SDK default (Unsupported) — correct for exec. `admin_operations` returns `&[]` via SDK default — correct, exec uses one operation name. Transactions / `prepare` / `has_prepared` / `execute_prepared` all use SDK defaults — correct. ABI: `_rivers_abi_version` + `_rivers_register_driver` exported under `plugin-exports`. **Static-build registration helper missing (RXE-T2-3)** — this is the only contract-adjacent gap.
 
-- [ ] **RXE1.7 — Read integration tests for coverage context.**
-  Read `crates/rivers-plugin-exec/tests/integration_test.rs` to separate tested invariants from untested risk.
-  Validation: report observations note major high-risk behavior covered or missing from tests.
+- [x] **RXE1.7 — Read integration tests for coverage context.** Done 2026-04-25: read `tests/integration_test.rs` (379 lines, 8 tests). Coverage: stdin round-trip, args interpolation, integrity correct/tampered, timeout, non-zero exit, unknown command, concurrency. **Not covered**: symlink swap, `every:N` first call, `setgroups`, RLIMIT/umask/sigmask, multi-byte stderr panic, stderr deadlock, concurrent verify race, working_dir hardening, shutdown/orphan with in-flight children. Documented in the report's "Coverage Notes" section.
 
-- [ ] **RXE2.1 — Write per-crate review report.**
-  Create `docs/review/rivers-plugin-exec.md` using the established finding format: one-line summary, Tier 1/2/3 findings, evidence snippets, impact, fix direction, and non-finding observations.
-  Validation: report only includes confirmed issues or explicitly labeled non-findings.
+- [x] **RXE2.1 — Write per-crate review report.** Done 2026-04-25: `docs/review/rivers-plugin-exec.md` written in the established format (matches `rivers-keystore-engine.md` and `rivers-lockbox-engine.md`). 4 Tier 1, 7 Tier 2, 5 Tier 3, plus non-findings, repeated-pattern note, coverage notes, bug density assessment, and ordered recommended-fix list. Every finding cites file:line; every non-finding explains what was investigated.
 
-- [ ] **RXE2.2 — Update logs.**
-  Record the single-crate scope decision and final report delivery in `changedecisionlog.md`; record file changes in `todo/changelog.md`.
-  Validation: logs name `docs/review/rivers-plugin-exec.md` and the exact source basis.
+- [x] **RXE2.2 — Update logs.** Done 2026-04-25: appended `RXE-1.1` block to `changedecisionlog.md` covering single-crate scope, severity-tier definitions, T1-vs-T2 borderline calls (RXE-T1-4 and RXE-T1-2), `getpwnam` reentrancy non-finding rationale, and the combined-fix rationale. Appended row to `todo/changelog.md` with file basis (3375 LOC source + 379-line integration test + 645-line SDK trait file) and validation results.
 
-- [ ] **RXE2.3 — Mark tasks complete and verify whitespace.**
-  Mark completed RXE tasks with high-level notes, then run `git diff --check -- docs/review/rivers-plugin-exec.md todo/tasks.md todo/gutter.md changedecisionlog.md todo/changelog.md`.
-  Validation: command passes.
+- [x] **RXE2.3 — Mark tasks complete and verify whitespace.** Done 2026-04-25: all 14 RXE sub-tasks flipped to `[x]` with one-line completion notes. `git diff --check` clean.
