@@ -1,0 +1,66 @@
+name: Version Check
+
+# Enforces the Rivers versioning policy: every PR targeting `main` must
+# bump the workspace version. The minimum bump is a fresh build stamp
+# (`+HHMMDDMMYY` UTC). Code-fix PRs bump PATCH; major-change PRs bump
+# MINOR. See CLAUDE.md "Versioning" for the policy.
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      # Pure-asset changes that ship no code or config are exempt.
+      # Most PRs DON'T match this list and must bump.
+      - '.gitignore'
+      - 'LICENSE'
+
+jobs:
+  version-bumped:
+    name: Workspace version bumped
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need the base ref to read its Cargo.toml for comparison.
+          fetch-depth: 0
+
+      - name: Verify version bumped vs. base
+        env:
+          # Pass github.base_ref through env to avoid expression injection
+          # in the shell. base_ref is a branch name and unlikely to be
+          # malicious, but env-var passthrough is the safer pattern.
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          BASE_VERSION=$(git show "origin/${BASE_REF}":Cargo.toml \
+            | grep -E '^version = "' | head -1 \
+            | sed 's/.*= *"\(.*\)".*/\1/')
+          HEAD_VERSION=$(grep -E '^version = "' Cargo.toml | head -1 \
+            | sed 's/.*= *"\(.*\)".*/\1/')
+
+          echo "Base (${BASE_REF}): $BASE_VERSION"
+          echo "Head:                $HEAD_VERSION"
+
+          if [[ "$BASE_VERSION" == "$HEAD_VERSION" ]]; then
+            echo ""
+            echo "ERROR: Workspace version is unchanged."
+            echo ""
+            echo "Every PR must bump the workspace version per CLAUDE.md."
+            echo "Run one of:"
+            echo "    just bump            # refresh build stamp only"
+            echo "    just bump-patch      # code fix"
+            echo "    just bump-minor      # major change"
+            echo "Then commit Cargo.toml and re-push."
+            exit 1
+          fi
+
+          # Sanity check: head version must contain a +build segment.
+          if [[ "$HEAD_VERSION" != *"+"* ]]; then
+            echo ""
+            echo "ERROR: Head version '$HEAD_VERSION' has no +build stamp."
+            echo "Run: just bump"
+            exit 1
+          fi
+
+          echo ""
+          echo "OK: version bumped ($BASE_VERSION -> $HEAD_VERSION)."

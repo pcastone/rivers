@@ -44,6 +44,58 @@ The Rust runtime is implemented across a workspace of crates under `crates/`.
 - Collapse complex things down to simple
 - Keep it simple
 - always make sure canary is working no failures it is our production. 
+
+## Versioning
+
+**Format:** `MAJOR.MINOR.PATCH+HHMMDDMMYY` — standard SemVer 2.0 with a UTC
+build-metadata stamp. Cargo accepts `+`-prefixed build metadata; some
+operator-facing surfaces (riversd banner, `riversctl status`) display the
+stamp with a `.` separator instead, but the canonical form in `Cargo.toml`
+uses `+`.
+
+**Build stamp components** (10 digits, UTC, all zero-padded 2-digit):
+
+| Position | Field |
+|----------|-------|
+| 1–2      | hour (00–23) |
+| 3–4      | minute (00–59) |
+| 5–6      | day (01–31) |
+| 7–8      | month (01–12) |
+| 9–10     | year (last two digits) |
+
+Example: a PR cut at 23:25 UTC on 26 April 2026 → `2325260426`. Workspace
+`Cargo.toml` records `version = "0.55.0+2325260426"`.
+
+**Bump rules — every PR must bump the workspace version:**
+
+| Change kind | What bumps | Recipe |
+|-------------|-----------|--------|
+| Any PR (default — docs, config, dependency churn, build-system tweaks) | `+build` only | `just bump` |
+| Code fix (bug fix in shipped code, tightening, refactor that changes runtime behavior) | `PATCH` and `+build` | `just bump-patch` |
+| Major change (new feature, breaking config change, public API surface) | `MINOR` and `+build`; `PATCH` resets to 0 | `just bump-minor` |
+
+The bump runs from the workspace root (`./scripts/bump-version.sh`). The
+script computes the UTC stamp, edits the workspace `[package]` version
+in place, and prints the old → new transition.
+
+**CI enforcement:** `.github/workflows/version-check.yml` runs on every
+PR targeting `main` and fails if `Cargo.toml`'s workspace version is
+unchanged versus the base branch, or if the version has no `+build`
+segment. Path-ignore list is intentionally tiny (`.gitignore`, `LICENSE`)
+— almost every PR must bump.
+
+**No squash-collapse:** the squash-merge commit on `main` carries the
+final bumped version; intermediate commits within a PR may bump build
+stamps multiple times (e.g. via rebase or force-push) and that's fine —
+only the final state matters at merge.
+
+**Bump cadence guidance:**
+
+- A PR full of unrelated micro-fixes is still one PR — one `bump-patch`.
+- A PR that only renames a private symbol or refactors comments is a `just bump` (build-only).
+- A PR that adds a new datasource type, changes the bundle layout, or alters a handler-visible API is a `bump-minor`.
+- When in doubt, prefer the lower bump. CI enforces *some* bump; reviewers can ask for a higher bump if the change warrants it.
+
 ## GOAL
 
 pushing out feature

@@ -16,6 +16,25 @@ version := `grep '^version' Cargo.toml | head -1 | sed 's/version = "//;s/"//'`
 arch := `uname -m`
 os := if os() == "macos" { "darwin" } else { os() }
 
+# ── Versioning ───────────────────────────────────────────────────
+#
+# Format: MAJOR.MINOR.PATCH+HHMMDDMMYY (UTC build stamp).
+# Policy: every PR must bump the workspace version. Most PRs only refresh
+# the +build stamp (`just bump`); code-fix PRs use `just bump-patch`;
+# major-change PRs use `just bump-minor`. See CLAUDE.md "Versioning".
+
+# Refresh the +build stamp only (every PR — the most common bump).
+bump:
+    @./scripts/bump-version.sh build
+
+# Code-fix PR: bump PATCH (third component) and refresh the build stamp.
+bump-patch:
+    @./scripts/bump-version.sh patch
+
+# Major-change PR: bump MINOR (second component), reset PATCH to 0, refresh the build stamp.
+bump-minor:
+    @./scripts/bump-version.sh minor
+
 # ── Build ────────────────────────────────────────────────────────
 
 # Build monolithic static binaries for the host (~80MB riversd)
