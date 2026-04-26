@@ -642,3 +642,40 @@ The SQLite version of test #5 used a single table and asserted COUNT == 2 after 
 - Default test (no env): 5 ignored / 0 run / 0 failed — verified.
 - Cluster run from this Bash-tool sandbox: blocked. Compiled Rust binaries cannot reach 192.168.2.209:5432 from this environment ("No route to host"), even though `nc`, `ping`, and `curl` to the same host:port succeed. The sandbox/macOS-app-firewall is differentiating between binaries it has granted network entitlements vs. our cargo-spawned test binary. The cluster IS reachable from the host (verified with the standard `nc -z` quick-check the task description recommends), so cluster-CI runners (which run on cluster hosts directly, no firewall) will produce the canonical green-light. The `cluster_available()` runtime check correctly detects this — tests skip cleanly with a diagnostic eprintln rather than failing.
 - The eprintln diagnostic in `cluster_available()` distinguishes env-unset vs. TCP-probe-failed so this can be debugged in any future environment.
+
+---
+
+## RXE-1.1 — `rivers-plugin-exec` per-crate review delivered (2026-04-25)
+
+**Files affected:**
+- `docs/review/rivers-plugin-exec.md` (new) — per-crate Tier 1/2/3 review report.
+- `todo/tasks.md` — RXE0.1 through RXE2.3 marked `[x]`.
+- `todo/changelog.md` — appended row for the report delivery.
+
+### Decisions
+
+**Decision 1: Single-crate scope, no cross-crate consolidation.**
+Per the user's RXE dispatch and the focus block in `docs/review_inc/rivers-per-crate-focus-blocks.md` section 1, this review covers `rivers-plugin-exec` only. Findings that hint at cross-crate wiring (e.g. RXE-T2-3 static-build registration, RXE-T2-4 schema-error leakage to `riversd`'s error formatter) are flagged with the in-crate evidence and the cross-crate question is named explicitly as out-of-scope. Consolidation is left for a separate session.
+
+**Decision 2: Severity tiers match the prior two reviews exactly.**
+- T1 = production-blocker / security failure / data corruption. Used here for: TOCTOU/symlink defeating pinning (RXE-T1-1), `every:N` first-call gap (RXE-T1-2), `setgroups` missing in privilege drop (RXE-T1-3), UTF-8 boundary panic on the failure path (RXE-T1-4).
+- T2 = correctness or contract violation. Used for: stderr deadlock (RXE-T2-1), stdout overflow boundary (RXE-T2-2), static-build registration (RXE-T2-3), schema-error value leakage (RXE-T2-4), concurrent verify race (RXE-T2-5), working_directory hardening (RXE-T2-6), rlimit/umask/sigmask (RXE-T2-7).
+- T3 = hardening / code quality. Used for: schema-error format (RXE-T3-1), parser default `/tmp` (RXE-T3-2), per-spawn `geteuid` (RXE-T3-3), log-args policy (RXE-T3-4), `Debug`/`Clone` non-secret derive note (RXE-T3-5).
+
+**Decision 3: Borderline T1-vs-T2 calls.**
+Two findings could plausibly sit either way:
+- RXE-T1-4 (UTF-8 boundary panic): classified T1 because it converts a *normal failure path* into a worker-thread panic. The data path that triggers it is operator-uncontrollable (any UTF-8 stderr longer than ~1 KB). Panics in the only-sandbox-in-the-runtime crate is a production-blocker per Tier 1's "security failure / data corruption" bar — a panic on the failure path is data-corruption-adjacent because the failed-state observability collapses.
+- RXE-T1-2 (`every:N` first-call gap): classified T1 because it materially weakens the documented runtime tamper-detection window. Could have been T2 ("contract violation") since the docs don't *explicitly* promise first-call coverage, but the spec text (`integrity.rs:137`) advertises "tamper detection window applies" without quantification, and `every:1` is the only mode that does the right thing. Alongside RXE-T1-1, the combined effect is a structural authorization gap, not a tightening opportunity.
+
+**Decision 4: RXE-T2-3 (static-build registration) included despite being a wiring concern.**
+The crate's `Cargo.toml` declares `rlib` as a crate type but `lib.rs` only exports the registration ABI under `#[cfg(feature = "plugin-exports")]`. There is no `pub fn register(&mut DriverFactory)` helper for the rlib path. This is a *bug-class-adjacent* finding — not a defect in the crate's spec compliance, but a fragility that intersects with this being the highest-risk plugin. Included as T2 because it's actionable in this crate alone.
+
+**Decision 5: `getpwnam` reentrancy is recorded as a non-finding.**
+Sweep showed `libc::getpwnam` used at validator and executor. Per POSIX, `getpwnam` is not thread-safe; `getpwnam_r` is. In this crate's call patterns (validator runs once at connect, executor runs once per spawn), the static buffer is unlikely to be contested. Recorded in non-findings so a future reviewer doesn't re-investigate; flagged as a known C-API gotcha that does not rise to a finding given the call patterns.
+
+**Decision 6: TOCTOU + concurrent-verify race + `every:N` first-call rolled into a single recommended fix.**
+The fix order in section "Recommended Fix Order" combines RXE-T1-1, RXE-T2-5, and RXE-T1-2 into one structural refactor (`PinnedExecutable` type owning `(File, [u8; 32], PathBuf)`). Doing them piecemeal would touch the same code paths three times.
+
+**Spec reference:** `docs/review_inc/rivers-per-crate-focus-blocks.md` section 1 (rivers-plugin-exec focus axes); `docs/review/rivers-keystore-engine.md` and `docs/review/rivers-lockbox-engine.md` (format template).
+
+**Resolution method:** source-grounded read of every production source file (13 files, 3375 LOC) plus `tests/integration_test.rs` (379 lines) plus `crates/rivers-driver-sdk/src/traits.rs` (645 lines) plus the focus block. Mechanical sweeps run before findings drafted (panics, unsafe/FFI, casts, format!, libc/setuid/setgroups, env_clear, plugin entry points). `cargo check -p rivers-plugin-exec` clean. `cargo test -p rivers-plugin-exec --lib` green: 93 passed / 0 failed / 2 ignored. No code modified — read-only audit.
