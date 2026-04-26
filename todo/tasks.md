@@ -476,13 +476,140 @@ These are not separate phases — they are the verification bar for the work abo
   Mirror the H6 fix on the dynamic-engine path. Use the same shared client builder so static and dynamic engines have identical outbound timeout policy.
   Validation: Same pattern as H6, exercised through the wasm engine path.
 
-- [ ] **H8 — riversd T2-8: Transaction host callbacks are stubs.**
-  **File:** `crates/riversd/src/engine_loader/host_callbacks.rs:920–922` (transaction begin/commit/rollback).
-  Stubs return `{"ok": true}` without doing any work. Handler code that calls `ctx.transaction(...)` believes a transaction succeeded when nothing happened.
-  Validation:
-  - Decision needed: implement (route through `ConnectionPool` checkout + driver `begin/commit/rollback`) or remove and throw `Error("transaction host callback not yet implemented")`. Log decision in `changedecisionlog.md`.
-  - Stubs that silently lie are the worst option — pick one direction, not the current state.
-  - If implementing: integration test on faker datasource (or postgres against 192.168.2.209) that begin → write → rollback leaves no row; begin → write → commit persists.
+- [~] **H8 — riversd T2-8: Transaction host callbacks are stubs (dynamic-engine path).**
+  **File:** `crates/riversd/src/engine_loader/host_callbacks.rs:887-1020` (`host_db_begin`, `host_db_commit`, `host_db_rollback`).
+  **Scope clarified 2026-04-25:** the V8 path is **already fully implemented** (`process_pool/v8_engine/context.rs::ctx_transaction_callback` ~line 898 with `TASK_TRANSACTION` map, real begin/commit/rollback semantics, timeout handling per H2, and a `TASK_COMMIT_FAILED` financial-correctness upgrade). The stubs are limited to the dynamic-engine cdylib host callbacks — comments explicitly say `TODO: Wire to TransactionMap in Task 8`.
+  **Decision (2026-04-25):** implement properly — mirror the V8 semantics on the cdylib side, re-using `Connection::begin_transaction/commit_transaction/rollback_transaction` (which are already on the trait at `crates/rivers-driver-sdk/src/traits.rs:517-535`) and `DataViewExecutor::execute(..., txn_conn: Some(...))` (already wired at `crates/rivers-runtime/src/dataview_engine.rs:759-783`).
+
+  Sub-tasks **I1–I9** below.
+
+### Phase I — Dynamic-engine transactions (H8 implementation)
+
+> **Source:** Decision under H8 (2026-04-25) to implement the dyn-engine transaction path properly rather than throw `not implemented`. Mirrors the V8 implementation at `process_pool/v8_engine/context.rs::ctx_transaction_callback`. **Goal:** every WASM/cdylib task can call `Rivers.db.begin/commit/rollback` and `Rivers.db.execute` inside a transaction with the same correctness guarantees as the V8 path.
+>
+> **Key existing scaffolding** (verified 2026-04-25):
+> - `Connection::begin_transaction/commit_transaction/rollback_transaction` exist on the driver trait (`rivers-driver-sdk/src/traits.rs:517-535`) with default-error impls.
+> - `Connection::execute_batch("BEGIN" | "COMMIT" | "ROLLBACK")` already implemented for postgres, mysql, sqlite (`rivers-drivers-builtin/src/{postgres,mysql,sqlite}.rs`).
+> - `DataViewExecutor::execute(..., txn_conn: Option<&mut Box<dyn Connection>>)` already supports the transactional path with cross-datasource rejection.
+> - `HOST_CALLBACK_TIMEOUT_MS = 30_000` constant from H2 — apply the same budget to dyn-engine commit/rollback.
+> - `TaskError::TransactionCommitFailed` already exists for the financial-correctness upgrade.
+
+- [ ] **I1 — Audit + design.**
+  Read these in full and decide three things before any code:
+  - V8 path: `crates/riversd/src/process_pool/v8_engine/context.rs:895-1100` (the entire `ctx_transaction_callback` plus the `TASK_TRANSACTION` thread-local definition + `TxnMap` type wherever it lives).
+  - Dyn-engine stubs: `crates/riversd/src/engine_loader/host_callbacks.rs:887-1020` (`host_db_begin`, `host_db_commit`, `host_db_rollback`).
+  - `host_db_execute` (DataView dispatch on the cdylib path) — find it, understand how it currently looks up `DataViewExecutor` and whether/how it could pass a `txn_conn`.
+  Decisions:
+  1. **Scope key:** what identifies "the current task" on the cdylib side? V8 uses a thread-local because tasks run on the V8 worker thread end-to-end. Cdylib host callbacks are invoked from engine threads that may not be 1:1 with task identity. Likely answer: include `task_id` in the input JSON for every `host_db_*` call and key the map by `(task_id, datasource)`. Confirm by reading what fields `host_db_*` already accept (most callbacks already take `task_id` via `read_input`).
+  2. **Map storage:** parallel `OnceLock<Mutex<HashMap<(TaskId, String), Box<dyn Connection>>>>` next to `HOST_CONTEXT`, OR re-use V8's `TASK_TRANSACTION` (no — it's a thread-local on V8's worker; cdylib threads can't see it).
+     Pick parallel map; name it `DYN_TXN_MAP`.
+  3. **Auto-rollback hook:** how does the cdylib task lifecycle signal "task done — clean up any leftover txn"? Likely the engine wrapper that dispatches a wasm/dylib task already has a finally-style block. Find it and plan to call `dyn_txn_map.rollback_all_for_task(task_id)` there.
+  Output: a 1-page decision note appended to `changedecisionlog.md` as `### TXN-I1.1 — Dyn-engine transaction map design`.
+
+- [ ] **I2 — Define `DynTransactionMap` type + module.**
+  **Files:** new `crates/riversd/src/engine_loader/transaction_map.rs`; modify `crates/riversd/src/engine_loader/mod.rs` to declare/re-export.
+  Type sketch (adapt to actual types and async-trait import):
+  ```rust
+  pub(crate) struct DynTransactionMap {
+      inner: tokio::sync::Mutex<HashMap<(TaskId, String), Box<dyn Connection>>>,
+  }
+  impl DynTransactionMap {
+      pub fn new() -> Self { ... }
+      pub async fn begin(
+          &self, task_id: TaskId, datasource: &str, conn: Box<dyn Connection>,
+      ) -> Result<(), DriverError>;          // errors if (task_id, ds) already exists
+      pub async fn take(
+          &self, task_id: TaskId, datasource: &str,
+      ) -> Option<Box<dyn Connection>>;     // remove + return
+      pub async fn with_conn_mut<F, R>(
+          &self, task_id: TaskId, datasource: &str, f: F,
+      ) -> Option<R>
+      where
+          F: FnOnce(&mut Box<dyn Connection>) -> R;
+      pub async fn rollback_all_for_task(&self, task_id: TaskId);
+  }
+  ```
+  Plus a single `OnceLock<DynTransactionMap>` accessor in `engine_loader::host_context` (or wherever `HOST_CONTEXT` lives). Pattern after the existing `OnceLock` accessors added in H1.
+  Tests: unit-test that `begin` rejects duplicate `(task_id, ds)`, `take` is one-shot, `rollback_all_for_task` drains exactly that task's entries.
+
+- [ ] **I3 — Implement `host_db_begin`.**
+  **File:** `crates/riversd/src/engine_loader/host_callbacks.rs` (replace the stub at ~line 902-928).
+  Steps the implementation should perform, in order:
+  1. Read input JSON; require `task_id` and `datasource` fields. Return `-3` with `{"error": "missing field"}` on missing.
+  2. Look up the `PoolManagerHandle` from `HOST_CONTEXT`. Acquire a connection: `let conn = pool.acquire(&datasource).await?` — use the same trait the V8 path uses; expose via a getter on `HOST_CONTEXT` if not already exposed. If `acquire` returns `Ok(None)` (broker datasource), return error JSON.
+  3. Call `conn.begin_transaction().await`. If it errors, drop the conn (PoolGuard returns to pool naturally) and return error JSON.
+  4. Insert into `DYN_TXN_MAP::begin(task_id, &datasource, conn)`. If insert errors (already exists), call `conn.rollback_transaction().await` and return error JSON — never silently overwrite.
+  5. Return `{"ok": true, "datasource": datasource}` on success.
+  Test: integration test that begins, then asserts `DYN_TXN_MAP` contains the entry; teardown via `rollback`.
+
+- [ ] **I4 — Implement `host_db_commit`.**
+  **File:** same.
+  Mirror the V8 commit semantics:
+  1. Read `task_id` + `datasource`; resolve to map key.
+  2. `let conn = DYN_TXN_MAP::take(task_id, &datasource).await` — if `None`, return error JSON `{"error": "no active transaction for datasource"}`.
+  3. `tokio::time::timeout(HOST_CALLBACK_TIMEOUT_MS, conn.commit_transaction()).await` — three outcomes:
+     - `Ok(Ok(()))`: success → `{"ok": true}`. Conn drops back to pool via PoolGuard.
+     - `Ok(Err(e))`: commit failure. Set `TASK_COMMIT_FAILED` (or its dyn-engine equivalent — find or add one). Return error JSON `{"error": "TransactionError: commit failed: <msg>", "fatal": true}`.
+     - `Err(_)` (timeout): same financial-correctness upgrade. Return `{"error": "TransactionError: commit timed out after 30000ms", "fatal": true}`. Connection abandoned (no rollback attempted — same conservative policy as V8).
+  Test: integration that commits, verifies persistence on a real backend (postgres if available).
+
+- [ ] **I5 — Implement `host_db_rollback`.**
+  **File:** same.
+  1. Read `task_id` + `datasource`.
+  2. `let conn = DYN_TXN_MAP::take(task_id, &datasource).await` — if `None`, return success (idempotent: rolling back nothing is a no-op).
+  3. `tokio::time::timeout(HOST_CALLBACK_TIMEOUT_MS, conn.rollback_transaction()).await` with timeout/error logged at `warn` (rollback failures don't trip `TASK_COMMIT_FAILED` — the writes were never committed). Return `{"ok": true}` even on rollback errors (so the caller's retry/cleanup logic isn't blocked) but include `"warning"` field with the message.
+
+- [ ] **I6 — Wire `host_db_execute` (DataView) to thread `txn_conn`.**
+  **File:** the cdylib DataView host callback (find via `grep -n "host_db_execute\|host_dataview\|fn host_db_query" crates/riversd/src/engine_loader/host_callbacks.rs`).
+  After resolving the dataview's datasource, check `DYN_TXN_MAP` for an active `(task_id, datasource)` entry:
+  ```rust
+  let result = DYN_TXN_MAP.with_conn_mut(task_id, &datasource, |conn| {
+      executor.execute(name, params, method, trace_id, Some(conn)).await
+  }).await
+  .unwrap_or_else(|| {
+      // No txn for this datasource — normal pool-acquire path
+      executor.execute(name, params, method, trace_id, None).await
+  });
+  ```
+  (The `with_conn_mut` async closure may need a small dance because Rust async closures aren't first-class — use a manual pattern: `take`, run, re-insert, OR add an `apply_async` method to `DynTransactionMap` that holds the mutex during the async call. Mind that holding a `tokio::Mutex` across an .await on a different conn is fine; just don't let the `txn_conn` operation block forever.)
+  Cross-datasource enforcement: `DataViewExecutor::execute` already rejects when the dataview's datasource differs from the open transaction's datasource (via `datasource_for`) — verify this still triggers.
+  Test: integration test that issues a `dataview("write_x")` on datasource A inside a transaction on A → write executes on the txn conn (verify with a second non-txn dataview that doesn't see the write until commit).
+
+- [ ] **I7 — Auto-rollback on cdylib task end.**
+  **File:** the dispatch wrapper that runs a cdylib/wasm task end-to-end. Find via `grep -n "spawn.*engine_run\|dispatch_task\|engine_loader::run_task" crates/riversd/src --include="*.rs"`.
+  After the task entry-point returns (success OR failure), call `DYN_TXN_MAP.rollback_all_for_task(task_id).await`. This guarantees no leaked transactions if a handler panics, returns an error, or calls `begin` without `commit`.
+  Test: cdylib task that calls `begin` then panics → next `acquire` on the same datasource succeeds (no leaked checkout).
+
+- [ ] **I8 — End-to-end tests.**
+  **File:** new `crates/riversd/tests/dyn_engine_transaction_tests.rs` (or extend an existing wasm/cdylib test file).
+  Required cases:
+  1. **Commit persists:** wasm task begins, writes via `Rivers.db.execute`, commits. Outside the task, a fresh dataview call sees the row.
+  2. **Rollback discards:** wasm task begins, writes, rolls back. Outside, the row is absent.
+  3. **Auto-rollback on task error:** wasm task begins, writes, returns error. Outside, the row is absent (auto-rollback fired).
+  4. **Cross-datasource rejection:** transaction open on `ds-a`, dataview call on `ds-b` → JS error.
+  5. **Concurrent transactions don't share state:** two tasks each open a transaction on the same datasource; their writes are isolated until commit.
+  6. **Commit timeout upgrades the error:** mock driver whose `commit_transaction` sleeps past 30s → caller sees `TransactionCommitFailed`-style error.
+  Use the postgres test cluster at `192.168.2.209` for cases 1-5 if available; otherwise skip those gated on infra (per the canary-bundle pattern).
+
+- [ ] **I9 — Update spec + remove all `TODO: Wire to TransactionMap in Task 8` comments.**
+  **Files:** `docs/arch/rivers-data-layer-spec.md` (add a §"Dynamic-engine transactions" subsection mirroring the V8 description), `docs/arch/rivers-driver-spec.md` (note that `begin/commit/rollback_transaction` are now exercised by both engines), and the three host callbacks (delete the TODO comments now that they're implemented).
+  Update `docs/code_review.md` T2-8 with `Resolved YYYY-MM-DD by <commit-sha>` per H-X.1.
+
+### Sequencing for Phase I
+
+1. **I1** (audit + decision) — must come first; outputs the design note.
+2. **I2** (DynTransactionMap) — pure infrastructure, no behavior change.
+3. **I3 → I4 → I5** — implement begin/commit/rollback in order; each is testable in isolation.
+4. **I6** — wire DataView through the txn map (depends on I2-I5).
+5. **I7** — auto-rollback hook (depends on I2).
+6. **I8** — end-to-end tests (depends on everything above).
+7. **I9** — docs cleanup at the end.
+
+### Cross-cutting
+
+- [ ] **I-X.1** — annotate `docs/code_review.md` T2-8 with resolution sha after I8.
+- [ ] **I-X.2** — log a decision-log entry for every non-obvious choice (auto-rollback semantics, timeout-on-rollback policy, map-key shape).
+- [ ] **I-X.3** — re-run the H Tier 1 + Tier 2 regression suites after I lands; make sure the V8 transaction path is still untouched.
 
 - [ ] **H9 — riversd T2-9: Engine log callback uses `std::str::from_utf8_unchecked`.**
   **File:** `crates/riversd/src/engine_loader/host_callbacks.rs:497`.
