@@ -4,6 +4,40 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 
 ---
 
+## 2026-04-27 — H3/H9/H13/H14: unsafe/FFI hardening
+
+### H3: ABI probe catch_unwind — already done, confirmed in-place
+**File:** `crates/rivers-core/src/driver_factory.rs`
+**Decision:** Confirmed `call_ffi_with_panic_containment` wraps the ABI probe. No source change needed.
+**Spec ref:** H3 / T1-1.
+**Resolution:** Verified by reading lines 298–355. `AssertUnwindSafe` is sound for a closure capturing only a raw `fn()` pointer with no shared mutable state.
+
+### H9: from_utf8_unchecked removal — already done, confirmed in-place
+**File:** `crates/riversd/src/engine_loader/host_callbacks.rs`
+**Decision:** Confirmed no `from_utf8_unchecked` in the file; `String::from_utf8_lossy` is used at all relevant sites.
+**Spec ref:** H9 / T2-9.
+**Resolution:** grep confirmed absence.
+
+### H13: HostCallbacks Copy derive — already done, confirmed in-place
+**File:** `crates/rivers-engine-sdk/src/lib.rs`, `crates/rivers-engine-v8/src/lib.rs`
+**Decision:** `#[derive(Copy, Clone)]` on `HostCallbacks` confirmed at line 207. V8 lib uses `*ptr` deref not `ptr::read`. No source change needed.
+**Spec ref:** H13 / T2-1.
+**Resolution:** Verified by reading both files.
+
+### H14: checked_offset helper — already done, confirmed in-place
+**File:** `crates/rivers-engine-wasm/src/lib.rs`
+**Decision:** `checked_offset(i32) -> Option<usize>` helper at line 312 uses `usize::try_from`. All three log linker closures go through `wasm_log_helper` which calls `checked_offset` for both ptr and len.
+**Spec ref:** H14 / T2-1.
+**Resolution:** Verified by reading lines 304–340 and confirming unit tests.
+
+### SQLite test param style: $param not :param
+**File:** `crates/rivers-core/tests/drivers_tests.rs`, `crates/rivers-core/tests/sqlite_live_test.rs`
+**Decision:** The SQLite driver's `bind_params()` always generates `$name`-prefixed keys when binding; SQL must use `$param` placeholders to match. Tests written before this convention used `:param` style — corrected to `$param` across both test files.
+**Spec ref:** Pre-existing test gap, uncovered by H1 DDL guard.
+**Resolution:** 7 SQL strings updated from `:name` to `$name` pattern. All 36 SQLite-related tests pass.
+
+---
+
 ## 2026-04-24 — Canary 135/135 push
 
 ### translate_params() QuestionPositional duplicate-$name fix
@@ -708,3 +742,52 @@ Per the tightened versioning policy in `CLAUDE.md` "Versioning": "A PR that clos
 
 **Resolution method:** source-grounded read of `rivers_global.rs:700-1136` (existing `db_*_callback` implementations as templates), `dataview_engine.rs:840-872` (canonical translate_params usage), `crates/rivers-driver-sdk/src/lib.rs:90-185` (`translate_params`), `crates/rivers-driver-sdk/src/traits.rs:440-590` (`Connection::execute`, `DatabaseDriver::connect`, `ParamStyle`), `crates/rivers-drivers-builtin/src/{sqlite,postgres}.rs` (per-driver param handling). New unit tests: 7 placeholder rewriter tests + 3 SQLite e2e tests = 10 new lib tests. Full suite: `cargo test -p riversd --lib` → 426 passed / 0 failed / 6 ignored. `cargo check -p riversd` clean.
 
+## REVIEW-WIDE-1.1 — Rivers-wide review consolidation report (2026-04-27)
+
+**Files affected:**
+- `docs/review/rivers-wide-code-review-2026-04-27.md` — new consolidated review report covering repeated bug classes, severity distribution, per-crate findings, and remediation order across the 22 requested focus crates.
+
+**Decision 1: Write a consolidated report instead of overwriting existing per-crate reports.**
+`docs/review/` already contained detailed reports for `rivers-lockbox-engine` and `rivers-keystore-engine`. The new artifact preserves those and adds a dated Rivers-wide summary that links the repeated patterns across crates.
+
+**Decision 2: Emphasize repeated bug classes and contract violations over style issues.**
+The user specifically asked for overly complicated code, missing wiring, and missing functionality. The report therefore prioritizes secret lifecycle, broker contract drift, unwired schema/admin/config paths, unbounded reads, timeout gaps, and tooling that reports success while producing incomplete artifacts.
+
+**Spec reference:** User request to build the detailed report in `docs/review/`; `docs/review_inc/rivers-code-review-prompt-kit.md` Prompt 2 output methodology; `docs/review_inc/rivers-per-crate-focus-blocks.md` 22-crate review scope.
+
+**Resolution method:** consolidated the confirmed per-crate findings collected during the review pass into one Markdown artifact; verified the report exists and is readable with `wc -l` and `sed`.
+
+## REVIEW-WIDE-1.2 — Second-pass validation of Rivers-wide review (2026-04-27)
+
+**Files affected:**
+- `docs/review/rivers-wide-code-review-2026-04-27.md` — corrected severity-table counts and tightened Kafka/CouchDB wording.
+- `docs/review/rivers-wide-code-review-2026-04-27-validation-pass.md` — new validation addendum summarizing confirmation status by crate.
+
+**Decision 1: Correct the primary report instead of only documenting discrepancies.**
+The user asked whether the existing report was 95% accurate. Leaving known count and wording defects in the source report would make future remediation work noisier, so the validation pass both records the audit and patches the report.
+
+**Decision 2: Downgrade the Kafka `rskafka` item to an observation.**
+The source confirms the crate uses pure-Rust `rskafka`, not `rdkafka`, but that fact is not itself a bug. The real confirmed Kafka defect is offset advancement before `ack()`.
+
+**Decision 3: Keep debated-but-source-true items in the report.**
+The Cassandra synthetic affected-row count, storage policy enforcement gap, and broker schema-checker wiring gaps are source-confirmed. Their severities may be adjusted during remediation, but they are valid enough to keep.
+
+**Spec reference:** User request for a second pass to confirm all items in `docs/review/rivers-wide-code-review-2026-04-27.md` are valid and 95% accurate.
+
+**Resolution method:** re-read targeted source paths for every crate, patched concrete inaccuracies, and wrote a validation addendum with per-crate confirmation status.
+
+---
+
+## H1-2026-04-27 — V8 ctx.ddl() DDL whitelist check (Gate 3)
+
+**File:** `crates/riversd/src/process_pool/v8_engine/context.rs` (`ctx_ddl_callback`)
+
+**Decision:** Insert whitelist check immediately after resolving `ds_params` and before calling `factory.connect()`. The check reads `engine_loader::ddl_whitelist()` (the same `OnceLock<Vec<String>>` the dynamic-engine path uses) and resolves the V8 entry_point name → manifest app_id via `engine_loader::app_id_for_entry_point()`. Rejection uses the exact error string format `"DDL not permitted for database '{database}' (datasource '{datasource}') in app '{app_id}'"` so operator alerting and log-search work identically across V8 and dynamic-engine paths.
+
+**Alternatives rejected:**
+- Routing through `host_ddl_execute` (the dynamic-engine FFI shim): would require V8 to go out through the C ABI to call a function in the same process. Fragile and unnecessary — V8 already has direct Rust access to all required state.
+- Adding the whitelist check inside `factory.connect()` or `conn.ddl_execute()`: these are in `rivers-driver-sdk` / `rivers-core` and must not carry application-level security policy.
+
+**Spec reference:** H1 — riversd T1-4 (rivers-wide code review 2026-04-27). Phase B1 gated the call to `ApplicationInit` but left the whitelist path unconnected.
+
+**Resolution method:** Read both `context.rs` and `engine_loader/host_callbacks.rs` in full; mirrored the existing Gate 3 block from `host_ddl_execute` into `ctx_ddl_callback`; wrote a dedicated integration test binary (`v8_ddl_whitelist_tests.rs`) with positive and negative SQLite-backed tests confirming table creation and rejection respectively.

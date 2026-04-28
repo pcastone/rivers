@@ -71,7 +71,7 @@ async fn sqlite_create_insert_select_roundtrip() {
     let insert_query = Query::with_operation(
         "insert",
         "",
-        "INSERT INTO contacts (name, age) VALUES (:name, :age)",
+        "INSERT INTO contacts (name, age) VALUES ($name, $age)",
     )
     .param("name", QueryValue::String("Alice".into()))
     .param("age", QueryValue::Integer(30));
@@ -96,7 +96,7 @@ async fn sqlite_create_insert_select_roundtrip() {
     let insert2_query = Query::with_operation(
         "insert",
         "",
-        "INSERT INTO contacts (name, age) VALUES (:name, :age)",
+        "INSERT INTO contacts (name, age) VALUES ($name, $age)",
     )
     .param("name", QueryValue::String("Bob".into()))
     .param("age", QueryValue::Integer(25));
@@ -156,7 +156,7 @@ async fn sqlite_named_parameter_binding() {
     let insert_query = Query::with_operation(
         "insert",
         "",
-        "INSERT INTO items (id, label, price, active) VALUES (:id, :label, :price, :active)",
+        "INSERT INTO items (id, label, price, active) VALUES ($id, $label, $price, $active)",
     )
     .param("id", QueryValue::Integer(42))
     .param("label", QueryValue::String("Widget".into()))
@@ -172,7 +172,7 @@ async fn sqlite_named_parameter_binding() {
     let select_query = Query::with_operation(
         "select",
         "",
-        "SELECT id, label, price, active FROM items WHERE id = :id",
+        "SELECT id, label, price, active FROM items WHERE id = $id",
     )
     .param("id", QueryValue::Integer(42));
 
@@ -196,7 +196,7 @@ async fn sqlite_named_parameter_binding() {
     let update_query = Query::with_operation(
         "update",
         "",
-        "UPDATE items SET price = :price WHERE id = :id",
+        "UPDATE items SET price = $price WHERE id = $id",
     )
     .param("price", QueryValue::Float(12.50))
     .param("id", QueryValue::Integer(42));
@@ -212,7 +212,7 @@ async fn sqlite_named_parameter_binding() {
     let verify_query = Query::with_operation(
         "select",
         "",
-        "SELECT price FROM items WHERE id = :id",
+        "SELECT price FROM items WHERE id = $id",
     )
     .param("id", QueryValue::Integer(42));
 
@@ -231,7 +231,7 @@ async fn sqlite_named_parameter_binding() {
     let delete_query = Query::with_operation(
         "delete",
         "",
-        "DELETE FROM items WHERE id = :id",
+        "DELETE FROM items WHERE id = $id",
     )
     .param("id", QueryValue::Integer(42));
 

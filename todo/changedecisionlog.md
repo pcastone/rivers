@@ -121,3 +121,13 @@ SerializedDirectDatasource>` field at that point. Flagged as a latent follow-up.
 - T2-5: `health_check` (lines 717-768) drains the idle queue under the lock via `std::mem::take(&mut state.idle)` (lines 720-723), drops the lock at the closure end, calls `pooled.conn.ping().await` with no lock held (lines 729-744), then re-acquires the lock to re-insert healthy entries (lines 749-756). The lock is `std::sync::Mutex` (not `tokio::Mutex`), so holding it across `.await` would not even compile.
 
 **Resolution:** marked both tasks `[x]` in `todo/tasks.md` with file:line evidence. No edits to `pool.rs`. Update to `docs/code_review.md` to annotate T2-4/T2-5 as resolved is tracked by H-X.1.
+
+---
+
+### MYSQL-H4.1 — Pool key password fingerprint approach
+
+- **File:** `crates/rivers-drivers-builtin/src/mysql.rs`
+- **Decision:** SHA-256 of password bytes, first 8 bytes (16 hex chars) appended to pool key as fragment (`#<fingerprint>`)
+- **Rationale:** 64-bit fingerprint is far more than sufficient to distinguish a small number of credential sets in a process-local cache. Raw password excluded from key for security.
+- **Alternative:** full password hash — rejected, overkill and slightly larger key string with no practical benefit for this use case
+- **Resolution method:** code review finding, H4 from rivers-wide review 2026-04-27

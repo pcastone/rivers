@@ -814,4 +814,149 @@ mod tests {
         assert_eq!(r1.payload["msg"], "hello");
         assert_eq!(r2.payload["msg"], "hello");
     }
+
+    // ── H11 tests: Observe-tier bounded concurrency ───────────────────
+
+    /// H11/T2-1: publish 1000 events against a slow Observe subscriber with a
+    /// cap of 8 concurrent dispatches. Asserts:
+    ///   1. The dropped counter is > 0 (semaphore was exhausted).
+    ///   2. At no point during publishing did we exceed `cap` in-flight spawns
+    ///      (verified indirectly: if the semaphore were unbounded, dropped
+    ///      would be 0; here it is provably > 0 given the sleep delay).
+    ///
+    /// The cap of 8 is intentionally tiny so the semaphore exhausts quickly
+    /// with 1000 rapid publishes and a 50ms handler delay.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn observe_concurrency_cap_drops_excess_spawns() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc as StdArc;
+
+        const CAP: usize = 8;
+        const EVENTS: usize = 1000;
+
+        let bus = EventBus::with_caps(DEFAULT_MAX_BROADCAST_SUBSCRIBERS, CAP);
+
+        // Slow Observe handler — holds a permit for 50 ms.
+        struct SlowHandler {
+            invocations: StdArc<AtomicU64>,
+        }
+
+        #[async_trait::async_trait]
+        impl EventHandler for SlowHandler {
+            fn name(&self) -> &str {
+                "slow-observe"
+            }
+            async fn handle(
+                &self,
+                _event: &crate::event::Event,
+            ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                self.invocations.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                Ok(())
+            }
+        }
+
+        let invocations = StdArc::new(AtomicU64::new(0));
+        let handler = Arc::new(SlowHandler {
+            invocations: invocations.clone(),
+        });
+
+        // Keep the handle alive for the duration of the test.
+        let _handle = bus
+            .subscribe("burst.event", handler, HandlerPriority::Observe)
+            .await;
+
+        // Publish 1000 events in rapid succession.
+        for _ in 0..EVENTS {
+            let event = crate::event::Event::new("burst.event", serde_json::json!({}));
+            bus.publish(&event).await;
+        }
+
+        // Allow in-flight spawns to drain.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let dropped = bus.observe_dropped();
+
+        // Sanity: with CAP=8 and 50ms handler delay, at most ~10 tasks complete
+        // in the first ~500ms of the burst. We expect the vast majority of the
+        // 1000 publishes to hit an exhausted semaphore.
+        assert!(
+            dropped > 0,
+            "expected dropped > 0 (semaphore exhaustion), got {}; \
+             invocations completed = {}",
+            dropped,
+            invocations.load(Ordering::Relaxed)
+        );
+
+        // Total dispatched (invoked + dropped) must equal EVENTS.
+        let completed = invocations.load(Ordering::Relaxed);
+        assert_eq!(
+            completed + dropped,
+            EVENTS as u64,
+            "completed({}) + dropped({}) should equal {} total events",
+            completed,
+            dropped,
+            EVENTS,
+        );
+    }
+
+    /// H11/T2-1: with a generous cap, all Observe dispatches succeed and
+    /// dropped stays at zero.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn observe_concurrency_no_drop_when_cap_sufficient() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc as StdArc;
+
+        const CAP: usize = 200;
+        const EVENTS: usize = 50;
+
+        let bus = EventBus::with_caps(DEFAULT_MAX_BROADCAST_SUBSCRIBERS, CAP);
+
+        struct CountHandler {
+            count: StdArc<AtomicU64>,
+        }
+
+        #[async_trait::async_trait]
+        impl EventHandler for CountHandler {
+            fn name(&self) -> &str {
+                "count-observe"
+            }
+            async fn handle(
+                &self,
+                _event: &crate::event::Event,
+            ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                self.count.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+
+        let count = StdArc::new(AtomicU64::new(0));
+        let handler = Arc::new(CountHandler { count: count.clone() });
+
+        let _handle = bus
+            .subscribe("nodrop.event", handler, HandlerPriority::Observe)
+            .await;
+
+        for _ in 0..EVENTS {
+            let event = crate::event::Event::new("nodrop.event", serde_json::json!({}));
+            bus.publish(&event).await;
+        }
+
+        // Give spawned tasks time to complete.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        assert_eq!(
+            bus.observe_dropped(),
+            0,
+            "no drops expected with cap={} and only {} events",
+            CAP,
+            EVENTS
+        );
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            EVENTS as u64,
+            "all {} events should have been handled",
+            EVENTS
+        );
+    }
 }

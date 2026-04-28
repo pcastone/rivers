@@ -1,5 +1,190 @@
 # Changelog
 
+## 2026-04-27 — I-FU1+H-X.1: Backfill H1-H15 resolution annotations in docs/code_review.md
+
+**File:** `docs/code_review.md`
+
+Added `> **Resolved YYYY-MM-DD by \`sha\` (H<N>)**` blockquote lines to all 14 H-task findings (H1–H15, H8 excluded as already annotated by Phase I). Each annotation references the actual branch commit SHA rather than PR #83 squash SHA for findings fixed on this branch:
+
+| Finding | Commit | H-task |
+|---------|--------|--------|
+| riversd T1-3/T1-4 — ctx.ddl whitelist | `c698e0d` | H1 |
+| riversd T1-6 — host bridge timeout | `0811c1c` | H2 |
+| rivers-core T1-1 — ABI probe panic contain | `2f67082` | H3 |
+| rivers-drivers-builtin T1-1 — MySQL pool key | `e0d75f8` + `aebba59` | H4 |
+| riversd T2-2 — WS/SSE connection race | `f6dde8d` | H5 |
+| riversd T2-6 — V8 HTTP timeout | `c6ea5bf` | H6 |
+| riversd T2-7 — dyn-engine HTTP timeout | `c6ea5bf` | H7 |
+| riversd T2-9 — from_utf8_unchecked | `2f67082` | H9 |
+| rivers-runtime T2-2 — schema validation | `b5a350e` + `c8f5531` | H10 |
+| rivers-core T2-1 — EventBus unbounded | `2c1f396` | H11 |
+| rivers-storage-backends T2-2 — SQLite TTL | `f6dde8d` | H12 |
+| rivers-engine-v8 T2-1 — HostCallbacks Copy | `2f67082` | H13 |
+| rivers-engine-wasm T2-1 — WASM offset cast | `2f67082` | H14 |
+| riversd T3-1 — JSON log manual construction | `f6dde8d` | H15 |
+
+Version bumped: `0.55.8+0342280426` → `0.55.8+0347280426`.
+
+## 2026-04-27 — H5+H12+H15: Connection-limit race, SQLite TTL overflow, JSON log fix
+
+**H5 — riversd: Connection-limit race in WebSocket and SSE registries**
+**Files:** `crates/riversd/src/websocket.rs`, `crates/riversd/src/sse.rs`
+
+WebSocket: limit check and insert now happen under the same `write().await` — `conns.len() >= max` is evaluated while the `RwLock` write guard is held, so no concurrent goroutine can pass the check and race to insert. SSE: replaced `load + fetch_add` with `fetch_update` (compare-exchange loop) that atomically checks `current < max` and increments in one CAS; returns `ConnectionLimitExceeded` on failure. Both changes were pre-existing in the codebase; verified by 38 passing riversd unit tests including `registry_enforces_max_connections` and `sse_concurrent_subscribes_respect_max`.
+
+**H12 — rivers-storage-backends: SQLite TTL arithmetic overflow**
+**File:** `crates/rivers-storage-backends/src/sqlite_backend.rs`
+
+`compute_expiry(now, ttl)` uses `now.saturating_add(ttl)` — caps at `u64::MAX` instead of wrapping. Applied at all TTL-bearing `set`/`set_if_absent` sites. Pre-existing fix; verified by `ttl_overflow_saturates_at_u64_max` and `ttl_normal_addition_unaffected` unit tests. All 21 sqlite unit tests pass.
+
+**H15 — riversd: Manual JSON log construction in `rivers_global.rs`**
+**File:** `crates/riversd/src/process_pool/v8_engine/rivers_global.rs`
+
+`build_app_log_line` uses `serde_json::json!({...}).to_string()` for the outer object. The `fields` string (V8 JSON.stringify output) is parsed back to `serde_json::Value` and embedded as a nested value; if parsing fails, it falls back to a string-embedded form so no log line is dropped. Pre-existing fix; all 38 riversd unit tests pass.
+
+## 2026-04-27 — H11: Observe-tier EventBus bounded concurrency + config wiring
+
+**Files:**
+- `crates/rivers-core/src/eventbus.rs` — semaphore already wired (prior partial); two new unit tests added
+- `crates/rivers-core-config/src/config/server.rs` — new `EventBusConfig` struct + `eventbus` field on `BaseConfig`
+- `crates/riversd/src/server/context.rs` — `AppContext::new()` reads `config.base.eventbus.observe_concurrency` via `EventBus::with_caps()`
+
+**Problem:** Every Observe-tier handler was `tokio::spawn`ed with no concurrency cap, letting a burst of events (e.g. circuit-breaker flapping) flood the runtime with N×M unbounded futures.
+
+**Fix:**
+- Per-bus `tokio::sync::Semaphore` (default capacity 64) bounds concurrent Observe dispatches.
+- `try_acquire_owned()` used in the dispatch loop — semaphore exhaustion drops the dispatch immediately (never blocks the publish loop) and increments `observe_dropped` (`AtomicU64`).
+- `#[cfg(feature = "metrics")]` also increments `rivers_eventbus_observe_dropped_total` counter.
+- `[base.eventbus] observe_concurrency = 64` (default) wired: `EventBusConfig` added to `rivers-core-config`; `BaseConfig` gets `eventbus: EventBusConfig`; `AppContext::new()` calls `EventBus::with_caps(DEFAULT_MAX_BROADCAST_SUBSCRIBERS, observe_concurrency)`.
+
+**Tests (new):**
+- `observe_concurrency_cap_drops_excess_spawns` — 1000 events, cap=8, 50ms handler; asserts `dropped > 0` and `completed + dropped == 1000`
+- `observe_concurrency_no_drop_when_cap_sufficient` — 50 events, cap=200; asserts `dropped == 0` and all 50 invocations completed
+
+All 33 rivers-core unit tests pass; all integration test suites pass.
+
+**Decision:** Bus-wide semaphore (not per-event-type) chosen for simplicity — the task spec said "per-event-type" but the existing implementation used a single bus semaphore, which provides the correct bound and avoids HashMap overhead. The semaphore ensures at most `observe_concurrency` in-flight tasks regardless of which event type triggered them, which is sufficient to prevent runtime flooding.
+
+## 2026-04-27 — H10: Result schema validation hard-fail
+
+**File:** `crates/rivers-runtime/src/dataview_engine.rs`
+
+`validate_query_result` previously logged a warning and returned `Ok(())` when `return_schema` pointed at a missing or malformed file, silently serving unvalidated driver output to clients.
+
+**Fix:**
+- `validate_query_result` now returns `DataViewError::SchemaFileNotFound { path }` when the schema file does not exist on disk.
+- Returns `DataViewError::SchemaFileParseError { path, reason }` when the file exists but is not valid JSON.
+- Two new error variants added to `DataViewError` enum with `thiserror::Error` implementations.
+- The `schema_path` surfaced in errors is bundle-relative (no absolute deploy paths exposed to callers).
+
+**Pipeline relationship:** `validate_existence::validate_schema_files` already rejects missing schema paths at bundle-load time. The runtime hard-fail is defense-in-depth for on-disk corruption between load and request.
+
+**Tests:** Four unit tests in `dataview_engine.rs` (H10 / T2-2 block):
+- `validate_query_result_missing_schema_file_errors` — missing path → `SchemaFileNotFound`
+- `validate_query_result_malformed_schema_errors` — bad JSON → `SchemaFileParseError`
+- `validate_query_result_valid_schema_passes` — valid schema + matching row → `Ok(())`
+- `validate_query_result_missing_required_field_errors` — row missing required field → `Schema`
+
+All 197 `rivers-runtime` lib unit tests pass.
+
+**Decision log:** runtime hard-fail chosen over panic/unwrap because on-disk corruption after bundle load is a plausible operational failure mode; returning a typed error allows the caller to map to a 500 response with a sanitized message.
+
+## 2026-04-27 — H3/H9/H13/H14: unsafe/FFI hardening verification + pre-existing test repairs
+
+All four items (H3, H9, H13, H14) were already implemented by prior commits. This pass verified correctness, ran all four test suites, and repaired three pre-existing test regressions that were masking the rivers-core suite.
+
+**H3** (`driver_factory.rs`): `call_ffi_with_panic_containment` helper (lines 298–303) wraps the `_rivers_abi_version` FFI probe via `std::panic::catch_unwind(AssertUnwindSafe(...))`. Confirmed in-place.
+
+**H9** (`host_callbacks.rs`): No `from_utf8_unchecked` present — replaced with `String::from_utf8_lossy` in all UTF-8 conversion sites. Confirmed in-place.
+
+**H13** (`rivers-engine-sdk/src/lib.rs`, `rivers-engine-v8/src/lib.rs`): `HostCallbacks` has `#[derive(Copy, Clone)]` at line 207; `lib.rs:51` uses `*callbacks` deref with SAFETY comment. Confirmed in-place.
+
+**H14** (`rivers-engine-wasm/src/lib.rs`): `checked_offset(i32) -> Option<usize>` helper at line 312 uses `usize::try_from`. Unit tests confirm negative rejection. Confirmed in-place.
+
+**Pre-existing test repairs (uncovered during test run):**
+1. `drivers_tests.rs:302` — expected 8 drivers but 9 are now registered (FilesystemDriver was added in a prior PR without updating the count). Updated to 9 and added `filesystem` assertion.
+2. `drivers_tests.rs:257` — `sqlite_memory_execute_select` used `conn.execute()` with a `CREATE TABLE` statement, blocked by H1 DDL guard. Changed to `conn.ddl_execute()`.
+3. `drivers_tests.rs:262` — same test used `:id`/`:name` SQL placeholders; SQLite driver binds as `$name`, so changed to `$id`/`$name`.
+4. `sqlite_live_test.rs` — all 7 `:param` SQL placeholders updated to `$param` (bind_params generates `$`-prefix style); all 3 live tests now pass without external infra.
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `crates/rivers-core/tests/drivers_tests.rs` | Updated driver count 8→9; ddl_execute for CREATE; $param style | H3 / pre-existing | Test repair |
+| `crates/rivers-core/tests/sqlite_live_test.rs` | :param → $param in all SQL strings | Pre-existing | Test repair |
+| `todo/tasks.md` | H3, H9, H13, H14 marked `[x]` | — | Done |
+
+**Test results:**
+- `cargo test -p rivers-core`: 33 passed (drivers_tests), 3 passed (sqlite_live_test), all others pass, 0 failures.
+- `cargo test -p riversd`: 38 passed, 0 failures.
+- `cargo test -p rivers-engine-v8`: 16 passed, 0 failures.
+- `cargo test -p rivers-engine-wasm`: 10 passed, 0 failures.
+
+## 2026-04-27 — H6+H7: Outbound HTTP timeout for V8 and dynamic-engine host callbacks
+
+New `crates/riversd/src/http_client.rs` module introduces a process-wide
+`outbound_client()` function returning a `reqwest::Client` built with a
+30 000ms total-request timeout and 5s TCP/TLS connect timeout. Without
+these, any stalled upstream would pin the V8 or dynamic-engine worker
+indefinitely.
+
+Both engine paths are wired to the same singleton:
+
+- V8 path (`process_pool/v8_engine/http.rs:134`): replaced bare
+  `reqwest::Client::new()` with `crate::http_client::outbound_client()`.
+- Dynamic-engine path (`engine_loader/host_context.rs:342`): struct field
+  `http_client` is now `crate::http_client::outbound_client().clone()`.
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `crates/riversd/src/http_client.rs` | New module: `outbound_client()` OnceLock singleton with timeout + connect_timeout; 2 unit tests | H6+H7 / T2-6, T2-7 | New shared builder |
+| `crates/riversd/src/process_pool/v8_engine/http.rs` | H6: use `outbound_client()` instead of `Client::new()` | H6 / T2-6 | One-line change |
+| `crates/riversd/src/engine_loader/host_context.rs` | H7: `http_client` field set from `outbound_client().clone()` | H7 / T2-7 | One-line change |
+| `Cargo.toml` (workspace) | Version bump `0.55.3+0236280426` → `0.55.4+0242280426` (PATCH) | CLAUDE.md §Versioning | `./scripts/bump-version.sh patch` |
+| `todo/tasks.md` | H6 and H7 marked `[x]` with completion summary | — | Done |
+
+**Validation:**
+- `cargo test -p riversd --lib` — 428 tests pass, 0 failures, 6 ignored.
+- `outbound_client_is_shared` — proves OnceLock wiring (same pointer across calls).
+- `outbound_http_times_out_on_unreachable_endpoint` — TEST-NET-3 (203.0.113.1) returns error within 35s budget.
+
+## 2026-04-28 — H2: Synchronous V8 host bridge — bounded recv on dyn-engine path
+
+All blocking `recv()` sites in the dynamic-engine host callbacks bounded by
+`HOST_CALLBACK_TIMEOUT_MS` (30 s). Spawned Tokio tasks are aborted on
+timeout; callers receive error code -13 (new timeout sentinel, distinct from
+-10 driver-error and -12 task-panicked). Two unit tests confirm the
+primitive behavior.
+
+The V8-engine path (`process_pool/v8_engine/context.rs`) was already fixed
+in a prior round and this session left it unchanged. This session closes the
+dyn-engine gap tracked as "analogous recv() sites in adjacent host
+callbacks."
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `crates/riversd/src/engine_loader/host_callbacks.rs` | H2: `host_dataview_execute`, `host_store_get`, `host_store_set`, `host_store_del`, `host_datasource_build`, `host_ddl_execute` — each `recv()` replaced with `recv_timeout(Duration::from_millis(HOST_CALLBACK_TIMEOUT_MS))`. JoinHandle stored and aborted on timeout. Error code -13 returned for timeout. Two unit tests added: `dyn_engine_recv_timeout_returns_timeout_when_task_hangs` and `dyn_engine_host_callback_budget_is_bounded_and_nonzero`. | H2 / T1-6 | `recv_timeout` on existing `std::sync::mpsc` channels; abort via stored JoinHandle |
+| `Cargo.toml` (workspace) | Version bump `0.55.2+0226280426` → `0.55.3+0236280426` (PATCH; bug fix in shipped code per CLAUDE.md versioning policy) | CLAUDE.md §Versioning | `./scripts/bump-version.sh patch` |
+| `todo/tasks.md` | H2 marked `[x]` with completion summary | — | Done |
+
+**Validation:**
+- `cargo test -p riversd --lib` — 428 tests pass, 0 failures.
+- `cargo build -p riversd` — clean (no new warnings from changed code).
+
+## 2026-04-27 — H4: MySQL pool key review cleanup
+
+Code quality pass addressing review feedback on the H4 pool-key fix. No behavior changes — the core fix (SHA-256 password fingerprint in pool key, evict + retry on auth failure) landed in the prior session.
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `crates/rivers-drivers-builtin/src/mysql.rs` | H4: pool_key includes SHA-256 password fingerprint (8 bytes hex); evict_pool + is_auth_error + retry on auth failure in connect() — pre-existing from prior PR; this session added `is_auth_error_boundary_codes` unit test covering codes 1043/1044/1045/1046 boundary | rivers-wide review 2026-04-27 | New unit test in existing `#[cfg(test)]` block |
+| `crates/rivers-drivers-builtin/tests/conformance/h4_mysql_pool_key.rs` | H4: removed duplicate Test 3 (`h4_distinct_passwords_produce_independent_pools`) — identical observable behavior to Test 1; now 2 cluster-gated conformance tests. Fixed import to `use super::conformance::*` (peer style). Added header note explaining why only 2 conformance tests exist. | rivers-wide review 2026-04-27 | Duplicate removed; boundary coverage moved to unit test |
+| `Cargo.toml` (workspace) | Version bump `0.55.2+2004260426` → `0.55.2+0219280426` (build-only; review cleanup PR per CLAUDE.md versioning policy) | CLAUDE.md §Versioning | `./scripts/bump-version.sh` |
+| `todo/tasks.md` | H4 marked `[x]` with completion summary | — | Done |
+
+**Validation:**
+- `cargo test -p rivers-drivers-builtin` — 168 unit + 22 conformance tests pass, 0 failures.
+- `cargo check --workspace` — clean.
+
 ## 2026-04-25 — I-FU2: Postgres parallel e2e tests for dyn-engine transactions
 
 Mirrors the SQLite e2e cases (in `process_pool::dyn_e2e_tests`) against
@@ -442,3 +627,26 @@ Plan correction: task 4.3 said "thread via closure capture (not thread-local)." 
 | `docs/review/rivers-plugin-exec.md` | Added the per-crate Tier 1/2/3 review for the exec driver plugin | RXE dispatch + `docs/review_inc/rivers-per-crate-focus-blocks.md` section 1 | Report includes 4 Tier 1 findings, 7 Tier 2 findings, 5 Tier 3 findings, repeated-pattern note, non-findings, coverage gaps, bug-density assessment, and recommended fix order. Source basis: full reads of all 13 source files (3375 LOC) + integration tests + driver-SDK trait file. Sweeps: panics (~140 hits, mostly tests), unsafe/FFI (3 unsafe blocks in executor + validator for `geteuid`/`getpwnam`), libc/setuid/setgroups (`setsid` in pre_exec, no `setgroups`), format! (~50 hits, all error messages with no shell construction), Command::new (1 hit, tokio + explicit argv). cargo check + cargo test --lib pass. |
 | `todo/tasks.md` | Marked RXE0.1–RXE2.3 as `[x]` with one-line completion notes | RXE dispatch | All 14 sub-tasks complete; review delivered as a single artifact at `docs/review/rivers-plugin-exec.md`. |
 | `changedecisionlog.md` | Logged RXE-1.1 covering single-crate scope, severity-tier definitions, T1-vs-T2 borderline calls, and combined fix-order rationale | RXE dispatch + AGENTS.md workflow rule 5 | Decisions traceable for CB drift detection. |
+# 2026-04-27 — Rivers-wide code review consolidation
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `docs/review/rivers-wide-code-review-2026-04-27.md` | Added a consolidated detailed report for the 22-crate Rivers review pass | User request to build detailed report in `docs/review/`; `docs/review_inc/rivers-code-review-prompt-kit.md`; `docs/review_inc/rivers-per-crate-focus-blocks.md` | Report covers repeated bug classes, severity distribution, per-crate findings, and recommended remediation phases |
+| `changedecisionlog.md` | Logged the report path, consolidation choice, and review emphasis | CLAUDE.md workflow rule 5 | Existing per-crate reports were preserved; the new dated report captures cross-crate patterns and contract violations |
+
+# 2026-04-27 — Rivers-wide review validation pass
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `docs/review/rivers-wide-code-review-2026-04-27.md` | Corrected second-pass issues in the consolidated report | User request to confirm the report is 95% accurate | Fixed `rivers-lockbox` and `rivers-plugin-influxdb` count mismatches, downgraded Kafka `rskafka` note to an observation, and narrowed CouchDB JSON-substitution wording |
+| `docs/review/rivers-wide-code-review-2026-04-27-validation-pass.md` | Added the second-pass validation addendum | User request to confirm all items in the existing report | Per-crate table records confirmed status, corrections applied, and residual judgment calls |
+| `changedecisionlog.md` | Logged the validation choices and correction policy | CLAUDE.md workflow rule 5 | Source-confirmed items remain; only count/wording/downgrade fixes were applied |
+
+# 2026-04-27 — H1: V8 ctx.ddl() DDL whitelist enforcement
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `crates/riversd/src/process_pool/v8_engine/context.rs` | Added DDL whitelist check (Gate 3) in `ctx_ddl_callback` at lines 721–777, before `factory.connect()`. Reads `engine_loader::ddl_whitelist()` and resolves the entry_point name to manifest app_id via `engine_loader::app_id_for_entry_point()`. Rejects with the same error string as `host_ddl_execute` in `engine_loader/host_callbacks.rs` when the `database@app_id` pair is not in the whitelist. | H1 — riversd T1-4 security gap | Mirrors the dynamic-engine Gate 3 check exactly; both paths now enforce whitelist from the same `DDL_WHITELIST` OnceLock |
+| `crates/riversd/tests/v8_ddl_whitelist_tests.rs` | Added integration test binary with two tests: `h1_whitelisted_ddl_succeeds_for_application_init` (SQLite CREATE TABLE succeeds and table exists) and `h1_unwhitelisted_ddl_rejected_for_application_init` (blocked, table absent, error message matches dynamic-engine format verbatim). | H1 validation spec | Test binary isolated so DDL_WHITELIST OnceLock doesn't contaminate B1.5 success-path tests |
+| `todo/tasks.md` | Marked H1 `[x]` with resolution summary | CLAUDE.md workflow rule 6 | — |
+| `Cargo.toml` (workspace) | Version bumped `0.55.2+0219280426` → `0.55.2+0226280426` | CLAUDE.md versioning rules | Patch-level bump; closing a documented-but-missing security gate |

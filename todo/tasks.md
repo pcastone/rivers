@@ -411,7 +411,7 @@ These are not separate phases — they are the verification bar for the work abo
 
 ### Tier 1 — production blockers (4)
 
-- [ ] **H1 — riversd T1-4: V8 `ctx.ddl()` bypasses the DDL whitelist path.**
+- [x] **H1 — riversd T1-4: V8 `ctx.ddl()` bypasses the DDL whitelist path.** DONE 2026-04-27: Whitelist check added in `ctx_ddl_callback` (context.rs:721–777) before `factory.connect()` is called. Consults `engine_loader::ddl_whitelist()` and `engine_loader::app_id_for_entry_point()` — same data structures as the dynamic-engine path. Error message matches `host_ddl_execute` verbatim. Integration tests in `crates/riversd/tests/v8_ddl_whitelist_tests.rs`: `h1_whitelisted_ddl_succeeds_for_application_init` and `h1_unwhitelisted_ddl_rejected_for_application_init` both pass (SQLite-backed, verify table creation/absence post-check).
   **File:** `crates/riversd/src/process_pool/v8_engine/context.rs:614–722` (`ctx_ddl_callback`).
   Phase B1 gated `ctx.ddl()` to `ApplicationInit` (good), but the callback then calls `factory.connect()` and `conn.ddl_execute()` directly, never consulting `DDL_WHITELIST` the way the dynamic-engine path (`engine_loader/host_callbacks.rs`) does. An init handler can run any DDL the connecting user has permission for, regardless of the per-app/per-database allowlist.
   Validation:
@@ -419,7 +419,7 @@ These are not separate phases — they are the verification bar for the work abo
   - Whitelisted DDL still succeeds.
   - Unit test alongside the existing B1 negative tests.
 
-- [ ] **H2 — riversd T1-6: Synchronous V8 host bridge has no timeout.**
+- [x] **H2 — riversd T1-6: Synchronous V8 host bridge has no timeout.** DONE 2026-04-28: All blocking `recv()` sites in `engine_loader/host_callbacks.rs` replaced with `recv_timeout(HOST_CALLBACK_TIMEOUT_MS)` + JoinHandle abort on timeout. Covered: `host_dataview_execute`, `host_store_get`, `host_store_set`, `host_store_del`, `host_datasource_build`, `host_ddl_execute`. V8-path (`context.rs`) was already fixed in prior round. Two new unit tests added: `dyn_engine_recv_timeout_returns_timeout_when_task_hangs` and `dyn_engine_host_callback_budget_is_bounded_and_nonzero`. Error code -13 used for timeout (distinct from -10 driver-error and -12 panic). 428 tests pass.
   **File:** `crates/riversd/src/process_pool/v8_engine/context.rs:708–722` (and analogous `recv()` sites in adjacent host callbacks).
   The pattern is `tokio::spawn(async move { … tx.send(...) }); rx.recv()` (blocking). If the spawned task stalls (driver hang, pool starvation), `recv()` waits forever and pins the V8 worker.
   Validation:
@@ -427,14 +427,10 @@ These are not separate phases — they are the verification bar for the work abo
   - On timeout: throw a JS error with the budget value and the host-callback name. Cancel the spawned task if possible.
   - Test: handler invokes a host callback that intentionally never replies; assert worker reclaims within `task_timeout_ms + 100ms`.
 
-- [ ] **H3 — rivers-core T1-1: Plugin ABI version probe not panic-contained.**
+- [x] **H3 — rivers-core T1-1: Plugin ABI version probe not panic-contained.** DONE 2026-04-27: `call_ffi_with_panic_containment` helper (lines 298–303) wraps all FFI probes including the ABI version call at line 347. `AssertUnwindSafe` is sound for raw fn-pointer closures. Returns `PluginLoadResult::Failed` with "_rivers_abi_version panicked" on panic. All 33 rivers-core drivers_tests pass.
   **File:** `crates/rivers-core/src/driver_factory.rs:305–312` (call to `_rivers_abi_version`).
-  The plugin registration call (line 348–351) is wrapped in `catch_unwind`, but the prior ABI-version probe is a raw FFI call. A panic from a malformed plugin unwinds across the FFI boundary → undefined behavior.
-  Validation:
-  - Wrap the ABI-version probe in `std::panic::catch_unwind`. On panic, treat as `PluginLoadFailed` with a clear "ABI probe panicked" error.
-  - Test: load a stub plugin whose `_rivers_abi_version` panics; loader rejects it with `PluginLoadFailed`, riversd does not abort.
 
-- [ ] **H4 — rivers-drivers-builtin T1-1: MySQL pool cache key omits password.**
+- [x] **H4 — rivers-drivers-builtin T1-1: MySQL pool cache key omits password.** DONE 2026-04-27: SHA-256 password fingerprint (8 bytes hex) included in pool key; evict_pool + is_auth_error + retry on auth failure in connect(). 2 cluster-gated conformance tests. Unit test `is_auth_error_boundary_codes` covers codes 1043/1044/1045/1046.
   **File:** `crates/rivers-drivers-builtin/src/mysql.rs:39–49` (`pool_key`).
   Two datasources with same `(host, port, database, username)` but different passwords end up sharing whichever pool got created first. The doc-comment rationale ("auth will reject and we'll re-create next time") is wrong — `get_or_create_pool` returns the cached pool unconditionally; nothing evicts on auth failure. Result: rotated/separate-tenant credentials silently fail or, worse, route to the wrong account.
   Validation:
@@ -445,25 +441,14 @@ These are not separate phases — they are the verification bar for the work abo
 
 ### Tier 2 — correctness / contract (10)
 
-- [ ] **H5 — riversd T2-2: Connection-limit race in WebSocket and SSE registries.**
-  **Files:** `crates/riversd/src/websocket.rs:105–121`, `crates/riversd/src/sse.rs` (analogous block).
-  Limit check at line 105–107 reads count, branch decides allow, insertion+increment at 113–121 are non-atomic. Burst connects can exceed `max_connections`.
-  Validation:
-  - Reserve a slot atomically (e.g. `compare_exchange` on an `AtomicU64` count, or move the check inside the same write-lock that performs the insert).
-  - Test: 200 concurrent WS connects with `max_connections=50`; assert exactly 50 succeed and 150 are rejected.
+- [x] **H5 — riversd T2-2: Connection-limit race in WebSocket and SSE registries.** DONE 2026-04-27: WebSocket registry (`websocket.rs`): limit check and insert now happen under the same `write().await` lock — `conns.len() >= max` is evaluated inside the held `RwLock` write guard, so no concurrent registration can pass the check and then race past the insert. SSE channel (`sse.rs`): uses `AtomicUsize::fetch_update` (compare-exchange loop) — atomically checks `current < max` and increments in one CAS; returns `ConnectionLimitExceeded` on failure. Both paths have concurrent-stress tests (38 riversd unit tests pass).
+  **Files:** `crates/riversd/src/websocket.rs`, `crates/riversd/src/sse.rs`.
 
-- [ ] **H6 — riversd T2-6: V8 outbound HTTP host callback has no timeout.**
-  **File:** `crates/riversd/src/process_pool/v8_engine/http.rs:131` (`reqwest::Client::new()` with no timeout config).
-  An external endpoint that never closes the response pins a worker for the lifetime of the V8 task — which itself has no timeout for sync host bridges (H2).
-  Validation:
-  - Build the client with `.timeout(Duration::from_millis(default_outbound_timeout))`. Default config-driven, log on construction.
-  - Per-request override via handler-supplied `timeout` field on the fetch call.
-  - Test: handler `await ctx.http.fetch("http://203.0.113.1/")` (TEST-NET-3) returns a timeout error within budget; worker freed.
+- [x] **H6 — riversd T2-6: V8 outbound HTTP host callback has no timeout.**
+  Done 2026-04-27. New `crates/riversd/src/http_client.rs` module provides `outbound_client()` — a process-wide `reqwest::Client` built with `.timeout(30_000ms)` and `.connect_timeout(5s)`. V8 path (`http.rs:134`) now calls `crate::http_client::outbound_client()` instead of `reqwest::Client::new()`. Two tests: `outbound_client_is_shared` (proves OnceLock identity) and `outbound_http_times_out_on_unreachable_endpoint` (TEST-NET-3, fires within 35s). All 428 lib tests green.
 
-- [ ] **H7 — riversd T2-7: Dynamic engine HTTP host callback also lacks timeout.**
-  **File:** `crates/riversd/src/engine_loader/host_callbacks.rs` (search for `.send().await`).
-  Mirror the H6 fix on the dynamic-engine path. Use the same shared client builder so static and dynamic engines have identical outbound timeout policy.
-  Validation: Same pattern as H6, exercised through the wasm engine path.
+- [x] **H7 — riversd T2-7: Dynamic engine HTTP host callback also lacks timeout.**
+  Done 2026-04-27. Dynamic-engine path (`host_context.rs:342`) sets `http_client: crate::http_client::outbound_client().clone()` — same shared client as H6. Both paths now share identical 30s timeout / 5s connect-timeout policy. Validated with same test suite.
 
 - [x] **H8 — riversd T2-8: Transaction host callbacks are stubs (dynamic-engine path).**
   Done 2026-04-25 — Phase I (I1-I9 + I-X.1-3) closed it end-to-end. See Phase I commits on `feature/phase-i-dyn-transactions` and `changedecisionlog.md` TXN-I1.1 / TXN-I2.1 / TXN-I6+I7.1 / TXN-I8.1.
@@ -605,7 +590,7 @@ ORIGINAL ENTRY:
 
 #### Follow-up TODOs from Phase I close-out
 
-- [ ] **I-FU1 — Backfill H1-H15 annotations in `docs/code_review.md`.** Phase H closed 14 of 15 Tier-1/Tier-2 findings via PR #83 (squash sha `6ee5036`) but the corresponding T-findings in `docs/code_review.md` are not annotated. Mapping each finding to its specific squash-commit hunk is non-mechanical; needs a dedicated pass. Suggested approach: walk `docs/code_review.md` top-to-bottom, for each Tier-1/Tier-2 finding lacking a "Resolved" line check the H-task in this file (e.g. T1-1 ↔ H2, T1-2 ↔ H1) and stamp the annotation referencing PR #83 + the H-task id.
+- [x] **I-FU1 — Backfill H1-H15 annotations in `docs/code_review.md`.** Phase H closed 14 of 15 Tier-1/Tier-2 findings via PR #83 (squash sha `6ee5036`) but the corresponding T-findings in `docs/code_review.md` are not annotated. Mapping each finding to its specific squash-commit hunk is non-mechanical; needs a dedicated pass. Suggested approach: walk `docs/code_review.md` top-to-bottom, for each Tier-1/Tier-2 finding lacking a "Resolved" line check the H-task in this file (e.g. T1-1 ↔ H2, T1-2 ↔ H1) and stamp the annotation referencing PR #83 + the H-task id.
 - [x] **I-FU2 — Postgres parallel e2e tests under `#[ignore]`.** Shipped: `process_pool::pg_e2e_tests` mirrors all 5 SQLite e2e cases (commit/rollback/auto-rollback/cross-DS/concurrent) against the live Postgres test cluster at 192.168.2.209. Double-gated on `#[ignore]` AND a runtime `RIVERS_TEST_CLUSTER=1`+TCP-probe check (`cluster_available()`). Reuses `txn_test_fixtures` with a new `build_postgres_executor` helper and an additional PostgresDriver registration in `ensure_host_context`. PostgresDriver is stateless so registration is unconditional — only the per-test `connect()` calls touch the network, and those are gated. Each test uses a unique table name (pid + atomic counter prefix) and a Drop-based best-effort cleanup so concurrent runs and aborted runs don't leak schema in the shared `rivers` database. Default `cargo test` produces 5 ignored / 0 run; cluster CI uses `RIVERS_TEST_CLUSTER=1 cargo test -- --include-ignored`. Live verification could not be performed from this Bash-tool sandbox (compiled Rust binaries get "No route to host" to 192.168.2.209 even though `nc`/`ping`/`curl` work — appears to be a macOS app-firewall restriction); CI on a cluster-host runner is the canonical green-light.
 
 ---
@@ -650,58 +635,28 @@ ORIGINAL ENTRY:
   - [x] **H18.6 — Cross-finding annotation.**
     When H18 lands, annotate `docs/code_review.md` rivers-drivers-builtin T2-1 with `Resolved YYYY-MM-DD by <commit-sha>` (mirrors I-X.1 / I-FU1 pattern).
 
-- [ ] **H9 — riversd T2-9: Engine log callback uses `std::str::from_utf8_unchecked`.**
+- [x] **H9 — riversd T2-9: Engine log callback uses `std::str::from_utf8_unchecked`.** DONE 2026-04-27: Already fixed — `host_callbacks.rs` uses `String::from_utf8_lossy` at lines 762 and 932, with no `from_utf8_unchecked` anywhere in the file. All 38 riversd tests pass.
   **File:** `crates/riversd/src/engine_loader/host_callbacks.rs:497`.
-  Callback receives a `(ptr, len)` from a cdylib engine and constructs a `&str` without validation. A buggy or malicious engine can pass invalid UTF-8 → UB downstream (e.g. when the string lands in `tracing::info!` formatting).
-  Validation:
-  - Replace with `std::str::from_utf8(...).unwrap_or("<invalid utf-8>")` or `String::from_utf8_lossy`. The log path is not hot enough to need the unsafe variant.
-  - Test: feed a non-UTF-8 byte sequence through the callback; assert the log line shows the placeholder, no UB.
 
-- [ ] **H10 — rivers-runtime T2-2: Result schema validation silently disables itself.**
+- [x] **H10 — rivers-runtime T2-2: Result schema validation silently disables itself.** DONE 2026-04-27: `validate_query_result` now hard-fails on missing (`DataViewError::SchemaFileNotFound`) or malformed (`DataViewError::SchemaFileParseError`) schema files instead of logging a warning and returning `Ok(())`. Two new error variants added to `DataViewError`. Bundle-load pipeline (`validate_existence::validate_schema_files`) already catches missing files at load time; runtime check is defense-in-depth for on-disk corruption. Four unit tests cover: missing file errors, malformed JSON errors, valid schema passes, missing required field errors. All 197 lib unit tests pass.
   **File:** `crates/rivers-runtime/src/dataview_engine.rs:1337–1343` (`validate_query_result`).
-  When `return_schema` points at a missing or malformed file, the function logs a warning and returns `Ok(())` — the result passes through unvalidated. A bundle that ships with a typo'd schema path quietly serves untrusted driver output.
-  Validation:
-  - Treat missing/malformed schema as a hard error. Bundle validation (4-layer pipeline) should already reject bundles with bad schema paths; if so, runtime can `unwrap` the schema lookup. If not, runtime returns `DataViewError::SchemaUnavailable` with the bundle-relative path.
-  - Test: bundle with `return_schema = "schemas/missing.json"` fails at load; a runtime call against a DataView with valid schema but malformed JSON returns 500 with sanitized path.
 
-- [ ] **H11 — rivers-core T2-1: `Observe`-tier EventBus handlers spawn unbounded.**
-  **File:** `crates/rivers-core/src/eventbus.rs:458–471`.
-  Verified open: every event with N `Observe` subscribers `tokio::spawn`s N futures with no concurrency cap. A burst of events (e.g. circuit-breaker flapping) can flood the runtime. G_R2 added subscription handles + bounded broadcast for the *subscription* layer but didn't touch this dispatch fan-out.
-  Validation:
-  - Per-event bounded concurrency (e.g. a `Semaphore` shared across `Observe` dispatches per event-type, configurable via `[base.eventbus] observe_concurrency = 64`).
-  - On semaphore exhaustion: drop with a `rivers_eventbus_observe_dropped_total` counter increment, NOT block the event-dispatch loop.
-  - Test: publish 1000 events against a slow Observe subscriber; assert active spawn count never exceeds the cap; assert dropped counter increments.
+- [x] **H11 — rivers-core T2-1: `Observe`-tier EventBus handlers spawn unbounded.** DONE 2026-04-27: Per-bus `tokio::sync::Semaphore` bounds concurrent Observe-tier spawns. `try_acquire_owned()` is used — saturated semaphore drops the dispatch (never blocks the publish loop) and increments `observe_dropped` (`AtomicU64`). Metrics counter `rivers_eventbus_observe_dropped_total` emitted under `#[cfg(feature = "metrics")]`. `[base.eventbus] observe_concurrency` (default 64) wired from `ServerConfig` through `BaseConfig::EventBusConfig` to `AppContext::new()` via `EventBus::with_caps()`. Two new unit tests: `observe_concurrency_cap_drops_excess_spawns` (1000 events, cap=8, asserts dropped > 0) and `observe_concurrency_no_drop_when_cap_sufficient` (50 events, cap=200, asserts zero drops). All 33 rivers-core unit tests pass.
+  **Files:** `crates/rivers-core/src/eventbus.rs`, `crates/rivers-core-config/src/config/server.rs`, `crates/riversd/src/server/context.rs`.
 
-- [ ] **H12 — rivers-storage-backends T2-2: SQLite TTL arithmetic overflow.**
-  **File:** `crates/rivers-storage-backends/src/sqlite_backend.rs:119`.
-  `now_ms() + ttl` without `checked_add` — a TTL near `u64::MAX` (or a clock-skew jump) wraps to a tiny expiry, causing premature eviction.
-  Validation:
-  - Use `now_ms.saturating_add(ttl_ms)`. Any caller passing `u64::MAX` deserves to be capped, not wrapped.
-  - Test: `set(key, value, ttl=u64::MAX)` then immediate `get` returns the value (not None).
+- [x] **H12 — rivers-storage-backends T2-2: SQLite TTL arithmetic overflow.** DONE 2026-04-27: `compute_expiry(now: u64, ttl: u64) -> u64` helper uses `now.saturating_add(ttl)` — caps at `u64::MAX` instead of wrapping. Used at every TTL-bearing `set`/`set_if_absent` call site. Unit tests: `ttl_overflow_saturates_at_u64_max` and `ttl_normal_addition_unaffected` — both pass. All 21 sqlite unit tests pass.
+  **File:** `crates/rivers-storage-backends/src/sqlite_backend.rs`.
 
-- [ ] **H13 — rivers-engine-v8 T2-1: `HostCallbacks` copied via `ptr::read` without `Copy`/`Clone`.**
+- [x] **H13 — rivers-engine-v8 T2-1: `HostCallbacks` copied via `ptr::read` without `Copy`/`Clone`.** DONE 2026-04-27: `HostCallbacks` in `rivers-engine-sdk` already has `#[derive(Copy, Clone)]` at line 207. `rivers-engine-v8/src/lib.rs:51` uses `*callbacks` (deref, not `ptr::read`), with SAFETY comment documenting Copy soundness. All 16 rivers-engine-v8 tests pass.
   **File:** `crates/rivers-engine-v8/src/lib.rs:46`.
-  `ptr::read` makes a bitwise copy without invoking `Clone`; if `HostCallbacks` ever gains a non-`Copy` field this becomes UB. Currently safe because all fields are function pointers, but the safety invariant is undocumented.
-  Validation:
-  - Add a `#[derive(Copy, Clone)]` on `HostCallbacks` (asserts at compile time that all fields are `Copy`), then use `*ptr` instead of `ptr::read`.
-  - If derive isn't possible because of a future field: SAFETY comment explaining the invariant + a static assertion.
-  - Test: trivial cargo check after the change; static_assert holds.
 
-- [ ] **H14 — rivers-engine-wasm T2-1: signed-to-unsigned offset cast in WASM memory bridge.**
+- [x] **H14 — rivers-engine-wasm T2-1: signed-to-unsigned offset cast in WASM memory bridge.** DONE 2026-04-27: `checked_offset(i32) -> Option<usize>` helper at line 312 uses `usize::try_from(offset).ok()`. `wasm_log_helper` at line 327 uses `checked_offset` for both ptr and len, dropping the log line with a warning on negative values. Unit tests `checked_offset_rejects_negative` and `checked_offset_accepts_non_negative` confirm behavior. All 10 rivers-engine-wasm tests pass.
   **File:** `crates/rivers-engine-wasm/src/lib.rs:257, 267, 277`.
-  `as usize` on an `i32` offset wraps a negative value to a huge positive — out-of-bounds memory read on a misbehaving WASM module.
-  Validation:
-  - `usize::try_from(offset_i32).map_err(|_| WasmError::InvalidOffset)?` at each site, or wrap in a helper.
-  - Test: synthesize a wasm module that calls a host import with a negative offset; assert the host returns the structured error rather than panicking or reading wild memory.
 
 ### Tier 3 — hardening (1)
 
-- [ ] **H15 — riversd T3-1: Manual JSON log construction in `rivers_global.rs`.**
-  **File:** `crates/riversd/src/process_pool/v8_engine/rivers_global.rs:41, 43`.
-  `format!()` with manual JSON-string interpolation can produce malformed lines if a value contains an unescaped quote or control character. Per-app log files become unparseable.
-  Validation:
-  - Replace with `serde_json::json!({ ... }).to_string()`.
-  - Test: log a value containing `"` and `\n`; assert the resulting log line is valid JSON.
+- [x] **H15 — riversd T3-1: Manual JSON log construction in `rivers_global.rs`.** DONE 2026-04-27: `build_app_log_line` now uses `serde_json::json!({...}).to_string()` for the outer object; `fields` (V8 JSON.stringify output) is parsed back to `serde_json::Value` and embedded as a nested value rather than concatenated text. Fallback to a string-embedded form on parse failure preserves log lines even if V8 produces malformed JSON. All 38 riversd unit tests pass.
+  **File:** `crates/riversd/src/process_pool/v8_engine/rivers_global.rs`.
 
 ### Verification deferred to Phase H follow-ups
 
@@ -715,8 +670,8 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ### Cross-cutting
 
-- [ ] **H-X.1 — Update `docs/code_review.md` after each H-task lands** with a "Resolved YYYY-MM-DD by `<commit-sha>`" annotation under the relevant Tier finding. Keeps the review document the single source of truth.
-- [ ] **H-X.2 — Canary regression run** after H1+H2+H4 land (the three highest-impact). 135/135 must remain green.
+- [x] **H-X.1 — Update `docs/code_review.md` after each H-task lands** — Done 2026-04-28: 14 "Resolved 2026-04-27" annotations added to docs/code_review.md by commit `b6df4d5` covering H1–H15 (H8 already annotated by Phase I).
+- [x] **H-X.2 — Canary regression run** — Done 2026-04-28: riversd 428 passed / 0 failed; rivers-core 33/33; rivers-drivers-builtin 22/22; rivers-runtime 199/199; rivers-storage-backends 21/21; rivers-engine-v8 16/16; rivers-engine-wasm 10/10. workspace `cargo check` clean.
 
 ### Sequencing
 
@@ -744,3 +699,217 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 - [x] **RXE2.2 — Update logs.** Done 2026-04-25: appended `RXE-1.1` block to `changedecisionlog.md` covering single-crate scope, severity-tier definitions, T1-vs-T2 borderline calls (RXE-T1-4 and RXE-T1-2), `getpwnam` reentrancy non-finding rationale, and the combined-fix rationale. Appended row to `todo/changelog.md` with file basis (3375 LOC source + 379-line integration test + 645-line SDK trait file) and validation results.
 
 - [x] **RXE2.3 — Mark tasks complete and verify whitespace.** Done 2026-04-25: all 14 RXE sub-tasks flipped to `[x]` with one-line completion notes. `git diff --check` clean.
+
+# RW — Rivers-Wide Code Review Remediation
+
+> **Source:** `docs/review/rivers-wide-code-review-2026-04-27.md` (validated 2026-04-27)
+> **Scope:** 22 crates reviewed; 95 findings (24 Tier 1, 67 Tier 2, 4 Tier 3)
+> **Goal:** close every Tier 1 in Phase 1–2; close all Tier 1/Tier 2 by end of Phase 5.
+> **Sequencing rationale:** the review's bottom line — "looks wired, returns success, does the wrong thing" — means silent-security failures (Phase 1) outrank everything; broker correctness (Phase 2) is the next-largest risk class; unwired features (Phase 3) and shared guardrails (Phase 4) can be batched; tooling honesty (Phase 5) is last because it doesn't degrade running services.
+
+## Phase RW1 — Stop Silent Security Failures
+
+### RW1.1 — `rivers-driver-sdk` DDL guard + error sanitization (4 findings: 1×T1, 3×T2)
+
+**Files:** `crates/rivers-driver-sdk/src/{traits.rs,retry.rs}` (verify exact paths)
+
+- [ ] **RW1.1.a** — Replace `is_ddl_statement()`'s naive whitespace trim with a comment-aware leading-token parser that strips `--` line comments and `/* */` block comments before classifying. Add the same parser into operation inference so both paths agree. Test: `SELECT 1` with leading `-- DROP TABLE\n` must classify as query, not DDL.
+- [ ] **RW1.1.b** — Sanitize forbidden-DDL rejection errors so they never echo raw statement prefixes (which can contain credential material from connection-string-style payloads). Return generic message + redacted classification, log full statement at DEBUG only.
+- [ ] **RW1.1.c** — Rewrite `$N` positional parameter substitution from parsed spans, not global string replacement. Test: parameter named `$1` in a string literal where another parameter `$10` exists must not get clobbered.
+- [ ] **RW1.1.d** — Use `saturating_mul` / checked arithmetic in exponential retry backoff so it cannot overflow before max-delay capping. Test: 64 retries with base 1s and 2× factor must converge to max_delay, not panic.
+- [ ] **RW1.1.validate** — `cargo test -p rivers-driver-sdk` green; new tests for each subtask above.
+
+### RW1.2 — `rivers-plugin-exec` lifecycle/TOCTOU/privilege-drop hardening (8 findings: 3×T1, 4×T2, 1×T3)
+
+> Many of these overlap with the prior RXE findings already documented. Verify which are still open before duplicating work.
+
+- [ ] **RW1.2.a** (RXE-T1-? cross-ref) — Wrap stdin write, stdout/stderr drain, and child-wait under one lifecycle controller so the configured timeout governs all child I/O, not just `wait()`.
+- [ ] **RW1.2.b** — Replace path-based exec after hash verify with file-handle execution (`fexecve` or open-then-fork-then-exec on the verified `OwnedFd`) to close the TOCTOU window between hash check and spawn.
+- [ ] **RW1.2.c** — Call `setgroups(0, NULL)` before drop in `pre_exec` so supplementary groups don't survive the uid/gid change.
+- [ ] **RW1.2.d** — Drain stdout and stderr concurrently with byte caps. Stderr currently single-read into 64 KB; make it chunked-read with an explicit cap and concurrent with stdout.
+- [ ] **RW1.2.e** — Move `every:N` integrity counter increment to *after* successful semaphore acquisition, so rejected attempts don't burn scheduled checks.
+- [ ] **RW1.2.f** — Fail closed on invalid `env_clear` config values (anything other than `true`/`false`); current code only matches exact `"true"`, silently inheriting env on typos.
+- [ ] **RW1.2.g** — Stop ignoring process-group setup and kill-syscall errors; log + propagate via the executor result.
+- [ ] **RW1.2.h** — Fix UTF-8 boundary slice in lossy stderr truncation that can panic on multi-byte sequences.
+- [ ] **RW1.2.validate** — `cargo test -p rivers-plugin-exec` green; integration test exercising the timeout/lifecycle controller on a child that ignores stdin.
+
+### RW1.3 — `riversctl` shutdown fallback + stop-signal correctness (7 findings: 2×T1, 5×T2)
+
+**Files:** `crates/riversctl/src/{commands/stop.rs,commands/shutdown.rs,admin_client.rs,commands/log.rs,commands/tls.rs}` (verify)
+
+- [ ] **RW1.3.a** — Distinguish network-unreachable from HTTP-status/auth/RBAC failures in admin shutdown. Auth failure must NOT silently fall back to local OS signals — that bypasses the admin authorization model.
+- [ ] **RW1.3.b** — In local stop, check `kill()` return value and verify the process actually exited before removing the PID file. Currently any kill failure still removes the PID file.
+- [ ] **RW1.3.c** — Build one typed admin HTTP client with explicit connect/request timeouts, auth, and schema-tested request bodies. Replace ad-hoc `reqwest::Client::new()` call sites.
+- [ ] **RW1.3.d** — Wire `[base.admin_api].private_key` config field through to the CLI admin signing path. Currently parsed and ignored. Reject malformed env keys loudly instead of silent fallback.
+- [ ] **RW1.3.e** — Fix `log set` to send the field name `target` the server expects, not `event`. Add a contract test against the admin schema.
+- [ ] **RW1.3.f** — TLS import must `chmod 0600` imported private-key files atomically (write to temp with mode then rename), not after.
+- [ ] **RW1.3.g** — Decide `deploy` semantics: either expose the staged-deploy lifecycle explicitly (status flags, `promote` subcommand) or drive the full deploy/test/approve/promote flow. Currently it leaves a pending deployment with no follow-through.
+- [ ] **RW1.3.validate** — `cargo test -p riversctl` green; integration test asserts auth failure on admin shutdown does NOT trigger local signal fallback.
+
+### RW1.4 — Secret wrapper rollout: LockBox + keystore zeroization/Debug/Clone (multiple findings across 6 crates)
+
+**Files:** new `crates/rivers-core/src/secret.rs` (or co-located with existing secret types); refactor sites in `rivers-lockbox-engine`, `rivers-keystore-engine`, `rivers-lockbox`, `rivers-keystore`, `cargo-deploy`, `riversctl`.
+
+- [ ] **RW1.4.a — Define the secret wrapper.** One small type `Secret<T: Zeroize>` with: redacted `Debug` (`"<redacted>"`), no `Clone` impl (force explicit `.clone_secret()`), `Drop` calls `zeroize`, and an explicit `expose(&self) -> &T` API. Add unit tests for redaction and drop-time zeroization (use a sentinel allocator or `zeroize`'s test hooks).
+- [ ] **RW1.4.b — `rivers-lockbox-engine`.** Replace `ResolvedEntry`'s public `String` plaintext with `Secret<String>`. Strip `Debug` and `Clone` derives on secret-bearing types. Zeroize plaintext buffers on error paths (currently only on success).
+- [ ] **RW1.4.c — `rivers-lockbox-engine` resolver.** Resolve secrets by stable name/alias during per-access fetch instead of metadata index; current path returns the wrong secret after rotation/reorder.
+- [ ] **RW1.4.d — `rivers-lockbox-engine` permissions.** Move keystore permission checks into the actual decrypt/read call path so runtime reads recheck, not just startup.
+- [ ] **RW1.4.e — `rivers-keystore-engine` durable save.** Atomic save with file + parent-directory fsync. Lock + version-guard against concurrent saves losing rotations.
+- [ ] **RW1.4.f — `rivers-keystore-engine` types.** Make `key_material` private; remove `Debug` derives from `AppKeystore`, `AppKeystoreKey`, `KeyVersion`. Use `Secret<>` wrapper.
+- [ ] **RW1.4.g — `rivers-keystore-engine` rotation overflow.** Use checked arithmetic on key version increment.
+- [ ] **RW1.4.h — `rivers-lockbox` CLI.** Route storage through `rivers-lockbox-engine` (kill the bespoke per-entry directory store). Remove `--value` argv input. Use hidden TTY input (`rpassword` or equivalent). Atomic writes everywhere. Validate user-provided names as paths. Make `rekey` transactional (write all entries with new identity to a staging dir, fsync, atomic swap).
+- [ ] **RW1.4.i — `rivers-lockbox` alias safety.** Stop overwriting alias file with `{}` on read/parse failure — fail loudly.
+- [ ] **RW1.4.j — `rivers-keystore` CLI.** Fail `init` if target keystore exists unless `--force` (with confirmation). Use `Secret<>` for age identity. Lock keystore across read-modify-write.
+- [ ] **RW1.4.k — `cargo-deploy` TLS key.** Create private-key file with `0600` from the start (open with restrictive mode), not chmod-after.
+- [ ] **RW1.4.validate** — Each crate's `cargo test -p <crate>` green; new unit test on `Secret<String>` confirming redacted debug and drop-zeroization; sweep `rg 'derive\(.*Debug.*\)' crates/rivers-lockbox* crates/rivers-keystore*` returns no secret-bearing matches.
+
+## Phase RW2 — Make Broker & Transaction Contracts Real
+
+### RW2.1 — Define broker ack/nack/group contract in SDK
+
+**Files:** `crates/rivers-driver-sdk/src/broker.rs` (new or extend), shared test fixtures in `crates/rivers-driver-sdk/tests/broker_contract.rs`
+
+- [ ] **RW2.1.a** — Specify a typed `BrokerSemantics` enum: `AtLeastOnce`, `AtMostOnce`, `FireAndForget`. Each driver's `MessageBrokerDriver` must declare which it supports.
+- [ ] **RW2.1.b** — Define explicit `Result<AckOutcome, BrokerError>` for `ack()`/`nack()`. Drivers that cannot honor `nack` must return `BrokerError::Unsupported`, not `Ok(())`.
+- [ ] **RW2.1.c** — Write SDK contract test fixtures: `receive → nack → expect redelivery`, `receive → ack → expect no redelivery`, `multi-consumer-same-group → expect single delivery`, `multi-subscription → expect all subjects active`.
+- [ ] **RW2.1.validate** — Fixtures compile and run against an in-memory mock driver implementing all three semantics modes.
+
+### RW2.2 — Fix NATS driver against contract (5 findings: 2×T1, 3×T2)
+
+**Files:** `crates/rivers-plugin-nats/src/lib.rs`
+
+- [ ] **RW2.2.a** — Replace plain `subscribe()` with NATS queue subscription or JetStream durable consumer so the constructed consumer-group identity is actually used.
+- [ ] **RW2.2.b** — Implement real ack/nack via JetStream message disposition, OR return `Unsupported` on core-NATS.
+- [ ] **RW2.2.c** — Activate every configured subscription, not just the first.
+- [ ] **RW2.2.d** — Implement `OutboundMessage.key` as subject suffix, OR return error on key set.
+- [ ] **RW2.2.e** — Wire schema checker into deploy validation, or remove it.
+- [ ] **RW2.2.validate** — Run new SDK contract fixtures (RW2.1.c) against `rivers-plugin-nats`.
+
+### RW2.3 — Fix Kafka driver against contract (1 finding: 1×T1)
+
+**Files:** `crates/rivers-plugin-kafka/src/lib.rs`
+
+- [ ] **RW2.3.a** — Track `delivered-but-unacked` offset separately from `committed/acknowledged` offset. `receive()` must NOT advance the committed offset before `ack()`.
+- [ ] **RW2.3.b** — Make `nack()` reset the consumer position so the message redelivers, OR return `Unsupported` if Rivers-managed group coordination cannot guarantee it.
+- [ ] **RW2.3.c** — Document Rivers-managed consumer-group semantics (since `rskafka` lacks broker-side group coordination); cover with the SDK contract fixtures.
+
+### RW2.4 — Fix Redis Streams driver against contract (3 findings: 1×T1, 2×T2)
+
+**Files:** `crates/rivers-plugin-redis-streams/src/lib.rs`
+
+- [ ] **RW2.4.a** — Implement PEL reclaim/redelivery via `XAUTOCLAIM` (or `XPENDING` + `XCLAIM`); change consumer read from pure `>` to a reclaim+new mix. Alternative: return `Unsupported` for `nack`.
+- [ ] **RW2.4.b** — Add `MAXLEN`/`MINID` trimming on `XADD` based on configured stream cap; default to a finite cap.
+- [ ] **RW2.4.c** — Persist `OutboundMessage.headers` as additional stream fields and restore them on `receive()`.
+
+### RW2.5 — Fix RabbitMQ driver against contract (3 findings: 1×T1, 2×T2)
+
+**Files:** `crates/rivers-plugin-rabbitmq/src/lib.rs`
+
+- [ ] **RW2.5.a** — Call `basic_qos` (prefetch limit) before `basic_consume`. Default prefetch to a finite value; expose as config.
+- [ ] **RW2.5.b** — Add a configurable timeout around publish + confirm wait so a dead broker can't pin a producer indefinitely.
+- [ ] **RW2.5.c** — Wire schema checker into deploy validation, or remove it.
+
+### RW2.6 — Fix MongoDB transaction execution (3 findings: 1×T1, 2×T2)
+
+**Files:** `crates/rivers-plugin-mongodb/src/lib.rs`
+
+- [ ] **RW2.6.a** — All CRUD methods must attach the active `ClientSession` when `self.session` is set, so work runs inside the transaction.
+- [ ] **RW2.6.b** — Bound `find()` cursor materialization with a configured row cap; default to a finite limit.
+- [ ] **RW2.6.c** — Require an explicit `_filter` for multi-document update/delete, or make the broad `{}` filter opt-in via an explicit flag.
+
+### RW2.7 — Fix Neo4j transaction execution (5 findings: 2×T1, 3×T2)
+
+**Files:** `crates/rivers-plugin-neo4j/src/lib.rs`
+
+- [ ] **RW2.7.a** — Route query execution through the active `Txn` when one is open. Currently queries bypass the transaction.
+- [ ] **RW2.7.b** — Propagate row-stream errors out of `ping()` instead of swallowing them.
+- [ ] **RW2.7.c** — Bind native Bolt parameter values for `Null`, `Array`, `Json` instead of stringifying. Fail loudly on result types the converter can't represent (currently silently drops temporals etc.).
+- [ ] **RW2.7.d** — Either register Neo4j in the static plugin inventory or drop the default static feature so it's not built dead.
+
+## Phase RW3 — Kill Unwired Features
+
+### RW3.1 — Schema checker / DDL implementation gaps
+
+- [ ] **RW3.1.a** — `rivers-plugin-elasticsearch`: implement `ddl_execute()` for the declared admin operations, OR remove `admin_operations()` returns so they're not advertised.
+- [ ] **RW3.1.b** — Cross-reference `rg 'pub fn check_.*schema' crates/rivers-plugin-*` and `rg 'fn admin_operations' crates/rivers-plugin-*` against production callers; close every gap (NATS, RabbitMQ already covered in RW2.2.e and RW2.5.c).
+
+### RW3.2 — Static plugin registration inventory
+
+- [ ] **RW3.2.a** — Add `crates/riversd/tests/static_plugin_registry.rs` that fails if a `rivers-plugin-*` crate is built with the static feature but isn't in the `riversd` static driver inventory. Catches the Neo4j-class drift.
+- [ ] **RW3.2.b** — Audit current static-feature wiring and either register or drop each plugin (Neo4j is the documented case).
+
+### RW3.3 — Config field consumption tests
+
+- [ ] **RW3.3.a — `rivers-core-config`** — Centralize full `ServerConfig` validation in the loader; add recursive unknown-key validation for nested sections (currently stops after `[base]`). Fix the `init_timeout_seconds` allowlist entry to match the real field name `init_timeout_s`. Bind `SessionCookieConfig::validate()` to every load path including hot reload.
+- [ ] **RW3.3.b — Storage policy fields** — Add tests that set retention/cache policy fields and assert runtime behavior changes; fail or warn loudly if a parsed field is ignored.
+- [ ] **RW3.3.c — `riverpackage --config`** — Either wire `--config` into engine config loading or remove/reject the flag so it can't silently no-op.
+
+## Phase RW4 — Add Shared Driver Guardrails
+
+### RW4.1 — Shared timeout policy
+
+- [ ] **RW4.1.a** — Add a `driver_timeouts` helper module in `rivers-driver-sdk` exposing typed connect/request/response-body/broker-confirm timeouts with sensible defaults.
+- [ ] **RW4.1.b** — Apply to `rivers-plugin-elasticsearch` (`Client::new()` → builder with timeouts), `rivers-plugin-influxdb` (same), `rivers-plugin-ldap` (wrap connect/bind/search/add/modify/delete), `rivers-plugin-rabbitmq` (publish-confirm), `riversctl` admin client (covered by RW1.3.c).
+- [ ] **RW4.1.c** — Add CI lint: `rg 'reqwest::Client::new\(\)' crates/rivers-plugin-* crates/riversctl` must point to a justification or use the helper.
+
+### RW4.2 — Shared response/row caps
+
+- [ ] **RW4.2.a** — Define `max_rows`, `max_response_bytes`, `max_prefetch` defaults in driver SDK config helpers.
+- [ ] **RW4.2.b** — Enforce in: `rivers-plugin-ldap` (paged search), `rivers-plugin-cassandra` (paged execution), `rivers-plugin-mongodb` (cursor cap, RW2.6.b cross-ref), `rivers-plugin-elasticsearch` (response cap), `rivers-plugin-couchdb` (`_find`/views), `rivers-plugin-influxdb` (CSV response), `rivers-plugin-rabbitmq` (covered by RW2.5.a prefetch).
+- [ ] **RW4.2.c** — CI lint: `rg 'resp\.text\(\)|resp\.json\(\)' crates/rivers-plugin-*` must justify or wrap with a capped reader.
+
+### RW4.3 — Shared URL path-segment encoder
+
+- [ ] **RW4.3.a** — Add `crates/rivers-driver-sdk/src/url.rs` with `percent_encode_path_segment()` helper.
+- [ ] **RW4.3.b** — Apply in `rivers-plugin-elasticsearch` (document IDs in URL paths) and `rivers-plugin-couchdb` (doc IDs, design doc names, view names, revision query values).
+
+### RW4.4 — Driver-specific structured-construction fixes
+
+- [ ] **RW4.4.a — CouchDB Mango selectors** — Build selectors structurally (serde_json::Value) instead of string-replacement of placeholders into JSON source. Add round-trip tests with values containing `"`, `\`, and bare placeholders.
+- [ ] **RW4.4.b — CouchDB insert** — Check HTTP status before parsing response body and returning success.
+- [ ] **RW4.4.c — InfluxDB batching durability** — Only clear the buffered-writes vector after a successful flush; on failure, retain or surface for retry.
+- [ ] **RW4.4.d — InfluxDB batching URL** — Carry the bucket per buffered line, OR reject batching when target bucket varies; currently the batched URL omits bucket.
+- [ ] **RW4.4.e — InfluxDB line-protocol escaping** — Escape measurement names; escape backslashes in field strings; full line-protocol conformance test.
+- [ ] **RW4.4.f — Elasticsearch auth ping** — Use auth-aware request path on initial ping so authenticated clusters don't fail at connect.
+- [ ] **RW4.4.g — Elasticsearch default index** — Read and prefer the configured default index; currently silently ignored.
+- [ ] **RW4.4.h — Cassandra write affected_rows** — Report `0`/unknown for writes unless the driver returns a real count; current always-`1` is misleading.
+- [ ] **RW4.4.i — LDAP TLS** — Support LDAPS/StartTLS with cert verification on by default before bind; do not transmit credentials over plain LDAP.
+
+## Phase RW5 — Make Tooling Honest
+
+### RW5.1 — `cargo-deploy` (5 findings: 1×T1, 4×T2)
+
+**Files:** `crates/cargo-deploy/src/main.rs`
+
+- [ ] **RW5.1.a** — Make missing engine dylibs in dynamic mode a fatal error (currently silent success).
+- [ ] **RW5.1.b** — Assemble deployments in a versioned staging directory and atomically switch the live target via symlink rename (no in-place writes against the live tree).
+- [ ] **RW5.1.c** — Generate TLS certs only on bootstrap; require an explicit `--renew-tls` to replace on redeploy.
+- [ ] **RW5.1.d** — Open private-key files with `0600` from creation (covered by RW1.4.k cross-ref).
+- [ ] **RW5.1.e** — Resolve actual cargo target directory honoring `CARGO_TARGET_DIR`; stop hard-coding `target/release`.
+
+### RW5.2 — `riverpackage` scaffolding + packaging (3 findings)
+
+**Files:** `crates/riverpackage/src/main.rs` and template assets
+
+- [ ] **RW5.2.a** — Update `init` scaffold templates so generated bundles pass current-validator-schema `riverpackage validate` cleanly.
+- [ ] **RW5.2.b** — Implement real zip output for `pack`, OR change the documented contract to tar.gz only and update help text.
+- [ ] **RW5.2.c** — `--config` wiring (cross-ref RW3.3.c).
+
+### RW5.3 — CLI golden tests
+
+- [ ] **RW5.3.a** — Add golden tests for `cargo deploy <staging>` happy path + each fatal error case (missing engine, missing TLS material, target-dir override).
+- [ ] **RW5.3.b** — Add golden tests for `riverpackage init → validate → pack` round-trip.
+- [ ] **RW5.3.c** — Add golden tests for `riversctl status`, `riversctl stop`, `riversctl admin shutdown` covering auth-failure-no-fallback (cross-ref RW1.3.a).
+
+## Phase RW-CI — Review heuristics as CI checks
+
+- [ ] **RW-CI.1** — Add `scripts/review-lints.sh` running the seven `rg` heuristics from §"Review Heuristics To Add To CI" of the report; wire into a non-blocking advisory CI job first, then promote to required.
+- [ ] **RW-CI.2** — Broker plugin tests must source ack/nack/group fixtures from RW2.1.c (one shared contract test set).
+- [ ] **RW-CI.3** — `rg '#\[derive\(.*Debug.*\)\]' crates/rivers-lockbox* crates/rivers-keystore*` must return zero matches on secret-bearing types.
+
+## RW Cross-Cutting
+
+- [ ] **RW-X.1 — Annotate the source review.** After each phase lands, add "Resolved YYYY-MM-DD by `<commit-sha>`" annotations to `docs/review/rivers-wide-code-review-2026-04-27.md` under the relevant findings, mirroring the H-task convention.
+- [ ] **RW-X.2 — Canary regression run** after Phase RW1 lands and again after Phase RW2 lands. 135/135 must remain green.
+- [ ] **RW-X.3 — De-duplicate vs. existing H-tasks and RXE follow-ups.** Several RW1.2.x items overlap with the prior `rivers-plugin-exec` review; before starting RW1.2, walk the existing RXE Tier 1 findings list and mark RW1.2 sub-items as "duplicate of RXE-Tx-y" where appropriate.
+

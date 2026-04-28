@@ -274,11 +274,33 @@ pub async fn load_and_wire_bundle(
             }
         }
 
-        // Register dataviews — namespaced by entry_point to prevent collisions
+        // Register dataviews — namespaced by entry_point to prevent collisions.
+        // Normalize all schema path fields to absolute paths using app_dir so
+        // that validate_query_result's fs::read_to_string is not CWD-dependent.
         for dv in app.config.data.dataviews.values() {
             let mut namespaced_dv = dv.clone();
             namespaced_dv.name = format!("{}:{}", entry_point, dv.name);
             namespaced_dv.datasource = format!("{}:{}", entry_point, dv.datasource);
+
+            // Helper: resolve a schema field to an absolute path string when the
+            // field is relative (absolute fields pass through unchanged).
+            let abs = |p: Option<String>| -> Option<String> {
+                p.map(|s| {
+                    let path = std::path::Path::new(&s);
+                    if path.is_absolute() {
+                        s
+                    } else {
+                        app.app_dir.join(&s).to_string_lossy().into_owned()
+                    }
+                })
+            };
+
+            namespaced_dv.return_schema = abs(namespaced_dv.return_schema);
+            namespaced_dv.get_schema = abs(namespaced_dv.get_schema);
+            namespaced_dv.post_schema = abs(namespaced_dv.post_schema);
+            namespaced_dv.put_schema = abs(namespaced_dv.put_schema);
+            namespaced_dv.delete_schema = abs(namespaced_dv.delete_schema);
+
             registry.register(namespaced_dv);
         }
 

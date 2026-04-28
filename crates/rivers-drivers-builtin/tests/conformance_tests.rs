@@ -20,3 +20,7 @@ mod conformance_param_binding {
 mod conformance_h18_mysql_uint {
     include!("conformance/h18_mysql_uint.rs");
 }
+
+mod conformance_h4_mysql_pool_key {
+    include!("conformance/h4_mysql_pool_key.rs");
+}
