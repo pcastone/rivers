@@ -190,6 +190,21 @@ pub async fn execute_command(
     // /proc does not exist. We fall back to path-based exec. The residual
     // TOCTOU window is bounded to the few microseconds between integrity.verify()
     // and spawn(); the hash check immediately precedes the spawn in pipeline.rs.
+
+    // FdGuard keeps the raw fd open until after spawn() so /proc/self/fd/N
+    // remains valid when the kernel exec's the child. Declared here so it
+    // outlives the `let mut cmd` block below.
+    #[cfg(target_os = "linux")]
+    struct FdGuard(i32);
+    #[cfg(target_os = "linux")]
+    impl Drop for FdGuard {
+        fn drop(&mut self) {
+            unsafe { libc::close(self.0); }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    let mut _fd_guard: Option<FdGuard> = None;
+
     #[cfg(target_os = "linux")]
     let mut cmd = {
         use std::os::unix::io::IntoRawFd;
@@ -257,15 +272,8 @@ pub async fn execute_command(
                     }
                 }
 
-                // Close the fd in the parent after spawn; the child inherits it
-                // via the /proc/self/fd path but O_CLOEXEC closes it post-exec.
-                struct FdGuard(i32);
-                impl Drop for FdGuard {
-                    fn drop(&mut self) {
-                        unsafe { libc::close(self.0); }
-                    }
-                }
-                let _guard = FdGuard(fd);
+                // Keep the fd alive until after spawn(); closed by _fd_guard's Drop.
+                _fd_guard = Some(FdGuard(fd));
                 fd_cmd
             }
             Err(e) => {
@@ -286,6 +294,12 @@ pub async fn execute_command(
     let mut child = cmd.spawn().map_err(|e| {
         DriverError::Internal(format!("failed to spawn command '{}': {e}", config.path.display()))
     })?;
+
+    // Close the parent's copy of the fd now that the child has been spawned.
+    // The child inherited the fd at exec time via /proc/self/fd/N; we no longer
+    // need it in the parent.
+    #[cfg(target_os = "linux")]
+    drop(_fd_guard);
 
     let child_pid = child.id();
 
