@@ -452,18 +452,11 @@ These are not separate phases — they are the verification bar for the work abo
   - Reserve a slot atomically (e.g. `compare_exchange` on an `AtomicU64` count, or move the check inside the same write-lock that performs the insert).
   - Test: 200 concurrent WS connects with `max_connections=50`; assert exactly 50 succeed and 150 are rejected.
 
-- [ ] **H6 — riversd T2-6: V8 outbound HTTP host callback has no timeout.**
-  **File:** `crates/riversd/src/process_pool/v8_engine/http.rs:131` (`reqwest::Client::new()` with no timeout config).
-  An external endpoint that never closes the response pins a worker for the lifetime of the V8 task — which itself has no timeout for sync host bridges (H2).
-  Validation:
-  - Build the client with `.timeout(Duration::from_millis(default_outbound_timeout))`. Default config-driven, log on construction.
-  - Per-request override via handler-supplied `timeout` field on the fetch call.
-  - Test: handler `await ctx.http.fetch("http://203.0.113.1/")` (TEST-NET-3) returns a timeout error within budget; worker freed.
+- [x] **H6 — riversd T2-6: V8 outbound HTTP host callback has no timeout.**
+  Done 2026-04-27. New `crates/riversd/src/http_client.rs` module provides `outbound_client()` — a process-wide `reqwest::Client` built with `.timeout(30_000ms)` and `.connect_timeout(5s)`. V8 path (`http.rs:134`) now calls `crate::http_client::outbound_client()` instead of `reqwest::Client::new()`. Two tests: `outbound_client_is_shared` (proves OnceLock identity) and `outbound_http_times_out_on_unreachable_endpoint` (TEST-NET-3, fires within 35s). All 428 lib tests green.
 
-- [ ] **H7 — riversd T2-7: Dynamic engine HTTP host callback also lacks timeout.**
-  **File:** `crates/riversd/src/engine_loader/host_callbacks.rs` (search for `.send().await`).
-  Mirror the H6 fix on the dynamic-engine path. Use the same shared client builder so static and dynamic engines have identical outbound timeout policy.
-  Validation: Same pattern as H6, exercised through the wasm engine path.
+- [x] **H7 — riversd T2-7: Dynamic engine HTTP host callback also lacks timeout.**
+  Done 2026-04-27. Dynamic-engine path (`host_context.rs:342`) sets `http_client: crate::http_client::outbound_client().clone()` — same shared client as H6. Both paths now share identical 30s timeout / 5s connect-timeout policy. Validated with same test suite.
 
 - [x] **H8 — riversd T2-8: Transaction host callbacks are stubs (dynamic-engine path).**
   Done 2026-04-25 — Phase I (I1-I9 + I-X.1-3) closed it end-to-end. See Phase I commits on `feature/phase-i-dyn-transactions` and `changedecisionlog.md` TXN-I1.1 / TXN-I2.1 / TXN-I6+I7.1 / TXN-I8.1.

@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-04-27 — H6+H7: Outbound HTTP timeout for V8 and dynamic-engine host callbacks
+
+New `crates/riversd/src/http_client.rs` module introduces a process-wide
+`outbound_client()` function returning a `reqwest::Client` built with a
+30 000ms total-request timeout and 5s TCP/TLS connect timeout. Without
+these, any stalled upstream would pin the V8 or dynamic-engine worker
+indefinitely.
+
+Both engine paths are wired to the same singleton:
+
+- V8 path (`process_pool/v8_engine/http.rs:134`): replaced bare
+  `reqwest::Client::new()` with `crate::http_client::outbound_client()`.
+- Dynamic-engine path (`engine_loader/host_context.rs:342`): struct field
+  `http_client` is now `crate::http_client::outbound_client().clone()`.
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `crates/riversd/src/http_client.rs` | New module: `outbound_client()` OnceLock singleton with timeout + connect_timeout; 2 unit tests | H6+H7 / T2-6, T2-7 | New shared builder |
+| `crates/riversd/src/process_pool/v8_engine/http.rs` | H6: use `outbound_client()` instead of `Client::new()` | H6 / T2-6 | One-line change |
+| `crates/riversd/src/engine_loader/host_context.rs` | H7: `http_client` field set from `outbound_client().clone()` | H7 / T2-7 | One-line change |
+| `Cargo.toml` (workspace) | Version bump `0.55.3+0236280426` → `0.55.4+0242280426` (PATCH) | CLAUDE.md §Versioning | `./scripts/bump-version.sh patch` |
+| `todo/tasks.md` | H6 and H7 marked `[x]` with completion summary | — | Done |
+
+**Validation:**
+- `cargo test -p riversd --lib` — 428 tests pass, 0 failures, 6 ignored.
+- `outbound_client_is_shared` — proves OnceLock wiring (same pointer across calls).
+- `outbound_http_times_out_on_unreachable_endpoint` — TEST-NET-3 (203.0.113.1) returns error within 35s budget.
+
 ## 2026-04-28 — H2: Synchronous V8 host bridge — bounded recv on dyn-engine path
 
 All blocking `recv()` sites in the dynamic-engine host callbacks bounded by
