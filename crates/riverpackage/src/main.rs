@@ -330,9 +330,20 @@ fn cmd_validate(args: &[String]) -> Result<(), String> {
         std::process::exit(2);
     }
 
+    // Wire --config into engine discovery so Layer 4 can compile-check handlers.
+    let engines = _config_path.and_then(|cfg| {
+        match rivers_runtime::discover_engines(Path::new(cfg)) {
+            Ok(e) => Some(e),
+            Err(e) => {
+                eprintln!("Warning: --config '{}': {e}", cfg);
+                None
+            }
+        }
+    });
+
     let config = rivers_runtime::ValidationConfig {
         bundle_dir: path.to_path_buf(),
-        engines: None,
+        engines,
     };
 
     let report = rivers_runtime::validate_bundle_full(&config);
@@ -485,6 +496,33 @@ fn cmd_import_exec(name: &str, script_path: &str, input_mode: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── --config flag tests ───────────────────────────────────────────────
+
+    /// Verify that `--config` is recognized by the argument parser.
+    #[test]
+    fn config_flag_is_parsed() {
+        let args: Vec<String> = vec![
+            "--config".into(),
+            "/etc/rivers/riversd.toml".into(),
+        ];
+        let parsed = parse_flag(&args, "--config");
+        assert_eq!(parsed, Some("/etc/rivers/riversd.toml"));
+    }
+
+    /// Verify that --config appearing after a positional arg is also extracted.
+    #[test]
+    fn config_flag_is_parsed_after_positional() {
+        let args: Vec<String> = vec![
+            "my-bundle".into(),
+            "--format".into(),
+            "json".into(),
+            "--config".into(),
+            "/opt/rivers/config/riversd.toml".into(),
+        ];
+        let parsed = parse_flag(&args, "--config");
+        assert_eq!(parsed, Some("/opt/rivers/config/riversd.toml"));
+    }
 
     #[test]
     fn validate_catches_missing_manifest() {

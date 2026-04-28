@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::error::DriverError;
-use crate::traits::ConnectionParams;
+use crate::traits::{ConnectionParams, HttpMethod, SchemaDefinition, SchemaSyntaxError};
 
 // ── Message Types ───────────────────────────────────────────────────
 
@@ -271,6 +271,21 @@ pub trait MessageBrokerDriver: Send + Sync {
         params: &ConnectionParams,
         config: &BrokerConsumerConfig,
     ) -> Result<Box<dyn BrokerConsumer>, DriverError>;
+
+    /// Build/deploy time — is this schema structurally valid for this driver?
+    ///
+    /// Per driver-schema-validation-spec §3.2: receives the HTTP method to
+    /// enforce method-specific rules (e.g., PUT/DELETE unsupported for broker schemas).
+    ///
+    /// Default implementation accepts all schemas — drivers that enforce schema
+    /// rules (kafka, nats, rabbitmq) override this.
+    fn check_schema_syntax(
+        &self,
+        _schema: &SchemaDefinition,
+        _method: HttpMethod,
+    ) -> Result<(), SchemaSyntaxError> {
+        Ok(())
+    }
 }
 
 /// A continuous consumer that receives messages from a broker.

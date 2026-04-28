@@ -33,6 +33,14 @@ impl MessageBrokerDriver for NatsDriver {
         BrokerSemantics::AtMostOnce
     }
 
+    fn check_schema_syntax(
+        &self,
+        schema: &rivers_driver_sdk::SchemaDefinition,
+        method: rivers_driver_sdk::HttpMethod,
+    ) -> Result<(), rivers_driver_sdk::SchemaSyntaxError> {
+        check_nats_schema(schema, method)
+    }
+
     async fn create_producer(
         &self,
         params: &ConnectionParams,

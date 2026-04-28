@@ -82,4 +82,4 @@ pub use validate_structural::validate_structural;
 pub use validate_crossref::validate_crossref;
 pub use validate_existence::validate_existence;
 pub use validate_pipeline::{validate_bundle_full, validate_bundle_live, ValidationConfig, LockBoxChecker, ServiceHealthChecker};
-pub use validate_engine::{EngineConfig, EngineHandles, EngineHandle};
+pub use validate_engine::{EngineConfig, EngineHandles, EngineHandle, discover_engines};

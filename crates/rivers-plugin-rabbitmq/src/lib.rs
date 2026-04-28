@@ -44,6 +44,14 @@ impl MessageBrokerDriver for RabbitMqDriver {
         BrokerSemantics::AtLeastOnce
     }
 
+    fn check_schema_syntax(
+        &self,
+        schema: &rivers_driver_sdk::SchemaDefinition,
+        method: rivers_driver_sdk::HttpMethod,
+    ) -> Result<(), rivers_driver_sdk::SchemaSyntaxError> {
+        check_rabbitmq_schema(schema, method)
+    }
+
     async fn create_producer(
         &self,
         params: &ConnectionParams,
