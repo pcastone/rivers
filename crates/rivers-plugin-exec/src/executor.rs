@@ -150,12 +150,12 @@ pub async fn execute_command(
             cmd.pre_exec(|| {
                 let sid = libc::setsid();
                 if sid == -1 {
-                    // Cannot use tracing inside pre_exec (no async runtime).
-                    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-                    eprintln!("exec pre_exec: setsid() failed: errno {errno}");
+                    // Cannot use tracing inside pre_exec (no async runtime); return
+                    // Err so spawn() surfaces the failure to the caller (RW1.2.g).
+                    return Err(std::io::Error::last_os_error());
                 }
                 // Clear supplementary groups before uid/gid drop (RW1.2.c).
-                // EPERM is expected when not root; all other errors are logged by the caller.
+                // EPERM is expected when not root; swallow silently.
                 libc::setgroups(0, std::ptr::null());
                 Ok(())
             });
@@ -258,8 +258,8 @@ pub async fn execute_command(
                     fd_cmd.pre_exec(move || {
                         let sid = libc::setsid();
                         if sid == -1 {
-                            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-                            eprintln!("exec pre_exec(fd): setsid() failed: errno {errno}");
+                            // Return Err so spawn() surfaces the failure (RW1.2.g).
+                            return Err(std::io::Error::last_os_error());
                         }
                         libc::setgroups(0, std::ptr::null());
                         Ok(())
