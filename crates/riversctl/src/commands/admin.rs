@@ -1,5 +1,19 @@
 #[cfg(feature = "admin-api")]
 use std::collections::HashMap;
+#[cfg(feature = "admin-api")]
+use std::sync::OnceLock;
+
+/// Config-sourced admin key path, set once from `[base.admin_api].private_key` before
+/// any commands run. `sign_request` checks this after the `RIVERS_ADMIN_KEY` env var.
+#[cfg(feature = "admin-api")]
+static CONFIG_ADMIN_KEY_PATH: OnceLock<Option<String>> = OnceLock::new();
+
+/// Populate the config-sourced key path. Call once from main() before dispatching
+/// any admin commands. Safe to call multiple times (subsequent calls are no-ops).
+#[cfg(feature = "admin-api")]
+pub fn init_config_key(path: Option<String>) {
+    let _ = CONFIG_ADMIN_KEY_PATH.set(path);
+}
 
 // ── Admin error type ─────────────────────────────────────────────────────────
 
@@ -93,7 +107,8 @@ pub fn sign_request(
 
 #[cfg(feature = "admin-api")]
 pub async fn admin_get(url: &str, path: &str) -> Result<serde_json::Value, AdminError> {
-    let headers = sign_request("GET", path, "", None)
+    let config_key = CONFIG_ADMIN_KEY_PATH.get().and_then(|opt| opt.as_deref());
+    let headers = sign_request("GET", path, "", config_key)
         .map_err(|e| AdminError::Http(format!("key error: {e}")))?;
     let client = admin_client();
     let mut req = client.get(format!("{url}{path}"));
@@ -120,7 +135,8 @@ pub async fn admin_get(url: &str, path: &str) -> Result<serde_json::Value, Admin
 #[cfg(feature = "admin-api")]
 pub async fn admin_post(url: &str, path: &str, body: &serde_json::Value) -> Result<serde_json::Value, AdminError> {
     let body_str = serde_json::to_string(body).unwrap_or_default();
-    let headers = sign_request("POST", path, &body_str, None)
+    let config_key = CONFIG_ADMIN_KEY_PATH.get().and_then(|opt| opt.as_deref());
+    let headers = sign_request("POST", path, &body_str, config_key)
         .map_err(|e| AdminError::Http(format!("key error: {e}")))?;
     let client = admin_client();
     let mut req = client.post(format!("{url}{path}"))

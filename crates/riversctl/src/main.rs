@@ -23,6 +23,15 @@ async fn main() {
     let admin_url = std::env::var("RIVERS_ADMIN_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:9090".into());
 
+    // Load [base.admin_api].private_key from config if present; env var takes priority
+    // inside sign_request, so this is only the fallback source.
+    #[cfg(feature = "admin-api")]
+    {
+        let config_key = doctor::load_config_for_tls().ok()
+            .and_then(|cfg| cfg.base.admin_api.private_key);
+        admin::init_config_key(config_key);
+    }
+
     let result: Result<(), String> = match args[1].as_str() {
         "start"  => start::cmd_start(&args[2..]),
         "stop"   => stop::cmd_stop(&args[2..]),

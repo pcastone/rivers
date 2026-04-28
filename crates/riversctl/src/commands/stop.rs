@@ -25,14 +25,17 @@ pub fn cmd_stop(_args: &[String]) -> Result<(), String> {
     send_kill(pid)?;
 
     // Wait up to 5 more seconds for the process to actually exit after SIGKILL.
+    // Only remove the PID file once we have confirmed the process is gone.
     for _ in 0..5 {
         std::thread::sleep(std::time::Duration::from_secs(1));
         if !is_process_alive(pid) {
-            break;
+            cleanup_pid_file();
+            return Ok(());
         }
     }
-    cleanup_pid_file();
-    Ok(())
+    Err(format!(
+        "riversd (pid {pid}) did not exit after SIGKILL — PID file NOT removed"
+    ))
 }
 
 /// Send SIGTERM (or Windows graceful stop) and verify the syscall succeeded.
