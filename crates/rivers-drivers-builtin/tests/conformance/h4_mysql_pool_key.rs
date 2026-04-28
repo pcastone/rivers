@@ -23,13 +23,19 @@
 //   - The subsequent good-password connect on the SAME host/port/db/user
 //     succeeds (pool isolation means the bad pool did NOT poison the cache
 //     entry for the correct credentials).
+//
+// NOTE: Only 2 conformance tests exist here (not 3). A third "distinct
+// passwords produce independent pools" scenario was removed because it was
+// identical in observable behavior to Test 1 — same 3 steps, same assertions.
+// The boundary conditions for `is_auth_error` (code 1044/1045 → true, others
+// → false) are covered by a unit test in `mysql.rs` (`is_auth_error_boundary_codes`).
 
 use std::collections::HashMap;
 use rivers_driver_sdk::traits::DatabaseDriver;
 use rivers_driver_sdk::ConnectionParams;
 use rivers_drivers_builtin::MysqlDriver;
 
-use super::conformance::cluster_available;
+use super::conformance::*;
 
 /// Returns the known-good MySQL connection params from the test cluster.
 fn good_params() -> ConnectionParams {
@@ -128,35 +134,3 @@ async fn h4_correct_credentials_work_after_failed_attempt() {
     );
 }
 
-// ── Test 3: verify pool key produces distinct strings for distinct passwords ──
-//
-// This is a unit-level assertion run as a cluster-gated conformance test so it
-// appears in the conformance report alongside the integration tests.
-// It re-validates the pool_key isolation property that the mysql unit tests
-// already cover, but from the external test harness (no access to private
-// pool_key fn — we infer isolation via observable connect behaviour).
-
-#[tokio::test]
-async fn h4_distinct_passwords_produce_independent_pools() {
-    if !cluster_available() {
-        eprintln!(
-            "RIVERS_TEST_CLUSTER not set — skipping h4_distinct_passwords_produce_independent_pools"
-        );
-        return;
-    }
-
-    let driver = MysqlDriver;
-
-    // Correct creds connect OK.
-    let ok = driver.connect(&good_params()).await;
-    assert!(ok.is_ok(), "correct-password pool must connect: {:?}", ok.err());
-
-    // Wrong creds fail — the key is different, a new pool is created, and it
-    // fails at checkout. The correct pool is untouched.
-    let fail = driver.connect(&wrong_password_params()).await;
-    assert!(fail.is_err(), "wrong-password must fail");
-
-    // Correct pool is still live and returns a valid connection.
-    let ok2 = driver.connect(&good_params()).await;
-    assert!(ok2.is_ok(), "correct-password pool must survive wrong-password attempt: {:?}", ok2.err());
-}

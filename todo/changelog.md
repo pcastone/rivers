@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-04-27 — H4: MySQL pool key review cleanup
+
+Code quality pass addressing review feedback on the H4 pool-key fix. No behavior changes — the core fix (SHA-256 password fingerprint in pool key, evict + retry on auth failure) landed in the prior session.
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `crates/rivers-drivers-builtin/src/mysql.rs` | H4: pool_key includes SHA-256 password fingerprint (8 bytes hex); evict_pool + is_auth_error + retry on auth failure in connect() — pre-existing from prior PR; this session added `is_auth_error_boundary_codes` unit test covering codes 1043/1044/1045/1046 boundary | rivers-wide review 2026-04-27 | New unit test in existing `#[cfg(test)]` block |
+| `crates/rivers-drivers-builtin/tests/conformance/h4_mysql_pool_key.rs` | H4: removed duplicate Test 3 (`h4_distinct_passwords_produce_independent_pools`) — identical observable behavior to Test 1; now 2 cluster-gated conformance tests. Fixed import to `use super::conformance::*` (peer style). Added header note explaining why only 2 conformance tests exist. | rivers-wide review 2026-04-27 | Duplicate removed; boundary coverage moved to unit test |
+| `Cargo.toml` (workspace) | Version bump `0.55.2+2004260426` → `0.55.2+0219280426` (build-only; review cleanup PR per CLAUDE.md versioning policy) | CLAUDE.md §Versioning | `./scripts/bump-version.sh` |
+| `todo/tasks.md` | H4 marked `[x]` with completion summary | — | Done |
+
+**Validation:**
+- `cargo test -p rivers-drivers-builtin` — 168 unit + 22 conformance tests pass, 0 failures.
+- `cargo check --workspace` — clean.
+
 ## 2026-04-25 — I-FU2: Postgres parallel e2e tests for dyn-engine transactions
 
 Mirrors the SQLite e2e cases (in `process_pool::dyn_e2e_tests`) against

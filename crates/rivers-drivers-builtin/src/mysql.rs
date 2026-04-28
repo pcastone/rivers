@@ -988,6 +988,29 @@ mod tests {
     }
 
     #[test]
+    fn is_auth_error_boundary_codes() {
+        // H4: verify exact boundary conditions for is_auth_error().
+        // 1043 (ER_HANDSHAKE_ERROR) — just below the auth range → false.
+        // 1044 (ER_DBACCESS_DENIED_ERROR) — access denied to database → true.
+        // 1045 (ER_ACCESS_DENIED_ERROR) — access denied for user → true.
+        // 1046 (ER_NO_DB_ERROR) — no database selected, not an auth error → false.
+        // These boundaries ensure the eviction path fires for exactly the two
+        // access-denied codes and does NOT fire for adjacent error codes.
+        let make_server_err = |code: u16| -> mysql_async::Error {
+            mysql_async::Error::Server(mysql_async::ServerError {
+                code,
+                message: format!("synthetic server error {code}"),
+                state: "HY000".into(),
+            })
+        };
+
+        assert!(!is_auth_error(&make_server_err(1043)), "1043 must not trigger eviction");
+        assert!(is_auth_error(&make_server_err(1044)),  "1044 must trigger eviction");
+        assert!(is_auth_error(&make_server_err(1045)),  "1045 must trigger eviction");
+        assert!(!is_auth_error(&make_server_err(1046)), "1046 must not trigger eviction");
+    }
+
+    #[test]
     fn driver_does_not_need_isolated_runtime() {
         // G_R7.2: built-in driver returns false → DriverFactory runs
         // connect() on the active runtime instead of spawning a fresh one.
