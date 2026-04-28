@@ -357,11 +357,14 @@ impl BrokerConsumer for RabbitConsumer {
             .handle
             .parse()
             .map_err(|_| BrokerError::Protocol("invalid rabbitmq delivery tag in receipt".into()))?;
-        self.channel
-            .basic_ack(tag, BasicAckOptions::default())
-            .await
-            .map_err(|e| BrokerError::Transport(format!("rabbitmq ack: {e}")))?;
-        Ok(AckOutcome::Acked)
+        match self.channel.basic_ack(tag, BasicAckOptions::default()).await {
+            Ok(()) => Ok(AckOutcome::Acked),
+            // AMQP 406 PRECONDITION-FAILED means the delivery tag was already acked.
+            Err(lapin::Error::ProtocolError(ref e)) if e.get_id() == 406 => {
+                Ok(AckOutcome::AlreadyAcked)
+            }
+            Err(e) => Err(BrokerError::Transport(format!("rabbitmq ack: {e}"))),
+        }
     }
 
     async fn nack(&mut self, receipt: &MessageReceipt) -> Result<AckOutcome, BrokerError> {

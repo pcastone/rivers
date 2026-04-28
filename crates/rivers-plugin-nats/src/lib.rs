@@ -69,7 +69,13 @@ impl MessageBrokerDriver for NatsDriver {
             config.subscriptions.iter().map(|s| s.topic.clone()).collect()
         };
 
-        let mut subscribers = Vec::with_capacity(subjects.len());
+        // One mpsc channel aggregates messages from all subscribers so receive()
+        // can await a single channel.recv() instead of polling subscribers in
+        // sequence. Each subscriber runs in its own task, so all subjects are
+        // polled concurrently — no subject starves another.
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<async_nats::Message>();
+        let mut tasks = Vec::with_capacity(subjects.len());
+
         for subject in &subjects {
             // RW2.2.a: use queue_subscribe for consumer-group semantics — only
             // one consumer in the queue group receives each message.
@@ -81,14 +87,27 @@ impl MessageBrokerDriver for NatsDriver {
                         "nats queue_subscribe({subject}, {queue_group}): {e}"
                     ))
                 })?;
-            subscribers.push(sub);
+
+            let task_tx = tx.clone();
+            tasks.push(tokio::spawn(async move {
+                use futures_lite::StreamExt;
+                let mut sub = sub;
+                while let Some(msg) = sub.next().await {
+                    if task_tx.send(msg).is_err() {
+                        break;
+                    }
+                }
+            }));
         }
+        // Drop the original sender so the channel closes when all tasks finish.
+        drop(tx);
 
         let primary_subject = subjects.into_iter().next().unwrap_or_else(|| params.database.clone());
 
         Ok(Box::new(NatsConsumer {
             client,
-            subscribers,
+            rx,
+            _tasks: tasks,
             subject: primary_subject,
             consumer_name,
             sequence: 0,
@@ -213,12 +232,15 @@ impl BrokerProducer for NatsProducer {
 
 /// NATS consumer — subscribes to one or more subjects via queue groups and receives messages.
 ///
-/// RW2.2.c: holds a subscriber per configured subject. `receive()` polls
-/// all subscribers in round-robin order, returning the first available message.
+/// Each subject has a dedicated tokio task forwarding messages into a shared mpsc channel.
+/// `receive()` reads from that channel so all subjects are polled concurrently and no
+/// subject starves another.
 pub struct NatsConsumer {
     client: async_nats::Client,
-    /// One subscriber per configured subject (RW2.2.c).
-    subscribers: Vec<async_nats::Subscriber>,
+    /// Aggregated receive channel — fed by one task per subscribed subject.
+    rx: tokio::sync::mpsc::UnboundedReceiver<async_nats::Message>,
+    /// Background tasks forwarding from each subscriber into `rx`. Aborted on close.
+    _tasks: Vec<tokio::task::JoinHandle<()>>,
     /// The primary (first) subject — used for logging and metadata.
     subject: String,
     consumer_name: String,
@@ -228,67 +250,46 @@ pub struct NatsConsumer {
 #[async_trait]
 impl BrokerConsumer for NatsConsumer {
     async fn receive(&mut self) -> Result<InboundMessage, DriverError> {
-        // RW2.2.c: poll all subscribers — return the first available message.
-        // Uses futures_lite::StreamExt::next() on each subscriber in order.
-        // For single-subject consumers this is equivalent to the original impl.
-        if self.subscribers.is_empty() {
-            return Err(DriverError::Connection(
-                "nats consumer has no subscriptions".into(),
-            ));
-        }
+        let message = self
+            .rx
+            .recv()
+            .await
+            .ok_or_else(|| DriverError::Connection("nats subscriber streams ended".into()))?;
 
-        // Simple round-trip: try each subscriber in order, take first message.
-        // A production implementation would use select! for true fairness, but
-        // for Rivers' single-message-at-a-time receive contract this is correct.
-        loop {
-            for sub in &mut self.subscribers {
-                // Try non-blocking next; if the stream has a message, return it.
-                use futures_lite::StreamExt;
-                if let Some(message) = sub.next().await {
-                    self.sequence += 1;
-                    let seq = self.sequence;
+        self.sequence += 1;
+        let seq = self.sequence;
 
-                    let headers: HashMap<String, String> = message
-                        .headers
-                        .as_ref()
-                        .map(|hm| {
-                            hm.iter()
-                                .map(|(k, v)| {
-                                    (
-                                        k.to_string(),
-                                        v.iter()
-                                            .next()
-                                            .map(|s| s.to_string())
-                                            .unwrap_or_default(),
-                                    )
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
+        let headers: HashMap<String, String> = message
+            .headers
+            .as_ref()
+            .map(|hm| {
+                hm.iter()
+                    .map(|(k, v)| {
+                        (
+                            k.to_string(),
+                            v.iter().next().map(|s| s.to_string()).unwrap_or_default(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
-                    let destination = message.subject.to_string();
-                    return Ok(InboundMessage {
-                        id: format!("nats:{}:{}", destination, seq),
-                        destination,
-                        payload: message.payload.to_vec(),
-                        headers,
-                        timestamp: Utc::now(),
-                        receipt: MessageReceipt {
-                            handle: seq.to_string(),
-                        },
-                        metadata: BrokerMetadata::Nats {
-                            sequence: seq,
-                            stream: self.subject.clone(),
-                            consumer: self.consumer_name.clone(),
-                        },
-                    });
-                }
-            }
-            // All subscribers returned None — the streams have ended.
-            return Err(DriverError::Connection(
-                "nats subscriber streams ended".into(),
-            ));
-        }
+        let destination = message.subject.to_string();
+        Ok(InboundMessage {
+            id: format!("nats:{}:{}", destination, seq),
+            destination,
+            payload: message.payload.to_vec(),
+            headers,
+            timestamp: Utc::now(),
+            receipt: MessageReceipt {
+                handle: seq.to_string(),
+            },
+            metadata: BrokerMetadata::Nats {
+                sequence: seq,
+                stream: self.subject.clone(),
+                consumer: self.consumer_name.clone(),
+            },
+        })
     }
 
     /// Ack on core NATS is a best-effort no-op.
@@ -310,8 +311,9 @@ impl BrokerConsumer for NatsConsumer {
     }
 
     async fn close(&mut self) -> Result<(), DriverError> {
-        // Unsubscribing is handled by dropping the Subscribers.
-        // Drain the client to flush pending operations.
+        for task in &self._tasks {
+            task.abort();
+        }
         self.client
             .drain()
             .await

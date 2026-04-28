@@ -35,6 +35,9 @@ pub fn register_all_drivers(
             ("kafka",          Box::new(|f| { f.register_broker_driver(A::new(rivers_plugin_kafka::KafkaDriver)); })),
             ("rabbitmq",       Box::new(|f| { f.register_broker_driver(A::new(rivers_plugin_rabbitmq::RabbitMqDriver)); })),
             ("nats",           Box::new(|f| { f.register_broker_driver(A::new(rivers_plugin_nats::NatsDriver)); })),
+            // RW2.7.e: redis-streams was compiled in via Cargo.toml but was never
+            // registered here — bundles using redis-streams would silently fail validation.
+            ("redis-streams",  Box::new(|f| { f.register_broker_driver(A::new(rivers_plugin_redis_streams::RedisStreamsDriver)); })),
             ("rivers-exec",    Box::new(|f| { f.register_database_driver(A::new(rivers_plugin_exec::ExecDriver)); })),
             // RW2.7.d: neo4j was listed in Cargo.toml as optional but was not
             // registered here. Added to complete the static-plugin inventory.
