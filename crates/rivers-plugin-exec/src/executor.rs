@@ -226,9 +226,11 @@ pub async fn execute_command(
                         } else {
                             params_obj.clone()
                         };
-                        if let Ok(args) = template::interpolate(tmpl, &interpolation_params) {
-                            fd_cmd.args(&args);
-                        }
+                        let args = template::interpolate(tmpl, &interpolation_params)
+                            .map_err(|e| DriverError::Internal(
+                                format!("args template interpolation failed: {e}")
+                            ))?;
+                        fd_cmd.args(&args);
                     }
                 }
                 fd_cmd.current_dir(&global_config.working_directory);
