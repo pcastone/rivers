@@ -16,6 +16,7 @@ use lapin::{
     BasicProperties, Channel, Connection as AmqpConnection, ConnectionProperties, Consumer,
 };
 use rivers_driver_sdk::{
+    url_encode_path_segment,
     AckOutcome, BrokerConsumer, BrokerConsumerConfig, BrokerError, BrokerMetadata, BrokerProducer,
     BrokerSemantics, ConnectionParams, DriverError, DriverRegistrar, InboundMessage,
     MessageBrokerDriver, MessageReceipt, OutboundMessage, PublishReceipt, ABI_VERSION,
@@ -164,7 +165,7 @@ async fn amqp_connect(params: &ConnectionParams) -> Result<AmqpConnection, Drive
     let vhost = params
         .options
         .get("vhost")
-        .map(|v| urlencoding_encode(v))
+        .map(|v| url_encode_path_segment(v))
         .unwrap_or_else(|| "%2f".to_string());
 
     let url = if params.username.is_empty() {
@@ -172,8 +173,8 @@ async fn amqp_connect(params: &ConnectionParams) -> Result<AmqpConnection, Drive
     } else {
         format!(
             "amqp://{}:{}@{}:{}/{}",
-            urlencoding_encode(&params.username),
-            urlencoding_encode(&params.password),
+            url_encode_path_segment(&params.username),
+            url_encode_path_segment(&params.password),
             params.host,
             params.port,
             vhost,
@@ -185,21 +186,6 @@ async fn amqp_connect(params: &ConnectionParams) -> Result<AmqpConnection, Drive
         .map_err(|e| DriverError::Connection(format!("rabbitmq connect: {e}")))
 }
 
-/// Minimal percent-encoding for AMQP URL components.
-fn urlencoding_encode(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for b in input.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => {
-                out.push_str(&format!("%{:02X}", b));
-            }
-        }
-    }
-    out
-}
 
 /// Resolve queue name from config subscriptions or connection params fallback.
 fn resolve_queue(config: &BrokerConsumerConfig, params: &ConnectionParams) -> String {
@@ -550,18 +536,18 @@ mod tests {
     }
 
     #[test]
-    fn urlencoding_encodes_special_chars() {
-        assert_eq!(urlencoding_encode("hello world"), "hello%20world");
-        assert_eq!(urlencoding_encode("user@host"), "user%40host");
-        assert_eq!(urlencoding_encode("p@ss:w0rd!"), "p%40ss%3Aw0rd%21");
-        assert_eq!(urlencoding_encode("simple"), "simple");
-        assert_eq!(urlencoding_encode("a/b"), "a%2Fb");
+    fn url_encode_path_segments_special_chars() {
+        assert_eq!(url_encode_path_segment("hello world"), "hello%20world");
+        assert_eq!(url_encode_path_segment("user@host"), "user%40host");
+        assert_eq!(url_encode_path_segment("p@ss:w0rd!"), "p%40ss%3Aw0rd%21");
+        assert_eq!(url_encode_path_segment("simple"), "simple");
+        assert_eq!(url_encode_path_segment("a/b"), "a%2Fb");
     }
 
     #[test]
     fn urlencoding_preserves_unreserved_chars() {
         // RFC 3986 unreserved: A-Z a-z 0-9 - _ . ~
-        assert_eq!(urlencoding_encode("AZaz09-_.~"), "AZaz09-_.~");
+        assert_eq!(url_encode_path_segment("AZaz09-_.~"), "AZaz09-_.~");
     }
 
     #[tokio::test]

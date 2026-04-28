@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -20,6 +21,7 @@ use serde::Deserialize;
 use tracing::debug;
 
 use rivers_driver_sdk::{
+    read_connect_timeout, read_request_timeout,
     Connection, ConnectionParams, DatabaseDriver, DriverError, DriverRegistrar, Query, QueryResult,
     QueryValue, ABI_VERSION,
 };
@@ -46,7 +48,11 @@ impl DatabaseDriver for ElasticsearchDriver {
             .unwrap_or("http");
         let base_url = format!("{}://{}:{}", scheme, params.host, params.port);
 
-        let client = Client::new();
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(read_connect_timeout(params)))
+            .timeout(Duration::from_secs(read_request_timeout(params)))
+            .build()
+            .map_err(|e| DriverError::Connection(format!("elasticsearch client build failed: {e}")))?;
 
         // Verify connectivity with GET /
         let resp = client
@@ -91,11 +97,17 @@ pub struct ElasticConnection {
 }
 
 impl ElasticConnection {
-    /// Construct a connection for testing.
+    /// Construct a connection for testing (uses same timeout policy as production).
     #[cfg(test)]
     fn test_instance() -> Self {
+        use rivers_driver_sdk::{DEFAULT_CONNECT_TIMEOUT_SECS, DEFAULT_REQUEST_TIMEOUT_SECS};
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
+            .timeout(std::time::Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS))
+            .build()
+            .expect("test reqwest client");
         Self {
-            client: reqwest::Client::new(),
+            client,
             base_url: "http://127.0.0.1:1".into(),
             username: "".into(),
             password: "".into(),

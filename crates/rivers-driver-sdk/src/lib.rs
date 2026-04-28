@@ -19,6 +19,8 @@ use std::sync::Arc;
 
 /// Message broker driver contracts — Kafka, RabbitMQ, NATS, Redis Streams.
 pub mod broker;
+/// Shared driver defaults — timeout constants, row/byte caps, option readers, and URL encoder.
+pub mod defaults;
 /// Driver error types.
 pub mod error;
 /// HTTP driver contracts — HTTP/HTTP2/SSE/WebSocket as a datasource.
@@ -36,6 +38,11 @@ pub mod types;
 /// Shared schema validation engine for field types and constraints.
 pub mod validation;
 
+pub use defaults::{
+    url_encode_path_segment, read_connect_timeout, read_request_timeout, read_max_rows,
+    DEFAULT_CONNECT_TIMEOUT_SECS, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_MAX_ROWS,
+    DEFAULT_REQUEST_TIMEOUT_SECS,
+};
 pub use broker::{
     AckOutcome, BrokerConsumer, BrokerConsumerConfig, BrokerError, BrokerMetadata, BrokerProducer,
     BrokerSemantics, BrokerSubscription, FailureMode, FailurePolicy, InboundMessage,

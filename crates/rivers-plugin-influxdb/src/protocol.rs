@@ -2,18 +2,14 @@
 
 use std::collections::HashMap;
 
-use rivers_driver_sdk::{DriverError, Query, QueryValue};
+use rivers_driver_sdk::{url_encode_path_segment, DriverError, Query, QueryValue};
 
-/// Simple URL encoding for path/query segments.
+/// URL-encode a path or query-parameter segment using the shared SDK encoder.
+///
+/// Delegates to [`url_encode_path_segment`] which applies RFC 3986 unreserved
+/// character rules (full percent-encoding of every reserved/special byte).
 pub(crate) fn urlencoded(s: &str) -> String {
-    // Encode common problematic characters. For production use, a full
-    // percent-encoding crate is preferred, but this covers typical org/bucket names.
-    s.replace('%', "%25")
-        .replace(' ', "%20")
-        .replace('&', "%26")
-        .replace('=', "%3D")
-        .replace('+', "%2B")
-        .replace('#', "%23")
+    url_encode_path_segment(s)
 }
 
 /// Parse InfluxDB annotated CSV response into rows.
@@ -172,7 +168,15 @@ pub(crate) fn build_line_protocol(query: &Query) -> Result<String, DriverError> 
         _ => String::new(),
     };
 
-    Ok(format!("{measurement}{tag_set} {field_set}{timestamp}"))
+    Ok(format!("{}{tag_set} {field_set}{timestamp}", escape_measurement_name(&measurement)))
+}
+
+/// Escape measurement name characters per line protocol spec.
+///
+/// Measurement names must escape commas and spaces. Unlike tag keys, `=` does
+/// not require escaping in measurement names.
+pub(crate) fn escape_measurement_name(s: &str) -> String {
+    s.replace(',', "\\,").replace(' ', "\\ ")
 }
 
 /// Escape measurement/tag key characters per line protocol spec.
@@ -450,5 +454,68 @@ mod tests {
         assert_eq!(urlencoded("a&b=c"), "a%26b%3Dc");
         assert_eq!(urlencoded("a+b"), "a%2Bb");
         assert_eq!(urlencoded("foo#bar"), "foo%23bar");
+    }
+
+    // ── RW4.5 — line protocol integration: special characters in keys/tags ─
+
+    #[test]
+    fn build_line_protocol_key_with_comma_is_escaped() {
+        // A measurement name with a comma must be escaped in the output.
+        let query = Query::with_operation("write", "my,bucket", "")
+            .param("measurement", QueryValue::String("cpu,cores".into()))
+            .param(
+                "fields",
+                QueryValue::Json(serde_json::json!({"value": 1})),
+            );
+        let result = build_line_protocol(&query).unwrap();
+        // Escaped comma in measurement name
+        assert!(result.starts_with("cpu\\,cores "), "got: {result}");
+    }
+
+    #[test]
+    fn build_line_protocol_tag_with_equals_is_escaped() {
+        let query = Query::with_operation("write", "mybucket", "")
+            .param("measurement", QueryValue::String("cpu".into()))
+            .param(
+                "tags",
+                QueryValue::Json(serde_json::json!({"env=prod": "val=ue"})),
+            )
+            .param(
+                "fields",
+                QueryValue::Json(serde_json::json!({"value": 1})),
+            );
+        let result = build_line_protocol(&query).unwrap();
+        // Both key and value with '=' must be escaped
+        assert!(result.contains("env\\=prod=val\\=ue"), "got: {result}");
+    }
+
+    #[test]
+    fn build_line_protocol_tag_with_space_is_escaped() {
+        let query = Query::with_operation("write", "mybucket", "")
+            .param("measurement", QueryValue::String("cpu".into()))
+            .param(
+                "tags",
+                QueryValue::Json(serde_json::json!({"host name": "server A"})),
+            )
+            .param(
+                "fields",
+                QueryValue::Json(serde_json::json!({"value": 1})),
+            );
+        let result = build_line_protocol(&query).unwrap();
+        // Spaces in tag key and value must both be backslash-escaped
+        assert!(result.contains("host\\ name=server\\ A"), "got: {result}");
+    }
+
+    #[test]
+    fn build_line_protocol_field_string_with_embedded_quote_is_escaped() {
+        let query = Query::with_operation("write", "mybucket", "")
+            .param("measurement", QueryValue::String("events".into()))
+            .param(
+                "fields",
+                QueryValue::Json(serde_json::json!({"msg": "say \"hi\""})),
+            );
+        let result = build_line_protocol(&query).unwrap();
+        // Embedded double-quote must be backslash-escaped inside the field string
+        assert!(result.contains(r#"msg="say \"hi\"""#), "got: {result}");
     }
 }

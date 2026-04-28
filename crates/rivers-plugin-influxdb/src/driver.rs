@@ -2,10 +2,11 @@
 
 use async_trait::async_trait;
 use reqwest::Client;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use rivers_driver_sdk::{Connection, ConnectionParams, DatabaseDriver, DriverError};
+use rivers_driver_sdk::{read_connect_timeout, read_request_timeout, Connection, ConnectionParams, DatabaseDriver, DriverError};
 
 use crate::batching::BatchingInfluxConnection;
 use crate::connection::InfluxConnection;
@@ -34,7 +35,11 @@ impl DatabaseDriver for InfluxDriver {
         let token = params.password.clone(); // InfluxDB uses API tokens via password field.
         let org = params.options.get("org").cloned().unwrap_or_default();
 
-        let client = Client::new();
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(read_connect_timeout(params)))
+            .timeout(Duration::from_secs(read_request_timeout(params)))
+            .build()
+            .map_err(|e| DriverError::Connection(format!("influxdb client build failed: {e}")))?;
 
         // Verify connectivity with GET /ping
         let resp = client
