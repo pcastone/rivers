@@ -93,7 +93,10 @@ pub use rivers_core_config::LockBoxConfig;
 /// Plaintext TOML schema inside the Age envelope.
 ///
 /// Per spec S2.2.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is not derived — entry values are secret material.
+/// The manual `Debug` impl redacts entries and shows only version + count.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Keystore {
     /// Schema version (currently 1).
     #[serde(default = "default_version")]
@@ -115,6 +118,15 @@ impl Zeroize for Keystore {
 impl Drop for Keystore {
     fn drop(&mut self) {
         self.zeroize();
+    }
+}
+
+impl std::fmt::Debug for Keystore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Keystore")
+            .field("version", &self.version)
+            .field("entries", &format_args!("[{} entries, values redacted]", self.entries.len()))
+            .finish()
     }
 }
 

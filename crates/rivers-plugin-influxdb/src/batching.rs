@@ -29,17 +29,16 @@ pub(crate) struct BatchingInfluxConnection {
 impl BatchingInfluxConnection {
     /// Flush all buffered lines to InfluxDB in a single batch write.
     async fn flush_buffer(&self) -> Result<(), DriverError> {
-        let mut buf = self.buffer.lock().await;
+        let buf = self.buffer.lock().await;
         if buf.is_empty() {
             return Ok(());
         }
 
         let batch = buf.join("\n");
         let count = buf.len();
-        buf.clear();
+        // Do NOT clear buf yet — only clear after confirmed HTTP success so we
+        // don't lose buffered writes on a transient failure.
         drop(buf);
-
-        *self.last_flush.lock().await = std::time::Instant::now();
 
         debug!(lines = count, "influxdb: flushing write batch");
 
@@ -66,6 +65,10 @@ impl BatchingInfluxConnection {
                 "influxdb batch write returned {status}: {text}"
             )));
         }
+
+        // HTTP succeeded — now it's safe to clear the buffer and update flush timestamp.
+        self.buffer.lock().await.clear();
+        *self.last_flush.lock().await = std::time::Instant::now();
 
         Ok(())
     }
