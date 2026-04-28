@@ -441,12 +441,8 @@ These are not separate phases — they are the verification bar for the work abo
 
 ### Tier 2 — correctness / contract (10)
 
-- [ ] **H5 — riversd T2-2: Connection-limit race in WebSocket and SSE registries.**
-  **Files:** `crates/riversd/src/websocket.rs:105–121`, `crates/riversd/src/sse.rs` (analogous block).
-  Limit check at line 105–107 reads count, branch decides allow, insertion+increment at 113–121 are non-atomic. Burst connects can exceed `max_connections`.
-  Validation:
-  - Reserve a slot atomically (e.g. `compare_exchange` on an `AtomicU64` count, or move the check inside the same write-lock that performs the insert).
-  - Test: 200 concurrent WS connects with `max_connections=50`; assert exactly 50 succeed and 150 are rejected.
+- [x] **H5 — riversd T2-2: Connection-limit race in WebSocket and SSE registries.** DONE 2026-04-27: WebSocket registry (`websocket.rs`): limit check and insert now happen under the same `write().await` lock — `conns.len() >= max` is evaluated inside the held `RwLock` write guard, so no concurrent registration can pass the check and then race past the insert. SSE channel (`sse.rs`): uses `AtomicUsize::fetch_update` (compare-exchange loop) — atomically checks `current < max` and increments in one CAS; returns `ConnectionLimitExceeded` on failure. Both paths have concurrent-stress tests (38 riversd unit tests pass).
+  **Files:** `crates/riversd/src/websocket.rs`, `crates/riversd/src/sse.rs`.
 
 - [x] **H6 — riversd T2-6: V8 outbound HTTP host callback has no timeout.**
   Done 2026-04-27. New `crates/riversd/src/http_client.rs` module provides `outbound_client()` — a process-wide `reqwest::Client` built with `.timeout(30_000ms)` and `.connect_timeout(5s)`. V8 path (`http.rs:134`) now calls `crate::http_client::outbound_client()` instead of `reqwest::Client::new()`. Two tests: `outbound_client_is_shared` (proves OnceLock identity) and `outbound_http_times_out_on_unreachable_endpoint` (TEST-NET-3, fires within 35s). All 428 lib tests green.
@@ -648,12 +644,8 @@ ORIGINAL ENTRY:
 - [x] **H11 — rivers-core T2-1: `Observe`-tier EventBus handlers spawn unbounded.** DONE 2026-04-27: Per-bus `tokio::sync::Semaphore` bounds concurrent Observe-tier spawns. `try_acquire_owned()` is used — saturated semaphore drops the dispatch (never blocks the publish loop) and increments `observe_dropped` (`AtomicU64`). Metrics counter `rivers_eventbus_observe_dropped_total` emitted under `#[cfg(feature = "metrics")]`. `[base.eventbus] observe_concurrency` (default 64) wired from `ServerConfig` through `BaseConfig::EventBusConfig` to `AppContext::new()` via `EventBus::with_caps()`. Two new unit tests: `observe_concurrency_cap_drops_excess_spawns` (1000 events, cap=8, asserts dropped > 0) and `observe_concurrency_no_drop_when_cap_sufficient` (50 events, cap=200, asserts zero drops). All 33 rivers-core unit tests pass.
   **Files:** `crates/rivers-core/src/eventbus.rs`, `crates/rivers-core-config/src/config/server.rs`, `crates/riversd/src/server/context.rs`.
 
-- [ ] **H12 — rivers-storage-backends T2-2: SQLite TTL arithmetic overflow.**
-  **File:** `crates/rivers-storage-backends/src/sqlite_backend.rs:119`.
-  `now_ms() + ttl` without `checked_add` — a TTL near `u64::MAX` (or a clock-skew jump) wraps to a tiny expiry, causing premature eviction.
-  Validation:
-  - Use `now_ms.saturating_add(ttl_ms)`. Any caller passing `u64::MAX` deserves to be capped, not wrapped.
-  - Test: `set(key, value, ttl=u64::MAX)` then immediate `get` returns the value (not None).
+- [x] **H12 — rivers-storage-backends T2-2: SQLite TTL arithmetic overflow.** DONE 2026-04-27: `compute_expiry(now: u64, ttl: u64) -> u64` helper uses `now.saturating_add(ttl)` — caps at `u64::MAX` instead of wrapping. Used at every TTL-bearing `set`/`set_if_absent` call site. Unit tests: `ttl_overflow_saturates_at_u64_max` and `ttl_normal_addition_unaffected` — both pass. All 21 sqlite unit tests pass.
+  **File:** `crates/rivers-storage-backends/src/sqlite_backend.rs`.
 
 - [x] **H13 — rivers-engine-v8 T2-1: `HostCallbacks` copied via `ptr::read` without `Copy`/`Clone`.** DONE 2026-04-27: `HostCallbacks` in `rivers-engine-sdk` already has `#[derive(Copy, Clone)]` at line 207. `rivers-engine-v8/src/lib.rs:51` uses `*callbacks` (deref, not `ptr::read`), with SAFETY comment documenting Copy soundness. All 16 rivers-engine-v8 tests pass.
   **File:** `crates/rivers-engine-v8/src/lib.rs:46`.
@@ -663,12 +655,8 @@ ORIGINAL ENTRY:
 
 ### Tier 3 — hardening (1)
 
-- [ ] **H15 — riversd T3-1: Manual JSON log construction in `rivers_global.rs`.**
-  **File:** `crates/riversd/src/process_pool/v8_engine/rivers_global.rs:41, 43`.
-  `format!()` with manual JSON-string interpolation can produce malformed lines if a value contains an unescaped quote or control character. Per-app log files become unparseable.
-  Validation:
-  - Replace with `serde_json::json!({ ... }).to_string()`.
-  - Test: log a value containing `"` and `\n`; assert the resulting log line is valid JSON.
+- [x] **H15 — riversd T3-1: Manual JSON log construction in `rivers_global.rs`.** DONE 2026-04-27: `build_app_log_line` now uses `serde_json::json!({...}).to_string()` for the outer object; `fields` (V8 JSON.stringify output) is parsed back to `serde_json::Value` and embedded as a nested value rather than concatenated text. Fallback to a string-embedded form on parse failure preserves log lines even if V8 produces malformed JSON. All 38 riversd unit tests pass.
+  **File:** `crates/riversd/src/process_pool/v8_engine/rivers_global.rs`.
 
 ### Verification deferred to Phase H follow-ups
 

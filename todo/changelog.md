@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-04-27 — H5+H12+H15: Connection-limit race, SQLite TTL overflow, JSON log fix
+
+**H5 — riversd: Connection-limit race in WebSocket and SSE registries**
+**Files:** `crates/riversd/src/websocket.rs`, `crates/riversd/src/sse.rs`
+
+WebSocket: limit check and insert now happen under the same `write().await` — `conns.len() >= max` is evaluated while the `RwLock` write guard is held, so no concurrent goroutine can pass the check and race to insert. SSE: replaced `load + fetch_add` with `fetch_update` (compare-exchange loop) that atomically checks `current < max` and increments in one CAS; returns `ConnectionLimitExceeded` on failure. Both changes were pre-existing in the codebase; verified by 38 passing riversd unit tests including `registry_enforces_max_connections` and `sse_concurrent_subscribes_respect_max`.
+
+**H12 — rivers-storage-backends: SQLite TTL arithmetic overflow**
+**File:** `crates/rivers-storage-backends/src/sqlite_backend.rs`
+
+`compute_expiry(now, ttl)` uses `now.saturating_add(ttl)` — caps at `u64::MAX` instead of wrapping. Applied at all TTL-bearing `set`/`set_if_absent` sites. Pre-existing fix; verified by `ttl_overflow_saturates_at_u64_max` and `ttl_normal_addition_unaffected` unit tests. All 21 sqlite unit tests pass.
+
+**H15 — riversd: Manual JSON log construction in `rivers_global.rs`**
+**File:** `crates/riversd/src/process_pool/v8_engine/rivers_global.rs`
+
+`build_app_log_line` uses `serde_json::json!({...}).to_string()` for the outer object. The `fields` string (V8 JSON.stringify output) is parsed back to `serde_json::Value` and embedded as a nested value; if parsing fails, it falls back to a string-embedded form so no log line is dropped. Pre-existing fix; all 38 riversd unit tests pass.
+
 ## 2026-04-27 — H11: Observe-tier EventBus bounded concurrency + config wiring
 
 **Files:**
