@@ -419,7 +419,7 @@ These are not separate phases — they are the verification bar for the work abo
   - Whitelisted DDL still succeeds.
   - Unit test alongside the existing B1 negative tests.
 
-- [ ] **H2 — riversd T1-6: Synchronous V8 host bridge has no timeout.**
+- [x] **H2 — riversd T1-6: Synchronous V8 host bridge has no timeout.** DONE 2026-04-28: All blocking `recv()` sites in `engine_loader/host_callbacks.rs` replaced with `recv_timeout(HOST_CALLBACK_TIMEOUT_MS)` + JoinHandle abort on timeout. Covered: `host_dataview_execute`, `host_store_get`, `host_store_set`, `host_store_del`, `host_datasource_build`, `host_ddl_execute`. V8-path (`context.rs`) was already fixed in prior round. Two new unit tests added: `dyn_engine_recv_timeout_returns_timeout_when_task_hangs` and `dyn_engine_host_callback_budget_is_bounded_and_nonzero`. Error code -13 used for timeout (distinct from -10 driver-error and -12 panic). 428 tests pass.
   **File:** `crates/riversd/src/process_pool/v8_engine/context.rs:708–722` (and analogous `recv()` sites in adjacent host callbacks).
   The pattern is `tokio::spawn(async move { … tx.send(...) }); rx.recv()` (blocking). If the spawned task stalls (driver hang, pool starvation), `recv()` waits forever and pins the V8 worker.
   Validation:

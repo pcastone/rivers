@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-04-28 — H2: Synchronous V8 host bridge — bounded recv on dyn-engine path
+
+All blocking `recv()` sites in the dynamic-engine host callbacks bounded by
+`HOST_CALLBACK_TIMEOUT_MS` (30 s). Spawned Tokio tasks are aborted on
+timeout; callers receive error code -13 (new timeout sentinel, distinct from
+-10 driver-error and -12 task-panicked). Two unit tests confirm the
+primitive behavior.
+
+The V8-engine path (`process_pool/v8_engine/context.rs`) was already fixed
+in a prior round and this session left it unchanged. This session closes the
+dyn-engine gap tracked as "analogous recv() sites in adjacent host
+callbacks."
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `crates/riversd/src/engine_loader/host_callbacks.rs` | H2: `host_dataview_execute`, `host_store_get`, `host_store_set`, `host_store_del`, `host_datasource_build`, `host_ddl_execute` — each `recv()` replaced with `recv_timeout(Duration::from_millis(HOST_CALLBACK_TIMEOUT_MS))`. JoinHandle stored and aborted on timeout. Error code -13 returned for timeout. Two unit tests added: `dyn_engine_recv_timeout_returns_timeout_when_task_hangs` and `dyn_engine_host_callback_budget_is_bounded_and_nonzero`. | H2 / T1-6 | `recv_timeout` on existing `std::sync::mpsc` channels; abort via stored JoinHandle |
+| `Cargo.toml` (workspace) | Version bump `0.55.2+0226280426` → `0.55.3+0236280426` (PATCH; bug fix in shipped code per CLAUDE.md versioning policy) | CLAUDE.md §Versioning | `./scripts/bump-version.sh patch` |
+| `todo/tasks.md` | H2 marked `[x]` with completion summary | — | Done |
+
+**Validation:**
+- `cargo test -p riversd --lib` — 428 tests pass, 0 failures.
+- `cargo build -p riversd` — clean (no new warnings from changed code).
+
 ## 2026-04-27 — H4: MySQL pool key review cleanup
 
 Code quality pass addressing review feedback on the H4 pool-key fix. No behavior changes — the core fix (SHA-256 password fingerprint in pool key, evict + retry on auth failure) landed in the prior session.

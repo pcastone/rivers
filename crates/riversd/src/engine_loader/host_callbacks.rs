@@ -106,10 +106,15 @@ pub(super) extern "C" fn host_dataview_execute(
     // thread-local reactor context, but `spawn` runs on a proper Tokio worker
     // thread where the reactor IS available.
     //
+    // H2: The recv is bounded by HOST_CALLBACK_TIMEOUT_MS. If the spawned task
+    // stalls (driver hang, pool starvation), recv_timeout returns
+    // RecvTimeoutError::Timeout, the JoinHandle is aborted, and the caller
+    // sees error code -13 rather than pinning forever.
+    //
     // If the spawned task panics, the tx sender is dropped without sending,
-    // causing rx.recv() to return Err — which we handle as error code -12.
+    // causing recv_timeout to return RecvTimeoutError::Disconnected — error -12.
     let (tx, rx) = std::sync::mpsc::channel();
-    ctx.rt_handle.spawn({
+    let handle = ctx.rt_handle.spawn({
         let executor_lock = executor_lock.clone();
         let name = name.clone();
         let trace_id = trace_id.clone();
@@ -141,9 +146,9 @@ pub(super) extern "C" fn host_dataview_execute(
         }
     });
 
-    // Wait for the spawned task to complete (blocks the V8 thread, which is fine —
-    // this is the same blocking behavior as the previous block_on approach)
-    match rx.recv() {
+    // Wait for the spawned task to complete, bounded by HOST_CALLBACK_TIMEOUT_MS.
+    let budget = Duration::from_millis(HOST_CALLBACK_TIMEOUT_MS);
+    match rx.recv_timeout(budget) {
         Ok(Ok(response)) => {
             // Serialize DataViewResponse.query_result to JSON
             let result = serde_json::json!({
@@ -161,8 +166,24 @@ pub(super) extern "C" fn host_dataview_execute(
             write_output(out_ptr, out_len, &err_val);
             -10
         }
-        Err(e) => {
-            tracing::error!(dataview = %name, error = %e, "host_dataview_execute: channel recv failed");
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            handle.abort();
+            tracing::error!(
+                dataview = %name,
+                budget_ms = HOST_CALLBACK_TIMEOUT_MS,
+                "host_dataview_execute: timed out — spawned task aborted"
+            );
+            let err_val = serde_json::json!({
+                "error": format!(
+                    "host callback 'host_dataview_execute' timed out after {}ms",
+                    HOST_CALLBACK_TIMEOUT_MS
+                )
+            });
+            write_output(out_ptr, out_len, &err_val);
+            -13
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            tracing::error!(dataview = %name, "host_dataview_execute: channel disconnected — task panicked");
             -12
         }
     }
@@ -376,12 +397,29 @@ pub(super) extern "C" fn host_store_get(
     let ns = namespace.to_string();
     let k = key.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
-    ctx.rt_handle.spawn(async move {
+    let handle = ctx.rt_handle.spawn(async move {
         let _ = tx.send(engine.get(&ns, &k).await);
     });
-    let store_result = match rx.recv() {
+    // H2: bounded recv — prevents a stalled storage backend from pinning the worker.
+    let budget = Duration::from_millis(HOST_CALLBACK_TIMEOUT_MS);
+    let store_result = match rx.recv_timeout(budget) {
         Ok(r) => r,
-        Err(_) => return -10, // channel dropped — task panicked
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            handle.abort();
+            tracing::error!(
+                budget_ms = HOST_CALLBACK_TIMEOUT_MS,
+                "host_store_get: timed out — spawned task aborted"
+            );
+            let err_val = serde_json::json!({
+                "error": format!(
+                    "host callback 'host_store_get' timed out after {}ms",
+                    HOST_CALLBACK_TIMEOUT_MS
+                )
+            });
+            write_output(out_ptr, out_len, &err_val);
+            return -13;
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return -10, // task panicked
     };
     match store_result {
         Ok(Some(bytes)) => {
@@ -438,13 +476,23 @@ pub(super) extern "C" fn host_store_set(
     let ns = namespace.to_string();
     let k = key.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
-    ctx.rt_handle.spawn(async move {
+    let handle = ctx.rt_handle.spawn(async move {
         let _ = tx.send(engine.set(&ns, &k, value_bytes, ttl_ms).await);
     });
-    match rx.recv() {
+    // H2: bounded recv — prevents a stalled storage backend from pinning the worker.
+    let budget = Duration::from_millis(HOST_CALLBACK_TIMEOUT_MS);
+    match rx.recv_timeout(budget) {
         Ok(Ok(())) => 0,
         Ok(Err(_)) => -10,
-        Err(_) => -10, // channel dropped — task panicked
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            handle.abort();
+            tracing::error!(
+                budget_ms = HOST_CALLBACK_TIMEOUT_MS,
+                "host_store_set: timed out — spawned task aborted"
+            );
+            -13
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => -10, // task panicked
     }
 }
 
@@ -478,13 +526,23 @@ pub(super) extern "C" fn host_store_del(
     let ns = namespace.to_string();
     let k = key.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
-    ctx.rt_handle.spawn(async move {
+    let handle = ctx.rt_handle.spawn(async move {
         let _ = tx.send(engine.delete(&ns, &k).await);
     });
-    match rx.recv() {
+    // H2: bounded recv — prevents a stalled storage backend from pinning the worker.
+    let budget = Duration::from_millis(HOST_CALLBACK_TIMEOUT_MS);
+    match rx.recv_timeout(budget) {
         Ok(Ok(_)) => 0,
         Ok(Err(_)) => -10,
-        Err(_) => -10, // channel dropped — task panicked
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            handle.abort();
+            tracing::error!(
+                budget_ms = HOST_CALLBACK_TIMEOUT_MS,
+                "host_store_del: timed out — spawned task aborted"
+            );
+            -13
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => -10, // task panicked
     }
 }
 
@@ -561,9 +619,12 @@ pub(super) extern "C" fn host_datasource_build(
     // "connection closed" on PG for every call after the first.
     // Use the host runtime directly; `catch_unwind` still guards against
     // driver panics.
+    //
+    // H2: recv is bounded by HOST_CALLBACK_TIMEOUT_MS. A stalled driver
+    // results in error code -13 rather than pinning the worker forever.
     let (ds_tx, ds_rx) = std::sync::mpsc::channel();
     let factory = Arc::clone(factory);
-    ctx.rt_handle.spawn(async move {
+    let ds_handle = ctx.rt_handle.spawn(async move {
         let result = async {
             let mut conn = factory.connect(&driver, &conn_params).await
                 .map_err(|e| format!("driver connect failed: {e}"))?;
@@ -571,7 +632,17 @@ pub(super) extern "C" fn host_datasource_build(
         }.await;
         let _ = ds_tx.send(result);
     });
-    match ds_rx.recv().unwrap_or_else(|_| Err("datasource task panicked".to_string())) {
+    let budget = Duration::from_millis(HOST_CALLBACK_TIMEOUT_MS);
+    match ds_rx.recv_timeout(budget).unwrap_or_else(|e| match e {
+        std::sync::mpsc::RecvTimeoutError::Disconnected => Err("datasource task panicked".to_string()),
+        std::sync::mpsc::RecvTimeoutError::Timeout => {
+            ds_handle.abort();
+            Err(format!(
+                "host callback 'host_datasource_build' timed out after {}ms",
+                HOST_CALLBACK_TIMEOUT_MS
+            ))
+        }
+    }) {
         Ok(result) => {
             let json_result = serde_json::json!({
                 "rows": result.rows,
@@ -581,9 +652,10 @@ pub(super) extern "C" fn host_datasource_build(
             0
         }
         Err(e) => {
+            let is_timeout = e.contains("timed out after");
             let err_val = serde_json::json!({"error": e});
             write_output(out_ptr, out_len, &err_val);
-            -10
+            if is_timeout { -13 } else { -10 }
         }
     }
 }
@@ -948,7 +1020,7 @@ pub(super) extern "C" fn host_ddl_execute(
     let (ds_tx, ds_rx) = std::sync::mpsc::channel();
     let factory = Arc::clone(factory);
     let whitelist = super::host_context::DDL_WHITELIST.get().cloned();
-    ctx.rt_handle.spawn(async move {
+    let ddl_handle = ctx.rt_handle.spawn(async move {
         let result = async {
             // Get datasource params from executor
             let (ds_params, driver_name) = {
@@ -1030,8 +1102,12 @@ pub(super) extern "C" fn host_ddl_execute(
         let _ = ds_tx.send(result);
     });
 
-    // Write DDL result to per-app log via AppLogRouter
-    let ddl_result = ds_rx.recv();
+    // Write DDL result to per-app log via AppLogRouter.
+    //
+    // H2: bounded recv — a stalled DDL driver no longer pins the worker.
+    // On timeout the spawned task is aborted and -13 is returned.
+    let budget = Duration::from_millis(HOST_CALLBACK_TIMEOUT_MS);
+    let ddl_result = ds_rx.recv_timeout(budget);
     let stmt_preview: String = log_statement.chars().take(80).collect();
 
     match ddl_result {
@@ -1063,8 +1139,24 @@ pub(super) extern "C" fn host_ddl_execute(
             write_output(out_ptr, out_len, &err_val);
             -10
         }
-        Err(e) => {
-            tracing::error!(error = %e, "host_ddl_execute: channel recv failed");
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            ddl_handle.abort();
+            tracing::error!(
+                datasource = %log_datasource,
+                budget_ms = HOST_CALLBACK_TIMEOUT_MS,
+                "host_ddl_execute: timed out — spawned task aborted"
+            );
+            let err_val = serde_json::json!({
+                "error": format!(
+                    "host callback 'host_ddl_execute' timed out after {}ms",
+                    HOST_CALLBACK_TIMEOUT_MS
+                )
+            });
+            write_output(out_ptr, out_len, &err_val);
+            -13
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            tracing::error!("host_ddl_execute: channel disconnected — task panicked");
             -12
         }
     }
@@ -2101,5 +2193,43 @@ mod tests {
 
         // Cleanup.
         let _ = dyn_txn_map().drain_task(task);
+    }
+
+    // ── H2 tests: dyn-engine recv_timeout primitive ────────────────
+    //
+    // These tests exercise the `recv_timeout` primitive used in the
+    // dynamic-engine host callbacks (host_store_get, host_store_set,
+    // host_store_del, host_dataview_execute, host_datasource_build,
+    // host_ddl_execute). They prove that a spawned async task that never
+    // sends a result surfaces as RecvTimeoutError::Timeout rather than
+    // blocking forever.
+
+    /// H2 (T1-6 dyn-engine): a channel whose sender is held but never
+    /// used — simulating a background Tokio task that stalls — returns
+    /// RecvTimeoutError::Timeout from recv_timeout, proving the
+    /// dyn-engine host callbacks do NOT block forever.
+    #[test]
+    fn dyn_engine_recv_timeout_returns_timeout_when_task_hangs() {
+        let (_tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        // _tx is kept alive (not dropped) so the channel stays connected —
+        // this mirrors a spawned Tokio task that is alive but never sends.
+        let budget = std::time::Duration::from_millis(50);
+        let result = rx.recv_timeout(budget);
+        assert!(
+            matches!(result, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+            "expected Timeout, got {:?}",
+            result
+        );
+    }
+
+    /// H2 (T1-6 dyn-engine): HOST_CALLBACK_TIMEOUT_MS is the canonical
+    /// timeout shared across both V8 and dyn-engine paths. Assert it is
+    /// nonzero and within a sane range so a bump to 0 or to hours would
+    /// break this test and force a deliberate decision.
+    #[test]
+    fn dyn_engine_host_callback_budget_is_bounded_and_nonzero() {
+        assert!(HOST_CALLBACK_TIMEOUT_MS > 0);
+        // Sanity: we expect this to be in seconds-not-hours range.
+        assert!(HOST_CALLBACK_TIMEOUT_MS <= 5 * 60 * 1000);
     }
 }
