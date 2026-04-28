@@ -160,7 +160,7 @@ fn print_usage() {
     eprintln!("  api-stop        Stop riversd immediately via HTTP admin API (SIGKILL fallback)");
     eprintln!("  graceful        Stop riversd gracefully — drain in-flight requests (SIGTERM fallback)");
     eprintln!("  log levels      View current log levels");
-    eprintln!("  log set <e> <l> Change log level");
+    eprintln!("  log set <target> <level> Change log level");
     eprintln!("  log reset       Reset to defaults");
     eprintln!("  breaker --app=<appId> --list                    List all circuit breakers for an app");
     eprintln!("  breaker --app=<appId> --name=<id>              Show circuit breaker status");

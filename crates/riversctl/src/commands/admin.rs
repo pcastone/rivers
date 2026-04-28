@@ -41,10 +41,9 @@ impl std::fmt::Display for AdminError {
 
 // ── Admin API helpers ────────────────────────────────────────────────────────
 
-/// Build a shared reqwest client with explicit connect and request timeouts.
-/// Both `admin_get` and `admin_post` use this client.
+/// Build a reqwest client with explicit connect and request timeouts for admin API calls.
 #[cfg(feature = "admin-api")]
-pub fn admin_client() -> reqwest::Client {
+pub fn build_admin_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(30))
@@ -110,7 +109,7 @@ pub async fn admin_get(url: &str, path: &str) -> Result<serde_json::Value, Admin
     let config_key = CONFIG_ADMIN_KEY_PATH.get().and_then(|opt| opt.as_deref());
     let headers = sign_request("GET", path, "", config_key)
         .map_err(|e| AdminError::Http(format!("key error: {e}")))?;
-    let client = admin_client();
+    let client = build_admin_client();
     let mut req = client.get(format!("{url}{path}"));
     for (k, v) in &headers {
         req = req.header(k.as_str(), v.as_str());
@@ -138,7 +137,7 @@ pub async fn admin_post(url: &str, path: &str, body: &serde_json::Value) -> Resu
     let config_key = CONFIG_ADMIN_KEY_PATH.get().and_then(|opt| opt.as_deref());
     let headers = sign_request("POST", path, &body_str, config_key)
         .map_err(|e| AdminError::Http(format!("key error: {e}")))?;
-    let client = admin_client();
+    let client = build_admin_client();
     let mut req = client.post(format!("{url}{path}"))
         .header("Content-Type", "application/json")
         .body(body_str);
