@@ -13,7 +13,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERBOSE="${1:-}"
 VIOLATIONS=0
 
-log() { [[ -n "$VERBOSE" ]] && echo "  $*"; }
+log() { if [[ -n "$VERBOSE" ]]; then echo "  $*"; fi; }
 
 fail() {
     echo "LINT FAIL [$1]: $2" >&2
