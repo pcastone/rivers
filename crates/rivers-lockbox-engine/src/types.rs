@@ -125,7 +125,7 @@ pub(crate) fn default_version() -> u32 {
 /// A single secret entry in the keystore.
 ///
 /// Per spec S3.1.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct KeystoreEntry {
     /// Registry key for this entry within the keystore. Must be unique.
     /// Used in `lockbox://` URIs to reference secrets from datasource configs.
@@ -180,6 +180,23 @@ impl Zeroize for KeystoreEntry {
 impl Drop for KeystoreEntry {
     fn drop(&mut self) {
         self.zeroize();
+    }
+}
+
+impl std::fmt::Debug for KeystoreEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeystoreEntry")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .field("entry_type", &self.entry_type)
+            .field("aliases", &self.aliases)
+            .field("created", &self.created)
+            .field("updated", &self.updated)
+            .field("driver", &self.driver)
+            .field("username", &self.username)
+            .field("hosts", &self.hosts)
+            .field("database", &self.database)
+            .finish()
     }
 }
 
