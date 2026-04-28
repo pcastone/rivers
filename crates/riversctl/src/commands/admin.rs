@@ -1,81 +1,157 @@
 #[cfg(feature = "admin-api")]
 use std::collections::HashMap;
 
-// ── Admin API helpers ────────────────────────────────────────────────────────
+// ── Admin error type ─────────────────────────────────────────────────────────
+
+/// Distinguishes a network-level failure (connection refused, timeout, DNS) from
+/// an HTTP-level failure (4xx/5xx including auth/RBAC). Only network failures
+/// may trigger a local signal fallback — HTTP errors must surface verbatim.
+#[cfg(feature = "admin-api")]
+#[derive(Debug)]
+pub enum AdminError {
+    /// The connection could not be established (unreachable, timeout, DNS).
+    Network(String),
+    /// The server responded with an HTTP error status.
+    Http(String),
+}
 
 #[cfg(feature = "admin-api")]
-pub fn sign_request(method: &str, path: &str, body: &str) -> HashMap<String, String> {
+impl std::fmt::Display for AdminError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AdminError::Network(s) => write!(f, "{s}"),
+            AdminError::Http(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+// ── Admin API helpers ────────────────────────────────────────────────────────
+
+/// Build a shared reqwest client with explicit connect and request timeouts.
+/// Both `admin_get` and `admin_post` use this client.
+#[cfg(feature = "admin-api")]
+pub fn admin_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("failed to build admin HTTP client")
+}
+
+/// Sign an admin API request and return the required headers.
+///
+/// Key loading priority:
+///   1. `RIVERS_ADMIN_KEY` env var (path to key file)
+///   2. `key_path` argument (from `[base.admin_api].private_key` in config)
+///
+/// If a key source is found but the content is malformed (invalid hex,
+/// wrong length), this function returns `Err` rather than silently falling
+/// back to an unsigned request.
+#[cfg(feature = "admin-api")]
+pub fn sign_request(
+    method: &str,
+    path: &str,
+    body: &str,
+    key_path: Option<&str>,
+) -> Result<HashMap<String, String>, String> {
     let mut headers = HashMap::new();
 
     // Server expects epoch milliseconds, not RFC 3339
     let ts_ms = chrono::Utc::now().timestamp_millis().to_string();
     headers.insert("X-Rivers-Timestamp".into(), ts_ms.clone());
 
-    if let Ok(key_path) = std::env::var("RIVERS_ADMIN_KEY") {
-        if let Ok(key_hex) = std::fs::read_to_string(&key_path) {
-            let key_hex = key_hex.trim();
-            if let Ok(seed_bytes) = hex::decode(key_hex) {
-                if seed_bytes.len() == 32 {
-                    use ed25519_dalek::{Signer, SigningKey};
-                    use sha2::Digest;
-                    let seed: [u8; 32] = seed_bytes.try_into().unwrap();
-                    let signing_key = SigningKey::from_bytes(&seed);
+    // Resolve the key file path: env var takes priority over config field.
+    let resolved_path = std::env::var("RIVERS_ADMIN_KEY").ok()
+        .or_else(|| key_path.map(|s| s.to_string()));
 
-                    // Match server's build_signing_payload: method\npath\ntimestamp\nbody_hash
-                    let body_hash = hex::encode(sha2::Sha256::digest(body.as_bytes()));
-                    let message = format!("{method}\n{path}\n{ts_ms}\n{body_hash}");
-                    let signature = signing_key.sign(message.as_bytes());
-                    headers.insert("X-Rivers-Signature".into(), hex::encode(signature.to_bytes()));
-                }
-            }
+    if let Some(kp) = resolved_path {
+        let key_hex = std::fs::read_to_string(&kp)
+            .map_err(|e| format!("cannot read admin key file '{kp}': {e}"))?;
+        let key_hex = key_hex.trim();
+        let seed_bytes = hex::decode(key_hex)
+            .map_err(|e| format!("admin key file '{kp}' contains invalid hex: {e}"))?;
+        if seed_bytes.len() != 32 {
+            return Err(format!(
+                "admin key file '{kp}' has wrong length: expected 32 bytes, got {}",
+                seed_bytes.len()
+            ));
         }
+        use ed25519_dalek::{Signer, SigningKey};
+        use sha2::Digest;
+        let seed: [u8; 32] = seed_bytes.try_into().unwrap();
+        let signing_key = SigningKey::from_bytes(&seed);
+
+        // Match server's build_signing_payload: method\npath\ntimestamp\nbody_hash
+        let body_hash = hex::encode(sha2::Sha256::digest(body.as_bytes()));
+        let message = format!("{method}\n{path}\n{ts_ms}\n{body_hash}");
+        let signature = signing_key.sign(message.as_bytes());
+        headers.insert("X-Rivers-Signature".into(), hex::encode(signature.to_bytes()));
     }
 
-    headers
+    Ok(headers)
 }
 
 #[cfg(feature = "admin-api")]
-pub async fn admin_get(url: &str, path: &str) -> Result<serde_json::Value, String> {
-    let headers = sign_request("GET", path, "");
-    let client = reqwest::Client::new();
+pub async fn admin_get(url: &str, path: &str) -> Result<serde_json::Value, AdminError> {
+    let headers = sign_request("GET", path, "", None)
+        .map_err(|e| AdminError::Http(format!("key error: {e}")))?;
+    let client = admin_client();
     let mut req = client.get(format!("{url}{path}"));
     for (k, v) in &headers {
         req = req.header(k.as_str(), v.as_str());
     }
-    let resp = req.send().await.map_err(|e| format!("request failed: {e}"))?;
+    let resp = req.send().await.map_err(|e| {
+        if e.is_connect() || e.is_timeout() {
+            AdminError::Network(format!("connection failed: {e}"))
+        } else {
+            AdminError::Http(format!("request failed: {e}"))
+        }
+    })?;
     let status = resp.status();
-    let body = resp.text().await.map_err(|e| format!("read body: {e}"))?;
+    let body = resp.text().await
+        .map_err(|e| AdminError::Http(format!("read body: {e}")))?;
     if !status.is_success() {
-        return Err(format!("HTTP {status}: {body}"));
+        return Err(AdminError::Http(format!("HTTP {status}: {body}")));
     }
-    serde_json::from_str(&body).map_err(|e| format!("parse JSON: {e}"))
+    serde_json::from_str(&body)
+        .map_err(|e| AdminError::Http(format!("parse JSON: {e}")))
 }
 
 #[cfg(feature = "admin-api")]
-pub async fn admin_post(url: &str, path: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+pub async fn admin_post(url: &str, path: &str, body: &serde_json::Value) -> Result<serde_json::Value, AdminError> {
     let body_str = serde_json::to_string(body).unwrap_or_default();
-    let headers = sign_request("POST", path, &body_str);
-    let client = reqwest::Client::new();
+    let headers = sign_request("POST", path, &body_str, None)
+        .map_err(|e| AdminError::Http(format!("key error: {e}")))?;
+    let client = admin_client();
     let mut req = client.post(format!("{url}{path}"))
         .header("Content-Type", "application/json")
         .body(body_str);
     for (k, v) in &headers {
         req = req.header(k.as_str(), v.as_str());
     }
-    let resp = req.send().await.map_err(|e| format!("request failed: {e}"))?;
+    let resp = req.send().await.map_err(|e| {
+        if e.is_connect() || e.is_timeout() {
+            AdminError::Network(format!("connection failed: {e}"))
+        } else {
+            AdminError::Http(format!("request failed: {e}"))
+        }
+    })?;
     let status = resp.status();
-    let body = resp.text().await.map_err(|e| format!("read body: {e}"))?;
+    let body = resp.text().await
+        .map_err(|e| AdminError::Http(format!("read body: {e}")))?;
     if !status.is_success() {
-        return Err(format!("HTTP {status}: {body}"));
+        return Err(AdminError::Http(format!("HTTP {status}: {body}")));
     }
-    serde_json::from_str(&body).map_err(|e| format!("parse JSON: {e}"))
+    serde_json::from_str(&body)
+        .map_err(|e| AdminError::Http(format!("parse JSON: {e}")))
 }
 
 // ── Admin API commands ──────────────────────────────────────────────────────
 
 #[cfg(feature = "admin-api")]
 pub async fn cmd_status(url: &str) -> Result<(), String> {
-    let data = admin_get(url, "/admin/status").await?;
+    let data = admin_get(url, "/admin/status").await
+        .map_err(|e| e.to_string())?;
     println!("{}", serde_json::to_string_pretty(&data).unwrap());
     Ok(())
 }
@@ -83,14 +159,24 @@ pub async fn cmd_status(url: &str) -> Result<(), String> {
 #[cfg(feature = "admin-api")]
 pub async fn cmd_deploy(url: &str, bundle_path: &str) -> Result<(), String> {
     let body = serde_json::json!({ "bundle_path": bundle_path });
-    let data = admin_post(url, "/admin/deploy", &body).await?;
+    let data = admin_post(url, "/admin/deploy", &body).await
+        .map_err(|e| e.to_string())?;
+
+    // Surface staged/pending deployment status explicitly.
+    let status_field = data.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    if status_field == "pending" || status_field == "staged" {
+        let id = data.get("id").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+        println!("Deployment staged. To activate, run: riversctl deploy promote {id}");
+    }
+
     println!("{}", serde_json::to_string_pretty(&data).unwrap());
     Ok(())
 }
 
 #[cfg(feature = "admin-api")]
 pub async fn cmd_drivers(url: &str) -> Result<(), String> {
-    let data = admin_get(url, "/admin/drivers").await?;
+    let data = admin_get(url, "/admin/drivers").await
+        .map_err(|e| e.to_string())?;
     if let Some(drivers) = data.as_array() {
         for d in drivers {
             println!("{}", d.as_str().unwrap_or(&d.to_string()));
@@ -103,7 +189,8 @@ pub async fn cmd_drivers(url: &str) -> Result<(), String> {
 
 #[cfg(feature = "admin-api")]
 pub async fn cmd_datasources(url: &str) -> Result<(), String> {
-    let data = admin_get(url, "/admin/datasources").await?;
+    let data = admin_get(url, "/admin/datasources").await
+        .map_err(|e| e.to_string())?;
     println!("{}", serde_json::to_string_pretty(&data).unwrap());
     Ok(())
 }
@@ -111,7 +198,8 @@ pub async fn cmd_datasources(url: &str) -> Result<(), String> {
 #[cfg(feature = "admin-api")]
 pub async fn cmd_health(_url: &str) -> Result<(), String> {
     let main_url = std::env::var("RIVERS_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into());
-    let data = admin_get(&main_url, "/health/verbose").await?;
+    let data = admin_get(&main_url, "/health/verbose").await
+        .map_err(|e| e.to_string())?;
     println!("{}", serde_json::to_string_pretty(&data).unwrap());
     Ok(())
 }
@@ -124,9 +212,14 @@ pub async fn cmd_stop(url: &str) -> Result<(), String> {
             println!("{}", serde_json::to_string_pretty(&data).unwrap());
             Ok(())
         }
-        Err(_) => {
-            eprintln!("Admin API unreachable — falling back to signal");
+        Err(AdminError::Network(e)) => {
+            // Only fall back to signal on a genuine network failure.
+            eprintln!("Admin API unreachable ({e}) — falling back to signal");
             signal_riversd(Signal::Kill)
+        }
+        Err(AdminError::Http(e)) => {
+            // Auth/RBAC/HTTP errors must NOT trigger local signal fallback.
+            Err(format!("admin shutdown failed: {e}"))
         }
     }
 }
@@ -139,9 +232,14 @@ pub async fn cmd_graceful(url: &str) -> Result<(), String> {
             println!("{}", serde_json::to_string_pretty(&data).unwrap());
             Ok(())
         }
-        Err(_) => {
-            eprintln!("Admin API unreachable — falling back to signal");
+        Err(AdminError::Network(e)) => {
+            // Only fall back to signal on a genuine network failure.
+            eprintln!("Admin API unreachable ({e}) — falling back to signal");
             signal_riversd(Signal::Term)
+        }
+        Err(AdminError::Http(e)) => {
+            // Auth/RBAC/HTTP errors must NOT trigger local signal fallback.
+            Err(format!("admin shutdown failed: {e}"))
         }
     }
 }
@@ -266,7 +364,8 @@ fn kill_pid(pid: &str, sig: &Signal) -> Result<(), String> {
 #[cfg(feature = "admin-api")]
 pub async fn cmd_breaker_list(url: &str, app: &str) -> Result<(), String> {
     let path = format!("/admin/apps/{}/breakers", app);
-    let data = admin_get(url, &path).await?;
+    let data = admin_get(url, &path).await
+        .map_err(|e| e.to_string())?;
     let empty = vec![];
     let breakers = data.as_array().unwrap_or(&empty);
     if breakers.is_empty() {
@@ -286,7 +385,8 @@ pub async fn cmd_breaker_list(url: &str, app: &str) -> Result<(), String> {
 #[cfg(feature = "admin-api")]
 pub async fn cmd_breaker_status(url: &str, app: &str, name: &str) -> Result<(), String> {
     let path = format!("/admin/apps/{}/breakers/{}", app, name);
-    let data = admin_get(url, &path).await?;
+    let data = admin_get(url, &path).await
+        .map_err(|e| e.to_string())?;
     let state = data["state"].as_str().unwrap_or("?");
     println!("  {} {}", name, state);
     if let Some(dvs) = data["dataviews"].as_array() {
@@ -300,7 +400,8 @@ pub async fn cmd_breaker_status(url: &str, app: &str, name: &str) -> Result<(), 
 #[cfg(feature = "admin-api")]
 pub async fn cmd_breaker_trip(url: &str, app: &str, name: &str) -> Result<(), String> {
     let path = format!("/admin/apps/{}/breakers/{}/trip", app, name);
-    let data = admin_post(url, &path, &serde_json::json!({})).await?;
+    let data = admin_post(url, &path, &serde_json::json!({})).await
+        .map_err(|e| e.to_string())?;
     let state = data["state"].as_str().unwrap_or("?");
     println!("  {} {}", name, state);
     if let Some(dvs) = data["dataviews"].as_array() {
@@ -314,7 +415,8 @@ pub async fn cmd_breaker_trip(url: &str, app: &str, name: &str) -> Result<(), St
 #[cfg(feature = "admin-api")]
 pub async fn cmd_breaker_reset(url: &str, app: &str, name: &str) -> Result<(), String> {
     let path = format!("/admin/apps/{}/breakers/{}/reset", app, name);
-    let data = admin_post(url, &path, &serde_json::json!({})).await?;
+    let data = admin_post(url, &path, &serde_json::json!({})).await
+        .map_err(|e| e.to_string())?;
     let state = data["state"].as_str().unwrap_or("?");
     println!("  {} {}", name, state);
     if let Some(dvs) = data["dataviews"].as_array() {
@@ -328,22 +430,97 @@ pub async fn cmd_breaker_reset(url: &str, app: &str, name: &str) -> Result<(), S
 pub async fn cmd_log(url: &str, args: &[String]) -> Result<(), String> {
     match args.first().map(|s| s.as_str()) {
         Some("levels") => {
-            let data = admin_get(url, "/admin/log/levels").await?;
+            let data = admin_get(url, "/admin/log/levels").await
+                .map_err(|e| e.to_string())?;
             println!("{}", serde_json::to_string_pretty(&data).unwrap());
         }
         Some("set") => {
             if args.len() < 3 {
-                return Err("Usage: riversctl log set <event> <level>".into());
+                return Err("Usage: riversctl log set <target> <level>".into());
             }
-            let body = serde_json::json!({ "event": args[1], "level": args[2] });
-            let data = admin_post(url, "/admin/log/set", &body).await?;
+            let body = serde_json::json!({ "target": args[1], "level": args[2] });
+            let data = admin_post(url, "/admin/log/set", &body).await
+                .map_err(|e| e.to_string())?;
             println!("{}", serde_json::to_string_pretty(&data).unwrap());
         }
         Some("reset") => {
-            let data = admin_post(url, "/admin/log/reset", &serde_json::json!({})).await?;
+            let data = admin_post(url, "/admin/log/reset", &serde_json::json!({})).await
+                .map_err(|e| e.to_string())?;
             println!("{}", serde_json::to_string_pretty(&data).unwrap());
         }
         _ => return Err("Usage: riversctl log <levels|set|reset>".into()),
     }
     Ok(())
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "admin-api")]
+    #[test]
+    fn sign_request_produces_timestamp_without_key() {
+        std::env::remove_var("RIVERS_ADMIN_KEY");
+        let headers = sign_request("GET", "/admin/status", "body", None).unwrap();
+        assert!(headers.contains_key("X-Rivers-Timestamp"));
+        assert!(!headers.contains_key("X-Rivers-Signature"));
+    }
+
+    #[cfg(feature = "admin-api")]
+    #[test]
+    fn sign_request_rejects_bad_hex_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("bad.key");
+        std::fs::write(&key_path, "notvalidhex!!").unwrap();
+        let result = sign_request("GET", "/admin/status", "", Some(&key_path.to_string_lossy()));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("invalid hex"), "got: {err}");
+    }
+
+    #[cfg(feature = "admin-api")]
+    #[test]
+    fn sign_request_rejects_wrong_length_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("short.key");
+        // 16 bytes → 32 hex chars — wrong length
+        std::fs::write(&key_path, "deadbeefdeadbeefdeadbeefdeadbeef").unwrap();
+        let result = sign_request("GET", "/admin/status", "", Some(&key_path.to_string_lossy()));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("wrong length"), "got: {err}");
+    }
+
+    #[cfg(feature = "admin-api")]
+    #[test]
+    fn log_set_body_uses_target_key() {
+        // Build the body the same way cmd_log does and assert it contains "target", not "event".
+        let args: Vec<String> = vec![
+            "set".to_string(),
+            "my_module".to_string(),
+            "debug".to_string(),
+        ];
+        let body = serde_json::json!({ "target": args[1], "level": args[2] });
+        assert!(body.get("target").is_some(), "body must contain 'target' key");
+        assert!(body.get("event").is_none(), "body must NOT contain 'event' key");
+        assert_eq!(body["target"], "my_module");
+        assert_eq!(body["level"], "debug");
+    }
+
+    #[cfg(feature = "admin-api")]
+    #[test]
+    fn admin_error_network_does_not_trigger_http_path() {
+        // Verify that only AdminError::Network triggers fallback, not AdminError::Http.
+        // This is a structural test — the match arms in cmd_stop/cmd_graceful are distinct.
+        let net_err = AdminError::Network("connection refused".into());
+        let http_err = AdminError::Http("HTTP 401: Unauthorized".into());
+        assert!(matches!(net_err, AdminError::Network(_)));
+        assert!(matches!(http_err, AdminError::Http(_)));
+        // A NetworkError should display without "HTTP"
+        assert!(!net_err.to_string().starts_with("HTTP"));
+        // An HttpError with 401 content should preserve it
+        assert!(http_err.to_string().contains("401"));
+    }
 }

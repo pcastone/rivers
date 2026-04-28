@@ -175,7 +175,8 @@ mod tests {
     #[cfg(feature = "admin-api")]
     #[test]
     fn sign_request_produces_timestamp() {
-        let headers = admin::sign_request("GET", "/admin/status", "test body");
+        std::env::remove_var("RIVERS_ADMIN_KEY");
+        let headers = admin::sign_request("GET", "/admin/status", "test body", None).unwrap();
         assert!(headers.contains_key("X-Rivers-Timestamp"));
     }
 
@@ -183,7 +184,7 @@ mod tests {
     #[test]
     fn sign_request_without_key_has_no_signature() {
         std::env::remove_var("RIVERS_ADMIN_KEY");
-        let headers = admin::sign_request("GET", "/admin/status", "body");
+        let headers = admin::sign_request("GET", "/admin/status", "body", None).unwrap();
         assert!(!headers.contains_key("X-Rivers-Signature"));
         assert!(headers.contains_key("X-Rivers-Timestamp"));
     }
