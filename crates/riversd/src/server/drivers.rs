@@ -36,6 +36,9 @@ pub fn register_all_drivers(
             ("rabbitmq",       Box::new(|f| { f.register_broker_driver(A::new(rivers_plugin_rabbitmq::RabbitMqDriver)); })),
             ("nats",           Box::new(|f| { f.register_broker_driver(A::new(rivers_plugin_nats::NatsDriver)); })),
             ("rivers-exec",    Box::new(|f| { f.register_database_driver(A::new(rivers_plugin_exec::ExecDriver)); })),
+            // RW2.7.d: neo4j was listed in Cargo.toml as optional but was not
+            // registered here. Added to complete the static-plugin inventory.
+            ("neo4j",          Box::new(|f| { f.register_database_driver(A::new(rivers_plugin_neo4j::Neo4jDriver)); })),
         ];
         for (name, register_fn) in static_plugins {
             if ignore.iter().any(|i| i == name) {

@@ -37,9 +37,9 @@ pub mod types;
 pub mod validation;
 
 pub use broker::{
-    BrokerConsumer, BrokerConsumerConfig, BrokerMetadata, BrokerProducer, BrokerSubscription,
-    FailureMode, FailurePolicy, InboundMessage, MessageBrokerDriver, MessageReceipt,
-    OutboundMessage, PublishReceipt,
+    AckOutcome, BrokerConsumer, BrokerConsumerConfig, BrokerError, BrokerMetadata, BrokerProducer,
+    BrokerSemantics, BrokerSubscription, FailureMode, FailurePolicy, InboundMessage,
+    MessageBrokerDriver, MessageReceipt, OutboundMessage, PublishReceipt,
 };
 pub use error::DriverError;
 pub use operation_descriptor::{OpKind, OperationDescriptor, Param, ParamType};

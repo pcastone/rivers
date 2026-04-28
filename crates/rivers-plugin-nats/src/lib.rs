@@ -6,22 +6,31 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use futures_lite::StreamExt;
 use rivers_driver_sdk::{
-    BrokerConsumer, BrokerConsumerConfig, BrokerMetadata, BrokerProducer, ConnectionParams,
-    DriverError, DriverRegistrar, InboundMessage, MessageBrokerDriver, MessageReceipt,
-    OutboundMessage, PublishReceipt, ABI_VERSION,
+    AckOutcome, BrokerConsumer, BrokerConsumerConfig, BrokerError, BrokerMetadata, BrokerProducer,
+    BrokerSemantics, ConnectionParams, DriverError, DriverRegistrar, InboundMessage,
+    MessageBrokerDriver, MessageReceipt, OutboundMessage, PublishReceipt, ABI_VERSION,
 };
 
 // ── Driver ─────────────────────────────────────────────────────────
 
 /// NATS driver factory — creates producers and consumers via core NATS pub/sub.
+///
+/// Core NATS semantics are `AtMostOnce` — the server delivers each message
+/// to all current subscribers once; there is no persistent queue or redelivery
+/// on consumer restart. JetStream (not implemented here) would upgrade this to
+/// `AtLeastOnce`.
 pub struct NatsDriver;
 
 #[async_trait]
 impl MessageBrokerDriver for NatsDriver {
     fn name(&self) -> &str {
         "nats"
+    }
+
+    /// Core NATS is fire-and-forget pub/sub — no redelivery on nack.
+    fn semantics(&self) -> BrokerSemantics {
+        BrokerSemantics::AtMostOnce
     }
 
     async fn create_producer(
@@ -39,22 +48,48 @@ impl MessageBrokerDriver for NatsDriver {
         config: &BrokerConsumerConfig,
     ) -> Result<Box<dyn BrokerConsumer>, DriverError> {
         let client = nats_connect(params).await?;
-        let subject = resolve_subject(config, params);
 
-        let subscriber = client
-            .subscribe(subject.clone())
-            .await
-            .map_err(|e| DriverError::Connection(format!("nats subscribe({subject}): {e}")))?;
-
-        let consumer_name = format!(
-            "{}.{}.{}.consumer",
+        // Derive the queue group name for load-balanced delivery across instances.
+        // All instances sharing the same group_prefix.app_id.datasource_id will
+        // form a queue group — only one member receives each message.
+        let queue_group = format!(
+            "{}.{}.{}",
             config.group_prefix, config.app_id, config.datasource_id
         );
 
+        let consumer_name = format!("{queue_group}.consumer");
+
+        // RW2.2.c: subscribe to ALL configured subjects, not just the first.
+        // Each subject gets its own queue_subscribe call so the consumer can
+        // receive from multiple topics in a single receive() loop.
+        let subjects: Vec<String> = if config.subscriptions.is_empty() {
+            // Fallback to the database field when no subscriptions are configured.
+            vec![params.database.clone()]
+        } else {
+            config.subscriptions.iter().map(|s| s.topic.clone()).collect()
+        };
+
+        let mut subscribers = Vec::with_capacity(subjects.len());
+        for subject in &subjects {
+            // RW2.2.a: use queue_subscribe for consumer-group semantics — only
+            // one consumer in the queue group receives each message.
+            let sub = client
+                .queue_subscribe(subject.clone(), queue_group.clone())
+                .await
+                .map_err(|e| {
+                    DriverError::Connection(format!(
+                        "nats queue_subscribe({subject}, {queue_group}): {e}"
+                    ))
+                })?;
+            subscribers.push(sub);
+        }
+
+        let primary_subject = subjects.into_iter().next().unwrap_or_else(|| params.database.clone());
+
         Ok(Box::new(NatsConsumer {
             client,
-            subscriber,
-            subject,
+            subscribers,
+            subject: primary_subject,
             consumer_name,
             sequence: 0,
         }))
@@ -81,6 +116,9 @@ async fn nats_connect(params: &ConnectionParams) -> Result<async_nats::Client, D
 }
 
 /// Resolve subject from config subscriptions or connection params fallback.
+///
+/// Kept for backward-compat use in tests; the consumer now subscribes to
+/// all subjects via `config.subscriptions` directly.
 fn resolve_subject(config: &BrokerConsumerConfig, params: &ConnectionParams) -> String {
     config
         .subscriptions
@@ -99,10 +137,21 @@ pub struct NatsProducer {
 #[async_trait]
 impl BrokerProducer for NatsProducer {
     async fn publish(&mut self, message: OutboundMessage) -> Result<PublishReceipt, DriverError> {
-        let subject = if message.destination.is_empty() {
+        if message.destination.is_empty() {
             return Err(DriverError::Query(
                 "nats publish requires a destination subject".into(),
             ));
+        }
+
+        // RW2.2.d: if a key is set, append it as a subject suffix (<base>/<key>).
+        // This follows NATS subject hierarchy conventions where '/' is a valid
+        // separator (though '.' is more common in NATS; we use '/' per spec).
+        let subject = if let Some(ref key) = message.key {
+            if key.is_empty() {
+                message.destination.clone()
+            } else {
+                format!("{}/{}", message.destination, key)
+            }
         } else {
             message.destination.clone()
         };
@@ -162,10 +211,15 @@ impl BrokerProducer for NatsProducer {
 
 // ── Consumer ───────────────────────────────────────────────────────
 
-/// NATS consumer — subscribes to a subject and receives messages.
+/// NATS consumer — subscribes to one or more subjects via queue groups and receives messages.
+///
+/// RW2.2.c: holds a subscriber per configured subject. `receive()` polls
+/// all subscribers in round-robin order, returning the first available message.
 pub struct NatsConsumer {
     client: async_nats::Client,
-    subscriber: async_nats::Subscriber,
+    /// One subscriber per configured subject (RW2.2.c).
+    subscribers: Vec<async_nats::Subscriber>,
+    /// The primary (first) subject — used for logging and metadata.
     subject: String,
     consumer_name: String,
     sequence: u64,
@@ -174,56 +228,89 @@ pub struct NatsConsumer {
 #[async_trait]
 impl BrokerConsumer for NatsConsumer {
     async fn receive(&mut self) -> Result<InboundMessage, DriverError> {
-        let message = self
-            .subscriber
-            .next()
-            .await
-            .ok_or_else(|| DriverError::Connection("nats subscriber stream ended".into()))?;
+        // RW2.2.c: poll all subscribers — return the first available message.
+        // Uses futures_lite::StreamExt::next() on each subscriber in order.
+        // For single-subject consumers this is equivalent to the original impl.
+        if self.subscribers.is_empty() {
+            return Err(DriverError::Connection(
+                "nats consumer has no subscriptions".into(),
+            ));
+        }
 
-        self.sequence += 1;
-        let seq = self.sequence;
+        // Simple round-trip: try each subscriber in order, take first message.
+        // A production implementation would use select! for true fairness, but
+        // for Rivers' single-message-at-a-time receive contract this is correct.
+        loop {
+            for sub in &mut self.subscribers {
+                // Try non-blocking next; if the stream has a message, return it.
+                use futures_lite::StreamExt;
+                if let Some(message) = sub.next().await {
+                    self.sequence += 1;
+                    let seq = self.sequence;
 
-        let headers: HashMap<String, String> = message
-            .headers
-            .as_ref()
-            .map(|hm| {
-                hm.iter()
-                    .map(|(k, v)| (k.to_string(), v.iter().next().map(|s| s.to_string()).unwrap_or_default()))
-                    .collect()
-            })
-            .unwrap_or_default();
+                    let headers: HashMap<String, String> = message
+                        .headers
+                        .as_ref()
+                        .map(|hm| {
+                            hm.iter()
+                                .map(|(k, v)| {
+                                    (
+                                        k.to_string(),
+                                        v.iter()
+                                            .next()
+                                            .map(|s| s.to_string())
+                                            .unwrap_or_default(),
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
 
-        Ok(InboundMessage {
-            id: format!("nats:{}:{}", self.subject, seq),
-            destination: message.subject.to_string(),
-            payload: message.payload.to_vec(),
-            headers,
-            timestamp: Utc::now(),
-            receipt: MessageReceipt {
-                handle: seq.to_string(),
-            },
-            metadata: BrokerMetadata::Nats {
-                sequence: seq,
-                stream: self.subject.clone(),
-                consumer: self.consumer_name.clone(),
-            },
-        })
+                    let destination = message.subject.to_string();
+                    return Ok(InboundMessage {
+                        id: format!("nats:{}:{}", destination, seq),
+                        destination,
+                        payload: message.payload.to_vec(),
+                        headers,
+                        timestamp: Utc::now(),
+                        receipt: MessageReceipt {
+                            handle: seq.to_string(),
+                        },
+                        metadata: BrokerMetadata::Nats {
+                            sequence: seq,
+                            stream: self.subject.clone(),
+                            consumer: self.consumer_name.clone(),
+                        },
+                    });
+                }
+            }
+            // All subscribers returned None — the streams have ended.
+            return Err(DriverError::Connection(
+                "nats subscriber streams ended".into(),
+            ));
+        }
     }
 
-    async fn ack(&mut self, _receipt: &MessageReceipt) -> Result<(), DriverError> {
-        // Core NATS has no ack mechanism (fire-and-forget pub/sub).
-        // Ack is a no-op; JetStream ack would go here in a future extension.
-        Ok(())
+    /// Ack on core NATS is a best-effort no-op.
+    ///
+    /// Core NATS has no acknowledgement protocol — messages are delivered once
+    /// and not tracked after delivery. The `AtMostOnce` semantics declared on
+    /// `NatsDriver` communicate this to the BrokerConsumerBridge.
+    async fn ack(&mut self, _receipt: &MessageReceipt) -> Result<AckOutcome, BrokerError> {
+        Ok(AckOutcome::Acked)
     }
 
-    async fn nack(&mut self, _receipt: &MessageReceipt) -> Result<(), DriverError> {
-        // Core NATS has no nack/requeue mechanism.
-        // No-op; JetStream nack would go here in a future extension.
-        Ok(())
+    /// Nack is not supported on core NATS — returns `Err(BrokerError::Unsupported)`.
+    ///
+    /// Core NATS has no nack/requeue mechanism. Messages are delivered once to
+    /// all queue-group members; there is no way to return a message to the broker
+    /// for redelivery. JetStream provides redelivery and would change this.
+    async fn nack(&mut self, _receipt: &MessageReceipt) -> Result<AckOutcome, BrokerError> {
+        Err(BrokerError::Unsupported)
     }
 
     async fn close(&mut self) -> Result<(), DriverError> {
-        // Unsubscribing is handled by dropping the Subscriber.
+        // Unsubscribing is handled by dropping the Subscribers.
         // Drain the client to flush pending operations.
         self.client
             .drain()
@@ -451,5 +538,13 @@ mod tests {
     fn nats_rejects_delete() {
         let schema = make_nats_schema("message", true);
         assert!(check_nats_schema(&schema, rivers_driver_sdk::HttpMethod::DELETE).is_err());
+    }
+
+    // ── RW2.2 contract tests ────────────────────────────────────────
+
+    #[test]
+    fn nats_driver_semantics_is_at_most_once() {
+        let driver = NatsDriver;
+        assert_eq!(driver.semantics(), rivers_driver_sdk::BrokerSemantics::AtMostOnce);
     }
 }

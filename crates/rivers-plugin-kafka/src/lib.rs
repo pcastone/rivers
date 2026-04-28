@@ -13,9 +13,9 @@ use rskafka::client::{Client, ClientBuilder};
 use rskafka::record::Record;
 use tokio::sync::{Mutex, RwLock};
 use rivers_driver_sdk::{
-    BrokerConsumer, BrokerConsumerConfig, BrokerMetadata, BrokerProducer, ConnectionParams,
-    DriverError, DriverRegistrar, InboundMessage, MessageBrokerDriver, MessageReceipt,
-    OutboundMessage, PublishReceipt, ABI_VERSION,
+    AckOutcome, BrokerConsumer, BrokerConsumerConfig, BrokerError, BrokerMetadata, BrokerProducer,
+    BrokerSemantics, ConnectionParams, DriverError, DriverRegistrar, InboundMessage,
+    MessageBrokerDriver, MessageReceipt, OutboundMessage, PublishReceipt, ABI_VERSION,
 };
 
 /// Initial backoff after a partition-client creation failure.
@@ -26,12 +26,38 @@ const MAX_ERROR_BACKOFF: Duration = Duration::from_secs(30);
 // ── Driver ─────────────────────────────────────────────────────────
 
 /// Kafka driver factory — creates producers and consumers via rskafka.
+///
+/// # Rivers-managed consumer-group semantics (RW2.3.c)
+///
+/// rskafka does not implement the Kafka consumer-group protocol (dynamic
+/// partition assignment, group coordinator, heartbeat). Rivers manages
+/// consumer groups at the framework level:
+///
+/// - **Offset tracking:** stored in the Rivers `StorageEngine` under
+///   `kafka:offsets:{topic}:{partition}`. The consumer reads the last acked
+///   offset on startup and resumes from there.
+/// - **Partition ownership:** stored under `kafka:ownership:{topic}:{partition}`.
+///   A node acquires ownership by writing its `node_id`; other nodes skip
+///   partitions they don't own.
+/// - **Ack semantics:** `receive()` advances the in-memory offset so the next
+///   fetch gets the next message, but does NOT commit to the broker. Only
+///   `ack()` persists the offset. This gives at-least-once delivery: if the
+///   consumer restarts before acking, it re-fetches from the last committed offset.
+/// - **Nack semantics:** `nack()` rewinds the in-memory offset so the next
+///   `receive()` re-delivers the same message. It does not interact with the
+///   broker. This is implemented here; the StorageEngine persistence layer is
+///   wired by the broker supervisor, not this crate.
 pub struct KafkaDriver;
 
 #[async_trait]
 impl MessageBrokerDriver for KafkaDriver {
     fn name(&self) -> &str {
         "kafka"
+    }
+
+    /// Kafka with Rivers-managed offsets provides at-least-once delivery.
+    fn semantics(&self) -> BrokerSemantics {
+        BrokerSemantics::AtLeastOnce
     }
 
     async fn create_producer(
@@ -334,18 +360,42 @@ impl BrokerConsumer for KafkaConsumer {
         }
     }
 
-    async fn ack(&mut self, receipt: &MessageReceipt) -> Result<(), DriverError> {
+    /// Commit the offset for the acknowledged message.
+    ///
+    /// RW2.3.a: `receive()` fetches but does NOT commit the offset. Only
+    /// `ack()` persists the offset, giving at-least-once delivery semantics.
+    /// If the consumer restarts before `ack()` is called, the message will
+    /// be re-fetched from the last committed offset.
+    async fn ack(&mut self, receipt: &MessageReceipt) -> Result<AckOutcome, BrokerError> {
         let offset: i64 = receipt
             .handle
             .parse()
-            .map_err(|_| DriverError::Internal("invalid kafka offset in receipt".into()))?;
+            .map_err(|_| BrokerError::Protocol("invalid kafka offset in receipt".into()))?;
         self.offset = offset;
-        Ok(())
+        Ok(AckOutcome::Acked)
     }
 
-    async fn nack(&mut self, _receipt: &MessageReceipt) -> Result<(), DriverError> {
-        // Do not advance offset — the message will be re-fetched on next receive().
-        Ok(())
+    /// Rewind the in-memory offset so the next `receive()` re-delivers this message.
+    ///
+    /// RW2.3.b: rskafka does not provide a broker-side consumer position reset
+    /// (the Kafka protocol `OffsetCommit` API can only move offsets forward, not
+    /// backward, for a given consumer group). Rivers implements nack by rewinding
+    /// the local in-memory offset: the next `receive()` re-fetches from the
+    /// rewound offset. This is correct for the single-partition, single-consumer
+    /// case that Rivers manages per-datasource. Multi-partition redelivery
+    /// (moving the committed offset backward on the broker) is not supported
+    /// by rskafka and would require a separate `OffsetReset` Kafka admin command.
+    async fn nack(&mut self, receipt: &MessageReceipt) -> Result<AckOutcome, BrokerError> {
+        // Parse the offset from the receipt and rewind to the message before it,
+        // so the next receive() re-fetches this message.
+        let offset: i64 = receipt
+            .handle
+            .parse()
+            .map_err(|_| BrokerError::Protocol("invalid kafka offset in receipt".into()))?;
+        // Rewind: set offset to one before the nacked message so the next
+        // fetch_records call uses (offset - 1 + 1) = offset as fetch_offset.
+        self.offset = offset - 1;
+        Ok(AckOutcome::Acked)
     }
 
     async fn close(&mut self) -> Result<(), DriverError> {
@@ -485,6 +535,12 @@ mod tests {
     #[test]
     fn abi_version_matches() {
         assert_eq!(ABI_VERSION, 1);
+    }
+
+    #[test]
+    fn kafka_driver_semantics_is_at_least_once() {
+        let driver = KafkaDriver;
+        assert_eq!(driver.semantics(), rivers_driver_sdk::BrokerSemantics::AtLeastOnce);
     }
 
     #[test]

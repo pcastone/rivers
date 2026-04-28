@@ -106,6 +106,54 @@ impl Connection for Neo4jConnection {
         let cypher = build_cypher(query)?;
         let has_return = statement_has_return(&query.statement);
 
+        // RW2.7.a: route through the open transaction when one is active.
+        // A transaction is open when `self.txn` is Some. All operations that
+        // execute Cypher must go through the transaction object to ensure ACID
+        // guarantees — using `self.graph` directly while a transaction is open
+        // would execute outside the transaction, breaking atomicity.
+        if let Some(ref mut txn) = self.txn {
+            return match query.operation.as_str() {
+                "select" | "query" | "find" | "match" | "get" => {
+                    execute_returning_txn(txn, cypher, "query").await
+                }
+                "insert" | "create" => {
+                    if has_return {
+                        execute_returning_txn(txn, cypher, "create").await
+                    } else {
+                        txn.run(cypher)
+                            .await
+                            .map_err(|e| DriverError::Query(format!("neo4j create (txn): {e}")))?;
+                        Ok(QueryResult { rows: Vec::new(), affected_rows: 1, last_insert_id: None, column_names: None })
+                    }
+                }
+                "update" | "set" => {
+                    if has_return {
+                        execute_returning_txn(txn, cypher, "update").await
+                    } else {
+                        txn.run(cypher)
+                            .await
+                            .map_err(|e| DriverError::Query(format!("neo4j update (txn): {e}")))?;
+                        Ok(QueryResult::empty())
+                    }
+                }
+                "delete" | "remove" | "del" => {
+                    if has_return {
+                        execute_returning_txn(txn, cypher, "delete").await
+                    } else {
+                        txn.run(cypher)
+                            .await
+                            .map_err(|e| DriverError::Query(format!("neo4j delete (txn): {e}")))?;
+                        Ok(QueryResult::empty())
+                    }
+                }
+                "ping" => Ok(QueryResult::empty()), // ping inside txn is a no-op
+                op => Err(DriverError::Unsupported(format!(
+                    "neo4j driver does not support operation: {op}"
+                ))),
+            };
+        }
+
+        // No active transaction — execute directly on the graph connection pool.
         match query.operation.as_str() {
             "select" | "query" | "find" | "match" | "get" => {
                 execute_returning(&self.graph, cypher, "query").await
@@ -170,8 +218,11 @@ impl Connection for Neo4jConnection {
         let mut result = self.graph.execute(cypher)
             .await
             .map_err(|e| DriverError::Connection(format!("neo4j ping: {e}")))?;
-        let _ = result.next().await;
-        Ok(())
+        // RW2.7.b: propagate row-stream errors instead of silently discarding them.
+        match result.next().await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(DriverError::Connection(format!("neo4j ping row: {e}"))),
+        }
     }
 
     fn driver_name(&self) -> &str {
@@ -243,18 +294,98 @@ async fn execute_returning(
     })
 }
 
+/// Execute a Cypher query through an open transaction, returning rows.
+///
+/// RW2.7.a: routes queries through `neo4rs::Txn` when a transaction is active
+/// so they participate in the same atomic unit of work.
+///
+/// Uses `txn.execute()` + `stream.next(txn.handle())` per the neo4rs API for
+/// transaction-scoped streams (see neo4rs streams_within_a_transaction example).
+async fn execute_returning_txn(
+    txn: &mut neo4rs::Txn,
+    cypher: neo4rs::Query,
+    op_name: &str,
+) -> Result<QueryResult, DriverError> {
+    let mut result = txn.execute(cypher)
+        .await
+        .map_err(|e| DriverError::Query(format!("neo4j {op_name} (txn): {e}")))?;
+
+    let mut rows = Vec::new();
+    loop {
+        // RowStream::next() within a transaction requires the transaction handle.
+        match result.next(txn.handle()).await {
+            Ok(Some(row)) => rows.push(row_to_map(&row)),
+            Ok(None) => break,
+            Err(e) => return Err(DriverError::Query(format!("neo4j {op_name} (txn) row: {e}"))),
+        }
+    }
+
+    let count = rows.len() as u64;
+    Ok(QueryResult {
+        rows,
+        affected_rows: count,
+        last_insert_id: None,
+        column_names: None,
+    })
+}
+
+/// Convert a `serde_json::Value` to a `neo4rs::BoltType` for parameter binding.
+///
+/// RW2.7.c: enables Array and Json values to be bound as native Bolt types
+/// rather than JSON strings. Returns None for types that cannot be represented
+/// in Bolt natively (maps in this version of neo4rs, temporal types).
+fn json_to_bolt(v: &serde_json::Value) -> Option<neo4rs::BoltType> {
+    match v {
+        serde_json::Value::Null => Some(neo4rs::BoltType::Null(neo4rs::BoltNull)),
+        serde_json::Value::Bool(b) => Some((*b).into()),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Some(i.into())
+            } else if let Some(f) = n.as_f64() {
+                Some(f.into())
+            } else {
+                None
+            }
+        }
+        serde_json::Value::String(s) => Some(s.clone().into()),
+        serde_json::Value::Array(arr) => {
+            // Convert to BoltList — returns None if any element can't be converted.
+            let bolt_items: Vec<neo4rs::BoltType> = arr
+                .iter()
+                .map(json_to_bolt)
+                .collect::<Option<Vec<_>>>()?;
+            let bolt_list = neo4rs::BoltList::from(bolt_items);
+            Some(neo4rs::BoltType::List(bolt_list))
+        }
+        serde_json::Value::Object(_) => {
+            // Objects (maps) require BoltMap. BoltMap construction is internal
+            // in neo4rs 0.9.0-rc.9, so map params fall back to a JSON string.
+            None
+        }
+    }
+}
+
 /// Build a neo4rs Query from Rivers Query (with parameter binding).
+///
+/// RW2.7.c: Binds `Null`, `Array`, and `Json` as native Bolt types where possible.
+/// Returns an error for types the Bolt converter cannot represent (e.g., `UInt` overflow).
 fn build_cypher(query: &Query) -> Result<neo4rs::Query, DriverError> {
     let mut cypher = neo4rs::query(&query.statement);
 
     for (key, val) in &query.parameters {
         match val {
-            // G1.3: bind null as empty string (neo4rs BoltNull not directly supported via param)
+            // RW2.7.c: bind Null as native BoltType::Null (not empty string).
             QueryValue::Null => {
-                cypher = cypher.param(key.as_str(), "");
+                cypher = cypher.param(key.as_str(), neo4rs::BoltType::Null(neo4rs::BoltNull));
             }
-            QueryValue::Boolean(b) => { cypher = cypher.param(key.as_str(), *b); }
-            QueryValue::Integer(i) => { cypher = cypher.param(key.as_str(), *i); }
+
+            QueryValue::Boolean(b) => {
+                cypher = cypher.param(key.as_str(), *b);
+            }
+            QueryValue::Integer(i) => {
+                cypher = cypher.param(key.as_str(), *i);
+            }
+
             // Bolt protocol's Integer is i64-only. Bind UInt as i64 if it
             // fits, otherwise return an explicit overflow error rather than
             // silently truncating.
@@ -267,11 +398,26 @@ fn build_cypher(query: &Query) -> Result<neo4rs::Query, DriverError> {
                 })?;
                 cypher = cypher.param(key.as_str(), i);
             }
-            QueryValue::Float(f) => { cypher = cypher.param(key.as_str(), *f); }
-            QueryValue::String(s) => { cypher = cypher.param(key.as_str(), s.clone()); }
+            QueryValue::Float(f) => {
+                cypher = cypher.param(key.as_str(), *f);
+            }
+            QueryValue::String(s) => {
+                cypher = cypher.param(key.as_str(), s.clone());
+            }
+
+            // RW2.7.c: bind Array and Json as native Bolt via json_to_bolt().
+            // This preserves type structure (lists) on the Neo4j side rather than
+            // sending a JSON string that Cypher can't query into.
+            // Maps and other unsupported types fall back to a JSON string.
             QueryValue::Array(_) | QueryValue::Json(_) => {
-                let json_str = serde_json::to_string(val).unwrap_or_default();
-                cypher = cypher.param(key.as_str(), json_str);
+                let json_val = serde_json::to_value(val).unwrap_or(serde_json::Value::Null);
+                if let Some(bolt) = json_to_bolt(&json_val) {
+                    cypher = cypher.param(key.as_str(), bolt);
+                } else {
+                    // Fallback: JSON string for types we can't represent natively in Bolt.
+                    let json_str = serde_json::to_string(val).unwrap_or_default();
+                    cypher = cypher.param(key.as_str(), json_str);
+                }
             }
         }
     }

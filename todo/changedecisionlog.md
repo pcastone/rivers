@@ -6,6 +6,51 @@ readers.
 
 ---
 
+### RW2 — Broker & Transaction Contracts (2026-04-28)
+
+**RW2.1 — `semantics()` on `MessageBrokerDriver`, not `BrokerConsumer`**
+- File: `crates/rivers-driver-sdk/src/broker.rs`
+- Decision: Placed `semantics()` on the driver trait (not consumer), defaulting to `AtLeastOnce`.
+- Rationale: Semantics are a property of the protocol/driver, not per-consumer connection. A driver that speaks AMQP is always at-least-once regardless of which consumer is active.
+- Resolution method: trait design review during RW2.1 implementation.
+
+**RW2.2 — NATS `nack()` returns `Err(BrokerError::Unsupported)`, not `Ok`**
+- File: `crates/rivers-plugin-nats/src/lib.rs`
+- Decision: `nack()` returns `Err(Unsupported)` (not `Ok(AlreadyAcked)` or silently drops).
+- Rationale: NATS core has no nack/redelivery protocol. Returning an error is honest; callers can distinguish "unsupported" from transport failures.
+- Resolution method: matches `AtMostOnce` semantics definition.
+
+**RW2.3 — Kafka `nack()` rewinds offset, returns `Ok(Acked)` (not `Err`)**
+- File: `crates/rivers-plugin-kafka/src/lib.rs`
+- Decision: `nack()` decrements `self.offset` by 1 and returns `Ok(AckOutcome::Acked)`.
+- Rationale: rskafka has no native nack command; cursor rewind is the only mechanism available. Rewind does cause redelivery on next poll (at-least-once). Returning `Ok` rather than `Err(Unsupported)` because redelivery is genuinely supported — just implicitly.
+- Resolution method: rskafka API review; documented in code comment.
+
+**RW2.4 — Redis Streams `nack()` returns `Ok(Acked)` via PEL passivity**
+- File: `crates/rivers-plugin-redis-streams/src/lib.rs`
+- Decision: `nack()` is a no-op that returns `Ok(AckOutcome::Acked)`.
+- Rationale: Messages not ACKed remain in the Pending Entries List (PEL). XAUTOCLAIM will redeliver them after the visibility timeout. No explicit XNACK exists in Redis Streams. Redelivery is guaranteed passively.
+- Resolution method: Redis Streams protocol review.
+
+**RW2.6 — MongoDB `exec_find` duplicates iteration loop (two branches)**
+- File: `crates/rivers-plugin-mongodb/src/lib.rs`
+- Decision: Two entirely independent code paths for session vs non-session find, each with their own cursor variable.
+- Rationale: `collection.find(filter).session(session)` returns `SessionCursor<Document>` and `collection.find(filter)` returns `Cursor<Document>`. These are distinct Rust types. They cannot be unified in a single if/else branch (the compiler rejects mismatched cursor types in each arm). Code duplication was unavoidable.
+- Resolution method: MongoDB Rust driver 3.x type system review; SessionCursor::advance() requires &mut ClientSession argument.
+
+**RW2.7 — Neo4j `nack()` maps to `Err(BrokerError::Unsupported)` (N/A — neo4j is a database driver)**
+- File: `crates/rivers-plugin-neo4j/src/lib.rs`
+- Decision: Neo4j is a `DatabaseDriver`, not a `MessageBrokerDriver`. RW2.7 fixes apply to transaction routing and Bolt type binding only, not broker ack/nack.
+- Resolution method: RW2.7 scope clarification — neo4j was added as a DB driver registration fix (RW2.7.d) + txn routing + Bolt types.
+
+**RW2.7 — neo4rs lazy connection: live tests treat ping failure as SKIP**
+- File: `crates/rivers-plugin-neo4j/tests/neo4j_live_test.rs`
+- Decision: Both live tests emit SKIP (not FAIL) when ping fails post-connect.
+- Rationale: `neo4rs::Graph::connect()` is lazy — it doesn't TCP-connect until the first query. After RW2.7.b (ping error propagation), a correctly-propagated ping error now surfaces in CI without a live Neo4j server. The skip preserves CI green on machines without Neo4j.
+- Resolution method: neo4rs 0.9.0-rc.9 API documentation review; mirrors pattern used by other live tests (NATS, Redis, RabbitMQ).
+
+---
+
 ### D1 — `mtime`/`atime`/`ctime` are epoch-seconds strings, not ISO-8601
 
 **File:** `crates/rivers-drivers-builtin/src/filesystem.rs` (ops::stat)
