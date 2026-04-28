@@ -856,3 +856,21 @@ The Cassandra synthetic affected-row count, storage policy enforcement gap, and 
 **Spec reference:** H1 — riversd T1-4 (rivers-wide code review 2026-04-27). Phase B1 gated the call to `ApplicationInit` but left the whitelist path unconnected.
 
 **Resolution method:** Read both `context.rs` and `engine_loader/host_callbacks.rs` in full; mirrored the existing Gate 3 block from `host_ddl_execute` into `ctx_ddl_callback`; wrote a dedicated integration test binary (`v8_ddl_whitelist_tests.rs`) with positive and negative SQLite-backed tests confirming table creation and rejection respectively.
+
+---
+
+## G-2026-04-28 — Canary fleet gap closure P0/P1
+
+**Files affected:** `canary-bundle/canary-sql/resources.toml`, `canary-bundle/canary-nosql/resources.toml`, `canary-bundle/canary-handlers/resources.toml`, `canary-bundle/canary-filesystem/resources.toml`, `canary-bundle/canary-sql/app.toml`, `canary-bundle/canary-handlers/app.toml`, `canary-bundle/run-tests.sh`
+
+**Decision:** Fix the datasource name mismatch across 4 apps by renaming all resources.toml datasource entries to use `canary-*` prefixes matching what app.toml DataViews and handler code reference. The mismatch meant every CRUD test hit a "datasource not found" dispatch failure.
+
+**Decision:** Standardize canary-sql app.toml path prefixes. The txn/* and qp/* view sections added in a previous session were missing leading `/` on their paths and used `language = "javascript"` instead of `"typescript"`. Both cause 404 or compile failures for those endpoints.
+
+**Decision:** Add GET variant of `ctx_store_get` view in canary-handlers. run-tests.sh exercises the same path with both POST and GET. The single POST view would have 404'd the GET call, losing that test.
+
+**Decision:** Add PROXY profile section to run-tests.sh. All 4 proxy views were implemented in canary-main/app.toml with correct spec test IDs but were never called from the test runner.
+
+**Spec reference:** `docs/bugs/canary-fleet-gap-analysis.md` P0/P1 blockers.
+
+**Resolution method:** Cross-referenced `grep -A2 '[[datasources]]'` across all resources.toml against `datasource =` fields in app.toml and handler `ctx.datasource("…")` calls. Confirmed all 4 proxy handlers have spec-correct test IDs before adding them to the runner.
