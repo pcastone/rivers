@@ -4,6 +4,40 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 
 ---
 
+## 2026-04-27 — H3/H9/H13/H14: unsafe/FFI hardening
+
+### H3: ABI probe catch_unwind — already done, confirmed in-place
+**File:** `crates/rivers-core/src/driver_factory.rs`
+**Decision:** Confirmed `call_ffi_with_panic_containment` wraps the ABI probe. No source change needed.
+**Spec ref:** H3 / T1-1.
+**Resolution:** Verified by reading lines 298–355. `AssertUnwindSafe` is sound for a closure capturing only a raw `fn()` pointer with no shared mutable state.
+
+### H9: from_utf8_unchecked removal — already done, confirmed in-place
+**File:** `crates/riversd/src/engine_loader/host_callbacks.rs`
+**Decision:** Confirmed no `from_utf8_unchecked` in the file; `String::from_utf8_lossy` is used at all relevant sites.
+**Spec ref:** H9 / T2-9.
+**Resolution:** grep confirmed absence.
+
+### H13: HostCallbacks Copy derive — already done, confirmed in-place
+**File:** `crates/rivers-engine-sdk/src/lib.rs`, `crates/rivers-engine-v8/src/lib.rs`
+**Decision:** `#[derive(Copy, Clone)]` on `HostCallbacks` confirmed at line 207. V8 lib uses `*ptr` deref not `ptr::read`. No source change needed.
+**Spec ref:** H13 / T2-1.
+**Resolution:** Verified by reading both files.
+
+### H14: checked_offset helper — already done, confirmed in-place
+**File:** `crates/rivers-engine-wasm/src/lib.rs`
+**Decision:** `checked_offset(i32) -> Option<usize>` helper at line 312 uses `usize::try_from`. All three log linker closures go through `wasm_log_helper` which calls `checked_offset` for both ptr and len.
+**Spec ref:** H14 / T2-1.
+**Resolution:** Verified by reading lines 304–340 and confirming unit tests.
+
+### SQLite test param style: $param not :param
+**File:** `crates/rivers-core/tests/drivers_tests.rs`, `crates/rivers-core/tests/sqlite_live_test.rs`
+**Decision:** The SQLite driver's `bind_params()` always generates `$name`-prefixed keys when binding; SQL must use `$param` placeholders to match. Tests written before this convention used `:param` style — corrected to `$param` across both test files.
+**Spec ref:** Pre-existing test gap, uncovered by H1 DDL guard.
+**Resolution:** 7 SQL strings updated from `:name` to `$name` pattern. All 36 SQLite-related tests pass.
+
+---
+
 ## 2026-04-24 — Canary 135/135 push
 
 ### translate_params() QuestionPositional duplicate-$name fix

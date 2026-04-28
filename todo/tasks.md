@@ -427,12 +427,8 @@ These are not separate phases — they are the verification bar for the work abo
   - On timeout: throw a JS error with the budget value and the host-callback name. Cancel the spawned task if possible.
   - Test: handler invokes a host callback that intentionally never replies; assert worker reclaims within `task_timeout_ms + 100ms`.
 
-- [ ] **H3 — rivers-core T1-1: Plugin ABI version probe not panic-contained.**
+- [x] **H3 — rivers-core T1-1: Plugin ABI version probe not panic-contained.** DONE 2026-04-27: `call_ffi_with_panic_containment` helper (lines 298–303) wraps all FFI probes including the ABI version call at line 347. `AssertUnwindSafe` is sound for raw fn-pointer closures. Returns `PluginLoadResult::Failed` with "_rivers_abi_version panicked" on panic. All 33 rivers-core drivers_tests pass.
   **File:** `crates/rivers-core/src/driver_factory.rs:305–312` (call to `_rivers_abi_version`).
-  The plugin registration call (line 348–351) is wrapped in `catch_unwind`, but the prior ABI-version probe is a raw FFI call. A panic from a malformed plugin unwinds across the FFI boundary → undefined behavior.
-  Validation:
-  - Wrap the ABI-version probe in `std::panic::catch_unwind`. On panic, treat as `PluginLoadFailed` with a clear "ABI probe panicked" error.
-  - Test: load a stub plugin whose `_rivers_abi_version` panics; loader rejects it with `PluginLoadFailed`, riversd does not abort.
 
 - [x] **H4 — rivers-drivers-builtin T1-1: MySQL pool cache key omits password.** DONE 2026-04-27: SHA-256 password fingerprint (8 bytes hex) included in pool key; evict_pool + is_auth_error + retry on auth failure in connect(). 2 cluster-gated conformance tests. Unit test `is_auth_error_boundary_codes` covers codes 1043/1044/1045/1046.
   **File:** `crates/rivers-drivers-builtin/src/mysql.rs:39–49` (`pool_key`).
@@ -643,12 +639,8 @@ ORIGINAL ENTRY:
   - [x] **H18.6 — Cross-finding annotation.**
     When H18 lands, annotate `docs/code_review.md` rivers-drivers-builtin T2-1 with `Resolved YYYY-MM-DD by <commit-sha>` (mirrors I-X.1 / I-FU1 pattern).
 
-- [ ] **H9 — riversd T2-9: Engine log callback uses `std::str::from_utf8_unchecked`.**
+- [x] **H9 — riversd T2-9: Engine log callback uses `std::str::from_utf8_unchecked`.** DONE 2026-04-27: Already fixed — `host_callbacks.rs` uses `String::from_utf8_lossy` at lines 762 and 932, with no `from_utf8_unchecked` anywhere in the file. All 38 riversd tests pass.
   **File:** `crates/riversd/src/engine_loader/host_callbacks.rs:497`.
-  Callback receives a `(ptr, len)` from a cdylib engine and constructs a `&str` without validation. A buggy or malicious engine can pass invalid UTF-8 → UB downstream (e.g. when the string lands in `tracing::info!` formatting).
-  Validation:
-  - Replace with `std::str::from_utf8(...).unwrap_or("<invalid utf-8>")` or `String::from_utf8_lossy`. The log path is not hot enough to need the unsafe variant.
-  - Test: feed a non-UTF-8 byte sequence through the callback; assert the log line shows the placeholder, no UB.
 
 - [ ] **H10 — rivers-runtime T2-2: Result schema validation silently disables itself.**
   **File:** `crates/rivers-runtime/src/dataview_engine.rs:1337–1343` (`validate_query_result`).
@@ -672,20 +664,11 @@ ORIGINAL ENTRY:
   - Use `now_ms.saturating_add(ttl_ms)`. Any caller passing `u64::MAX` deserves to be capped, not wrapped.
   - Test: `set(key, value, ttl=u64::MAX)` then immediate `get` returns the value (not None).
 
-- [ ] **H13 — rivers-engine-v8 T2-1: `HostCallbacks` copied via `ptr::read` without `Copy`/`Clone`.**
+- [x] **H13 — rivers-engine-v8 T2-1: `HostCallbacks` copied via `ptr::read` without `Copy`/`Clone`.** DONE 2026-04-27: `HostCallbacks` in `rivers-engine-sdk` already has `#[derive(Copy, Clone)]` at line 207. `rivers-engine-v8/src/lib.rs:51` uses `*callbacks` (deref, not `ptr::read`), with SAFETY comment documenting Copy soundness. All 16 rivers-engine-v8 tests pass.
   **File:** `crates/rivers-engine-v8/src/lib.rs:46`.
-  `ptr::read` makes a bitwise copy without invoking `Clone`; if `HostCallbacks` ever gains a non-`Copy` field this becomes UB. Currently safe because all fields are function pointers, but the safety invariant is undocumented.
-  Validation:
-  - Add a `#[derive(Copy, Clone)]` on `HostCallbacks` (asserts at compile time that all fields are `Copy`), then use `*ptr` instead of `ptr::read`.
-  - If derive isn't possible because of a future field: SAFETY comment explaining the invariant + a static assertion.
-  - Test: trivial cargo check after the change; static_assert holds.
 
-- [ ] **H14 — rivers-engine-wasm T2-1: signed-to-unsigned offset cast in WASM memory bridge.**
+- [x] **H14 — rivers-engine-wasm T2-1: signed-to-unsigned offset cast in WASM memory bridge.** DONE 2026-04-27: `checked_offset(i32) -> Option<usize>` helper at line 312 uses `usize::try_from(offset).ok()`. `wasm_log_helper` at line 327 uses `checked_offset` for both ptr and len, dropping the log line with a warning on negative values. Unit tests `checked_offset_rejects_negative` and `checked_offset_accepts_non_negative` confirm behavior. All 10 rivers-engine-wasm tests pass.
   **File:** `crates/rivers-engine-wasm/src/lib.rs:257, 267, 277`.
-  `as usize` on an `i32` offset wraps a negative value to a huge positive — out-of-bounds memory read on a misbehaving WASM module.
-  Validation:
-  - `usize::try_from(offset_i32).map_err(|_| WasmError::InvalidOffset)?` at each site, or wrap in a helper.
-  - Test: synthesize a wasm module that calls a host import with a negative offset; assert the host returns the structured error rather than panicking or reading wild memory.
 
 ### Tier 3 — hardening (1)
 

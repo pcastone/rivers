@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-04-27 — H3/H9/H13/H14: unsafe/FFI hardening verification + pre-existing test repairs
+
+All four items (H3, H9, H13, H14) were already implemented by prior commits. This pass verified correctness, ran all four test suites, and repaired three pre-existing test regressions that were masking the rivers-core suite.
+
+**H3** (`driver_factory.rs`): `call_ffi_with_panic_containment` helper (lines 298–303) wraps the `_rivers_abi_version` FFI probe via `std::panic::catch_unwind(AssertUnwindSafe(...))`. Confirmed in-place.
+
+**H9** (`host_callbacks.rs`): No `from_utf8_unchecked` present — replaced with `String::from_utf8_lossy` in all UTF-8 conversion sites. Confirmed in-place.
+
+**H13** (`rivers-engine-sdk/src/lib.rs`, `rivers-engine-v8/src/lib.rs`): `HostCallbacks` has `#[derive(Copy, Clone)]` at line 207; `lib.rs:51` uses `*callbacks` deref with SAFETY comment. Confirmed in-place.
+
+**H14** (`rivers-engine-wasm/src/lib.rs`): `checked_offset(i32) -> Option<usize>` helper at line 312 uses `usize::try_from`. Unit tests confirm negative rejection. Confirmed in-place.
+
+**Pre-existing test repairs (uncovered during test run):**
+1. `drivers_tests.rs:302` — expected 8 drivers but 9 are now registered (FilesystemDriver was added in a prior PR without updating the count). Updated to 9 and added `filesystem` assertion.
+2. `drivers_tests.rs:257` — `sqlite_memory_execute_select` used `conn.execute()` with a `CREATE TABLE` statement, blocked by H1 DDL guard. Changed to `conn.ddl_execute()`.
+3. `drivers_tests.rs:262` — same test used `:id`/`:name` SQL placeholders; SQLite driver binds as `$name`, so changed to `$id`/`$name`.
+4. `sqlite_live_test.rs` — all 7 `:param` SQL placeholders updated to `$param` (bind_params generates `$`-prefix style); all 3 live tests now pass without external infra.
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `crates/rivers-core/tests/drivers_tests.rs` | Updated driver count 8→9; ddl_execute for CREATE; $param style | H3 / pre-existing | Test repair |
+| `crates/rivers-core/tests/sqlite_live_test.rs` | :param → $param in all SQL strings | Pre-existing | Test repair |
+| `todo/tasks.md` | H3, H9, H13, H14 marked `[x]` | — | Done |
+
+**Test results:**
+- `cargo test -p rivers-core`: 33 passed (drivers_tests), 3 passed (sqlite_live_test), all others pass, 0 failures.
+- `cargo test -p riversd`: 38 passed, 0 failures.
+- `cargo test -p rivers-engine-v8`: 16 passed, 0 failures.
+- `cargo test -p rivers-engine-wasm`: 10 passed, 0 failures.
+
 ## 2026-04-27 — H6+H7: Outbound HTTP timeout for V8 and dynamic-engine host callbacks
 
 New `crates/riversd/src/http_client.rs` module introduces a process-wide

@@ -252,11 +252,11 @@ async fn sqlite_memory_execute_select() {
     params.database = ":memory:".to_string();
     let mut conn = SqliteDriver.connect(&params).await.unwrap();
 
-    // Create a table and insert a row
+    // Create a table via ddl_execute (DDL guard blocks CREATE in execute() since H1)
     let create = Query::with_operation("create", "test", "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)");
-    conn.execute(&create).await.unwrap();
+    conn.ddl_execute(&create).await.unwrap();
 
-    let insert = Query::with_operation("insert", "test", "INSERT INTO test (id, name) VALUES (:id, :name)")
+    let insert = Query::with_operation("insert", "test", "INSERT INTO test (id, name) VALUES ($id, $name)")
         .param("id", QueryValue::Integer(1))
         .param("name", QueryValue::String("alice".into()));
     let result = conn.execute(&insert).await.unwrap();
@@ -299,7 +299,7 @@ fn redis_no_transactions() {
 fn register_builtin_drivers_populates_factory() {
     let mut factory = DriverFactory::new();
     register_builtin_drivers(&mut factory);
-    assert_eq!(factory.total_count(), 8);
+    assert_eq!(factory.total_count(), 9); // faker, postgres, mysql, sqlite, redis, memcached, rps-client, eventbus, filesystem
 
     let names = factory.driver_names();
     assert!(names.contains(&"faker"));
@@ -310,6 +310,7 @@ fn register_builtin_drivers_populates_factory() {
     assert!(names.contains(&"memcached"));
     assert!(names.contains(&"rps-client"));
     assert!(names.contains(&"eventbus"));
+    assert!(names.contains(&"filesystem"));
 }
 
 #[tokio::test]
