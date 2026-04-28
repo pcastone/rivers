@@ -33,7 +33,7 @@ fn main() {
         }
         "pack" => {
             let bundle_dir = if args.len() >= 3 { &args[2] } else { "." };
-            let output = if args.len() >= 4 { &args[3] } else { "bundle.zip" };
+            let output = if args.len() >= 4 { &args[3] } else { "bundle.tar.gz" };
             cmd_pack(bundle_dir, output)
         }
         "import-exec" => {
@@ -68,7 +68,7 @@ fn print_usage() {
     eprintln!("  validate [dir] [--format text|json] [--config <path>]");
     eprintln!("                              Validate bundle (Layers 1-4): structural, existence, cross-ref");
     eprintln!("  preflight [dir]             Validate + check schema/parameter orphans");
-    eprintln!("  pack [dir] [output]         Package bundle into a .zip file");
+    eprintln!("  pack [dir] [output]         Package bundle into a .tar.gz archive");
     eprintln!("  import-exec <name> <path>   Generate ExecDriver TOML config for a script");
     eprintln!();
     eprintln!("Exit codes (validate):");
@@ -118,7 +118,7 @@ fn cmd_init(bundle_arg: &str, driver: &str) -> Result<(), String> {
 
     // --- bundle manifest.toml ---
     let bundle_manifest = format!(
-        "bundleName    = \"{name}\"\nbundleVersion = \"1.0.0\"\napps          = [\"{name}\"]\n",
+        "bundleName    = \"{name}\"\nbundleVersion = \"1.0.0\"\nsource        = \"local\"\napps          = [\"{name}\"]\n",
         name = bundle_name
     );
     write_file(&bundle_root.join("manifest.toml"), &bundle_manifest)?;
@@ -126,7 +126,7 @@ fn cmd_init(bundle_arg: &str, driver: &str) -> Result<(), String> {
     // --- app manifest.toml ---
     let app_id = Uuid::new_v4();
     let app_manifest = format!(
-        "appName    = \"{name}\"\nappId      = \"{id}\"\ntype       = \"service\"\nentryPoint = \"{name}\"\n",
+        "appName    = \"{name}\"\nversion    = \"1.0.0\"\ntype       = \"app-service\"\nappId      = \"{id}\"\nentryPoint = \"{name}\"\nsource     = \"local\"\n",
         name = bundle_name,
         id = app_id,
     );
@@ -168,30 +168,33 @@ fn write_file(path: &Path, content: &str) -> Result<(), String> {
 }
 
 /// Build resources.toml content and return `(datasource_name, toml_text)`.
+///
+/// Each datasource entry requires: `name`, `driver`, `x-type`, `required`.
+/// `x-type` is the canonical driver type identifier used by the validator (Layer 1, S003).
 fn build_resources(bundle_name: &str, driver: &str) -> (String, String) {
     match driver {
         "faker" => (
             "data".into(),
-            "[[datasources]]\nname       = \"data\"\ndriver     = \"faker\"\nnopassword = true\nrequired   = true\n".into(),
+            "[[datasources]]\nname       = \"data\"\ndriver     = \"faker\"\nx-type     = \"faker\"\nnopassword = true\nrequired   = true\n".into(),
         ),
         "postgres" => (
             "db".into(),
             format!(
-                "[[datasources]]\nname     = \"db\"\ndriver   = \"postgres\"\nhost     = \"localhost\"\nport     = 5432\ndatabase = \"{name}\"\nusername = \"postgres\"\nrequired = true\n",
+                "[[datasources]]\nname     = \"db\"\ndriver   = \"postgres\"\nx-type   = \"postgres\"\nhost     = \"localhost\"\nport     = 5432\ndatabase = \"{name}\"\nusername = \"postgres\"\nrequired = true\n",
                 name = bundle_name
             ),
         ),
         "sqlite" => (
             "db".into(),
             format!(
-                "[[datasources]]\nname     = \"db\"\ndriver   = \"sqlite\"\nhost     = \"{name}.db\"\nrequired = true\n",
+                "[[datasources]]\nname     = \"db\"\ndriver   = \"sqlite\"\nx-type   = \"sqlite\"\nhost     = \"{name}.db\"\nrequired = true\n",
                 name = bundle_name
             ),
         ),
         "mysql" => (
             "db".into(),
             format!(
-                "[[datasources]]\nname     = \"db\"\ndriver   = \"mysql\"\nhost     = \"localhost\"\nport     = 3306\ndatabase = \"{name}\"\nusername = \"root\"\nrequired = true\n",
+                "[[datasources]]\nname     = \"db\"\ndriver   = \"mysql\"\nx-type   = \"mysql\"\nhost     = \"localhost\"\nport     = 3306\ndatabase = \"{name}\"\nusername = \"root\"\nrequired = true\n",
                 name = bundle_name
             ),
         ),
@@ -201,12 +204,18 @@ fn build_resources(bundle_name: &str, driver: &str) -> (String, String) {
 }
 
 /// Build app.toml content for the scaffolded app.
+///
+/// DataView required fields: `name`, `datasource`.
+/// View required fields: `path`, `method`, `view_type`, `handler`.
+/// Handler required fields: `type`.
 fn build_app_toml(bundle_name: &str, _driver: &str, ds_name: &str) -> String {
     let schema_path = "schemas/item.schema.json";
+    let _ = bundle_name; // ds_name carries the relevant datasource identity
     format!(
         r#"[data.dataviews.list_items]
-datasource   = "{ds}"
-query        = "SELECT * FROM items LIMIT ${{limit}}"
+name          = "list_items"
+datasource    = "{ds}"
+query         = "SELECT * FROM items LIMIT ${{limit}}"
 return_schema = "{schema}"
 
 [[data.dataviews.list_items.parameters]]
@@ -215,14 +224,16 @@ type    = "integer"
 default = 20
 
 [api.views.items]
-method      = "GET"
-path        = "/items"
-dataview    = "list_items"
-description = "List {name} items"
+path       = "/items"
+method     = "GET"
+view_type  = "Rest"
+
+[api.views.items.handler]
+type     = "dataview"
+dataview = "list_items"
 "#,
         ds = ds_name,
         schema = schema_path,
-        name = bundle_name,
     )
 }
 
@@ -563,6 +574,152 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // ── Golden: init → validate round-trip (all drivers) ─────────────
+
+    /// Verifies that `cmd_init` produces a bundle that passes structural
+    /// validation without errors for the faker driver (default scaffold).
+    #[test]
+    fn init_faker_validates_without_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_path = tmp.path().join("my-app");
+        let bundle_str = bundle_path.to_str().unwrap();
+
+        cmd_init(bundle_str, "faker").expect("cmd_init should succeed for faker driver");
+
+        let report = run_validate(bundle_str).expect("run_validate should succeed");
+        assert!(
+            !report.has_errors(),
+            "faker init bundle should validate without errors.\nReport:\n{}",
+            rivers_runtime::format_text(&report),
+        );
+    }
+
+    /// Verifies that `cmd_init` with postgres driver also validates.
+    #[test]
+    fn init_postgres_validates_without_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_path = tmp.path().join("pg-app");
+        let bundle_str = bundle_path.to_str().unwrap();
+
+        cmd_init(bundle_str, "postgres").expect("cmd_init should succeed for postgres driver");
+
+        let report = run_validate(bundle_str).expect("run_validate should succeed");
+        assert!(
+            !report.has_errors(),
+            "postgres init bundle should validate without errors.\nReport:\n{}",
+            rivers_runtime::format_text(&report),
+        );
+    }
+
+    /// Verifies that `cmd_init` with sqlite driver also validates.
+    #[test]
+    fn init_sqlite_validates_without_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_path = tmp.path().join("sqlite-app");
+        let bundle_str = bundle_path.to_str().unwrap();
+
+        cmd_init(bundle_str, "sqlite").expect("cmd_init should succeed for sqlite driver");
+
+        let report = run_validate(bundle_str).expect("run_validate should succeed");
+        assert!(
+            !report.has_errors(),
+            "sqlite init bundle should validate without errors.\nReport:\n{}",
+            rivers_runtime::format_text(&report),
+        );
+    }
+
+    /// Verifies that `cmd_init` with mysql driver also validates.
+    #[test]
+    fn init_mysql_validates_without_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_path = tmp.path().join("mysql-app");
+        let bundle_str = bundle_path.to_str().unwrap();
+
+        cmd_init(bundle_str, "mysql").expect("cmd_init should succeed for mysql driver");
+
+        let report = run_validate(bundle_str).expect("run_validate should succeed");
+        assert!(
+            !report.has_errors(),
+            "mysql init bundle should validate without errors.\nReport:\n{}",
+            rivers_runtime::format_text(&report),
+        );
+    }
+
+    /// Verifies that `cmd_init` creates the expected files.
+    #[test]
+    fn init_creates_expected_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_path = tmp.path().join("test-bundle");
+        let bundle_str = bundle_path.to_str().unwrap();
+
+        cmd_init(bundle_str, "faker").expect("cmd_init should succeed");
+
+        // Bundle manifest
+        assert!(bundle_path.join("manifest.toml").exists(), "bundle manifest.toml should exist");
+        // App directory named after the bundle
+        let app_dir = bundle_path.join("test-bundle");
+        assert!(app_dir.exists(), "app directory should exist");
+        assert!(app_dir.join("manifest.toml").exists(), "app manifest.toml should exist");
+        assert!(app_dir.join("resources.toml").exists(), "resources.toml should exist");
+        assert!(app_dir.join("app.toml").exists(), "app.toml should exist");
+        assert!(app_dir.join("schemas/item.schema.json").exists(), "schema json should exist");
+    }
+
+    /// Verifies that the `cmd_init` output cannot be created twice (idempotency guard).
+    #[test]
+    fn init_fails_if_dir_already_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_path = tmp.path().join("dup-app");
+        let bundle_str = bundle_path.to_str().unwrap();
+
+        cmd_init(bundle_str, "faker").expect("first init should succeed");
+        let result = cmd_init(bundle_str, "faker");
+        assert!(result.is_err(), "second init into same dir should fail");
+    }
+
+    /// Verifies that `cmd_init` rejects unknown drivers.
+    #[test]
+    fn init_rejects_unknown_driver() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_path = tmp.path().join("bad-driver-app");
+        let bundle_str = bundle_path.to_str().unwrap();
+        let result = cmd_init(bundle_str, "cassandra");
+        assert!(result.is_err(), "unknown driver should be rejected");
+    }
+
+    /// Verifies `cmd_pack` renames .zip output to .tar.gz with a warning.
+    #[test]
+    fn pack_zip_extension_is_corrected_to_tar_gz() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_path = tmp.path().join("pack-test");
+        let bundle_str = bundle_path.to_str().unwrap();
+
+        cmd_init(bundle_str, "faker").expect("init should succeed");
+
+        let out_zip = tmp.path().join("out.zip");
+        let out_tar = tmp.path().join("out.tar.gz");
+
+        let result = cmd_pack(bundle_str, out_zip.to_str().unwrap());
+        assert!(result.is_ok(), "pack should succeed: {result:?}");
+        assert!(out_tar.exists(), ".tar.gz artifact should exist");
+        assert!(!out_zip.exists(), ".zip should not exist");
+    }
+
+    /// Verifies `cmd_pack` produces a .tar.gz when given the correct extension.
+    #[test]
+    fn pack_produces_tar_gz() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_path = tmp.path().join("pack-tar-test");
+        let bundle_str = bundle_path.to_str().unwrap();
+
+        cmd_init(bundle_str, "faker").expect("init should succeed");
+
+        let out = tmp.path().join("bundle.tar.gz");
+        let result = cmd_pack(bundle_str, out.to_str().unwrap());
+        assert!(result.is_ok(), "pack should succeed: {result:?}");
+        assert!(out.exists(), ".tar.gz artifact should exist");
+    }
+
     #[test]
     fn run_validate_returns_report_with_layers() {
         let bundle_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../address-book-bundle");
@@ -587,41 +744,31 @@ fn cmd_pack(bundle_dir: &str, output: &str) -> Result<(), String> {
         ));
     }
 
-    // Create a zip file
-    // For V1: just report what would be packed (zip crate not in deps)
-    let path = Path::new(bundle_dir);
-    let mut file_count = 0;
+    // Normalise output path: always produce .tar.gz regardless of what the
+    // caller requested. If the caller passed a .zip extension (common mistake),
+    // swap it out and warn rather than silently producing the wrong artifact.
+    let tar_output = if output.ends_with(".zip") {
+        let base = &output[..output.len() - 4];
+        let corrected = format!("{base}.tar.gz");
+        eprintln!(
+            "warning: .zip output is not supported — producing {corrected} instead"
+        );
+        corrected
+    } else if output.ends_with(".tar.gz") {
+        output.to_string()
+    } else {
+        format!("{output}.tar.gz")
+    };
 
-    fn count_files(dir: &Path, count: &mut usize) {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    count_files(&path, count);
-                } else {
-                    *count += 1;
-                }
-            }
-        }
-    }
-
-    count_files(path, &mut file_count);
-
-    println!("Would pack {file_count} files from {bundle_dir} -> {output}");
-    println!("(zip packaging requires the 'zip' crate — use tar for now)");
-
-    // Alternative: use tar via std::process::Command
-    let tar_output = output.replace(".zip", ".tar.gz");
     let status = std::process::Command::new("tar")
         .args(["-czf", &tar_output, "-C", bundle_dir, "."])
-        .status();
+        .status()
+        .map_err(|e| format!("tar command failed: {e}"))?;
 
-    match status {
-        Ok(s) if s.success() => {
-            println!("Packed: {tar_output}");
-            Ok(())
-        }
-        Ok(s) => Err(format!("tar exited with status {s}")),
-        Err(e) => Err(format!("tar command failed: {e}")),
+    if !status.success() {
+        return Err(format!("tar exited with status {status}"));
     }
+
+    println!("Packed: {tar_output}");
+    Ok(())
 }
