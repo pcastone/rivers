@@ -741,3 +741,19 @@ The Cassandra synthetic affected-row count, storage policy enforcement gap, and 
 **Spec reference:** User request for a second pass to confirm all items in `docs/review/rivers-wide-code-review-2026-04-27.md` are valid and 95% accurate.
 
 **Resolution method:** re-read targeted source paths for every crate, patched concrete inaccuracies, and wrote a validation addendum with per-crate confirmation status.
+
+---
+
+## H1-2026-04-27 — V8 ctx.ddl() DDL whitelist check (Gate 3)
+
+**File:** `crates/riversd/src/process_pool/v8_engine/context.rs` (`ctx_ddl_callback`)
+
+**Decision:** Insert whitelist check immediately after resolving `ds_params` and before calling `factory.connect()`. The check reads `engine_loader::ddl_whitelist()` (the same `OnceLock<Vec<String>>` the dynamic-engine path uses) and resolves the V8 entry_point name → manifest app_id via `engine_loader::app_id_for_entry_point()`. Rejection uses the exact error string format `"DDL not permitted for database '{database}' (datasource '{datasource}') in app '{app_id}'"` so operator alerting and log-search work identically across V8 and dynamic-engine paths.
+
+**Alternatives rejected:**
+- Routing through `host_ddl_execute` (the dynamic-engine FFI shim): would require V8 to go out through the C ABI to call a function in the same process. Fragile and unnecessary — V8 already has direct Rust access to all required state.
+- Adding the whitelist check inside `factory.connect()` or `conn.ddl_execute()`: these are in `rivers-driver-sdk` / `rivers-core` and must not carry application-level security policy.
+
+**Spec reference:** H1 — riversd T1-4 (rivers-wide code review 2026-04-27). Phase B1 gated the call to `ApplicationInit` but left the whitelist path unconnected.
+
+**Resolution method:** Read both `context.rs` and `engine_loader/host_callbacks.rs` in full; mirrored the existing Gate 3 block from `host_ddl_execute` into `ctx_ddl_callback`; wrote a dedicated integration test binary (`v8_ddl_whitelist_tests.rs`) with positive and negative SQLite-backed tests confirming table creation and rejection respectively.

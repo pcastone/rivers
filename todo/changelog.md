@@ -471,3 +471,12 @@ Plan correction: task 4.3 said "thread via closure capture (not thread-local)." 
 | `docs/review/rivers-wide-code-review-2026-04-27.md` | Corrected second-pass issues in the consolidated report | User request to confirm the report is 95% accurate | Fixed `rivers-lockbox` and `rivers-plugin-influxdb` count mismatches, downgraded Kafka `rskafka` note to an observation, and narrowed CouchDB JSON-substitution wording |
 | `docs/review/rivers-wide-code-review-2026-04-27-validation-pass.md` | Added the second-pass validation addendum | User request to confirm all items in the existing report | Per-crate table records confirmed status, corrections applied, and residual judgment calls |
 | `changedecisionlog.md` | Logged the validation choices and correction policy | CLAUDE.md workflow rule 5 | Source-confirmed items remain; only count/wording/downgrade fixes were applied |
+
+# 2026-04-27 — H1: V8 ctx.ddl() DDL whitelist enforcement
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `crates/riversd/src/process_pool/v8_engine/context.rs` | Added DDL whitelist check (Gate 3) in `ctx_ddl_callback` at lines 721–777, before `factory.connect()`. Reads `engine_loader::ddl_whitelist()` and resolves the entry_point name to manifest app_id via `engine_loader::app_id_for_entry_point()`. Rejects with the same error string as `host_ddl_execute` in `engine_loader/host_callbacks.rs` when the `database@app_id` pair is not in the whitelist. | H1 — riversd T1-4 security gap | Mirrors the dynamic-engine Gate 3 check exactly; both paths now enforce whitelist from the same `DDL_WHITELIST` OnceLock |
+| `crates/riversd/tests/v8_ddl_whitelist_tests.rs` | Added integration test binary with two tests: `h1_whitelisted_ddl_succeeds_for_application_init` (SQLite CREATE TABLE succeeds and table exists) and `h1_unwhitelisted_ddl_rejected_for_application_init` (blocked, table absent, error message matches dynamic-engine format verbatim). | H1 validation spec | Test binary isolated so DDL_WHITELIST OnceLock doesn't contaminate B1.5 success-path tests |
+| `todo/tasks.md` | Marked H1 `[x]` with resolution summary | CLAUDE.md workflow rule 6 | — |
+| `Cargo.toml` (workspace) | Version bumped `0.55.2+0219280426` → `0.55.2+0226280426` | CLAUDE.md versioning rules | Patch-level bump; closing a documented-but-missing security gate |

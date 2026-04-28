@@ -411,7 +411,7 @@ These are not separate phases — they are the verification bar for the work abo
 
 ### Tier 1 — production blockers (4)
 
-- [ ] **H1 — riversd T1-4: V8 `ctx.ddl()` bypasses the DDL whitelist path.**
+- [x] **H1 — riversd T1-4: V8 `ctx.ddl()` bypasses the DDL whitelist path.** DONE 2026-04-27: Whitelist check added in `ctx_ddl_callback` (context.rs:721–777) before `factory.connect()` is called. Consults `engine_loader::ddl_whitelist()` and `engine_loader::app_id_for_entry_point()` — same data structures as the dynamic-engine path. Error message matches `host_ddl_execute` verbatim. Integration tests in `crates/riversd/tests/v8_ddl_whitelist_tests.rs`: `h1_whitelisted_ddl_succeeds_for_application_init` and `h1_unwhitelisted_ddl_rejected_for_application_init` both pass (SQLite-backed, verify table creation/absence post-check).
   **File:** `crates/riversd/src/process_pool/v8_engine/context.rs:614–722` (`ctx_ddl_callback`).
   Phase B1 gated `ctx.ddl()` to `ApplicationInit` (good), but the callback then calls `factory.connect()` and `conn.ddl_execute()` directly, never consulting `DDL_WHITELIST` the way the dynamic-engine path (`engine_loader/host_callbacks.rs`) does. An init handler can run any DDL the connecting user has permission for, regardless of the per-app/per-database allowlist.
   Validation:
