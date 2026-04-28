@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026-04-27 — I-FU1+H-X.1: Backfill H1-H15 resolution annotations in docs/code_review.md
+
+**File:** `docs/code_review.md`
+
+Added `> **Resolved YYYY-MM-DD by \`sha\` (H<N>)**` blockquote lines to all 14 H-task findings (H1–H15, H8 excluded as already annotated by Phase I). Each annotation references the actual branch commit SHA rather than PR #83 squash SHA for findings fixed on this branch:
+
+| Finding | Commit | H-task |
+|---------|--------|--------|
+| riversd T1-3/T1-4 — ctx.ddl whitelist | `c698e0d` | H1 |
+| riversd T1-6 — host bridge timeout | `0811c1c` | H2 |
+| rivers-core T1-1 — ABI probe panic contain | `2f67082` | H3 |
+| rivers-drivers-builtin T1-1 — MySQL pool key | `e0d75f8` + `aebba59` | H4 |
+| riversd T2-2 — WS/SSE connection race | `f6dde8d` | H5 |
+| riversd T2-6 — V8 HTTP timeout | `c6ea5bf` | H6 |
+| riversd T2-7 — dyn-engine HTTP timeout | `c6ea5bf` | H7 |
+| riversd T2-9 — from_utf8_unchecked | `2f67082` | H9 |
+| rivers-runtime T2-2 — schema validation | `b5a350e` + `c8f5531` | H10 |
+| rivers-core T2-1 — EventBus unbounded | `2c1f396` | H11 |
+| rivers-storage-backends T2-2 — SQLite TTL | `f6dde8d` | H12 |
+| rivers-engine-v8 T2-1 — HostCallbacks Copy | `2f67082` | H13 |
+| rivers-engine-wasm T2-1 — WASM offset cast | `2f67082` | H14 |
+| riversd T3-1 — JSON log manual construction | `f6dde8d` | H15 |
+
+Version bumped: `0.55.8+0342280426` → `0.55.8+0347280426`.
+
 ## 2026-04-27 — H5+H12+H15: Connection-limit race, SQLite TTL overflow, JSON log fix
 
 **H5 — riversd: Connection-limit race in WebSocket and SSE registries**
