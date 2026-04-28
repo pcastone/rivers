@@ -169,6 +169,8 @@ impl AppContext {
         let pool = Arc::new(ProcessPoolManager::from_config(
             &config.runtime.process_pools,
         ));
+        // Extract before config is moved into Self.
+        let observe_concurrency = config.base.eventbus.observe_concurrency;
         Self {
             config,
             shutdown,
@@ -183,7 +185,10 @@ impl AppContext {
             loaded_bundle: None,
             lockbox_resolver: None,
             keystore_resolver: None,
-            event_bus: Arc::new(EventBus::new()),
+            event_bus: Arc::new(EventBus::with_caps(
+                rivers_runtime::rivers_core::DEFAULT_MAX_BROADCAST_SUBSCRIBERS,
+                observe_concurrency,
+            )),
             storage_engine: None,
             session_manager: None,
             csrf_manager: None,

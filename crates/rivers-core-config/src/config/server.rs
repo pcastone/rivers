@@ -140,6 +140,10 @@ pub struct BaseConfig {
     /// Default: 60.
     #[serde(default = "default_init_timeout")]
     pub init_timeout_s: u64,
+
+    /// EventBus dispatch limits (Observe-tier concurrency cap).
+    #[serde(default)]
+    pub eventbus: EventBusConfig,
 }
 
 impl Default for BaseConfig {
@@ -157,6 +161,7 @@ impl Default for BaseConfig {
             logging: LoggingConfig::default(),
             tls: None,
             init_timeout_s: default_init_timeout(),
+            eventbus: EventBusConfig::default(),
         }
     }
 }
@@ -167,6 +172,34 @@ fn default_init_timeout() -> u64 {
 
 fn default_host() -> String {
     "0.0.0.0".to_string()
+}
+
+// ── [base.eventbus] ─────────────────────────────────────────────────
+
+/// `[base.eventbus]` -- EventBus dispatch settings.
+///
+/// H11/T2-1: bounds the number of concurrent Observe-tier dispatches so a
+/// burst of events cannot flood the Tokio runtime with unbounded spawns.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct EventBusConfig {
+    /// Maximum number of Observe-tier handler spawns that may be in-flight
+    /// simultaneously (across all event types on this bus).
+    ///
+    /// When the limit is reached, additional Observe dispatches are dropped
+    /// and counted in the `rivers_eventbus_observe_dropped_total` metric.
+    /// Does NOT affect Expect / Handle / Emit tiers (those are always awaited).
+    ///
+    /// Default: `64`.
+    pub observe_concurrency: usize,
+}
+
+impl Default for EventBusConfig {
+    fn default() -> Self {
+        Self {
+            observe_concurrency: 64,
+        }
+    }
 }
 
 fn default_port() -> u16 {

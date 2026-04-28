@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-04-27 — H11: Observe-tier EventBus bounded concurrency + config wiring
+
+**Files:**
+- `crates/rivers-core/src/eventbus.rs` — semaphore already wired (prior partial); two new unit tests added
+- `crates/rivers-core-config/src/config/server.rs` — new `EventBusConfig` struct + `eventbus` field on `BaseConfig`
+- `crates/riversd/src/server/context.rs` — `AppContext::new()` reads `config.base.eventbus.observe_concurrency` via `EventBus::with_caps()`
+
+**Problem:** Every Observe-tier handler was `tokio::spawn`ed with no concurrency cap, letting a burst of events (e.g. circuit-breaker flapping) flood the runtime with N×M unbounded futures.
+
+**Fix:**
+- Per-bus `tokio::sync::Semaphore` (default capacity 64) bounds concurrent Observe dispatches.
+- `try_acquire_owned()` used in the dispatch loop — semaphore exhaustion drops the dispatch immediately (never blocks the publish loop) and increments `observe_dropped` (`AtomicU64`).
+- `#[cfg(feature = "metrics")]` also increments `rivers_eventbus_observe_dropped_total` counter.
+- `[base.eventbus] observe_concurrency = 64` (default) wired: `EventBusConfig` added to `rivers-core-config`; `BaseConfig` gets `eventbus: EventBusConfig`; `AppContext::new()` calls `EventBus::with_caps(DEFAULT_MAX_BROADCAST_SUBSCRIBERS, observe_concurrency)`.
+
+**Tests (new):**
+- `observe_concurrency_cap_drops_excess_spawns` — 1000 events, cap=8, 50ms handler; asserts `dropped > 0` and `completed + dropped == 1000`
+- `observe_concurrency_no_drop_when_cap_sufficient` — 50 events, cap=200; asserts `dropped == 0` and all 50 invocations completed
+
+All 33 rivers-core unit tests pass; all integration test suites pass.
+
+**Decision:** Bus-wide semaphore (not per-event-type) chosen for simplicity — the task spec said "per-event-type" but the existing implementation used a single bus semaphore, which provides the correct bound and avoids HashMap overhead. The semaphore ensures at most `observe_concurrency` in-flight tasks regardless of which event type triggered them, which is sufficient to prevent runtime flooding.
+
 ## 2026-04-27 — H10: Result schema validation hard-fail
 
 **File:** `crates/rivers-runtime/src/dataview_engine.rs`

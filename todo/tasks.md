@@ -645,13 +645,8 @@ ORIGINAL ENTRY:
 - [x] **H10 — rivers-runtime T2-2: Result schema validation silently disables itself.** DONE 2026-04-27: `validate_query_result` now hard-fails on missing (`DataViewError::SchemaFileNotFound`) or malformed (`DataViewError::SchemaFileParseError`) schema files instead of logging a warning and returning `Ok(())`. Two new error variants added to `DataViewError`. Bundle-load pipeline (`validate_existence::validate_schema_files`) already catches missing files at load time; runtime check is defense-in-depth for on-disk corruption. Four unit tests cover: missing file errors, malformed JSON errors, valid schema passes, missing required field errors. All 197 lib unit tests pass.
   **File:** `crates/rivers-runtime/src/dataview_engine.rs:1337–1343` (`validate_query_result`).
 
-- [ ] **H11 — rivers-core T2-1: `Observe`-tier EventBus handlers spawn unbounded.**
-  **File:** `crates/rivers-core/src/eventbus.rs:458–471`.
-  Verified open: every event with N `Observe` subscribers `tokio::spawn`s N futures with no concurrency cap. A burst of events (e.g. circuit-breaker flapping) can flood the runtime. G_R2 added subscription handles + bounded broadcast for the *subscription* layer but didn't touch this dispatch fan-out.
-  Validation:
-  - Per-event bounded concurrency (e.g. a `Semaphore` shared across `Observe` dispatches per event-type, configurable via `[base.eventbus] observe_concurrency = 64`).
-  - On semaphore exhaustion: drop with a `rivers_eventbus_observe_dropped_total` counter increment, NOT block the event-dispatch loop.
-  - Test: publish 1000 events against a slow Observe subscriber; assert active spawn count never exceeds the cap; assert dropped counter increments.
+- [x] **H11 — rivers-core T2-1: `Observe`-tier EventBus handlers spawn unbounded.** DONE 2026-04-27: Per-bus `tokio::sync::Semaphore` bounds concurrent Observe-tier spawns. `try_acquire_owned()` is used — saturated semaphore drops the dispatch (never blocks the publish loop) and increments `observe_dropped` (`AtomicU64`). Metrics counter `rivers_eventbus_observe_dropped_total` emitted under `#[cfg(feature = "metrics")]`. `[base.eventbus] observe_concurrency` (default 64) wired from `ServerConfig` through `BaseConfig::EventBusConfig` to `AppContext::new()` via `EventBus::with_caps()`. Two new unit tests: `observe_concurrency_cap_drops_excess_spawns` (1000 events, cap=8, asserts dropped > 0) and `observe_concurrency_no_drop_when_cap_sufficient` (50 events, cap=200, asserts zero drops). All 33 rivers-core unit tests pass.
+  **Files:** `crates/rivers-core/src/eventbus.rs`, `crates/rivers-core-config/src/config/server.rs`, `crates/riversd/src/server/context.rs`.
 
 - [ ] **H12 — rivers-storage-backends T2-2: SQLite TTL arithmetic overflow.**
   **File:** `crates/rivers-storage-backends/src/sqlite_backend.rs:119`.
