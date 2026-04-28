@@ -414,3 +414,18 @@ Plan correction: task 4.3 said "thread via closure capture (not thread-local)." 
 | File | Summary | Reference | Resolution |
 |------|---------|-----------|------------|
 | `todo/tasks.md` | Marked H16 (T2-4 capacity accounting) and H17 (T2-5 health-check lock) as `[x]` with file:line evidence after re-reading `crates/riversd/src/pool.rs` end-to-end | `docs/code_review.md` Tier-2 findings T2-4, T2-5; Phase D commit `2dfbb7b` (D1) | Both findings verified closed by Phase D's pool rewrite. No source change required. |
+
+# 2026-04-27 — Rivers-wide code review consolidation
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `docs/review/rivers-wide-code-review-2026-04-27.md` | Added a consolidated detailed report for the 22-crate Rivers review pass | User request to build detailed report in `docs/review/`; `docs/review_inc/rivers-code-review-prompt-kit.md`; `docs/review_inc/rivers-per-crate-focus-blocks.md` | Report covers repeated bug classes, severity distribution, per-crate findings, and recommended remediation phases |
+| `changedecisionlog.md` | Logged the report path, consolidation choice, and review emphasis | CLAUDE.md workflow rule 5 | Existing per-crate reports were preserved; the new dated report captures cross-crate patterns and contract violations |
+
+# 2026-04-27 — Rivers-wide review validation pass
+
+| File | Summary | Reference | Resolution |
+|------|---------|-----------|------------|
+| `docs/review/rivers-wide-code-review-2026-04-27.md` | Corrected second-pass issues in the consolidated report | User request to confirm the report is 95% accurate | Fixed `rivers-lockbox` and `rivers-plugin-influxdb` count mismatches, downgraded Kafka `rskafka` note to an observation, and narrowed CouchDB JSON-substitution wording |
+| `docs/review/rivers-wide-code-review-2026-04-27-validation-pass.md` | Added the second-pass validation addendum | User request to confirm all items in the existing report | Per-crate table records confirmed status, corrections applied, and residual judgment calls |
+| `changedecisionlog.md` | Logged the validation choices and correction policy | CLAUDE.md workflow rule 5 | Source-confirmed items remain; only count/wording/downgrade fixes were applied |

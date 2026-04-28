@@ -558,3 +558,37 @@ Pre-commit hooks fire on every WIP commit during a feature branch; the bump only
 **Spec reference:** SemVer 2.0 §10 (build metadata: optional, `+`-prefixed, alphanumerics + hyphen, no semantic effect on precedence). User-facing policy lives in CLAUDE.md "Versioning" section.
 
 **Resolution method:** spec-aligned design + portable shell tooling + CI gate. Validated by running the bump script three times locally (`build`, `patch`, `minor`) and confirming each produced the right transition: `0.54.2 → 0.54.2+1118260426`, `0.54.2+… → 0.54.3+…`, `0.54.3+… → 0.55.0+…`. CI gate validated at PR merge time on this very PR (which applies its own build-only seed bump).
+
+## REVIEW-WIDE-1.1 — Rivers-wide review consolidation report (2026-04-27)
+
+**Files affected:**
+- `docs/review/rivers-wide-code-review-2026-04-27.md` — new consolidated review report covering repeated bug classes, severity distribution, per-crate findings, and remediation order across the 22 requested focus crates.
+
+**Decision 1: Write a consolidated report instead of overwriting existing per-crate reports.**
+`docs/review/` already contained detailed reports for `rivers-lockbox-engine` and `rivers-keystore-engine`. The new artifact preserves those and adds a dated Rivers-wide summary that links the repeated patterns across crates.
+
+**Decision 2: Emphasize repeated bug classes and contract violations over style issues.**
+The user specifically asked for overly complicated code, missing wiring, and missing functionality. The report therefore prioritizes secret lifecycle, broker contract drift, unwired schema/admin/config paths, unbounded reads, timeout gaps, and tooling that reports success while producing incomplete artifacts.
+
+**Spec reference:** User request to build the detailed report in `docs/review/`; `docs/review_inc/rivers-code-review-prompt-kit.md` Prompt 2 output methodology; `docs/review_inc/rivers-per-crate-focus-blocks.md` 22-crate review scope.
+
+**Resolution method:** consolidated the confirmed per-crate findings collected during the review pass into one Markdown artifact; verified the report exists and is readable with `wc -l` and `sed`.
+
+## REVIEW-WIDE-1.2 — Second-pass validation of Rivers-wide review (2026-04-27)
+
+**Files affected:**
+- `docs/review/rivers-wide-code-review-2026-04-27.md` — corrected severity-table counts and tightened Kafka/CouchDB wording.
+- `docs/review/rivers-wide-code-review-2026-04-27-validation-pass.md` — new validation addendum summarizing confirmation status by crate.
+
+**Decision 1: Correct the primary report instead of only documenting discrepancies.**
+The user asked whether the existing report was 95% accurate. Leaving known count and wording defects in the source report would make future remediation work noisier, so the validation pass both records the audit and patches the report.
+
+**Decision 2: Downgrade the Kafka `rskafka` item to an observation.**
+The source confirms the crate uses pure-Rust `rskafka`, not `rdkafka`, but that fact is not itself a bug. The real confirmed Kafka defect is offset advancement before `ack()`.
+
+**Decision 3: Keep debated-but-source-true items in the report.**
+The Cassandra synthetic affected-row count, storage policy enforcement gap, and broker schema-checker wiring gaps are source-confirmed. Their severities may be adjusted during remediation, but they are valid enough to keep.
+
+**Spec reference:** User request for a second pass to confirm all items in `docs/review/rivers-wide-code-review-2026-04-27.md` are valid and 95% accurate.
+
+**Resolution method:** re-read targeted source paths for every crate, patched concrete inaccuracies, and wrote a validation addendum with per-crate confirmation status.
