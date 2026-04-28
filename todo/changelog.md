@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-04-27 — H10: Result schema validation hard-fail
+
+**File:** `crates/rivers-runtime/src/dataview_engine.rs`
+
+`validate_query_result` previously logged a warning and returned `Ok(())` when `return_schema` pointed at a missing or malformed file, silently serving unvalidated driver output to clients.
+
+**Fix:**
+- `validate_query_result` now returns `DataViewError::SchemaFileNotFound { path }` when the schema file does not exist on disk.
+- Returns `DataViewError::SchemaFileParseError { path, reason }` when the file exists but is not valid JSON.
+- Two new error variants added to `DataViewError` enum with `thiserror::Error` implementations.
+- The `schema_path` surfaced in errors is bundle-relative (no absolute deploy paths exposed to callers).
+
+**Pipeline relationship:** `validate_existence::validate_schema_files` already rejects missing schema paths at bundle-load time. The runtime hard-fail is defense-in-depth for on-disk corruption between load and request.
+
+**Tests:** Four unit tests in `dataview_engine.rs` (H10 / T2-2 block):
+- `validate_query_result_missing_schema_file_errors` — missing path → `SchemaFileNotFound`
+- `validate_query_result_malformed_schema_errors` — bad JSON → `SchemaFileParseError`
+- `validate_query_result_valid_schema_passes` — valid schema + matching row → `Ok(())`
+- `validate_query_result_missing_required_field_errors` — row missing required field → `Schema`
+
+All 197 `rivers-runtime` lib unit tests pass.
+
+**Decision log:** runtime hard-fail chosen over panic/unwrap because on-disk corruption after bundle load is a plausible operational failure mode; returning a typed error allows the caller to map to a 500 response with a sanitized message.
+
 ## 2026-04-27 — H3/H9/H13/H14: unsafe/FFI hardening verification + pre-existing test repairs
 
 All four items (H3, H9, H13, H14) were already implemented by prior commits. This pass verified correctness, ran all four test suites, and repaired three pre-existing test regressions that were masking the rivers-core suite.

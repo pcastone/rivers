@@ -642,12 +642,8 @@ ORIGINAL ENTRY:
 - [x] **H9 — riversd T2-9: Engine log callback uses `std::str::from_utf8_unchecked`.** DONE 2026-04-27: Already fixed — `host_callbacks.rs` uses `String::from_utf8_lossy` at lines 762 and 932, with no `from_utf8_unchecked` anywhere in the file. All 38 riversd tests pass.
   **File:** `crates/riversd/src/engine_loader/host_callbacks.rs:497`.
 
-- [ ] **H10 — rivers-runtime T2-2: Result schema validation silently disables itself.**
+- [x] **H10 — rivers-runtime T2-2: Result schema validation silently disables itself.** DONE 2026-04-27: `validate_query_result` now hard-fails on missing (`DataViewError::SchemaFileNotFound`) or malformed (`DataViewError::SchemaFileParseError`) schema files instead of logging a warning and returning `Ok(())`. Two new error variants added to `DataViewError`. Bundle-load pipeline (`validate_existence::validate_schema_files`) already catches missing files at load time; runtime check is defense-in-depth for on-disk corruption. Four unit tests cover: missing file errors, malformed JSON errors, valid schema passes, missing required field errors. All 197 lib unit tests pass.
   **File:** `crates/rivers-runtime/src/dataview_engine.rs:1337–1343` (`validate_query_result`).
-  When `return_schema` points at a missing or malformed file, the function logs a warning and returns `Ok(())` — the result passes through unvalidated. A bundle that ships with a typo'd schema path quietly serves untrusted driver output.
-  Validation:
-  - Treat missing/malformed schema as a hard error. Bundle validation (4-layer pipeline) should already reject bundles with bad schema paths; if so, runtime can `unwrap` the schema lookup. If not, runtime returns `DataViewError::SchemaUnavailable` with the bundle-relative path.
-  - Test: bundle with `return_schema = "schemas/missing.json"` fails at load; a runtime call against a DataView with valid schema but malformed JSON returns 500 with sanitized path.
 
 - [ ] **H11 — rivers-core T2-1: `Observe`-tier EventBus handlers spawn unbounded.**
   **File:** `crates/rivers-core/src/eventbus.rs:458–471`.
