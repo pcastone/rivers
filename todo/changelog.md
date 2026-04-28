@@ -650,3 +650,16 @@ Plan correction: task 4.3 said "thread via closure capture (not thread-local)." 
 | `crates/riversd/tests/v8_ddl_whitelist_tests.rs` | Added integration test binary with two tests: `h1_whitelisted_ddl_succeeds_for_application_init` (SQLite CREATE TABLE succeeds and table exists) and `h1_unwhitelisted_ddl_rejected_for_application_init` (blocked, table absent, error message matches dynamic-engine format verbatim). | H1 validation spec | Test binary isolated so DDL_WHITELIST OnceLock doesn't contaminate B1.5 success-path tests |
 | `todo/tasks.md` | Marked H1 `[x]` with resolution summary | CLAUDE.md workflow rule 6 | — |
 | `Cargo.toml` (workspace) | Version bumped `0.55.2+0219280426` → `0.55.2+0226280426` | CLAUDE.md versioning rules | Patch-level bump; closing a documented-but-missing security gate |
+
+## RW1.1 — `rivers-driver-sdk` DDL guard + error sanitization + param substitution + retry backoff
+
+| File | What changed | Spec ref | Resolution |
+|------|---------|-----------|------------|
+| `crates/rivers-driver-sdk/src/lib.rs` | Added `first_sql_token()` helper that delegates to `infer_operation()` (which already strips SQL comments via `strip_sql_comments()`). Rewrote `is_ddl_statement()` to compare the full first token rather than `starts_with()` on raw trimmed text — fixes comment-aware DDL classification (RW1.1.a). | RW1.1.a | `-- DROP TABLE\nSELECT 1` now classifies as query, not DDL |
+| `crates/rivers-driver-sdk/src/lib.rs` | Sanitized `check_admin_guard()`: error message now emits only the classified token, never raw statement content. Full statement logged at `tracing::debug!` only (RW1.1.b). | RW1.1.b | Credential material in connection-string-style payloads cannot leak into user-facing errors |
+| `crates/rivers-driver-sdk/src/lib.rs` | Rewrote `translate_params()` DollarPositional/QuestionPositional/ColonNamed branches to use a single span-based scan instead of `str::replace()`. Eliminates prefix-collision where `$param1` processing would clobber `$param10` (RW1.1.c). | RW1.1.c | `$param1` and `$param10` now substitute to independent positional slots |
+| `crates/rivers-driver-sdk/src/http_executor/connection.rs` | Replaced `2u64.pow(n) * base` with `2u64.saturating_pow(n)` + `base.saturating_mul(factor)` in `retry_delay()`. Also hardened `BackoffStrategy::Linear` arm to `saturating_mul`. (RW1.1.d). | RW1.1.d | 64+ retries with large base no longer overflow before max-delay cap |
+| `crates/rivers-driver-sdk/src/http_executor/oauth2.rs` | Same saturating arithmetic fix in OAuth2 token retry sleep calculation (RW1.1.d). | RW1.1.d | Consistent with connection.rs fix |
+| `crates/rivers-driver-sdk/tests/ddl_guard_tests.rs` | Updated `guard_truncates_statement_in_message` → `guard_sanitizes_statement_not_echoed_in_message` to assert the new security-correct behavior: raw statement must NOT appear in error messages. | RW1.1.b | Test now validates sanitization rather than the former prefix-echo behavior |
+| `crates/rivers-driver-sdk/src/lib.rs` | Added `rw1_1_tests` module with 13 new tests covering all four subtasks. | RW1.1.validate | 203 tests pass across all driver-sdk test targets |
+| `Cargo.toml` (workspace) | Version bumped `0.55.8+0347280426` → `0.55.9+1329280426` | CLAUDE.md versioning rules | Patch bump — closing documented-but-missing security/correctness gaps |

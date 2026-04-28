@@ -177,9 +177,12 @@ impl ReqwestHttpConnection {
         if let Some(ref config) = self.retry_config {
             let delay_ms = match config.backoff {
                 BackoffStrategy::None => 0,
-                BackoffStrategy::Linear => config.base_delay_ms * (attempt as u64),
+                BackoffStrategy::Linear => config.base_delay_ms.saturating_mul(attempt as u64),
                 BackoffStrategy::Exponential => {
-                    config.base_delay_ms * 2u64.pow(attempt.saturating_sub(1))
+                    // Use saturating arithmetic so that large attempt counts
+                    // cannot overflow before the max-delay cap is applied (RW1.1.d).
+                    let factor = 2u64.saturating_pow(attempt.saturating_sub(1));
+                    config.base_delay_ms.saturating_mul(factor)
                 }
             };
             Duration::from_millis(delay_ms.min(config.max_delay_ms))

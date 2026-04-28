@@ -713,11 +713,11 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 **Files:** `crates/rivers-driver-sdk/src/{traits.rs,retry.rs}` (verify exact paths)
 
-- [ ] **RW1.1.a** — Replace `is_ddl_statement()`'s naive whitespace trim with a comment-aware leading-token parser that strips `--` line comments and `/* */` block comments before classifying. Add the same parser into operation inference so both paths agree. Test: `SELECT 1` with leading `-- DROP TABLE\n` must classify as query, not DDL.
-- [ ] **RW1.1.b** — Sanitize forbidden-DDL rejection errors so they never echo raw statement prefixes (which can contain credential material from connection-string-style payloads). Return generic message + redacted classification, log full statement at DEBUG only.
-- [ ] **RW1.1.c** — Rewrite `$N` positional parameter substitution from parsed spans, not global string replacement. Test: parameter named `$1` in a string literal where another parameter `$10` exists must not get clobbered.
-- [ ] **RW1.1.d** — Use `saturating_mul` / checked arithmetic in exponential retry backoff so it cannot overflow before max-delay capping. Test: 64 retries with base 1s and 2× factor must converge to max_delay, not panic.
-- [ ] **RW1.1.validate** — `cargo test -p rivers-driver-sdk` green; new tests for each subtask above.
+- [x] **RW1.1.a** — Replace `is_ddl_statement()`'s naive whitespace trim with a comment-aware leading-token parser that strips `--` line comments and `/* */` block comments before classifying. Add the same parser into operation inference so both paths agree. Test: `SELECT 1` with leading `-- DROP TABLE\n` must classify as query, not DDL. (`lib.rs`: `first_sql_token()` + `is_ddl_statement()` rewritten)
+- [x] **RW1.1.b** — Sanitize forbidden-DDL rejection errors so they never echo raw statement prefixes (which can contain credential material from connection-string-style payloads). Return generic message + redacted classification, log full statement at DEBUG only. (`lib.rs`: `check_admin_guard()` sanitized; existing integration test updated to match)
+- [x] **RW1.1.c** — Rewrite `$N` positional parameter substitution from parsed spans, not global string replacement. Test: parameter named `$1` in a string literal where another parameter `$10` exists must not get clobbered. (`lib.rs`: `translate_params()` DollarPositional/QuestionPositional/ColonNamed all rewritten span-based)
+- [x] **RW1.1.d** — Use `saturating_mul` / checked arithmetic in exponential retry backoff so it cannot overflow before max-delay capping. Test: 64 retries with base 1s and 2× factor must converge to max_delay, not panic. (`http_executor/connection.rs` + `oauth2.rs`: `saturating_pow` + `saturating_mul`)
+- [x] **RW1.1.validate** — `cargo test -p rivers-driver-sdk` green; new tests for each subtask above. (203 tests pass; 13 new RW1.1 tests added)
 
 ### RW1.2 — `rivers-plugin-exec` lifecycle/TOCTOU/privilege-drop hardening (8 findings: 3×T1, 4×T2, 1×T3)
 

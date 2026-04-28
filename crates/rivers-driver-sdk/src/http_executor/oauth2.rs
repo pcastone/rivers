@@ -52,7 +52,10 @@ pub(crate) async fn fetch_oauth2_token(
 
     for attempt in 0..max_attempts {
         if attempt > 0 {
-            tokio::time::sleep(Duration::from_millis(100 * 2u64.pow(attempt - 1))).await;
+            // Saturating arithmetic prevents overflow on large attempt counts
+            // before the sleep duration is computed (RW1.1.d).
+            let delay_ms = 100u64.saturating_mul(2u64.saturating_pow(attempt - 1));
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         }
 
         let mut form = vec![
