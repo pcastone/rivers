@@ -4,6 +4,71 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 
 ---
 
+## 2026-04-28 — RW5: Tooling honesty (cargo-deploy staging, riverpackage templates, pack, golden tests)
+
+### RW5.1 — cargo-deploy atomicity
+**File:** `crates/cargo-deploy/src/main.rs`
+**Decided:** Assemble into `<deploy_path>.staging/` directory, then `std::fs::rename` to final path. This matches POSIX rename(2) atomicity — either the old deploy or the new deploy is visible, never a partial state.
+**Spec ref:** RW5 Phase 5 review finding T2 (deploy writes directly into live target).
+**Resolution:** Added staging dir cleanup (leftover from interrupted runs), build into staging, final remove-then-rename. Also made missing engine dylibs fatal in dynamic mode (T1 finding).
+
+### RW5.2 — riverpackage init template fields
+**File:** `crates/riverpackage/src/main.rs`
+**Decided:** Fix all template fields to match what `validate_structural` (Layer 1) requires. Root cause: `cmd_init` was generating TOML that failed the structural validator.
+- Bundle manifest: added `source = "local"` (BUNDLE_MANIFEST_REQUIRED includes `source`)
+- App manifest: fixed `type` from "service" to "app-service" (S009 check), added `version = "1.0.0"` and `source = "local"` (both required by APP_MANIFEST_REQUIRED)
+- resources.toml: added `x-type` field per driver (DATASOURCE_DECL_REQUIRED includes `x-type`)
+- app.toml DataView: added `name` field (DATAVIEW_REQUIRED includes `name`)
+- app.toml View: added `view_type = "Rest"` and `[handler]` sub-table with `type = "dataview"`, removed `dataview` and `description` from view top-level (VIEW_REQUIRED includes `view_type` and `handler`)
+**Spec ref:** `validate_structural.rs` field-set constants; rivers-bundle-validation-spec.md §4.1.
+**Resolution:** Fixed all five template generation functions/strings.
+
+### RW5.3 — riverpackage pack artifact type
+**File:** `crates/riverpackage/src/main.rs`
+**Decided:** Change command contract: `pack` always produces `.tar.gz`. If caller passes `.zip` extension, corrected to `.tar.gz` with a warning to stderr. Default output renamed from `bundle.zip` to `bundle.tar.gz`. This is honest — the `zip` crate is not in the workspace and adding it for a CLI utility is not justified.
+**Spec ref:** Review finding T3 — pack advertises zip but produces tar.gz with "would pack" stub.
+**Resolution:** Removed stub/misleading output; produce actual archive; explicit extension handling.
+
+### RW5.4 — CLI golden tests
+**File:** `crates/riverpackage/src/main.rs`
+**Decided:** Add 9 new unit tests covering: init → validate round-trip for all 4 drivers, expected file creation, duplicate-dir guard, unknown-driver rejection, pack .zip correction, pack .tar.gz production.
+**Spec ref:** RW5 Phase 5 review — "Add CLI golden tests for deploy/package/admin workflows."
+**Resolution:** All 16 tests pass. Tests live in the existing `#[cfg(test)]` block.
+
+## 2026-04-28 — RW4: Shared driver guardrails
+
+### RW4.1 — Timeout/row constants placement
+**File:** `crates/rivers-driver-sdk/src/defaults.rs` (new)
+**Decision:** Created a new `defaults` module rather than adding constants to `traits.rs`. `traits.rs` is already large (645 lines); a dedicated module is cleaner and easier to discover.
+**Spec ref:** RW4.1 / rivers-wide code review 2026-04-27 §Phase 4.
+**Resolution:** All items re-exported from `lib.rs` so callers use `rivers_driver_sdk::read_connect_timeout(...)` without extra path qualification.
+
+### RW4.2 — Elasticsearch and InfluxDB timeout wiring
+**File:** `crates/rivers-plugin-elasticsearch/src/lib.rs`, `crates/rivers-plugin-influxdb/src/driver.rs`
+**Decision:** Used `reqwest::Client::builder().connect_timeout().timeout()` in `connect()`. The `test_instance()` helper in ES keeps `Client::new()` since it is test-only and the test doesn't hit the network through the client builder path.
+**Spec ref:** RW4.2.
+**Resolution:** Confirmed reqwest 0.12 supports `.connect_timeout(Duration)` and `.timeout(Duration)` on the builder. No new dependencies needed.
+
+### RW4.3 — URL encoder consolidation
+**File:** `crates/rivers-driver-sdk/src/defaults.rs`, `crates/rivers-plugin-rabbitmq/src/lib.rs`, `crates/rivers-plugin-influxdb/src/protocol.rs`
+**Decision:** Moved the canonical RFC 3986 unreserved-char encoder from RabbitMQ's local `urlencoding_encode` to `defaults::url_encode_path_segment`. The InfluxDB partial encoder (`urlencoded`) was replaced with a thin wrapper delegating to the shared function. The two implementations were semantically identical for unreserved chars; the InfluxDB hand-rolled version missed characters outside its 6-case list (e.g., `@`, `:`, `/` which are now correctly encoded). The rabbitmq tests were updated in-place (they now call the imported symbol, still exercise the same logic).
+**Spec ref:** RW4.3.
+**Resolution:** `replace_all` rename of `urlencoding_encode` → `url_encode_path_segment` in rabbitmq, then deletion of the local function. InfluxDB's `urlencoded` kept as a module-local alias for readability.
+
+### RW4.4 — LDAP max_rows cap
+**File:** `crates/rivers-plugin-ldap/src/lib.rs`
+**Decision:** Stored `max_rows` on `LdapConnection` (set at connect time from `read_max_rows(&params)`) rather than passing `ConnectionParams` through the `Connection::execute` call chain. The `Connection` trait does not carry params and changing it would be a much wider change. Storing on the struct is the right minimal-change approach.
+**Spec ref:** RW4.4.
+**Resolution:** `ldap.search()` returns all matching entries before we can truncate; `.take(max_rows)` is applied in the iterator chain. `tracing::warn!` is emitted if `total > max_rows`.
+
+### RW4.5 — InfluxDB line protocol test coverage + measurement name escaping fix
+**File:** `crates/rivers-plugin-influxdb/src/protocol.rs`
+**Decision:** Writing the `build_line_protocol_key_with_comma_is_escaped` test exposed a latent bug: measurement names were not being escaped (commas/spaces must be backslash-escaped per InfluxDB line protocol spec). Added `escape_measurement_name()` and wired it into `build_line_protocol`. This is a correct behavior fix, not just a test addition.
+**Spec ref:** RW4.5 / InfluxDB line protocol spec §Measurement.
+**Resolution:** `escape_measurement_name` escapes `,` and ` ` (not `=` — that is only required in tag keys/values). 4 new tests covering comma-in-measurement, equals-in-tag-key-and-value, space-in-tag, embedded-quote-in-field-string.
+
+---
+
 ## 2026-04-27 — H3/H9/H13/H14: unsafe/FFI hardening
 
 ### H3: ABI probe catch_unwind — already done, confirmed in-place

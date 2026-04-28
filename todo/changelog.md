@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-04-28 — RW5: Tooling honesty (cargo-deploy staging, riverpackage templates, pack, golden tests)
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `crates/cargo-deploy/src/main.rs` | Added staging-dir atomicity: all deploy output assembles into `<deploy_path>.staging/`, then `rename()` to final path. Added leftover-staging cleanup on startup. Made missing engine dylibs fatal in dynamic mode (was warn+skip). | RW5.1, review T1/T2 | Staging dir + rename; hard exit on missing dylibs. |
+| `crates/riverpackage/src/main.rs` | Fixed `cmd_init` bundle manifest (added `source`), app manifest (fixed `type` → "app-service", added `version`, `source`), resources.toml (added `x-type` per driver), app.toml DataView (added `name`), app.toml View (added `view_type`, `handler` sub-table; removed invalid `dataview`/`description` from view level). | RW5.2, validate_structural.rs field sets | All 4 drivers' init bundles now pass structural validation. |
+| `crates/riverpackage/src/main.rs` | Fixed `cmd_pack`: removed stub "would pack" output, produce actual tar.gz, handle .zip extension by correcting to .tar.gz with warning, changed default output from `bundle.zip` to `bundle.tar.gz`, updated usage text. | RW5.3, review T3 | Honest artifact output. |
+| `crates/riverpackage/src/main.rs` | Added 9 golden tests: init→validate round-trip for faker/postgres/sqlite/mysql, file creation check, dup-dir guard, unknown-driver rejection, pack .zip correction, pack .tar.gz production. | RW5.4 | 16/16 tests passing. |
+| `Cargo.toml` | Version bumped 0.55.16 → 0.55.17 | versioning rule | `just bump-patch` |
+
+## 2026-04-28 — RW4: Shared driver guardrails (timeouts, row caps, URL encoder, driver fixes)
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `crates/rivers-driver-sdk/src/defaults.rs` | NEW — shared constants (`DEFAULT_CONNECT_TIMEOUT_SECS=10`, `DEFAULT_REQUEST_TIMEOUT_SECS=30`, `DEFAULT_MAX_ROWS=10_000`, `DEFAULT_MAX_RESPONSE_BYTES=10MiB`), option readers (`read_connect_timeout`, `read_request_timeout`, `read_max_rows`), and `url_encode_path_segment` (RFC 3986 unreserved chars). Full unit test coverage (13 tests). | RW4.1, RW4.3 | New module; all public items re-exported from `rivers-driver-sdk/src/lib.rs`. |
+| `crates/rivers-driver-sdk/src/lib.rs` | Added `pub mod defaults` declaration and re-exports for all defaults items. | RW4.1, RW4.3 | Minimal addition alongside existing pub-use block. |
+| `crates/rivers-plugin-elasticsearch/src/lib.rs` | `connect()` now uses `Client::builder().connect_timeout(...).timeout(...)` with values from `read_connect_timeout`/`read_request_timeout`. Removed `Client::new()`. | RW4.2 | Imported `std::time::Duration`, `read_connect_timeout`, `read_request_timeout` from SDK. |
+| `crates/rivers-plugin-influxdb/src/driver.rs` | Same timeout wiring as ES — `Client::builder()` with SDK constants. | RW4.2 | Imported `std::time::Duration`, `read_connect_timeout`, `read_request_timeout`. |
+| `crates/rivers-plugin-influxdb/src/protocol.rs` | `urlencoded()` now delegates to `url_encode_path_segment` from SDK (was a partial hand-rolled encoder). Added `escape_measurement_name()` to properly escape commas/spaces in measurement names (line protocol correctness). Added 4 new RW4.5 integration tests covering comma-in-key, equals-in-tag, space-in-tag, embedded-quote-in-field-string. | RW4.3, RW4.5 | Removed 6-case hand-rolled encoder; fixed latent line protocol bug for measurement names. |
+| `crates/rivers-plugin-rabbitmq/src/lib.rs` | Removed local `urlencoding_encode` function; imported and uses `url_encode_path_segment` from SDK. No behavior change (implementations were identical). | RW4.3 | Single `replace_all` rename + local function deletion. |
+| `crates/rivers-plugin-ldap/src/lib.rs` | `LdapConnection` struct gained `max_rows: usize` field (set at connect time via `read_max_rows(&params)`). `exec_search` now `.take(self.max_rows)` and emits `tracing::warn!` if truncation occurred. Added 2 unit tests: `read_max_rows_default_is_ten_thousand`, `read_max_rows_from_option`. | RW4.4 | Field stored on connection at connect time; no change to `Connection` trait. |
+| `Cargo.toml` (workspace) | Version bumped `0.55.14+1605280426` → `0.55.15+1612280426` | CLAUDE.md versioning rules | Patch bump — 5 guardrail fixes closing documented-but-missing timeout/cap/encoder policy. |
+
 ## 2026-04-28 — RW2: Broker contract SDK + driver compliance (7 sub-tasks)
 
 | File | What changed | Spec ref | Resolution |

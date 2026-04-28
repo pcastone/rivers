@@ -760,106 +760,106 @@ entrypoint = "hostCallbackAvailable"
 
 # ── Transaction Tests ─────────────────────────────────────
 [api.views.txn_commit]
-path      = "canary/sql/txn/commit"
+path      = "/canary/sql/txn/commit"
 method    = "POST"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.txn_commit.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/transaction-tests.ts"
 entrypoint = "txnCommit"
 
 [api.views.txn_rollback]
-path      = "canary/sql/txn/rollback"
+path      = "/canary/sql/txn/rollback"
 method    = "POST"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.txn_rollback.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/transaction-tests.ts"
 entrypoint = "txnRollback"
 
 [api.views.txn_double_begin]
-path      = "canary/sql/txn/double-begin"
+path      = "/canary/sql/txn/double-begin"
 method    = "POST"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.txn_double_begin.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/transaction-tests.ts"
 entrypoint = "txnDoubleBegin"
 
 [api.views.txn_batch]
-path      = "canary/sql/txn/batch"
+path      = "/canary/sql/txn/batch"
 method    = "POST"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.txn_batch.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/transaction-tests.ts"
 entrypoint = "txnBatch"
 
 # ── Query Parameter Tests ─────────────────────────────────
 [api.views.qp_query_access]
-path      = "canary/sql/qp/query-access"
+path      = "/canary/sql/qp/query-access"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.qp_query_access.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/query-param-tests.ts"
 entrypoint = "qpQueryAccess"
 
 [api.views.qp_query_all]
-path      = "canary/sql/qp/query-all"
+path      = "/canary/sql/qp/query-all"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.qp_query_all.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/query-param-tests.ts"
 entrypoint = "qpQueryAll"
 
 [api.views.qp_percent_decode]
-path      = "canary/sql/qp/percent-decode"
+path      = "/canary/sql/qp/percent-decode"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.qp_percent_decode.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/query-param-tests.ts"
 entrypoint = "qpPercentDecode"
 
 [api.views.qp_empty_value]
-path      = "canary/sql/qp/empty-value"
+path      = "/canary/sql/qp/empty-value"
 method    = "GET"
 view_type = "Rest"
 auth      = "none"
 
 [api.views.qp_empty_value.handler]
 type       = "codecomponent"
-language   = "javascript"
+language   = "typescript"
 module     = "libraries/handlers/query-param-tests.ts"
 entrypoint = "qpEmptyValue"
 
 # ── MCP View ──────────────────────────────────────────────
 
 [api.views.mcp]
-path      = "canary/sql/mcp"
+path      = "/canary/sql/mcp"
 view_type = "Mcp"
 method    = "POST"
 auth      = "none"

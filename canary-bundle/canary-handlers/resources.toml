@@ -1,5 +1,5 @@
 [[datasources]]
-name       = "faker"
+name       = "canary-faker"
 driver     = "faker"
 x-type     = "faker"
 nopassword = true
