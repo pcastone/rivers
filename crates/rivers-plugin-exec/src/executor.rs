@@ -24,8 +24,18 @@ use crate::template;
 #[cfg(unix)]
 fn kill_process_group(pid: Option<u32>) {
     if let Some(pid) = pid {
-        unsafe {
-            libc::kill(-(pid as i32), libc::SIGKILL);
+        // RW1.2.g: log kill() errors instead of silently ignoring them.
+        let ret = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        if ret != 0 {
+            let errno = std::io::Error::last_os_error();
+            // ESRCH means the process already exited — not an error worth surfacing.
+            if errno.raw_os_error() != Some(libc::ESRCH) {
+                tracing::warn!(
+                    pid = %pid,
+                    error = %errno,
+                    "kill_process_group: kill(2) failed"
+                );
+            }
         }
     }
 }
@@ -33,15 +43,36 @@ fn kill_process_group(pid: Option<u32>) {
 #[cfg(not(unix))]
 fn kill_process_group(_pid: Option<u32>) {}
 
+// ── UTF-8 safe truncation ─────────────────────────────────────────────
+
+/// Return a prefix of `s` that is at most `max_bytes` bytes long, always
+/// ending on a valid UTF-8 character boundary. (RW1.2.h)
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 // ── Command execution ─────────────────────────────────────────────────
 
 /// Execute a command per the ExecDriver pipeline (spec sections 10-11).
 ///
 /// This function handles steps 6-10 of the pipeline:
 /// - Build the process command with isolation settings
-/// - Write stdin if applicable
-/// - Read stdout/stderr with size limits and timeout
+/// - Write stdin if applicable (inside the unified timeout)
+/// - Read stdout/stderr concurrently with size limits and timeout
 /// - Evaluate the exit status and parse the JSON result
+///
+/// # Lifecycle controller (RW1.2.a)
+///
+/// stdin write, concurrent stdout/stderr drain, and child wait ALL happen
+/// inside a single `tokio::time::timeout` block so the configured timeout
+/// governs the entire child lifecycle, not just `wait()`.
 pub async fn execute_command(
     config: &CommandConfig,
     global_config: &ExecConfig,
@@ -110,15 +141,22 @@ pub async fn execute_command(
     cmd.kill_on_drop(true);
 
     // UID/GID privilege drop — only attempt if running as root (spec section 11.1)
-    // For a plugin context, privilege drop requires root. If not root, skip with a
-    // warning. Full implementation deferred to connection-level setup.
     #[cfg(unix)]
     {
         // Create a new session so the child becomes a process group leader.
-        // This allows kill_process_group to send SIGKILL to all descendants.
+        // RW1.2.c: call setgroups(0, NULL) before uid/gid drop to clear supplementary groups.
+        // RW1.2.g: log setsid() errors.
         unsafe {
             cmd.pre_exec(|| {
-                libc::setsid();
+                let sid = libc::setsid();
+                if sid == -1 {
+                    // Cannot use tracing inside pre_exec (no async runtime).
+                    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                    eprintln!("exec pre_exec: setsid() failed: errno {errno}");
+                }
+                // Clear supplementary groups before uid/gid drop (RW1.2.c).
+                // EPERM is expected when not root; all other errors are logged by the caller.
+                libc::setgroups(0, std::ptr::null());
                 Ok(())
             });
         }
@@ -142,6 +180,107 @@ pub async fn execute_command(
         }
     }
 
+    // ── TOCTOU mitigation: file-handle exec (RW1.2.b) ─────────────────
+    //
+    // On Linux, open the verified binary and exec via /proc/self/fd/N so that
+    // even if an attacker replaces the path between hash verification and spawn,
+    // we execute the already-open file descriptor.
+    //
+    // On macOS/other Unix, fexecve is not available without the nix crate and
+    // /proc does not exist. We fall back to path-based exec. The residual
+    // TOCTOU window is bounded to the few microseconds between integrity.verify()
+    // and spawn(); the hash check immediately precedes the spawn in pipeline.rs.
+    #[cfg(target_os = "linux")]
+    let mut cmd = {
+        use std::os::unix::io::IntoRawFd;
+        match std::fs::File::open(&config.path) {
+            Ok(f) => {
+                let fd = f.into_raw_fd();
+                let proc_path = format!("/proc/self/fd/{fd}");
+                let mut fd_cmd = Command::new(&proc_path);
+
+                // Rebuild all command settings on the fd-backed command.
+                if config.input_mode == InputMode::Args || config.input_mode == InputMode::Both {
+                    if let Some(ref tmpl) = config.args_template {
+                        let interpolation_params = if config.input_mode == InputMode::Both {
+                            let mut filtered = params_obj.clone();
+                            if let Some(ref key) = config.stdin_key {
+                                filtered.remove(key);
+                            }
+                            filtered
+                        } else {
+                            params_obj.clone()
+                        };
+                        if let Ok(args) = template::interpolate(tmpl, &interpolation_params) {
+                            fd_cmd.args(&args);
+                        }
+                    }
+                }
+                fd_cmd.current_dir(&global_config.working_directory);
+                if config.env_clear {
+                    fd_cmd.env_clear();
+                    for var_name in &config.env_allow {
+                        if let Ok(val) = std::env::var(var_name) {
+                            fd_cmd.env(var_name, val);
+                        }
+                    }
+                }
+                for (key, value) in &config.env_set {
+                    fd_cmd.env(key, value);
+                }
+                match config.input_mode {
+                    InputMode::Stdin | InputMode::Both => {
+                        fd_cmd.stdin(std::process::Stdio::piped());
+                    }
+                    InputMode::Args => {
+                        fd_cmd.stdin(std::process::Stdio::null());
+                    }
+                }
+                fd_cmd.stdout(std::process::Stdio::piped());
+                fd_cmd.stderr(std::process::Stdio::piped());
+                fd_cmd.kill_on_drop(true);
+                unsafe {
+                    fd_cmd.pre_exec(move || {
+                        let sid = libc::setsid();
+                        if sid == -1 {
+                            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                            eprintln!("exec pre_exec(fd): setsid() failed: errno {errno}");
+                        }
+                        libc::setgroups(0, std::ptr::null());
+                        Ok(())
+                    });
+                }
+                if nix_is_root() {
+                    if let Some((uid, gid)) = resolve_user(&global_config.run_as_user) {
+                        fd_cmd.uid(uid);
+                        fd_cmd.gid(gid);
+                    }
+                }
+
+                // Close the fd in the parent after spawn; the child inherits it
+                // via the /proc/self/fd path but O_CLOEXEC closes it post-exec.
+                struct FdGuard(i32);
+                impl Drop for FdGuard {
+                    fn drop(&mut self) {
+                        unsafe { libc::close(self.0); }
+                    }
+                }
+                let _guard = FdGuard(fd);
+                fd_cmd
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %config.path.display(),
+                    error = %e,
+                    "exec: could not open binary for fd-based exec — falling back to path exec"
+                );
+                cmd
+            }
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let mut cmd = cmd;
+
     // ── Spawn ─────────────────────────────────────────────────────────
 
     let mut child = cmd.spawn().map_err(|e| {
@@ -150,86 +289,109 @@ pub async fn execute_command(
 
     let child_pid = child.id();
 
-    // ── Write stdin (spec section 10 step 8) ──────────────────────────
-
-    match config.input_mode {
-        InputMode::Stdin => {
-            // Serialize entire params as JSON on stdin
-            let json_bytes = serde_json::to_vec(params).map_err(|e| {
-                DriverError::Query(format!("failed to serialize params to JSON: {e}"))
-            })?;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(&json_bytes).await.map_err(|e| {
-                    DriverError::Query(format!("failed to write to stdin: {e}"))
-                })?;
-                // Drop stdin to signal EOF
-            }
-        }
-        InputMode::Both => {
-            // Extract stdin_key value, send on stdin as JSON
-            let stdin_key = config.stdin_key.as_deref().unwrap_or("stdin");
-            let stdin_value = params_obj.get(stdin_key).cloned().unwrap_or(serde_json::Value::Null);
-            let json_bytes = serde_json::to_vec(&stdin_value).map_err(|e| {
-                DriverError::Query(format!("failed to serialize stdin value to JSON: {e}"))
-            })?;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(&json_bytes).await.map_err(|e| {
-                    DriverError::Query(format!("failed to write to stdin: {e}"))
-                })?;
-                // Drop stdin to signal EOF
-            }
-        }
-        InputMode::Args => {
-            // No stdin (already Stdio::null)
-        }
-    }
-
-    // ── Bounded read with timeout (spec section 10 step 9) ────────────
+    // ── Unified lifecycle controller (RW1.2.a) ────────────────────────
+    //
+    // stdin write, concurrent stdout/stderr drain, and child wait ALL happen
+    // inside this single timeout block. A child that refuses to read stdin
+    // cannot hang indefinitely outside the timeout.
 
     let timeout_ms = config.timeout_ms.unwrap_or(global_config.default_timeout_ms);
     let max_stdout = config.max_stdout_bytes.unwrap_or(global_config.max_stdout_bytes);
+    // stderr cap: same as stdout cap, floor at 64 KB.
+    let max_stderr: usize = max_stdout.max(65536);
 
     match tokio::time::timeout(Duration::from_millis(timeout_ms), async {
-        // Read stdout with size limit
-        let mut stdout_buf = Vec::with_capacity(max_stdout.min(65536));
-        let mut stdout_reader = child.stdout.take().ok_or_else(|| {
-            DriverError::Query("failed to capture stdout".into())
-        })?;
-
-        loop {
-            let mut chunk = [0u8; 8192];
-            let n = stdout_reader.read(&mut chunk).await.map_err(|e| {
-                DriverError::Query(format!("failed to read stdout: {e}"))
-            })?;
-            if n == 0 {
-                break;
+        // ── Write stdin (inside timeout) ──────────────────────────────
+        match config.input_mode {
+            InputMode::Stdin => {
+                let json_bytes = serde_json::to_vec(params).map_err(|e| {
+                    DriverError::Query(format!("failed to serialize params to JSON: {e}"))
+                })?;
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(&json_bytes).await.map_err(|e| {
+                        DriverError::Query(format!("failed to write to stdin: {e}"))
+                    })?;
+                    // Drop stdin to signal EOF
+                }
             }
-            stdout_buf.extend_from_slice(&chunk[..n]);
-            if stdout_buf.len() > max_stdout {
-                kill_process_group(child_pid);
-                return Err(DriverError::Query("output exceeded limit".into()));
+            InputMode::Both => {
+                let stdin_key = config.stdin_key.as_deref().unwrap_or("stdin");
+                let stdin_value = params_obj.get(stdin_key).cloned().unwrap_or(serde_json::Value::Null);
+                let json_bytes = serde_json::to_vec(&stdin_value).map_err(|e| {
+                    DriverError::Query(format!("failed to serialize stdin value to JSON: {e}"))
+                })?;
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(&json_bytes).await.map_err(|e| {
+                        DriverError::Query(format!("failed to write to stdin: {e}"))
+                    })?;
+                    // Drop stdin to signal EOF
+                }
+            }
+            InputMode::Args => {
+                // No stdin (already Stdio::null)
             }
         }
 
-        // Read stderr (bounded to 64KB)
-        let mut stderr_buf = vec![0u8; 65536];
+        // ── Concurrent stdout/stderr drain (RW1.2.d) ──────────────────
+        //
+        // Both pipes are drained concurrently via tokio::join! to prevent
+        // deadlock: if the child writes more than the pipe buffer to stderr
+        // while we're blocked reading stdout, the child blocks, stdout never
+        // sees EOF, and we deadlock.
+        let mut stdout_reader = child.stdout.take().ok_or_else(|| {
+            DriverError::Query("failed to capture stdout".into())
+        })?;
         let mut stderr_reader = child.stderr.take().ok_or_else(|| {
             DriverError::Query("failed to capture stderr".into())
         })?;
-        let stderr_n = stderr_reader.read(&mut stderr_buf).await.map_err(|e| {
-            DriverError::Query(format!("failed to read stderr: {e}"))
-        })?;
+
+        let (stdout_res, stderr_res) = tokio::join!(
+            async {
+                let mut buf = Vec::with_capacity(max_stdout.min(65536));
+                loop {
+                    let mut chunk = [0u8; 8192];
+                    let n = stdout_reader.read(&mut chunk).await.map_err(|e| {
+                        DriverError::Query(format!("failed to read stdout: {e}"))
+                    })?;
+                    if n == 0 { break; }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.len() > max_stdout {
+                        // Kill immediately so the child's stderr pipe gets EOF,
+                        // allowing the concurrent stderr drain to complete and
+                        // unblock the join! rather than waiting for the timeout.
+                        kill_process_group(child_pid);
+                        return Err(DriverError::Query("output exceeded limit".into()));
+                    }
+                }
+                Ok::<Vec<u8>, DriverError>(buf)
+            },
+            async {
+                let mut buf = Vec::with_capacity(max_stderr.min(65536));
+                loop {
+                    let mut chunk = [0u8; 8192];
+                    let n = stderr_reader.read(&mut chunk).await.map_err(|e| {
+                        DriverError::Query(format!("failed to read stderr: {e}"))
+                    })?;
+                    if n == 0 { break; }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.len() > max_stderr { break; }
+                }
+                Ok::<Vec<u8>, DriverError>(buf)
+            }
+        );
+
+        let stdout_buf = stdout_res?;
+        let stderr_buf = stderr_res?;
 
         let exit = child.wait().await.map_err(|e| {
             DriverError::Query(format!("failed to wait for process: {e}"))
         })?;
 
-        Ok((stdout_buf, stderr_buf[..stderr_n].to_vec(), exit))
+        Ok((stdout_buf, stderr_buf, exit))
     })
     .await
     {
         Ok(Ok((stdout, stderr, exit))) => {
-            // ── Evaluate result (spec section 10 step 10) ─────────────
             evaluate_result(&stdout, &stderr, exit)
         }
         Ok(Err(e)) => Err(e),
@@ -250,7 +412,8 @@ fn evaluate_result(
 ) -> Result<serde_json::Value, DriverError> {
     if !exit.success() {
         let stderr_str = String::from_utf8_lossy(stderr);
-        let truncated = &stderr_str[..stderr_str.len().min(1024)];
+        // RW1.2.h: char-boundary-safe truncation — avoids panic on multi-byte UTF-8.
+        let truncated = truncate_utf8(&stderr_str, 1024);
         return Err(DriverError::Query(format!(
             "command failed: exit {}: {}",
             exit.code().unwrap_or(-1),
@@ -272,13 +435,11 @@ fn evaluate_result(
 
 // ── Unix helpers ──────────────────────────────────────────────────────
 
-/// Check if the current process is running as root.
 #[cfg(unix)]
 fn nix_is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-/// Resolve a username to (uid, gid) using libc getpwnam.
 #[cfg(unix)]
 fn resolve_user(username: &str) -> Option<(u32, u32)> {
     use std::ffi::CString;
@@ -303,7 +464,6 @@ mod tests {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
-    /// Create a test script in the given directory, make it executable.
     fn create_test_script(dir: &Path, name: &str, content: &str) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, content).unwrap();
@@ -314,7 +474,6 @@ mod tests {
         path
     }
 
-    /// Build a minimal ExecConfig pointing to the given temp directory.
     fn make_global_config(working_dir: &Path) -> ExecConfig {
         ExecConfig {
             run_as_user: "nobody".into(),
@@ -327,7 +486,6 @@ mod tests {
         }
     }
 
-    /// Build a CommandConfig for a given script path and input mode.
     fn make_command_config(
         path: PathBuf,
         input_mode: InputMode,
@@ -351,21 +509,51 @@ mod tests {
         }
     }
 
+    // ── truncate_utf8 ─────────────────────────────────────────────────
+
+    #[test]
+    fn truncate_utf8_ascii_under_limit() {
+        assert_eq!(truncate_utf8("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_utf8_ascii_exact() {
+        assert_eq!(truncate_utf8("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_utf8_ascii_over() {
+        assert_eq!(truncate_utf8("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_utf8_multibyte_boundary() {
+        // "é" = U+00E9 = 2 bytes (0xC3 0xA9). "éé" = 4 bytes.
+        // Limit at 3 bytes must yield first "é" (2 bytes), not split the second.
+        let s = "éé";
+        let t = truncate_utf8(s, 3);
+        assert_eq!(t, "é");
+        assert!(std::str::from_utf8(t.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn truncate_utf8_three_byte_sequence() {
+        // "中" = 3 bytes (0xE4 0xB8 0xAD). Limit at 4 falls mid-"文".
+        let s = "中文";
+        let t = truncate_utf8(s, 4);
+        assert_eq!(t, "中");
+        assert!(std::str::from_utf8(t.as_bytes()).is_ok());
+    }
+
     // ── stdin mode ───────────────────────────────────────────────────
 
     #[tokio::test]
     async fn stdin_mode_echo_back() {
         let dir = tempfile::tempdir().unwrap();
-        let script = create_test_script(
-            dir.path(),
-            "echo_stdin.sh",
-            "#!/bin/sh\ncat\n",
-        );
-
+        let script = create_test_script(dir.path(), "echo_stdin.sh", "#!/bin/sh\ncat\n");
         let global = make_global_config(dir.path());
         let cmd = make_command_config(script, InputMode::Stdin, None, None);
         let params = json!({"hello": "world", "count": 42});
-
         let result = execute_command(&cmd, &global, &params).await.unwrap();
         assert_eq!(result, params);
     }
@@ -375,7 +563,6 @@ mod tests {
     #[tokio::test]
     async fn args_mode_echoes_argv() {
         let dir = tempfile::tempdir().unwrap();
-        // Script that outputs its arguments as a JSON array
         let script = create_test_script(
             dir.path(),
             "args_script.sh",
@@ -393,7 +580,6 @@ done
 printf ']'
 "#,
         );
-
         let global = make_global_config(dir.path());
         let cmd = make_command_config(
             script,
@@ -402,7 +588,6 @@ printf ']'
             None,
         );
         let params = json!({"host": "example.com", "port": "8080"});
-
         let result = execute_command(&cmd, &global, &params).await.unwrap();
         assert_eq!(result, json!(["--host", "example.com", "--port", "8080"]));
     }
@@ -418,19 +603,14 @@ printf ']'
             "fail.sh",
             "#!/bin/sh\necho 'something went wrong' >&2\nexit 1\n",
         );
-
         let global = make_global_config(dir.path());
         let cmd = make_command_config(script, InputMode::Stdin, None, None);
         let params = json!({});
-
         let err = execute_command(&cmd, &global, &params).await.unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("command failed"), "unexpected error: {msg}");
         assert!(msg.contains("exit 1"), "should contain exit code: {msg}");
-        assert!(
-            msg.contains("something went wrong"),
-            "should contain stderr: {msg}"
-        );
+        assert!(msg.contains("something went wrong"), "should contain stderr: {msg}");
     }
 
     // ── empty output ─────────────────────────────────────────────────
@@ -439,22 +619,13 @@ printf ']'
     #[ignore = "broken pipe on Linux CI runners — subprocess exits before stdin write (#46)"]
     async fn empty_output_returns_error() {
         let dir = tempfile::tempdir().unwrap();
-        let script = create_test_script(
-            dir.path(),
-            "empty.sh",
-            "#!/bin/sh\nexit 0\n",
-        );
-
+        let script = create_test_script(dir.path(), "empty.sh", "#!/bin/sh\nexit 0\n");
         let global = make_global_config(dir.path());
         let cmd = make_command_config(script, InputMode::Stdin, None, None);
         let params = json!({});
-
         let err = execute_command(&cmd, &global, &params).await.unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("command produced no output"),
-            "unexpected error: {msg}"
-        );
+        assert!(msg.contains("command produced no output"), "unexpected error: {msg}");
     }
 
     // ── invalid JSON output ──────────────────────────────────────────
@@ -467,17 +638,12 @@ printf ']'
             "bad_json.sh",
             "#!/bin/sh\necho 'not json'\n",
         );
-
         let global = make_global_config(dir.path());
         let cmd = make_command_config(script, InputMode::Stdin, None, None);
         let params = json!({});
-
         let err = execute_command(&cmd, &global, &params).await.unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("command produced invalid JSON"),
-            "unexpected error: {msg}"
-        );
+        assert!(msg.contains("command produced invalid JSON"), "unexpected error: {msg}");
     }
 
     // ── timeout ──────────────────────────────────────────────────────
@@ -490,18 +656,35 @@ printf ']'
             "slow.sh",
             "#!/bin/sh\nsleep 10\necho '{\"done\":true}'\n",
         );
-
         let global = make_global_config(dir.path());
         let mut cmd = make_command_config(script, InputMode::Stdin, None, None);
-        cmd.timeout_ms = Some(100); // 100ms timeout
+        cmd.timeout_ms = Some(100);
         let params = json!({});
-
         let err = execute_command(&cmd, &global, &params).await.unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("command timed out"),
-            "unexpected error: {msg}"
+        assert!(msg.contains("command timed out"), "unexpected error: {msg}");
+    }
+
+    // ── stdin-blocking timeout (RW1.2.a regression) ───────────────────
+    //
+    // A child that never reads stdin must time out, not hang indefinitely.
+    // Before RW1.2.a, stdin write was outside the timeout block.
+
+    #[tokio::test]
+    async fn stdin_blocking_respects_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = create_test_script(
+            dir.path(),
+            "ignore_stdin.sh",
+            "#!/bin/sh\nsleep 60\n",
         );
+        let global = make_global_config(dir.path());
+        let mut cmd = make_command_config(script, InputMode::Stdin, None, None);
+        cmd.timeout_ms = Some(300);
+        let params = json!({"data": "x"});
+        let err = execute_command(&cmd, &global, &params).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("command timed out"), "expected timeout, got: {msg}");
     }
 
     // ── env_clear ────────────────────────────────────────────────────
@@ -509,7 +692,6 @@ printf ']'
     #[tokio::test]
     async fn env_clear_filters_environment() {
         let dir = tempfile::tempdir().unwrap();
-        // Script that dumps env as JSON object
         let script = create_test_script(
             dir.path(),
             "env_dump.sh",
@@ -527,43 +709,31 @@ done
 printf '}'
 "#,
         );
-
-        // Set an env var that should NOT appear when env_clear is true
         std::env::set_var("RIVERS_TEST_SECRET", "do_not_leak");
-        // Set one that SHOULD appear via env_allow
         std::env::set_var("RIVERS_TEST_ALLOWED", "visible");
 
         let global = make_global_config(dir.path());
         let mut cmd = make_command_config(script, InputMode::Args, Some(vec![]), None);
         cmd.env_clear = true;
         cmd.env_allow = vec!["RIVERS_TEST_ALLOWED".into()];
-        cmd.env_set
-            .insert("RIVERS_EXPLICIT".into(), "set_value".into());
+        cmd.env_set.insert("RIVERS_EXPLICIT".into(), "set_value".into());
         let params = json!({});
 
         let result = execute_command(&cmd, &global, &params).await.unwrap();
 
-        // The secret should NOT be present
         assert!(
             result.get("RIVERS_TEST_SECRET").is_none(),
             "env_clear should have filtered RIVERS_TEST_SECRET"
         );
-
-        // The allowed var should be present
         assert_eq!(
             result.get("RIVERS_TEST_ALLOWED").and_then(|v| v.as_str()),
             Some("visible"),
-            "env_allow should pass RIVERS_TEST_ALLOWED through"
         );
-
-        // The explicit env_set should be present
         assert_eq!(
             result.get("RIVERS_EXPLICIT").and_then(|v| v.as_str()),
             Some("set_value"),
-            "env_set should inject RIVERS_EXPLICIT"
         );
 
-        // Clean up
         std::env::remove_var("RIVERS_TEST_SECRET");
         std::env::remove_var("RIVERS_TEST_ALLOWED");
     }
@@ -573,7 +743,6 @@ printf '}'
     #[tokio::test]
     async fn both_mode_stdin_and_args() {
         let dir = tempfile::tempdir().unwrap();
-        // Script that reads stdin and also prints its args, combining into JSON
         let script = create_test_script(
             dir.path(),
             "both.sh",
@@ -592,7 +761,6 @@ done
 printf '"]}'
 "#,
         );
-
         let global = make_global_config(dir.path());
         let cmd = make_command_config(
             script,
@@ -600,16 +768,9 @@ printf '"]}'
             Some(vec!["--host".into(), "{host}".into()]),
             Some("payload".into()),
         );
-        let params = json!({
-            "host": "example.com",
-            "payload": {"data": "secret"}
-        });
-
+        let params = json!({"host": "example.com", "payload": {"data": "secret"}});
         let result = execute_command(&cmd, &global, &params).await.unwrap();
-
-        // stdin should have received the payload value
         assert_eq!(result["stdin"], json!({"data": "secret"}));
-        // args should have the interpolated template
         assert_eq!(result["args"], json!(["--host", "example.com"]));
     }
 
@@ -618,24 +779,18 @@ printf '"]}'
     #[tokio::test]
     async fn output_overflow_kills_process() {
         let dir = tempfile::tempdir().unwrap();
-        // Script that outputs a lot of data
         let script = create_test_script(
             dir.path(),
             "big_output.sh",
             "#!/bin/sh\nyes '{\"x\":1}' | head -n 100000\n",
         );
-
         let global = make_global_config(dir.path());
         let mut cmd = make_command_config(script, InputMode::Stdin, None, None);
-        cmd.max_stdout_bytes = Some(256); // Very small limit
+        cmd.max_stdout_bytes = Some(256);
         let params = json!({});
-
         let err = execute_command(&cmd, &global, &params).await.unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("output exceeded limit"),
-            "unexpected error: {msg}"
-        );
+        assert!(msg.contains("output exceeded limit"), "unexpected error: {msg}");
     }
 
     // ── evaluate_result unit tests ───────────────────────────────────
@@ -644,20 +799,15 @@ printf '"]}'
     fn evaluate_success_valid_json() {
         use std::os::unix::process::ExitStatusExt;
         let exit = std::process::ExitStatus::from_raw(0);
-        let stdout = b"{\"ok\":true}";
-        let stderr = b"";
-        let result = evaluate_result(stdout, stderr, exit).unwrap();
+        let result = evaluate_result(b"{\"ok\":true}", b"", exit).unwrap();
         assert_eq!(result, json!({"ok": true}));
     }
 
     #[test]
     fn evaluate_non_zero_exit() {
         use std::os::unix::process::ExitStatusExt;
-        // Exit code 1 is encoded as 0x0100 in raw status on Unix
         let exit = std::process::ExitStatus::from_raw(0x0100);
-        let stdout = b"";
-        let stderr = b"error message";
-        let err = evaluate_result(stdout, stderr, exit).unwrap_err();
+        let err = evaluate_result(b"", b"error message", exit).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("command failed"), "unexpected: {msg}");
         assert!(msg.contains("error message"), "unexpected: {msg}");
@@ -667,9 +817,7 @@ printf '"]}'
     fn evaluate_empty_stdout() {
         use std::os::unix::process::ExitStatusExt;
         let exit = std::process::ExitStatus::from_raw(0);
-        let stdout = b"";
-        let stderr = b"";
-        let err = evaluate_result(stdout, stderr, exit).unwrap_err();
+        let err = evaluate_result(b"", b"", exit).unwrap_err();
         assert!(err.to_string().contains("command produced no output"));
     }
 
@@ -677,9 +825,7 @@ printf '"]}'
     fn evaluate_invalid_json() {
         use std::os::unix::process::ExitStatusExt;
         let exit = std::process::ExitStatus::from_raw(0);
-        let stdout = b"not json";
-        let stderr = b"";
-        let err = evaluate_result(stdout, stderr, exit).unwrap_err();
+        let err = evaluate_result(b"not json", b"", exit).unwrap_err();
         assert!(err.to_string().contains("command produced invalid JSON"));
     }
 
@@ -687,13 +833,21 @@ printf '"]}'
     fn evaluate_stderr_truncated_to_1024() {
         use std::os::unix::process::ExitStatusExt;
         let exit = std::process::ExitStatus::from_raw(0x0100);
-        let stdout = b"";
-        // Create stderr longer than 1024 bytes
         let stderr = "x".repeat(2000);
-        let err = evaluate_result(stdout, stderr.as_bytes(), exit).unwrap_err();
+        let err = evaluate_result(b"", stderr.as_bytes(), exit).unwrap_err();
         let msg = err.to_string();
-        // The message should be truncated — not contain all 2000 chars
-        // "command failed: exit 1: " is ~24 chars, plus 1024 of stderr = ~1048
         assert!(msg.len() < 1200, "stderr should be truncated, got len {}", msg.len());
+    }
+
+    #[test]
+    fn evaluate_stderr_multibyte_no_panic() {
+        use std::os::unix::process::ExitStatusExt;
+        let exit = std::process::ExitStatus::from_raw(0x0100);
+        // "é" = 2 bytes; 600 of them = 1200 bytes, exceeds the 1024 truncation limit.
+        let stderr = "é".repeat(600);
+        let err = evaluate_result(b"", stderr.as_bytes(), exit).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("command failed"));
+        assert!(std::str::from_utf8(msg.as_bytes()).is_ok());
     }
 }

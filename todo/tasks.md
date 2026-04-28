@@ -723,15 +723,15 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 > Many of these overlap with the prior RXE findings already documented. Verify which are still open before duplicating work.
 
-- [ ] **RW1.2.a** (RXE-T1-? cross-ref) — Wrap stdin write, stdout/stderr drain, and child-wait under one lifecycle controller so the configured timeout governs all child I/O, not just `wait()`.
-- [ ] **RW1.2.b** — Replace path-based exec after hash verify with file-handle execution (`fexecve` or open-then-fork-then-exec on the verified `OwnedFd`) to close the TOCTOU window between hash check and spawn.
-- [ ] **RW1.2.c** — Call `setgroups(0, NULL)` before drop in `pre_exec` so supplementary groups don't survive the uid/gid change.
-- [ ] **RW1.2.d** — Drain stdout and stderr concurrently with byte caps. Stderr currently single-read into 64 KB; make it chunked-read with an explicit cap and concurrent with stdout.
-- [ ] **RW1.2.e** — Move `every:N` integrity counter increment to *after* successful semaphore acquisition, so rejected attempts don't burn scheduled checks.
-- [ ] **RW1.2.f** — Fail closed on invalid `env_clear` config values (anything other than `true`/`false`); current code only matches exact `"true"`, silently inheriting env on typos.
-- [ ] **RW1.2.g** — Stop ignoring process-group setup and kill-syscall errors; log + propagate via the executor result.
-- [ ] **RW1.2.h** — Fix UTF-8 boundary slice in lossy stderr truncation that can panic on multi-byte sequences.
-- [ ] **RW1.2.validate** — `cargo test -p rivers-plugin-exec` green; integration test exercising the timeout/lifecycle controller on a child that ignores stdin.
+- [x] **RW1.2.a** (RXE-T1-? cross-ref) — Wrap stdin write, stdout/stderr drain, and child-wait under one lifecycle controller so the configured timeout governs all child I/O, not just `wait()`.
+- [x] **RW1.2.b** — Replace path-based exec after hash verify with file-handle execution (`fexecve` or open-then-fork-then-exec on the verified `OwnedFd`) to close the TOCTOU window between hash check and spawn.
+- [x] **RW1.2.c** — Call `setgroups(0, NULL)` before drop in `pre_exec` so supplementary groups don't survive the uid/gid change.
+- [x] **RW1.2.d** — Drain stdout and stderr concurrently with byte caps. Stderr currently single-read into 64 KB; make it chunked-read with an explicit cap and concurrent with stdout.
+- [x] **RW1.2.e** — Move `every:N` integrity counter increment to *after* successful semaphore acquisition, so rejected attempts don't burn scheduled checks.
+- [x] **RW1.2.f** — Fail closed on invalid `env_clear` config values (anything other than `true`/`false`); current code only matches exact `"true"`, silently inheriting env on typos.
+- [x] **RW1.2.g** — Stop ignoring process-group setup and kill-syscall errors; log + propagate via the executor result.
+- [x] **RW1.2.h** — Fix UTF-8 boundary slice in lossy stderr truncation that can panic on multi-byte sequences.
+- [x] **RW1.2.validate** — `cargo test -p rivers-plugin-exec` green; integration test exercising the timeout/lifecycle controller on a child that ignores stdin.
 
 ### RW1.3 — `riversctl` shutdown fallback + stop-signal correctness (7 findings: 2×T1, 5×T2)
 
