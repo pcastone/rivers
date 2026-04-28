@@ -480,6 +480,18 @@ else
     printf "  SKIP %-40s (Kafka unreachable)\n" "SCEN-STREAM-ACTIVITY-FEED"
 fi
 
+# ── PROXY Profile (canary-main proxies to canary-sql and canary-handlers) ──
+# These tests verify that the main app correctly proxies to downstream apps
+# and that headers/sessions are forwarded. proxy_session_check requires a
+# session cookie (auth=session), so it runs after the AUTH login above.
+
+echo ""
+echo "  ── PROXY Profile ──"
+test_ep "proxy-session"       GET  "$BASE/main/canary/proxy/session-check"
+test_ep "proxy-sql"           GET  "$BASE/main/canary/proxy/sql/pg/select"
+test_ep "proxy-handler"       GET  "$BASE/main/canary/proxy/rt/ctx/trace-id"
+test_ep "proxy-error"         GET  "$BASE/main/canary/proxy/error"
+
 # ── MCP Tests ────────────────────────────────────────────────
 # MCP session model: initialize returns Mcp-Session-Id; all subsequent
 # methods must send it as a request header (JSON-RPC 2.0 / MCP spec).
