@@ -1,0 +1,27 @@
+name: Lint Heuristics
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'scripts/lint-heuristics.sh'
+      - '.github/workflows/lint-heuristics.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'scripts/lint-heuristics.sh'
+      - '.github/workflows/lint-heuristics.yml'
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ripgrep
+        run: sudo apt-get install -y ripgrep
+
+      - name: Run heuristic lint checks
+        run: bash scripts/lint-heuristics.sh --verbose
