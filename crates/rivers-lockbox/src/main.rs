@@ -111,9 +111,9 @@ fn aliases_path(lockbox_dir: &str) -> PathBuf {
 
 fn load_identity(lockbox_dir: &str) -> Result<age::x25519::Identity, String> {
     let path = identity_path(lockbox_dir);
-    let key_str = fs::read_to_string(&path)
+    let raw = fs::read_to_string(&path)
         .map_err(|e| format!("cannot read identity at {}: {e}", path.display()))?;
-    let key_str = key_str.trim();
+    let key_str = zeroize::Zeroizing::new(raw.trim().to_string());
     key_str.parse::<age::x25519::Identity>()
         .map_err(|e| format!("invalid identity key: {e}"))
 }
@@ -242,8 +242,8 @@ fn cmd_show(lockbox_dir: &str, name: &str) -> Result<(), String> {
 
     let identity = load_identity(lockbox_dir)?;
     let encrypted = fs::read(&entry_path).map_err(|e| format!("read entry: {e}"))?;
-    let decrypted = decrypt_value(&identity, &encrypted)?;
-    let value = String::from_utf8(decrypted).map_err(|e| format!("UTF-8: {e}"))?;
+    let decrypted = zeroize::Zeroizing::new(decrypt_value(&identity, &encrypted)?);
+    let value = String::from_utf8(decrypted.to_vec()).map_err(|e| format!("UTF-8: {e}"))?;
 
     println!("{value}");
     Ok(())
@@ -332,7 +332,7 @@ fn cmd_rekey(lockbox_dir: &str) -> Result<(), String> {
     let mut staged: Vec<(PathBuf, Vec<u8>)> = Vec::with_capacity(entries.len());
     for entry in &entries {
         let encrypted = fs::read(entry.path()).map_err(|e| format!("read: {e}"))?;
-        let decrypted = decrypt_value(&old_identity, &encrypted)?;
+        let decrypted = zeroize::Zeroizing::new(decrypt_value(&old_identity, &encrypted)?);
         let re_encrypted = encrypt_value(&new_recipient, &decrypted)?;
         staged.push((entry.path(), re_encrypted));
     }

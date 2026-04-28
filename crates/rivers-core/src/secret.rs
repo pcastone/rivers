@@ -6,6 +6,14 @@
 //!   explicit intent.
 //! - `Drop` zeroizes the inner value so secret bytes don't linger in memory.
 //! - `.expose(&self) -> &T` is the only way to access the inner value.
+//!
+//! # When to use `Secret<T>` vs `zeroize::Zeroizing<T>`
+//!
+//! Use `Secret<T>` when you need all three properties: Debug-redaction,
+//! clone-blocking, and drop-zeroization. Use `Zeroizing<T>` from the `zeroize`
+//! crate for short-lived buffers where Debug access and cloning are not a
+//! concern (e.g., a temporary decryption buffer that goes out of scope in the
+//! same function).
 
 use zeroize::Zeroize;
 

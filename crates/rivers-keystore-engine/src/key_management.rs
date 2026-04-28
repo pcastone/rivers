@@ -3,7 +3,7 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Utc;
 use rand::RngCore;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::types::*;
 
@@ -185,10 +185,8 @@ impl AppKeystore {
 
     /// Decode the current version's key material into raw bytes.
     ///
-    /// # Security
-    /// The returned `Vec<u8>` contains raw key material. The caller **must**
-    /// zeroize it after use (e.g. `bytes.zeroize()`).
-    pub fn current_key_bytes(&self, name: &str) -> Result<Vec<u8>, AppKeystoreError> {
+    /// The returned bytes are wrapped in `Zeroizing` and will be zeroized on drop.
+    pub fn current_key_bytes(&self, name: &str) -> Result<Zeroizing<Vec<u8>>, AppKeystoreError> {
         let key = self
             .get_key(name)
             .ok_or_else(|| AppKeystoreError::KeyNotFound {
@@ -221,19 +219,17 @@ impl AppKeystore {
             });
         }
 
-        Ok(bytes)
+        Ok(Zeroizing::new(bytes))
     }
 
     /// Decode a specific version's key material into raw bytes.
     ///
-    /// # Security
-    /// The returned `Vec<u8>` contains raw key material. The caller **must**
-    /// zeroize it after use (e.g. `bytes.zeroize()`).
+    /// The returned bytes are wrapped in `Zeroizing` and will be zeroized on drop.
     pub fn versioned_key_bytes(
         &self,
         name: &str,
         version: u32,
-    ) -> Result<Vec<u8>, AppKeystoreError> {
+    ) -> Result<Zeroizing<Vec<u8>>, AppKeystoreError> {
         let kv = self.get_key_version(name, version)?;
 
         let bytes =
@@ -253,6 +249,6 @@ impl AppKeystore {
             });
         }
 
-        Ok(bytes)
+        Ok(Zeroizing::new(bytes))
     }
 }
