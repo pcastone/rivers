@@ -1420,6 +1420,74 @@ mod tests {
             .expect_err("row missing a required field should fail validation");
         assert!(matches!(err, DataViewError::Schema { .. }));
     }
+
+    /// Verify that validate_query_result works correctly when given a path that
+    /// was constructed by joining a bundle_root with a relative schema path —
+    /// the same pattern that bundle_loader::load applies at DataView registration
+    /// time before calling validate_query_result.  A relative path alone would
+    /// resolve against CWD and fail silently; the join must produce an absolute
+    /// path that reaches the correct file.
+    #[test]
+    fn validate_query_result_bundle_root_join_reaches_schema() {
+        let bundle_root = tempfile::TempDir::new().unwrap();
+        // Create the schemas/ subdirectory that mirrors real bundle layout.
+        let schemas_dir = bundle_root.path().join("schemas");
+        std::fs::create_dir_all(&schemas_dir).unwrap();
+
+        // Relative path as it would appear in TOML config.
+        let relative = "schemas/contact.schema.json";
+
+        // Write the schema into the bundle-root-relative location.
+        let abs_path = bundle_root.path().join(relative);
+        std::fs::write(
+            &abs_path,
+            r#"{"fields":[{"name":"id","required":true}]}"#,
+        )
+        .unwrap();
+
+        // Simulate what load.rs does: join bundle_root with the relative path.
+        let resolved = bundle_root.path().join(relative);
+        assert!(resolved.is_absolute(), "resolved path must be absolute");
+
+        let mut row = std::collections::HashMap::new();
+        row.insert("id".to_string(), QueryValue::Integer(42));
+        let result = rivers_driver_sdk::types::QueryResult {
+            rows: vec![row],
+            affected_rows: 1,
+            last_insert_id: None,
+            column_names: None,
+        };
+
+        // validate_query_result receives the absolute resolved path.
+        validate_query_result(&result, resolved.to_str().unwrap())
+            .expect("bundle-root-joined absolute path should reach schema and pass validation");
+    }
+
+    /// Verify that SchemaFileNotFound does not expose the OS error string in its
+    /// path field (Issue 2 — error message must not leak OS internals).
+    #[test]
+    fn validate_query_result_missing_schema_error_does_not_embed_os_error() {
+        let result = rivers_driver_sdk::types::QueryResult::empty();
+        let err = validate_query_result(&result, "/nonexistent/bundle/schemas/contact.schema.json")
+            .expect_err("missing schema must hard-fail");
+        match err {
+            DataViewError::SchemaFileNotFound { path } => {
+                // path must identify the schema location but must NOT contain OS
+                // error text such as "No such file or directory".
+                assert!(
+                    !path.contains("No such file") && !path.contains("os error"),
+                    "SchemaFileNotFound.path must not embed OS error text, got: {}",
+                    path
+                );
+                assert!(
+                    path.contains("schemas/contact.schema.json"),
+                    "path should still reference the schema file, got: {}",
+                    path
+                );
+            }
+            other => panic!("expected SchemaFileNotFound, got {:?}", other),
+        }
+    }
 }
 
 /// Validate query result rows against a schema file's required fields.
@@ -1434,18 +1502,25 @@ mod tests {
 /// common case at validate time; this guard provides defense in depth for
 /// on-disk corruption between load and request.
 ///
-/// `schema_path` is expected to be bundle-relative (the bundle loader
-/// normalizes paths before this point), so the surfaced error message does
-/// not leak absolute deploy paths. The `None` case for `return_schema` is a
-/// bundle-author choice and never reaches this function.
+/// `schema_path` is the bundle-loader-normalized absolute path for the schema
+/// file. The bundle loader (`bundle_loader::load`) resolves relative paths via
+/// `app_dir.join(schema_path)` before registering the DataViewConfig, so
+/// production callers always supply an absolute path and the surfaced error
+/// message never leaks CWD-relative ambiguity. The OS-level error is logged at
+/// debug level for diagnostics but is suppressed from the user-facing message
+/// to avoid exposing absolute deploy paths. The `None` case for `return_schema`
+/// is a bundle-author choice and never reaches this function.
 fn validate_query_result(
     result: &rivers_driver_sdk::types::QueryResult,
     schema_path: &str,
 ) -> Result<(), DataViewError> {
     // Load and parse schema file — hard-fail on missing or malformed.
+    // Suppress OS error from the user-facing message (could expose absolute
+    // deploy paths); log it at debug for diagnostics.
     let schema_json = std::fs::read_to_string(schema_path).map_err(|e| {
+        tracing::debug!(path = %schema_path, error = %e, "schema file read failed");
         DataViewError::SchemaFileNotFound {
-            path: format!("{}: {}", schema_path, e),
+            path: schema_path.to_string(),
         }
     })?;
     let schema: serde_json::Value =
