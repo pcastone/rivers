@@ -146,7 +146,14 @@ impl AppKeystore {
         let key_material = BASE64.encode(&raw_key);
         raw_key.zeroize();
 
-        let new_version = key.current_version + 1;
+        let new_version = key.current_version.checked_add(1).ok_or_else(|| {
+            AppKeystoreError::MalformedKeystore {
+                reason: format!(
+                    "key '{}' version counter overflow (current_version = {})",
+                    name, key.current_version
+                ),
+            }
+        })?;
         let now = Utc::now();
 
         key.versions.push(KeyVersion {

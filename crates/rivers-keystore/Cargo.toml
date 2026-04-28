@@ -12,3 +12,4 @@ path = "src/main.rs"
 rivers-keystore-engine = { path = "../rivers-keystore-engine" }
 age = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+zeroize = { workspace = true }

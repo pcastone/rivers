@@ -18,5 +18,6 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
 zeroize = { workspace = true }
+libc = { workspace = true }
 
 [dev-dependencies]

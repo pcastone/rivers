@@ -83,7 +83,7 @@ async fn lockbox_credential_resolves_and_connects_redis() {
         identity_str.expose_secret().trim(),
     )
     .unwrap();
-    assert_eq!(resolved.value, "rivers_test");
+    assert_eq!(resolved.value.as_str(), "rivers_test");
 
     // 8. Use the resolved password to connect to Redis
     //    Get host/port from the real lockbox keystore (not hardcoded)
@@ -93,7 +93,7 @@ async fn lockbox_credential_resolves_and_connects_redis() {
         port: real_params.port,
         database: "0".into(),
         username: "".into(),
-        password: resolved.value,
+        password: resolved.value.as_str().to_string(),
         options: real_params.options,
     };
 

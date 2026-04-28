@@ -94,7 +94,10 @@ pub enum AppKeystoreError {
 // ── Types ───────────────────────────────────────────────────────────
 
 /// Plaintext TOML schema inside the Age envelope.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is not derived — this type contains fields that chain to
+/// `KeyVersion.key_material` which must never appear in logs or debug output.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AppKeystore {
     /// Schema version (currently 1).
     #[serde(default = "default_version")]
@@ -104,8 +107,20 @@ pub struct AppKeystore {
     pub keys: Vec<AppKeystoreKey>,
 }
 
+impl std::fmt::Debug for AppKeystore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppKeystore")
+            .field("version", &self.version)
+            .field("key_count", &self.keys.len())
+            .finish()
+    }
+}
+
 /// A named encryption key with version history.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is not derived — `versions` chains to `key_material` which must
+/// never appear in logs or debug output.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AppKeystoreKey {
     /// Unique key name within the keystore.
     pub name: String,
@@ -121,15 +136,46 @@ pub struct AppKeystoreKey {
     pub versions: Vec<KeyVersion>,
 }
 
+impl std::fmt::Debug for AppKeystoreKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppKeystoreKey")
+            .field("name", &self.name)
+            .field("key_type", &self.key_type)
+            .field("current_version", &self.current_version)
+            .field("version_count", &self.versions.len())
+            .field("created", &self.created)
+            .field("updated", &self.updated)
+            .finish()
+    }
+}
+
 /// A single version of a key's material.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is not derived — `key_material` must never appear in logs or
+/// debug output. Use `KeyInfo` to inspect metadata without raw key bytes.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct KeyVersion {
     /// Version number (1-based, monotonically increasing).
     pub version: u32,
     /// Base64-encoded AES-256 key material (32 bytes). Zeroized on drop.
+    ///
+    /// # Security
+    /// Prefer `AppKeystore::current_key_bytes()` or `versioned_key_bytes()`
+    /// over accessing this field directly. Those methods decode the base64 into
+    /// raw bytes with an explicit caller obligation to zeroize after use.
     pub key_material: String,
     /// When this version was generated.
     pub created: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for KeyVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyVersion")
+            .field("version", &self.version)
+            .field("key_material", &"<redacted>")
+            .field("created", &self.created)
+            .finish()
+    }
 }
 
 /// Metadata returned by key_info() — never contains raw key bytes.

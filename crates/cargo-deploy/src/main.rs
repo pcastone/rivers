@@ -470,14 +470,29 @@ fn generate_self_signed_cert(
 
     std::fs::write(cert_path, cert_pem)
         .map_err(|e| format!("failed to write cert to {}: {e}", cert_path.display()))?;
-    std::fs::write(key_path, key_pem)
-        .map_err(|e| format!("failed to write key to {}: {e}", key_path.display()))?;
 
+    // Write the private key with 0o600 permissions from the start so there is
+    // never a window where it is world-readable. On Unix, `OpenOptions::mode`
+    // sets the permission bits at create time before any bytes are written.
+    // On non-Unix targets we fall back to a plain write.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("chmod key file {}: {e}", key_path.display()))?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(key_path)
+            .map_err(|e| format!("failed to create key file {}: {e}", key_path.display()))?;
+        f.write_all(key_pem.as_bytes())
+            .map_err(|e| format!("failed to write key to {}: {e}", key_path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(key_path, key_pem)
+            .map_err(|e| format!("failed to write key to {}: {e}", key_path.display()))?;
     }
 
     Ok(())

@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use age::secrecy::ExposeSecret;
@@ -28,14 +27,10 @@ fn main() {
         }
         "init" => cmd_init(&lockbox_dir),
         "add" => {
-            if args.len() < 3 { eprintln!("Usage: rivers-lockbox add <name> [--value <val>]"); std::process::exit(1); }
-            let value = if args.len() >= 5 && args[3] == "--value" {
-                args[4].clone()
-            } else {
-                match read_stdin_value() {
-                    Ok(v) => v,
-                    Err(e) => { eprintln!("Error: {e}"); std::process::exit(1); }
-                }
+            if args.len() < 3 { eprintln!("Usage: rivers-lockbox add <name>"); std::process::exit(1); }
+            let value = match read_secret_value(&format!("Enter value for '{}': ", args[2])) {
+                Ok(v) => v,
+                Err(e) => { eprintln!("Error: {e}"); std::process::exit(1); }
             };
             cmd_add(&lockbox_dir, &args[2], &value)
         }
@@ -49,14 +44,10 @@ fn main() {
             cmd_alias(&lockbox_dir, &args[2], &args[3])
         }
         "rotate" => {
-            if args.len() < 3 { eprintln!("Usage: rivers-lockbox rotate <name> [--value <val>]"); std::process::exit(1); }
-            let value = if args.len() >= 5 && args[3] == "--value" {
-                args[4].clone()
-            } else {
-                match read_stdin_value() {
-                    Ok(v) => v,
-                    Err(e) => { eprintln!("Error: {e}"); std::process::exit(1); }
-                }
+            if args.len() < 3 { eprintln!("Usage: rivers-lockbox rotate <name>"); std::process::exit(1); }
+            let value = match read_secret_value(&format!("Enter new value for '{}': ", args[2])) {
+                Ok(v) => v,
+                Err(e) => { eprintln!("Error: {e}"); std::process::exit(1); }
             };
             cmd_rotate(&lockbox_dir, &args[2], &value)
         }
@@ -87,11 +78,11 @@ fn print_usage() {
     eprintln!();
     eprintln!("Commands:");
     eprintln!("  init              Create new lockbox with age keypair");
-    eprintln!("  add <name>        Add a secret (reads value from stdin or --value)");
+    eprintln!("  add <name>        Add a secret (prompts for value via hidden TTY input)");
     eprintln!("  list              List all entry names");
     eprintln!("  show <name>       Decrypt and show a secret");
     eprintln!("  alias <a> <target> Create an alias");
-    eprintln!("  rotate <name>     Replace a secret value");
+    eprintln!("  rotate <name>     Replace a secret value (prompts for value via hidden TTY input)");
     eprintln!("  remove <name>     Remove a secret");
     eprintln!("  rekey             Re-encrypt all secrets with new identity");
     eprintln!("  validate          Verify keystore integrity");
@@ -99,13 +90,11 @@ fn print_usage() {
     eprintln!("Environment: RIVERS_LOCKBOX_DIR (default: ./lockbox)");
 }
 
-fn read_stdin_value() -> Result<String, String> {
-    eprint!("Enter value: ");
-    io::stderr().flush().ok();
-    let mut value = String::new();
-    io::stdin().read_line(&mut value)
-        .map_err(|e| format!("failed to read stdin: {e}"))?;
-    Ok(value.trim().to_string())
+fn read_secret_value(prompt: &str) -> Result<String, String> {
+    // Use rpassword for hidden TTY input — secret values must not appear on
+    // the command line (shell history) or echo to the terminal.
+    rpassword::prompt_password(prompt)
+        .map_err(|e| format!("failed to read secret: {e}"))
 }
 
 fn entries_dir(lockbox_dir: &str) -> PathBuf {
@@ -209,11 +198,17 @@ fn cmd_list(lockbox_dir: &str) -> Result<(), String> {
         .collect();
     entries.sort();
 
-    // Also list aliases
-    let aliases: HashMap<String, String> = fs::read_to_string(aliases_path(lockbox_dir))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+    // Also list aliases (best-effort; absent file is silently skipped,
+    // but a corrupt file is reported so users know something is wrong).
+    let aliases_file = aliases_path(lockbox_dir);
+    let aliases: HashMap<String, String> = if aliases_file.exists() {
+        let raw = fs::read_to_string(&aliases_file)
+            .map_err(|e| format!("cannot read aliases file: {e}"))?;
+        serde_json::from_str(&raw)
+            .map_err(|e| format!("aliases file is corrupt: {e}"))?
+    } else {
+        HashMap::new()
+    };
 
     for entry in &entries {
         println!("{entry}");
@@ -228,11 +223,16 @@ fn cmd_list(lockbox_dir: &str) -> Result<(), String> {
 }
 
 fn cmd_show(lockbox_dir: &str, name: &str) -> Result<(), String> {
-    // Check aliases first
-    let aliases: HashMap<String, String> = fs::read_to_string(aliases_path(lockbox_dir))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+    // Check aliases first — fail loudly if aliases file is corrupt.
+    let aliases_file = aliases_path(lockbox_dir);
+    let aliases: HashMap<String, String> = if aliases_file.exists() {
+        let raw = fs::read_to_string(&aliases_file)
+            .map_err(|e| format!("cannot read aliases file: {e}"))?;
+        serde_json::from_str(&raw)
+            .map_err(|e| format!("aliases file is corrupt: {e}"))?
+    } else {
+        HashMap::new()
+    };
     let resolved = aliases.get(name).map(|s| s.as_str()).unwrap_or(name);
 
     let entry_path = entries_dir(lockbox_dir).join(format!("{resolved}.age"));
@@ -255,13 +255,21 @@ fn cmd_alias(lockbox_dir: &str, alias: &str, target: &str) -> Result<(), String>
         return Err(format!("target entry '{target}' not found"));
     }
 
-    let mut aliases: HashMap<String, String> = fs::read_to_string(aliases_path(lockbox_dir))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+    // Read aliases file — fail loudly if it exists but is unparseable rather
+    // than silently overwriting with an empty map (which would destroy aliases).
+    let aliases_file = aliases_path(lockbox_dir);
+    let mut aliases: HashMap<String, String> = if aliases_file.exists() {
+        let raw = fs::read_to_string(&aliases_file)
+            .map_err(|e| format!("cannot read aliases file: {e}"))?;
+        serde_json::from_str(&raw)
+            .map_err(|e| format!("aliases file is corrupt — refusing to overwrite: {e}"))?
+    } else {
+        HashMap::new()
+    };
+
     aliases.insert(alias.to_string(), target.to_string());
     let json = serde_json::to_string_pretty(&aliases).map_err(|e| format!("json: {e}"))?;
-    fs::write(aliases_path(lockbox_dir), json.as_bytes()).map_err(|e| format!("write: {e}"))?;
+    fs::write(&aliases_file, json.as_bytes()).map_err(|e| format!("write: {e}"))?;
 
     println!("Alias: {alias} → {target}");
     Ok(())
@@ -288,15 +296,21 @@ fn cmd_remove(lockbox_dir: &str, name: &str) -> Result<(), String> {
     }
     fs::remove_file(&entry_path).map_err(|e| format!("remove: {e}"))?;
 
-    // Also remove any aliases pointing to this entry
-    let mut aliases: HashMap<String, String> = fs::read_to_string(aliases_path(lockbox_dir))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    aliases.retain(|_, v| v != name);
-    let json = serde_json::to_string_pretty(&aliases).unwrap_or_else(|_| "{}".into());
-    fs::write(aliases_path(lockbox_dir), json.as_bytes())
-        .map_err(|e| format!("failed to update aliases: {e}"))?;
+    // Also remove any aliases pointing to this entry.
+    // Fail loudly if the aliases file exists but is unparseable — do not
+    // silently overwrite with an empty map (which would destroy aliases).
+    let aliases_file = aliases_path(lockbox_dir);
+    if aliases_file.exists() {
+        let raw = fs::read_to_string(&aliases_file)
+            .map_err(|e| format!("cannot read aliases file: {e}"))?;
+        let mut aliases: HashMap<String, String> = serde_json::from_str(&raw)
+            .map_err(|e| format!("aliases file is corrupt — refusing to overwrite: {e}"))?;
+        aliases.retain(|_, v| v != name);
+        let json = serde_json::to_string_pretty(&aliases)
+            .map_err(|e| format!("failed to serialize aliases: {e}"))?;
+        fs::write(&aliases_file, json.as_bytes())
+            .map_err(|e| format!("failed to update aliases: {e}"))?;
+    }
 
     println!("Removed: {name}");
     Ok(())
