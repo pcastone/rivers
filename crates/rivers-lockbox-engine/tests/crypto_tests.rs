@@ -183,21 +183,21 @@ fn fetch_secret_value_round_trip() {
     let meta = resolver.resolve("first").unwrap();
     let resolved = fetch_secret_value(meta, &path, identity_str.trim()).unwrap();
     assert_eq!(resolved.name, "first");
-    assert_eq!(resolved.value, "value-one");
+    assert_eq!(resolved.value.as_str(), "value-one");
     assert_eq!(resolved.entry_type, EntryType::String);
 
     // Fetch second entry by alias
     let meta = resolver.resolve("alias-second").unwrap();
     let resolved = fetch_secret_value(meta, &path, identity_str.trim()).unwrap();
     assert_eq!(resolved.name, "second");
-    assert_eq!(resolved.value, "value-two");
+    assert_eq!(resolved.value.as_str(), "value-two");
     assert_eq!(resolved.entry_type, EntryType::Base64Url);
 
     // Fetch third entry by name
     let meta = resolver.resolve("third").unwrap();
     let resolved = fetch_secret_value(meta, &path, identity_str.trim()).unwrap();
     assert_eq!(resolved.name, "third");
-    assert_eq!(resolved.value, "value-three");
+    assert_eq!(resolved.value.as_str(), "value-three");
     assert_eq!(resolved.entry_type, EntryType::Pem);
 }
 
@@ -218,9 +218,9 @@ fn fetch_secret_value_zeroize_after_use() {
     let meta = resolver.resolve("api-key").unwrap();
     let mut resolved = fetch_secret_value(meta, &path, identity_str.trim()).unwrap();
 
-    assert_eq!(resolved.value, "super-secret");
+    assert_eq!(resolved.value.as_str(), "super-secret");
     resolved.value.zeroize();
-    assert_eq!(resolved.value, "");
+    assert_eq!(resolved.value.as_str(), "");
     assert_eq!(resolved.name, "api-key");
 }
 
@@ -369,7 +369,10 @@ fn error_malformed_keystore_invalid_utf8() {
 // ── fetch_secret_value Edge Cases ────────────────────────────────
 
 #[test]
-fn fetch_secret_value_entry_index_out_of_bounds() {
+fn fetch_secret_value_name_not_found_in_keystore() {
+    // After RW1.4.c: fetch_secret_value now looks up by name, not entry_index.
+    // A metadata entry whose name doesn't exist in the on-disk keystore must
+    // return a MalformedKeystore error mentioning the entry name.
     let (identity_str, recipient_str) = generate_keypair();
 
     let keystore = Keystore {
@@ -381,14 +384,14 @@ fn fetch_secret_value_entry_index_out_of_bounds() {
     };
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("oob.rkeystore");
+    let path = dir.path().join("name_not_found.rkeystore");
     encrypt_keystore(&path, &recipient_str, &keystore).unwrap();
 
-    // Construct metadata with out-of-bounds entry_index
+    // Construct metadata for a name that is absent from the keystore.
     let bad_metadata = EntryMetadata {
         name: "phantom".to_string(),
         entry_type: EntryType::String,
-        entry_index: 99,
+        entry_index: 0, // irrelevant — name-based lookup ignores this
         driver: None,
         username: None,
         hosts: vec![],
@@ -399,9 +402,12 @@ fn fetch_secret_value_entry_index_out_of_bounds() {
     assert!(result.is_err());
     match result.unwrap_err() {
         LockBoxError::MalformedKeystore { reason } => {
-            assert!(reason.contains("out of bounds"), "reason was: {}", reason);
+            assert!(
+                reason.contains("phantom"),
+                "error reason should mention the missing entry name; got: {}", reason
+            );
         }
-        other => panic!("expected MalformedKeystore (out of bounds), got: {:?}", other),
+        other => panic!("expected MalformedKeystore (name not found), got: {:?}", other),
     }
 }
 
@@ -426,7 +432,7 @@ fn fetch_secret_value_with_alias() {
     let meta = resolver.resolve("pg-prod").unwrap();
     let resolved = fetch_secret_value(meta, &path, identity_str.trim()).unwrap();
     assert_eq!(resolved.name, "postgres/prod");
-    assert_eq!(resolved.value, "pg://secret-password");
+    assert_eq!(resolved.value.as_str(), "pg://secret-password");
     assert_eq!(resolved.entry_type, EntryType::String);
 }
 

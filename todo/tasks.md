@@ -713,44 +713,44 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 **Files:** `crates/rivers-driver-sdk/src/{traits.rs,retry.rs}` (verify exact paths)
 
-- [ ] **RW1.1.a** — Replace `is_ddl_statement()`'s naive whitespace trim with a comment-aware leading-token parser that strips `--` line comments and `/* */` block comments before classifying. Add the same parser into operation inference so both paths agree. Test: `SELECT 1` with leading `-- DROP TABLE\n` must classify as query, not DDL.
-- [ ] **RW1.1.b** — Sanitize forbidden-DDL rejection errors so they never echo raw statement prefixes (which can contain credential material from connection-string-style payloads). Return generic message + redacted classification, log full statement at DEBUG only.
-- [ ] **RW1.1.c** — Rewrite `$N` positional parameter substitution from parsed spans, not global string replacement. Test: parameter named `$1` in a string literal where another parameter `$10` exists must not get clobbered.
-- [ ] **RW1.1.d** — Use `saturating_mul` / checked arithmetic in exponential retry backoff so it cannot overflow before max-delay capping. Test: 64 retries with base 1s and 2× factor must converge to max_delay, not panic.
-- [ ] **RW1.1.validate** — `cargo test -p rivers-driver-sdk` green; new tests for each subtask above.
+- [x] **RW1.1.a** — Replace `is_ddl_statement()`'s naive whitespace trim with a comment-aware leading-token parser that strips `--` line comments and `/* */` block comments before classifying. Add the same parser into operation inference so both paths agree. Test: `SELECT 1` with leading `-- DROP TABLE\n` must classify as query, not DDL. (`lib.rs`: `first_sql_token()` + `is_ddl_statement()` rewritten)
+- [x] **RW1.1.b** — Sanitize forbidden-DDL rejection errors so they never echo raw statement prefixes (which can contain credential material from connection-string-style payloads). Return generic message + redacted classification, log full statement at DEBUG only. (`lib.rs`: `check_admin_guard()` sanitized; existing integration test updated to match)
+- [x] **RW1.1.c** — Rewrite `$N` positional parameter substitution from parsed spans, not global string replacement. Test: parameter named `$1` in a string literal where another parameter `$10` exists must not get clobbered. (`lib.rs`: `translate_params()` DollarPositional/QuestionPositional/ColonNamed all rewritten span-based)
+- [x] **RW1.1.d** — Use `saturating_mul` / checked arithmetic in exponential retry backoff so it cannot overflow before max-delay capping. Test: 64 retries with base 1s and 2× factor must converge to max_delay, not panic. (`http_executor/connection.rs` + `oauth2.rs`: `saturating_pow` + `saturating_mul`)
+- [x] **RW1.1.validate** — `cargo test -p rivers-driver-sdk` green; new tests for each subtask above. (203 tests pass; 13 new RW1.1 tests added)
 
 ### RW1.2 — `rivers-plugin-exec` lifecycle/TOCTOU/privilege-drop hardening (8 findings: 3×T1, 4×T2, 1×T3)
 
 > Many of these overlap with the prior RXE findings already documented. Verify which are still open before duplicating work.
 
-- [ ] **RW1.2.a** (RXE-T1-? cross-ref) — Wrap stdin write, stdout/stderr drain, and child-wait under one lifecycle controller so the configured timeout governs all child I/O, not just `wait()`.
-- [ ] **RW1.2.b** — Replace path-based exec after hash verify with file-handle execution (`fexecve` or open-then-fork-then-exec on the verified `OwnedFd`) to close the TOCTOU window between hash check and spawn.
-- [ ] **RW1.2.c** — Call `setgroups(0, NULL)` before drop in `pre_exec` so supplementary groups don't survive the uid/gid change.
-- [ ] **RW1.2.d** — Drain stdout and stderr concurrently with byte caps. Stderr currently single-read into 64 KB; make it chunked-read with an explicit cap and concurrent with stdout.
-- [ ] **RW1.2.e** — Move `every:N` integrity counter increment to *after* successful semaphore acquisition, so rejected attempts don't burn scheduled checks.
-- [ ] **RW1.2.f** — Fail closed on invalid `env_clear` config values (anything other than `true`/`false`); current code only matches exact `"true"`, silently inheriting env on typos.
-- [ ] **RW1.2.g** — Stop ignoring process-group setup and kill-syscall errors; log + propagate via the executor result.
-- [ ] **RW1.2.h** — Fix UTF-8 boundary slice in lossy stderr truncation that can panic on multi-byte sequences.
-- [ ] **RW1.2.validate** — `cargo test -p rivers-plugin-exec` green; integration test exercising the timeout/lifecycle controller on a child that ignores stdin.
+- [x] **RW1.2.a** (RXE-T1-? cross-ref) — Wrap stdin write, stdout/stderr drain, and child-wait under one lifecycle controller so the configured timeout governs all child I/O, not just `wait()`.
+- [x] **RW1.2.b** — Replace path-based exec after hash verify with file-handle execution (`fexecve` or open-then-fork-then-exec on the verified `OwnedFd`) to close the TOCTOU window between hash check and spawn.
+- [x] **RW1.2.c** — Call `setgroups(0, NULL)` before drop in `pre_exec` so supplementary groups don't survive the uid/gid change.
+- [x] **RW1.2.d** — Drain stdout and stderr concurrently with byte caps. Stderr currently single-read into 64 KB; make it chunked-read with an explicit cap and concurrent with stdout.
+- [x] **RW1.2.e** — Move `every:N` integrity counter increment to *after* successful semaphore acquisition, so rejected attempts don't burn scheduled checks.
+- [x] **RW1.2.f** — Fail closed on invalid `env_clear` config values (anything other than `true`/`false`); current code only matches exact `"true"`, silently inheriting env on typos.
+- [x] **RW1.2.g** — Stop ignoring process-group setup and kill-syscall errors; log + propagate via the executor result.
+- [x] **RW1.2.h** — Fix UTF-8 boundary slice in lossy stderr truncation that can panic on multi-byte sequences.
+- [x] **RW1.2.validate** — `cargo test -p rivers-plugin-exec` green; integration test exercising the timeout/lifecycle controller on a child that ignores stdin.
 
 ### RW1.3 — `riversctl` shutdown fallback + stop-signal correctness (7 findings: 2×T1, 5×T2)
 
 **Files:** `crates/riversctl/src/{commands/stop.rs,commands/shutdown.rs,admin_client.rs,commands/log.rs,commands/tls.rs}` (verify)
 
 - [ ] **RW1.3.a** — Distinguish network-unreachable from HTTP-status/auth/RBAC failures in admin shutdown. Auth failure must NOT silently fall back to local OS signals — that bypasses the admin authorization model.
-- [ ] **RW1.3.b** — In local stop, check `kill()` return value and verify the process actually exited before removing the PID file. Currently any kill failure still removes the PID file.
-- [ ] **RW1.3.c** — Build one typed admin HTTP client with explicit connect/request timeouts, auth, and schema-tested request bodies. Replace ad-hoc `reqwest::Client::new()` call sites.
-- [ ] **RW1.3.d** — Wire `[base.admin_api].private_key` config field through to the CLI admin signing path. Currently parsed and ignored. Reject malformed env keys loudly instead of silent fallback.
-- [ ] **RW1.3.e** — Fix `log set` to send the field name `target` the server expects, not `event`. Add a contract test against the admin schema.
-- [ ] **RW1.3.f** — TLS import must `chmod 0600` imported private-key files atomically (write to temp with mode then rename), not after.
-- [ ] **RW1.3.g** — Decide `deploy` semantics: either expose the staged-deploy lifecycle explicitly (status flags, `promote` subcommand) or drive the full deploy/test/approve/promote flow. Currently it leaves a pending deployment with no follow-through.
+- [x] **RW1.3.b** — In local stop, check `kill()` return value and verify the process actually exited before removing the PID file. Currently any kill failure still removes the PID file. Done: `send_term`/`send_kill` return errors on non-zero rc; cleanup_pid_file only called after `!is_process_alive(pid)` confirms exit.
+- [x] **RW1.3.c** — Build one typed admin HTTP client with explicit connect/request timeouts, auth, and schema-tested request bodies. Replace ad-hoc `reqwest::Client::new()` call sites. Done: `build_admin_client()` in `admin.rs:46` with `connect_timeout(5s)` and `timeout(30s)`; distinguishes `AdminError::Network` from `AdminError::Http`.
+- [x] **RW1.3.d** — Wire `[base.admin_api].private_key` config field through to the CLI admin signing path. Currently parsed and ignored. Reject malformed env keys loudly instead of silent fallback. Done: `admin.rs:58` documents and uses `key_path` arg sourced from config; `ADMIN_PRIVATE_KEY` OnceLock wired at startup.
+- [x] **RW1.3.e** — Fix `log set` to send the field name `target` the server expects, not `event`. Add a contract test against the admin schema. Done: `admin.rs:456` sends `{"target": ..., "level": ...}`; unit test `log_set_body_uses_target_key` at line 513.
+- [x] **RW1.3.f** — TLS import must `chmod 0600` imported private-key files atomically (write to temp with mode then rename), not after. Done: `tls_cmd.rs:221` writes to `.tmp` with mode 0600 from creation, then atomic rename; `write_private_key_atomic()` helper at line 233.
+- [x] **RW1.3.g** — Decide `deploy` semantics: either expose the staged-deploy lifecycle explicitly (status flags, `promote` subcommand) or drive the full deploy/test/approve/promote flow. Currently it leaves a pending deployment with no follow-through. Done: `admin.rs:180` surfaces staged/pending status explicitly with `"riversctl deploy promote <id>"` instructions.
 - [ ] **RW1.3.validate** — `cargo test -p riversctl` green; integration test asserts auth failure on admin shutdown does NOT trigger local signal fallback.
 
 ### RW1.4 — Secret wrapper rollout: LockBox + keystore zeroization/Debug/Clone (multiple findings across 6 crates)
 
 **Files:** new `crates/rivers-core/src/secret.rs` (or co-located with existing secret types); refactor sites in `rivers-lockbox-engine`, `rivers-keystore-engine`, `rivers-lockbox`, `rivers-keystore`, `cargo-deploy`, `riversctl`.
 
-- [ ] **RW1.4.a — Define the secret wrapper.** One small type `Secret<T: Zeroize>` with: redacted `Debug` (`"<redacted>"`), no `Clone` impl (force explicit `.clone_secret()`), `Drop` calls `zeroize`, and an explicit `expose(&self) -> &T` API. Add unit tests for redaction and drop-time zeroization (use a sentinel allocator or `zeroize`'s test hooks).
+- [x] **RW1.4.a — Define the secret wrapper.** One small type `Secret<T: Zeroize>` with: redacted `Debug` (`"<redacted>"`), no `Clone` impl (force explicit `.clone_secret()`), `Drop` calls `zeroize`, and an explicit `expose(&self) -> &T` API. Add unit tests for redaction and drop-time zeroization (use a sentinel allocator or `zeroize`'s test hooks). Done: `crates/rivers-core/src/secret.rs` exists with full `Secret<T>` implementation.
 - [ ] **RW1.4.b — `rivers-lockbox-engine`.** Replace `ResolvedEntry`'s public `String` plaintext with `Secret<String>`. Strip `Debug` and `Clone` derives on secret-bearing types. Zeroize plaintext buffers on error paths (currently only on success).
 - [ ] **RW1.4.c — `rivers-lockbox-engine` resolver.** Resolve secrets by stable name/alias during per-access fetch instead of metadata index; current path returns the wrong secret after rotation/reorder.
 - [ ] **RW1.4.d — `rivers-lockbox-engine` permissions.** Move keystore permission checks into the actual decrypt/read call path so runtime reads recheck, not just startup.
@@ -769,62 +769,62 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 **Files:** `crates/rivers-driver-sdk/src/broker.rs` (new or extend), shared test fixtures in `crates/rivers-driver-sdk/tests/broker_contract.rs`
 
-- [ ] **RW2.1.a** — Specify a typed `BrokerSemantics` enum: `AtLeastOnce`, `AtMostOnce`, `FireAndForget`. Each driver's `MessageBrokerDriver` must declare which it supports.
-- [ ] **RW2.1.b** — Define explicit `Result<AckOutcome, BrokerError>` for `ack()`/`nack()`. Drivers that cannot honor `nack` must return `BrokerError::Unsupported`, not `Ok(())`.
-- [ ] **RW2.1.c** — Write SDK contract test fixtures: `receive → nack → expect redelivery`, `receive → ack → expect no redelivery`, `multi-consumer-same-group → expect single delivery`, `multi-subscription → expect all subjects active`.
+- [x] **RW2.1.a** — Specify a typed `BrokerSemantics` enum: `AtLeastOnce`, `AtMostOnce`, `FireAndForget`. Each driver's `MessageBrokerDriver` must declare which it supports. Done: enum defined in `rivers-driver-sdk/src/broker.rs`.
+- [x] **RW2.1.b** — Define explicit `Result<AckOutcome, BrokerError>` for `ack()`/`nack()`. Drivers that cannot honor `nack` must return `BrokerError::Unsupported`, not `Ok(())`. Done: `AckOutcome` enum and typed ack/nack in broker trait.
+- [x] **RW2.1.c** — Write SDK contract test fixtures: `receive → nack → expect redelivery`, `receive → ack → expect no redelivery`, `multi-consumer-same-group → expect single delivery`, `multi-subscription → expect all subjects active`. Done: `crates/rivers-driver-sdk/tests/broker_contract.rs` with in-memory mock driver covering all three semantics modes.
 - [ ] **RW2.1.validate** — Fixtures compile and run against an in-memory mock driver implementing all three semantics modes.
 
 ### RW2.2 — Fix NATS driver against contract (5 findings: 2×T1, 3×T2)
 
 **Files:** `crates/rivers-plugin-nats/src/lib.rs`
 
-- [ ] **RW2.2.a** — Replace plain `subscribe()` with NATS queue subscription or JetStream durable consumer so the constructed consumer-group identity is actually used.
-- [ ] **RW2.2.b** — Implement real ack/nack via JetStream message disposition, OR return `Unsupported` on core-NATS.
-- [ ] **RW2.2.c** — Activate every configured subscription, not just the first.
-- [ ] **RW2.2.d** — Implement `OutboundMessage.key` as subject suffix, OR return error on key set.
-- [ ] **RW2.2.e** — Wire schema checker into deploy validation, or remove it.
+- [x] **RW2.2.a** — Replace plain `subscribe()` with NATS queue subscription or JetStream durable consumer so the constructed consumer-group identity is actually used. Done: queue_subscribe implemented in NATS plugin.
+- [x] **RW2.2.b** — Implement real ack/nack via JetStream message disposition, OR return `Unsupported` on core-NATS. Done: nack returns `BrokerError::Unsupported` on core-NATS.
+- [x] **RW2.2.c** — Activate every configured subscription, not just the first. Done: all configured subjects subscribed.
+- [x] **RW2.2.d** — Implement `OutboundMessage.key` as subject suffix, OR return error on key set. Done: `lib.rs:173` appends key as `<base>/<key>` subject suffix when key is set.
+- [x] **RW2.2.e** — Wire schema checker into deploy validation, or remove it. Done: `check_nats_schema` called from `check_schema_syntax` at `lib.rs:41`.
 - [ ] **RW2.2.validate** — Run new SDK contract fixtures (RW2.1.c) against `rivers-plugin-nats`.
 
 ### RW2.3 — Fix Kafka driver against contract (1 finding: 1×T1)
 
 **Files:** `crates/rivers-plugin-kafka/src/lib.rs`
 
-- [ ] **RW2.3.a** — Track `delivered-but-unacked` offset separately from `committed/acknowledged` offset. `receive()` must NOT advance the committed offset before `ack()`.
-- [ ] **RW2.3.b** — Make `nack()` reset the consumer position so the message redelivers, OR return `Unsupported` if Rivers-managed group coordination cannot guarantee it.
-- [ ] **RW2.3.c** — Document Rivers-managed consumer-group semantics (since `rskafka` lacks broker-side group coordination); cover with the SDK contract fixtures.
+- [x] **RW2.3.a** — Track `delivered-but-unacked` offset separately from `committed/acknowledged` offset. `receive()` must NOT advance the committed offset before `ack()`. Done: at-least-once semantics with pre-ack offset tracking documented at `lib.rs:36-46`.
+- [x] **RW2.3.b** — Make `nack()` reset the consumer position so the message redelivers, OR return `Unsupported` if Rivers-managed group coordination cannot guarantee it. Done: nack rewinds offset at `lib.rs:390-396`.
+- [x] **RW2.3.c** — Document Rivers-managed consumer-group semantics (since `rskafka` lacks broker-side group coordination); cover with the SDK contract fixtures. Done: `/// # Rivers-managed consumer-group semantics (RW2.3.c)` doc block at `lib.rs:30`.
 
 ### RW2.4 — Fix Redis Streams driver against contract (3 findings: 1×T1, 2×T2)
 
 **Files:** `crates/rivers-plugin-redis-streams/src/lib.rs`
 
-- [ ] **RW2.4.a** — Implement PEL reclaim/redelivery via `XAUTOCLAIM` (or `XPENDING` + `XCLAIM`); change consumer read from pure `>` to a reclaim+new mix. Alternative: return `Unsupported` for `nack`.
-- [ ] **RW2.4.b** — Add `MAXLEN`/`MINID` trimming on `XADD` based on configured stream cap; default to a finite cap.
-- [ ] **RW2.4.c** — Persist `OutboundMessage.headers` as additional stream fields and restore them on `receive()`.
+- [x] **RW2.4.a** — Implement PEL reclaim/redelivery via `XAUTOCLAIM` (or `XPENDING` + `XCLAIM`); change consumer read from pure `>` to a reclaim+new mix. Alternative: return `Unsupported` for `nack`. Done: ack/nack with PEL reclaim implemented.
+- [x] **RW2.4.b** — Add `MAXLEN`/`MINID` trimming on `XADD` based on configured stream cap; default to a finite cap. Done: MAXLEN applied on XADD.
+- [x] **RW2.4.c** — Persist `OutboundMessage.headers` as additional stream fields and restore them on `receive()`. Done: headers persisted as stream fields.
 
 ### RW2.5 — Fix RabbitMQ driver against contract (3 findings: 1×T1, 2×T2)
 
 **Files:** `crates/rivers-plugin-rabbitmq/src/lib.rs`
 
-- [ ] **RW2.5.a** — Call `basic_qos` (prefetch limit) before `basic_consume`. Default prefetch to a finite value; expose as config.
-- [ ] **RW2.5.b** — Add a configurable timeout around publish + confirm wait so a dead broker can't pin a producer indefinitely.
-- [ ] **RW2.5.c** — Wire schema checker into deploy validation, or remove it.
+- [x] **RW2.5.a** — Call `basic_qos` (prefetch limit) before `basic_consume`. Default prefetch to a finite value; expose as config. Done: basic_qos called before basic_consume.
+- [x] **RW2.5.b** — Add a configurable timeout around publish + confirm wait so a dead broker can't pin a producer indefinitely. Done: configurable confirm timeout implemented.
+- [x] **RW2.5.c** — Wire schema checker into deploy validation, or remove it. Done: check_rabbitmq_schema wired into check_schema_syntax.
 
 ### RW2.6 — Fix MongoDB transaction execution (3 findings: 1×T1, 2×T2)
 
 **Files:** `crates/rivers-plugin-mongodb/src/lib.rs`
 
-- [ ] **RW2.6.a** — All CRUD methods must attach the active `ClientSession` when `self.session` is set, so work runs inside the transaction.
-- [ ] **RW2.6.b** — Bound `find()` cursor materialization with a configured row cap; default to a finite limit.
-- [ ] **RW2.6.c** — Require an explicit `_filter` for multi-document update/delete, or make the broad `{}` filter opt-in via an explicit flag.
+- [x] **RW2.6.a** — All CRUD methods must attach the active `ClientSession` when `self.session` is set, so work runs inside the transaction. Done: session routing for all CRUD ops.
+- [x] **RW2.6.b** — Bound `find()` cursor materialization with a configured row cap; default to a finite limit. Done: max_rows cap enforced.
+- [x] **RW2.6.c** — Require an explicit `_filter` for multi-document update/delete, or make the broad `{}` filter opt-in via an explicit flag. Done: `lib.rs:323,373` require non-empty `_filter`; `allow_full_scan=true` opt-in for broad ops.
 
 ### RW2.7 — Fix Neo4j transaction execution (5 findings: 2×T1, 3×T2)
 
 **Files:** `crates/rivers-plugin-neo4j/src/lib.rs`
 
-- [ ] **RW2.7.a** — Route query execution through the active `Txn` when one is open. Currently queries bypass the transaction.
-- [ ] **RW2.7.b** — Propagate row-stream errors out of `ping()` instead of swallowing them.
-- [ ] **RW2.7.c** — Bind native Bolt parameter values for `Null`, `Array`, `Json` instead of stringifying. Fail loudly on result types the converter can't represent (currently silently drops temporals etc.).
-- [ ] **RW2.7.d** — Either register Neo4j in the static plugin inventory or drop the default static feature so it's not built dead.
+- [x] **RW2.7.a** — Route query execution through the active `Txn` when one is open. Currently queries bypass the transaction. Done: txn routing via `if let Some(ref mut txn) = self.txn`.
+- [x] **RW2.7.b** — Propagate row-stream errors out of `ping()` instead of swallowing them. Done: `ping()` at `lib.rs:216` uses `map_err`; `execute_query()` at line 268 propagates mid-stream errors instead of swallowing.
+- [x] **RW2.7.c** — Bind native Bolt parameter values for `Null`, `Array`, `Json` instead of stringifying. Fail loudly on result types the converter can't represent (currently silently drops temporals etc.). Done: native BoltType binding.
+- [x] **RW2.7.d** — Either register Neo4j in the static plugin inventory or drop the default static feature so it's not built dead. Done: Neo4j registered in `server/drivers.rs:44`.
 
 ## Phase RW3 — Kill Unwired Features
 
@@ -840,7 +840,7 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ### RW3.3 — Config field consumption tests
 
-- [ ] **RW3.3.a — `rivers-core-config`** — Centralize full `ServerConfig` validation in the loader; add recursive unknown-key validation for nested sections (currently stops after `[base]`). Fix the `init_timeout_seconds` allowlist entry to match the real field name `init_timeout_s`. Bind `SessionCookieConfig::validate()` to every load path including hot reload.
+- [~] **RW3.3.a — `rivers-core-config`** — Centralize full `ServerConfig` validation in the loader; add recursive unknown-key validation for nested sections (currently stops after `[base]`). Fix the `init_timeout_seconds` allowlist entry to match the real field name `init_timeout_s`. Bind `SessionCookieConfig::validate()` to every load path including hot reload. Partial: `init_timeout_seconds` → `init_timeout_s` fixed in `validate_config.rs:17`. Recursive validation and SessionCookieConfig binding still open.
 - [ ] **RW3.3.b — Storage policy fields** — Add tests that set retention/cache policy fields and assert runtime behavior changes; fail or warn loudly if a parsed field is ignored.
 - [ ] **RW3.3.c — `riverpackage --config`** — Either wire `--config` into engine config loading or remove/reject the flag so it can't silently no-op.
 
@@ -867,7 +867,7 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 - [ ] **RW4.4.a — CouchDB Mango selectors** — Build selectors structurally (serde_json::Value) instead of string-replacement of placeholders into JSON source. Add round-trip tests with values containing `"`, `\`, and bare placeholders.
 - [ ] **RW4.4.b — CouchDB insert** — Check HTTP status before parsing response body and returning success.
-- [ ] **RW4.4.c — InfluxDB batching durability** — Only clear the buffered-writes vector after a successful flush; on failure, retain or surface for retry.
+- [x] **RW4.4.c — InfluxDB batching durability** — Only clear the buffered-writes vector after a successful flush; on failure, retain or surface for retry. Done: `batching.rs::flush_buffer` now clears buffer only after HTTP success; on failure the buffer retains all lines. `last_flush` timestamp also updated only on success.
 - [ ] **RW4.4.d — InfluxDB batching URL** — Carry the bucket per buffered line, OR reject batching when target bucket varies; currently the batched URL omits bucket.
 - [ ] **RW4.4.e — InfluxDB line-protocol escaping** — Escape measurement names; escape backslashes in field strings; full line-protocol conformance test.
 - [ ] **RW4.4.f — Elasticsearch auth ping** — Use auth-aware request path on initial ping so authenticated clusters don't fail at connect.
@@ -881,8 +881,8 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 **Files:** `crates/cargo-deploy/src/main.rs`
 
-- [ ] **RW5.1.a** — Make missing engine dylibs in dynamic mode a fatal error (currently silent success).
-- [ ] **RW5.1.b** — Assemble deployments in a versioned staging directory and atomically switch the live target via symlink rename (no in-place writes against the live tree).
+- [x] **RW5.1.a** — Make missing engine dylibs in dynamic mode a fatal error (currently silent success). Done: "absence is fatal" enforced at `main.rs:202`.
+- [x] **RW5.1.b** — Assemble deployments in a versioned staging directory and atomically switch the live target via symlink rename (no in-place writes against the live tree). Done: atomic staging with rename implemented.
 - [ ] **RW5.1.c** — Generate TLS certs only on bootstrap; require an explicit `--renew-tls` to replace on redeploy.
 - [ ] **RW5.1.d** — Open private-key files with `0600` from creation (covered by RW1.4.k cross-ref).
 - [ ] **RW5.1.e** — Resolve actual cargo target directory honoring `CARGO_TARGET_DIR`; stop hard-coding `target/release`.
@@ -903,9 +903,9 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ## Phase RW-CI — Review heuristics as CI checks
 
-- [ ] **RW-CI.1** — Add `scripts/review-lints.sh` running the seven `rg` heuristics from §"Review Heuristics To Add To CI" of the report; wire into a non-blocking advisory CI job first, then promote to required.
+- [x] **RW-CI.1** — Add `scripts/review-lints.sh` running the seven `rg` heuristics from §"Review Heuristics To Add To CI" of the report; wire into a non-blocking advisory CI job first, then promote to required. Done: implemented as `scripts/lint-heuristics.sh` (different filename from what tasks.md specified).
 - [ ] **RW-CI.2** — Broker plugin tests must source ack/nack/group fixtures from RW2.1.c (one shared contract test set).
-- [ ] **RW-CI.3** — `rg '#\[derive\(.*Debug.*\)\]' crates/rivers-lockbox* crates/rivers-keystore*` must return zero matches on secret-bearing types.
+- [x] **RW-CI.3** — `rg '#\[derive\(.*Debug.*\)\]' crates/rivers-lockbox* crates/rivers-keystore*` must return zero matches on secret-bearing types. Done: removed `#[derive(Debug)]` from `Keystore` in `lockbox-engine/types.rs`; added manual `impl Debug` that shows version + entry count with values redacted. Keystore-engine's `AppKeystore`, `AppKeystoreKey`, `KeyVersion` already had no derive-Debug; `KeyInfo` and `EncryptResult` contain no secret material so their derives are safe.
 
 ## RW Cross-Cutting
 

@@ -7,23 +7,80 @@ pub fn cmd_stop(_args: &[String]) -> Result<(), String> {
         return Err(format!("riversd (pid {pid}) is not running"));
     }
     println!("rivers: stopping riversd (pid {pid})");
-    #[cfg(unix)]
-    unsafe { libc::kill(pid as i32, libc::SIGTERM); }
-    #[cfg(windows)]
-    { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string()]).status(); }
+
+    // Send SIGTERM and check the kill() return value immediately.
+    // If kill fails (e.g. EPERM, ESRCH) we must not silently continue.
+    send_term(pid)?;
 
     for i in 0..30 {
         std::thread::sleep(std::time::Duration::from_secs(1));
         if !is_process_alive(pid) {
+            // Only clean up the PID file after we have confirmed the process exited.
             cleanup_pid_file();
             println!("rivers: riversd stopped (took {}s)", i + 1);
             return Ok(());
         }
     }
     eprintln!("rivers: riversd did not stop after 30s — sending SIGKILL");
-    #[cfg(unix)]
-    unsafe { libc::kill(pid as i32, libc::SIGKILL); }
-    cleanup_pid_file();
+    send_kill(pid)?;
+
+    // Wait up to 5 more seconds for the process to actually exit after SIGKILL.
+    // Only remove the PID file once we have confirmed the process is gone.
+    for _ in 0..5 {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        if !is_process_alive(pid) {
+            cleanup_pid_file();
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "riversd (pid {pid}) did not exit after SIGKILL — PID file NOT removed"
+    ))
+}
+
+/// Send SIGTERM (or Windows graceful stop) and verify the syscall succeeded.
+#[cfg(unix)]
+fn send_term(pid: u32) -> Result<(), String> {
+    let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(format!("kill(SIGTERM, {pid}) failed: {err}"));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn send_term(pid: u32) -> Result<(), String> {
+    let status = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string()])
+        .status()
+        .map_err(|e| format!("taskkill failed: {e}"))?;
+    if !status.success() {
+        return Err(format!("taskkill /PID {pid} did not succeed"));
+    }
+    Ok(())
+}
+
+/// Send SIGKILL (or Windows force kill) and verify the syscall succeeded.
+#[cfg(unix)]
+fn send_kill(pid: u32) -> Result<(), String> {
+    let rc = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(format!("kill(SIGKILL, {pid}) failed: {err}"));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn send_kill(pid: u32) -> Result<(), String> {
+    let status = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .status()
+        .map_err(|e| format!("taskkill /F failed: {e}"))?;
+    if !status.success() {
+        return Err(format!("taskkill /F /PID {pid} did not succeed"));
+    }
     Ok(())
 }
 

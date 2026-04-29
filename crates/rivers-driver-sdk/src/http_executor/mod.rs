@@ -585,4 +585,63 @@ mod tests {
         let result = driver.connect(&params).await;
         assert!(result.is_ok());
     }
+
+    // ── RW1.1.d — saturating retry backoff arithmetic ────────────
+
+    #[test]
+    fn test_retry_backoff_64_retries_converges_to_max() {
+        // 64 retries with base=1s and 2× factor — without saturating_mul
+        // this would overflow u64 long before max_delay_ms is applied.
+        let conn = ReqwestHttpConnection {
+            client: reqwest::Client::new(),
+            base_url: "https://example.com".to_string(),
+            auth_state: AuthState::None,
+            retry_config: Some(RetryConfig {
+                attempts: 64,
+                backoff: BackoffStrategy::Exponential,
+                base_delay_ms: 1_000,
+                max_delay_ms: 30_000,
+                retry_on_status: vec![503],
+                retry_on_timeout: true,
+            }),
+            circuit_breaker: None,
+            default_timeout_ms: 5000,
+            session_claims: None,
+        };
+
+        // Every attempt from attempt 6 onward should be capped at max_delay_ms.
+        for attempt in 1u32..=64 {
+            let d = conn.retry_delay(attempt);
+            assert!(
+                d <= Duration::from_millis(30_000),
+                "attempt {attempt}: delay {d:?} exceeded max_delay_ms"
+            );
+        }
+
+        // High attempts must converge to exactly max_delay_ms.
+        assert_eq!(conn.retry_delay(64), Duration::from_millis(30_000));
+    }
+
+    #[test]
+    fn test_retry_backoff_no_overflow_panic() {
+        // Verifies u64::MAX-level exponents do not panic (saturating_pow).
+        let conn = ReqwestHttpConnection {
+            client: reqwest::Client::new(),
+            base_url: "https://example.com".to_string(),
+            auth_state: AuthState::None,
+            retry_config: Some(RetryConfig {
+                attempts: u32::MAX,
+                backoff: BackoffStrategy::Exponential,
+                base_delay_ms: u64::MAX,
+                max_delay_ms: 5_000,
+                retry_on_status: vec![],
+                retry_on_timeout: false,
+            }),
+            circuit_breaker: None,
+            default_timeout_ms: 5000,
+            session_claims: None,
+        };
+        // Should not panic, must return max_delay_ms.
+        assert_eq!(conn.retry_delay(u32::MAX), Duration::from_millis(5_000));
+    }
 }

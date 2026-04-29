@@ -10,6 +10,8 @@
 
 use std::path::Path;
 
+use rivers_driver_sdk::{HttpMethod, SchemaDefinition, SchemaSyntaxError};
+
 use crate::loader::LoadedBundle;
 use crate::validate_engine::EngineHandles;
 use crate::validate_result::{error_codes, ValidationResult};
@@ -30,22 +32,48 @@ pub fn validate_syntax(
         let app_name = &app.manifest.app_name;
         let app_dir = &app.app_dir;
 
-        // ── Schema JSON validation (C006-C008) ──────────────────────
+        // ── Schema JSON validation (C006-C009) ──────────────────────
         for (dv_name, dv) in &app.config.data.dataviews {
-            let schema_refs = [
-                dv.return_schema.as_deref(),
-                dv.get_schema.as_deref(),
-                dv.post_schema.as_deref(),
-                dv.put_schema.as_deref(),
-                dv.delete_schema.as_deref(),
+            // Look up the driver name so broker-specific checks can run (C009).
+            let driver_name = app
+                .config
+                .data
+                .datasources
+                .get(&dv.datasource)
+                .map(|ds| ds.driver.as_str())
+                .unwrap_or("");
+
+            // (method, schema_ref) pairs — method is used for broker schema checks.
+            let schema_refs: &[(Option<HttpMethod>, Option<&str>)] = &[
+                (Some(HttpMethod::GET), dv.return_schema.as_deref()),
+                (Some(HttpMethod::GET), dv.get_schema.as_deref()),
+                (Some(HttpMethod::POST), dv.post_schema.as_deref()),
+                (Some(HttpMethod::PUT), dv.put_schema.as_deref()),
+                (Some(HttpMethod::DELETE), dv.delete_schema.as_deref()),
             ];
-            for schema_ref in schema_refs.into_iter().flatten() {
+            for (method, schema_ref) in schema_refs.iter() {
+                let Some(schema_ref) = schema_ref else { continue };
                 let schema_path = app_dir.join(schema_ref);
                 let display_path = format!("{}/{}", app_name, schema_ref);
                 if schema_path.exists() {
                     let schema_results =
                         validate_schema_json(&schema_path, &display_path, app_name, dv_name);
                     results.extend(schema_results);
+
+                    // C009: driver-specific broker schema constraints.
+                    if matches!(driver_name, "nats" | "rabbitmq" | "kafka") {
+                        if let Some(method) = method {
+                            let broker_results = validate_broker_schema(
+                                &schema_path,
+                                &display_path,
+                                app_name,
+                                dv_name,
+                                driver_name,
+                                *method,
+                            );
+                            results.extend(broker_results);
+                        }
+                    }
                 }
                 // Missing files are handled by Layer 2 (existence checks).
             }
@@ -363,6 +391,139 @@ pub fn validate_schema_json(
     }
 
     results
+}
+
+// ── Broker Schema Validation (C009) ────────────────────────────
+
+/// Validate driver-specific broker schema constraints (C009).
+///
+/// Called after structural JSON validation (`validate_schema_json`) for dataviews
+/// backed by broker drivers. Deserializes the schema as a `SchemaDefinition` and
+/// applies the same rules as the driver's `check_schema_syntax` implementation so
+/// the validation pipeline catches missing fields (e.g. NATS requires `subject`)
+/// at build time rather than silently accepting invalid configs.
+fn validate_broker_schema(
+    path: &Path,
+    display_path: &str,
+    app_name: &str,
+    _dv_name: &str,
+    driver_name: &str,
+    method: HttpMethod,
+) -> Vec<ValidationResult> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let schema: SchemaDefinition = match serde_json::from_str(&content) {
+        Ok(s) => s,
+        Err(_) => return vec![], // C006 already reported by validate_schema_json
+    };
+    let result = check_broker_schema_syntax(driver_name, &schema, method);
+    match result {
+        Ok(()) => vec![],
+        Err(e) => vec![
+            ValidationResult::fail(
+                error_codes::C009,
+                display_path,
+                format!("broker schema constraint: {e}"),
+            )
+            .with_app(app_name),
+        ],
+    }
+}
+
+/// Driver-specific schema constraint checking for broker drivers.
+///
+/// Mirrors the logic in each broker plugin's `check_schema_syntax` so that
+/// `rivers-runtime` can validate without depending on the plugin crates.
+fn check_broker_schema_syntax(
+    driver_name: &str,
+    schema: &SchemaDefinition,
+    method: HttpMethod,
+) -> Result<(), SchemaSyntaxError> {
+    match driver_name {
+        "nats" => {
+            if schema.schema_type != "message" {
+                return Err(SchemaSyntaxError::UnsupportedType {
+                    schema_type: schema.schema_type.clone(),
+                    driver: "nats".into(),
+                    supported: vec!["message".into()],
+                    schema_file: String::new(),
+                });
+            }
+            if !schema.extra.contains_key("subject") {
+                return Err(SchemaSyntaxError::MissingRequiredField {
+                    field: "subject".into(),
+                    driver: "nats".into(),
+                    schema_file: String::new(),
+                });
+            }
+            if matches!(method, HttpMethod::PUT | HttpMethod::DELETE) {
+                return Err(SchemaSyntaxError::UnsupportedMethod {
+                    method: method.as_str().into(),
+                    driver: "nats".into(),
+                    schema_file: String::new(),
+                });
+            }
+        }
+        "rabbitmq" => {
+            if schema.schema_type != "message" {
+                return Err(SchemaSyntaxError::UnsupportedType {
+                    schema_type: schema.schema_type.clone(),
+                    driver: "rabbitmq".into(),
+                    supported: vec!["message".into()],
+                    schema_file: String::new(),
+                });
+            }
+            if method == HttpMethod::POST && !schema.extra.contains_key("exchange") {
+                return Err(SchemaSyntaxError::MissingRequiredField {
+                    field: "exchange".into(),
+                    driver: "rabbitmq".into(),
+                    schema_file: String::new(),
+                });
+            }
+            if method == HttpMethod::GET && !schema.extra.contains_key("queue") {
+                return Err(SchemaSyntaxError::MissingRequiredField {
+                    field: "queue".into(),
+                    driver: "rabbitmq".into(),
+                    schema_file: String::new(),
+                });
+            }
+            if matches!(method, HttpMethod::PUT | HttpMethod::DELETE) {
+                return Err(SchemaSyntaxError::UnsupportedMethod {
+                    method: method.as_str().into(),
+                    driver: "rabbitmq".into(),
+                    schema_file: String::new(),
+                });
+            }
+        }
+        "kafka" => {
+            if schema.schema_type != "message" {
+                return Err(SchemaSyntaxError::UnsupportedType {
+                    schema_type: schema.schema_type.clone(),
+                    driver: "kafka".into(),
+                    supported: vec!["message".into()],
+                    schema_file: String::new(),
+                });
+            }
+            if !schema.extra.contains_key("topic") {
+                return Err(SchemaSyntaxError::MissingRequiredField {
+                    field: "topic".into(),
+                    driver: "kafka".into(),
+                    schema_file: String::new(),
+                });
+            }
+            if matches!(method, HttpMethod::PUT | HttpMethod::DELETE) {
+                return Err(SchemaSyntaxError::UnsupportedMethod {
+                    method: method.as_str().into(),
+                    driver: "kafka".into(),
+                    schema_file: String::new(),
+                });
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 // ── Import Path Resolution ──────────────────────────────────────

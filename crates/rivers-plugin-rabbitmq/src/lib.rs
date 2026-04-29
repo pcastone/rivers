@@ -10,18 +10,26 @@ use futures_lite::StreamExt;
 use lapin::{
     options::{
         BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicPublishOptions,
-        QueueDeclareOptions,
+        BasicQosOptions, QueueDeclareOptions,
     },
     types::FieldTable,
     BasicProperties, Channel, Connection as AmqpConnection, ConnectionProperties, Consumer,
 };
 use rivers_driver_sdk::{
-    BrokerConsumer, BrokerConsumerConfig, BrokerMetadata, BrokerProducer, ConnectionParams,
-    DriverError, DriverRegistrar, InboundMessage, MessageBrokerDriver, MessageReceipt,
-    OutboundMessage, PublishReceipt, ABI_VERSION,
+    url_encode_path_segment,
+    AckOutcome, BrokerConsumer, BrokerConsumerConfig, BrokerError, BrokerMetadata, BrokerProducer,
+    BrokerSemantics, ConnectionParams, DriverError, DriverRegistrar, InboundMessage,
+    MessageBrokerDriver, MessageReceipt, OutboundMessage, PublishReceipt, ABI_VERSION,
 };
 
 // ── Driver ─────────────────────────────────────────────────────────
+
+/// Default prefetch count for RabbitMQ consumers (RW2.5.a).
+///
+/// Limits the number of unacknowledged messages the broker will push to this
+/// consumer at a time. A value of 10 balances throughput vs. memory pressure.
+/// Override via `options.prefetch_count` in the datasource config.
+const DEFAULT_PREFETCH_COUNT: u16 = 10;
 
 /// RabbitMQ driver factory — creates producers and consumers via AMQP 0.9.1.
 pub struct RabbitMqDriver;
@@ -30,6 +38,19 @@ pub struct RabbitMqDriver;
 impl MessageBrokerDriver for RabbitMqDriver {
     fn name(&self) -> &str {
         "rabbitmq"
+    }
+
+    /// RabbitMQ with manual ack + basic.nack provides at-least-once delivery.
+    fn semantics(&self) -> BrokerSemantics {
+        BrokerSemantics::AtLeastOnce
+    }
+
+    fn check_schema_syntax(
+        &self,
+        schema: &rivers_driver_sdk::SchemaDefinition,
+        method: rivers_driver_sdk::HttpMethod,
+    ) -> Result<(), rivers_driver_sdk::SchemaSyntaxError> {
+        check_rabbitmq_schema(schema, method)
     }
 
     async fn create_producer(
@@ -64,7 +85,14 @@ impl MessageBrokerDriver for RabbitMqDriver {
             .await
             .map_err(|e| DriverError::Connection(format!("rabbitmq confirm_select: {e}")))?;
 
-        Ok(Box::new(RabbitProducer { _conn: connection, channel, queue }))
+        // RW2.5.b: configurable confirm timeout.
+        let confirm_timeout_ms = params
+            .options
+            .get("confirm_timeout_ms")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_PUBLISH_CONFIRM_TIMEOUT_MS);
+
+        Ok(Box::new(RabbitProducer { _conn: connection, channel, queue, confirm_timeout_ms }))
     }
 
     async fn create_consumer(
@@ -98,6 +126,21 @@ impl MessageBrokerDriver for RabbitMqDriver {
             config.group_prefix, config.app_id, config.datasource_id
         );
 
+        // RW2.5.a: call basic_qos before basic_consume to set prefetch limit.
+        // This prevents the broker from flooding the consumer with more messages
+        // than it can process, bounding memory use and enabling fair dispatch
+        // across multiple consumers on the same queue.
+        let prefetch_count = params
+            .options
+            .get("prefetch_count")
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(DEFAULT_PREFETCH_COUNT);
+
+        channel
+            .basic_qos(prefetch_count, BasicQosOptions::default())
+            .await
+            .map_err(|e| DriverError::Connection(format!("rabbitmq basic_qos: {e}")))?;
+
         let consumer = channel
             .basic_consume(
                 &queue,
@@ -122,7 +165,7 @@ async fn amqp_connect(params: &ConnectionParams) -> Result<AmqpConnection, Drive
     let vhost = params
         .options
         .get("vhost")
-        .map(|v| urlencoding_encode(v))
+        .map(|v| url_encode_path_segment(v))
         .unwrap_or_else(|| "%2f".to_string());
 
     let url = if params.username.is_empty() {
@@ -130,8 +173,8 @@ async fn amqp_connect(params: &ConnectionParams) -> Result<AmqpConnection, Drive
     } else {
         format!(
             "amqp://{}:{}@{}:{}/{}",
-            urlencoding_encode(&params.username),
-            urlencoding_encode(&params.password),
+            url_encode_path_segment(&params.username),
+            url_encode_path_segment(&params.password),
             params.host,
             params.port,
             vhost,
@@ -143,21 +186,6 @@ async fn amqp_connect(params: &ConnectionParams) -> Result<AmqpConnection, Drive
         .map_err(|e| DriverError::Connection(format!("rabbitmq connect: {e}")))
 }
 
-/// Minimal percent-encoding for AMQP URL components.
-fn urlencoding_encode(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for b in input.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => {
-                out.push_str(&format!("%{:02X}", b));
-            }
-        }
-    }
-    out
-}
 
 /// Resolve queue name from config subscriptions or connection params fallback.
 fn resolve_queue(config: &BrokerConsumerConfig, params: &ConnectionParams) -> String {
@@ -170,11 +198,19 @@ fn resolve_queue(config: &BrokerConsumerConfig, params: &ConnectionParams) -> St
 
 // ── Producer ───────────────────────────────────────────────────────
 
-/// RabbitMQ producer — publishes messages with publisher confirms.
+/// Default publish confirm timeout in milliseconds (RW2.5.b).
+const DEFAULT_PUBLISH_CONFIRM_TIMEOUT_MS: u64 = 5_000;
+
+/// RabbitMQ producer — publishes messages with publisher confirms and configurable timeout.
+///
+/// RW2.5.b: the confirm await is wrapped in a tokio::time::timeout to prevent
+/// blocking indefinitely when the broker is slow or unresponsive.
 pub struct RabbitProducer {
     _conn: AmqpConnection,
     channel: Channel,
     queue: String,
+    /// Timeout for the publisher confirm in milliseconds.
+    confirm_timeout_ms: u64,
 }
 
 #[async_trait]
@@ -200,7 +236,10 @@ impl BrokerProducer for RabbitProducer {
             properties = properties.with_headers(table);
         }
 
-        let confirm = self
+        // RW2.5.b: wrap the publish + confirm in a configurable timeout.
+        // The first .await submits the publish; the second .await waits for the
+        // broker's ack/nack confirm. The timeout applies to the confirm phase.
+        let confirm_future = self
             .channel
             .basic_publish(
                 "",
@@ -210,8 +249,17 @@ impl BrokerProducer for RabbitProducer {
                 properties,
             )
             .await
-            .map_err(|e| DriverError::Query(format!("rabbitmq publish: {e}")))?
+            .map_err(|e| DriverError::Query(format!("rabbitmq publish: {e}")))?;
+
+        let timeout_dur = std::time::Duration::from_millis(self.confirm_timeout_ms);
+        let confirm = tokio::time::timeout(timeout_dur, confirm_future)
             .await
+            .map_err(|_| {
+                DriverError::Query(format!(
+                    "rabbitmq publish confirm timed out after {}ms",
+                    self.confirm_timeout_ms
+                ))
+            })?
             .map_err(|e| DriverError::Query(format!("rabbitmq publish confirm: {e}")))?;
 
         if !confirm.is_ack() {
@@ -298,23 +346,26 @@ impl BrokerConsumer for RabbitConsumer {
         })
     }
 
-    async fn ack(&mut self, receipt: &MessageReceipt) -> Result<(), DriverError> {
+    async fn ack(&mut self, receipt: &MessageReceipt) -> Result<AckOutcome, BrokerError> {
         let tag: u64 = receipt
             .handle
             .parse()
-            .map_err(|_| DriverError::Internal("invalid rabbitmq delivery tag in receipt".into()))?;
-        self.channel
-            .basic_ack(tag, BasicAckOptions::default())
-            .await
-            .map_err(|e| DriverError::Query(format!("rabbitmq ack: {e}")))?;
-        Ok(())
+            .map_err(|_| BrokerError::Protocol("invalid rabbitmq delivery tag in receipt".into()))?;
+        match self.channel.basic_ack(tag, BasicAckOptions::default()).await {
+            Ok(()) => Ok(AckOutcome::Acked),
+            // AMQP 406 PRECONDITION-FAILED means the delivery tag was already acked.
+            Err(lapin::Error::ProtocolError(ref e)) if e.get_id() == 406 => {
+                Ok(AckOutcome::AlreadyAcked)
+            }
+            Err(e) => Err(BrokerError::Transport(format!("rabbitmq ack: {e}"))),
+        }
     }
 
-    async fn nack(&mut self, receipt: &MessageReceipt) -> Result<(), DriverError> {
+    async fn nack(&mut self, receipt: &MessageReceipt) -> Result<AckOutcome, BrokerError> {
         let tag: u64 = receipt
             .handle
             .parse()
-            .map_err(|_| DriverError::Internal("invalid rabbitmq delivery tag in receipt".into()))?;
+            .map_err(|_| BrokerError::Protocol("invalid rabbitmq delivery tag in receipt".into()))?;
         self.channel
             .basic_nack(
                 tag,
@@ -324,8 +375,8 @@ impl BrokerConsumer for RabbitConsumer {
                 },
             )
             .await
-            .map_err(|e| DriverError::Query(format!("rabbitmq nack: {e}")))?;
-        Ok(())
+            .map_err(|e| BrokerError::Transport(format!("rabbitmq nack: {e}")))?;
+        Ok(AckOutcome::Acked)
     }
 
     async fn close(&mut self) -> Result<(), DriverError> {
@@ -455,6 +506,22 @@ mod tests {
     }
 
     #[test]
+    fn rabbitmq_driver_semantics_is_at_least_once() {
+        let driver = RabbitMqDriver;
+        assert_eq!(driver.semantics(), rivers_driver_sdk::BrokerSemantics::AtLeastOnce);
+    }
+
+    #[test]
+    fn default_prefetch_count_is_ten() {
+        assert_eq!(DEFAULT_PREFETCH_COUNT, 10);
+    }
+
+    #[test]
+    fn default_publish_confirm_timeout_is_five_seconds() {
+        assert_eq!(DEFAULT_PUBLISH_CONFIRM_TIMEOUT_MS, 5_000);
+    }
+
+    #[test]
     fn resolve_queue_uses_subscription_first() {
         let config = test_config();
         let params = bad_params();
@@ -469,18 +536,18 @@ mod tests {
     }
 
     #[test]
-    fn urlencoding_encodes_special_chars() {
-        assert_eq!(urlencoding_encode("hello world"), "hello%20world");
-        assert_eq!(urlencoding_encode("user@host"), "user%40host");
-        assert_eq!(urlencoding_encode("p@ss:w0rd!"), "p%40ss%3Aw0rd%21");
-        assert_eq!(urlencoding_encode("simple"), "simple");
-        assert_eq!(urlencoding_encode("a/b"), "a%2Fb");
+    fn url_encode_path_segments_special_chars() {
+        assert_eq!(url_encode_path_segment("hello world"), "hello%20world");
+        assert_eq!(url_encode_path_segment("user@host"), "user%40host");
+        assert_eq!(url_encode_path_segment("p@ss:w0rd!"), "p%40ss%3Aw0rd%21");
+        assert_eq!(url_encode_path_segment("simple"), "simple");
+        assert_eq!(url_encode_path_segment("a/b"), "a%2Fb");
     }
 
     #[test]
     fn urlencoding_preserves_unreserved_chars() {
         // RFC 3986 unreserved: A-Z a-z 0-9 - _ . ~
-        assert_eq!(urlencoding_encode("AZaz09-_.~"), "AZaz09-_.~");
+        assert_eq!(url_encode_path_segment("AZaz09-_.~"), "AZaz09-_.~");
     }
 
     #[tokio::test]

@@ -233,9 +233,10 @@ pub async fn load_and_wire_bundle(
                 ks_decl.name,
             )))?;
 
-            // The resolved value IS the Age identity string for the keystore
-            let master_key = resolved.value.clone();
-            resolved.value.zeroize();
+            // The resolved value IS the Age identity string for the keystore.
+            // Clone the inner string from the Zeroizing wrapper; the wrapper's
+            // own zeroize-on-drop handles cleanup of both copies.
+            let master_key = zeroize::Zeroizing::new((*resolved.value).clone());
 
             // 4. Load and decrypt the keystore
             let keystore = rivers_keystore_engine::AppKeystore::load(&ks_path, &master_key)
@@ -396,9 +397,8 @@ pub async fn load_and_wire_bundle(
                         identity_str.trim(),
                     )
                     .map_err(|e| ServerError::Config(format!("lockbox fetch: {e}")))?;
-                    params.password = resolved.value.clone();
-                    // Zeroize per SHAPE-5
-                    resolved.value.zeroize();
+                    // Copy the secret value out; ResolvedEntry.value zeroizes on drop.
+                    params.password = (*resolved.value).clone();
                     tracing::info!(datasource = %ds.name, "lockbox: credential loaded");
                 }
             }

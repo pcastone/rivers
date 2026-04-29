@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::error::DriverError;
-use crate::traits::ConnectionParams;
+use crate::traits::{ConnectionParams, HttpMethod, SchemaDefinition, SchemaSyntaxError};
 
 // ── Message Types ───────────────────────────────────────────────────
 
@@ -189,6 +189,55 @@ pub struct FailurePolicyHandler {
     pub module: String,
 }
 
+// ── Broker Semantics Contract ───────────────────────────────────────
+
+/// Delivery semantics guaranteed by a broker driver.
+///
+/// Per spec §3.4: each driver declares which semantics it can honor.
+/// The BrokerConsumerBridge uses this to decide whether to call
+/// `ack()`/`nack()` or treat them as no-ops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrokerSemantics {
+    /// Ack/nack are honored; an un-acked (nacked) message will be redelivered.
+    ///
+    /// Examples: Kafka (Rivers-managed offset), RabbitMQ (AMQP basic.nack + requeue),
+    /// Redis Streams (PEL + XAUTOCLAIM).
+    AtLeastOnce,
+    /// No ack/nack tracking; the broker delivers each message at most once.
+    ///
+    /// Example: NATS core pub/sub (fire-and-forget to all current subscribers).
+    AtMostOnce,
+    /// Neither ack nor redelivery is tracked — messages are consumed and gone.
+    ///
+    /// Reserved for future use.
+    FireAndForget,
+}
+
+/// Outcome of a successful `ack()` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AckOutcome {
+    /// The message was acknowledged for the first time.
+    Acked,
+    /// The message had already been acknowledged (idempotent re-ack).
+    AlreadyAcked,
+}
+
+/// Broker-level error distinct from transport-level [`DriverError`].
+///
+/// Returned by `ack()` and `nack()` on `BrokerConsumer`.
+#[derive(Debug, thiserror::Error)]
+pub enum BrokerError {
+    /// This driver cannot honor the requested operation (e.g., nack on NATS core).
+    #[error("broker operation not supported by this driver")]
+    Unsupported,
+    /// A network or protocol-level transport failure.
+    #[error("broker transport error: {0}")]
+    Transport(String),
+    /// A broker protocol-level error (unexpected response, framing, etc.).
+    #[error("broker protocol error: {0}")]
+    Protocol(String),
+}
+
 // ── Broker Traits ───────────────────────────────────────────────────
 
 /// A named, stateless factory that creates broker producer and consumer instances.
@@ -199,6 +248,15 @@ pub struct FailurePolicyHandler {
 pub trait MessageBrokerDriver: Send + Sync {
     /// Unique name for this broker driver (e.g. "kafka", "rabbitmq", "nats").
     fn name(&self) -> &str;
+
+    /// Delivery semantics this driver can guarantee.
+    ///
+    /// The BrokerConsumerBridge uses this to decide how to handle
+    /// `ack()`/`nack()` results. Defaults to `AtLeastOnce` for backward
+    /// compatibility; drivers that cannot honor redelivery override this.
+    fn semantics(&self) -> BrokerSemantics {
+        BrokerSemantics::AtLeastOnce
+    }
 
     /// Create a new producer instance.
     async fn create_producer(
@@ -213,6 +271,21 @@ pub trait MessageBrokerDriver: Send + Sync {
         params: &ConnectionParams,
         config: &BrokerConsumerConfig,
     ) -> Result<Box<dyn BrokerConsumer>, DriverError>;
+
+    /// Build/deploy time — is this schema structurally valid for this driver?
+    ///
+    /// Per driver-schema-validation-spec §3.2: receives the HTTP method to
+    /// enforce method-specific rules (e.g., PUT/DELETE unsupported for broker schemas).
+    ///
+    /// Default implementation accepts all schemas — drivers that enforce schema
+    /// rules (kafka, nats, rabbitmq) override this.
+    fn check_schema_syntax(
+        &self,
+        _schema: &SchemaDefinition,
+        _method: HttpMethod,
+    ) -> Result<(), SchemaSyntaxError> {
+        Ok(())
+    }
 }
 
 /// A continuous consumer that receives messages from a broker.
@@ -225,10 +298,18 @@ pub trait BrokerConsumer: Send + Sync {
     async fn receive(&mut self) -> Result<InboundMessage, DriverError>;
 
     /// Acknowledge successful processing of a message.
-    async fn ack(&mut self, receipt: &MessageReceipt) -> Result<(), DriverError>;
+    ///
+    /// Returns `Ok(AckOutcome::Acked)` on first ack, `Ok(AckOutcome::AlreadyAcked)`
+    /// if the message was already acknowledged (idempotent).
+    /// Returns `Err(BrokerError::Unsupported)` if the driver's semantics do not
+    /// support acknowledgement (e.g., `AtMostOnce` drivers).
+    async fn ack(&mut self, receipt: &MessageReceipt) -> Result<AckOutcome, BrokerError>;
 
     /// Negatively acknowledge a message (reject/requeue).
-    async fn nack(&mut self, receipt: &MessageReceipt) -> Result<(), DriverError>;
+    ///
+    /// Drivers that cannot honor redelivery (e.g., NATS core) MUST return
+    /// `Err(BrokerError::Unsupported)` rather than `Ok(())`.
+    async fn nack(&mut self, receipt: &MessageReceipt) -> Result<AckOutcome, BrokerError>;
 
     /// Close the consumer gracefully.
     async fn close(&mut self) -> Result<(), DriverError>;

@@ -93,7 +93,10 @@ pub use rivers_core_config::LockBoxConfig;
 /// Plaintext TOML schema inside the Age envelope.
 ///
 /// Per spec S2.2.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is not derived — entry values are secret material.
+/// The manual `Debug` impl redacts entries and shows only version + count.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Keystore {
     /// Schema version (currently 1).
     #[serde(default = "default_version")]
@@ -118,6 +121,15 @@ impl Drop for Keystore {
     }
 }
 
+impl std::fmt::Debug for Keystore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Keystore")
+            .field("version", &self.version)
+            .field("entries", &format_args!("[{} entries, values redacted]", self.entries.len()))
+            .finish()
+    }
+}
+
 pub(crate) fn default_version() -> u32 {
     1
 }
@@ -125,7 +137,7 @@ pub(crate) fn default_version() -> u32 {
 /// A single secret entry in the keystore.
 ///
 /// Per spec S3.1.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct KeystoreEntry {
     /// Registry key for this entry within the keystore. Must be unique.
     /// Used in `lockbox://` URIs to reference secrets from datasource configs.
@@ -180,6 +192,23 @@ impl Zeroize for KeystoreEntry {
 impl Drop for KeystoreEntry {
     fn drop(&mut self) {
         self.zeroize();
+    }
+}
+
+impl std::fmt::Debug for KeystoreEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeystoreEntry")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .field("entry_type", &self.entry_type)
+            .field("aliases", &self.aliases)
+            .field("created", &self.created)
+            .field("updated", &self.updated)
+            .field("driver", &self.driver)
+            .field("username", &self.username)
+            .field("hosts", &self.hosts)
+            .field("database", &self.database)
+            .finish()
     }
 }
 

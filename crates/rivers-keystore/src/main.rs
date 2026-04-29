@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use rivers_keystore_engine::AppKeystore;
+use zeroize::Zeroizing;
 
 // ── CLI definition ──────────────────────────────────────────────────
 
@@ -26,6 +27,10 @@ enum Command {
         /// Path to the keystore file
         #[arg(long)]
         path: PathBuf,
+
+        /// Overwrite an existing keystore file
+        #[arg(long)]
+        force: bool,
     },
 
     /// Generate and store a new encryption key
@@ -83,11 +88,13 @@ enum Command {
 // ── Helpers ─────────────────────────────────────────────────────────
 
 /// Read and validate the Age identity from the env var.
-/// Returns (raw key string, parsed identity).
-fn read_identity() -> Result<(String, age::x25519::Identity), String> {
+///
+/// The raw key string is wrapped in `Zeroizing<String>` so its bytes are
+/// zeroed when the returned tuple is dropped.
+fn read_identity() -> Result<(Zeroizing<String>, age::x25519::Identity), String> {
     let key = std::env::var("RIVERS_KEYSTORE_KEY")
         .map_err(|_| "RIVERS_KEYSTORE_KEY env var not set".to_string())?;
-    let trimmed = key.trim().to_string();
+    let trimmed = Zeroizing::new(key.trim().to_string());
     let identity = trimmed
         .parse::<age::x25519::Identity>()
         .map_err(|_| "RIVERS_KEYSTORE_KEY is not a valid Age identity".to_string())?;
@@ -110,7 +117,15 @@ fn save_keystore(keystore: &AppKeystore, path: &Path) -> Result<(), String> {
 
 // ── Commands ────────────────────────────────────────────────────────
 
-fn cmd_init(path: &Path) -> Result<(), String> {
+fn cmd_init(path: &Path, force: bool) -> Result<(), String> {
+    // Refuse to silently overwrite an existing keystore unless --force is set.
+    if path.exists() && !force {
+        return Err(format!(
+            "keystore already exists: {} — use --force to overwrite",
+            path.display()
+        ));
+    }
+
     let (_key_str, identity) = read_identity()?;
     let recipient = identity.to_public();
     AppKeystore::create(path, &recipient.to_string())
@@ -197,7 +212,7 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Command::Init { ref path } => cmd_init(path),
+        Command::Init { ref path, force } => cmd_init(path, force),
         Command::Generate {
             ref name,
             ref key_type,

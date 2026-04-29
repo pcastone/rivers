@@ -35,7 +35,13 @@ pub fn register_all_drivers(
             ("kafka",          Box::new(|f| { f.register_broker_driver(A::new(rivers_plugin_kafka::KafkaDriver)); })),
             ("rabbitmq",       Box::new(|f| { f.register_broker_driver(A::new(rivers_plugin_rabbitmq::RabbitMqDriver)); })),
             ("nats",           Box::new(|f| { f.register_broker_driver(A::new(rivers_plugin_nats::NatsDriver)); })),
+            // RW2.7.e: redis-streams was compiled in via Cargo.toml but was never
+            // registered here — bundles using redis-streams would silently fail validation.
+            ("redis-streams",  Box::new(|f| { f.register_broker_driver(A::new(rivers_plugin_redis_streams::RedisStreamsDriver)); })),
             ("rivers-exec",    Box::new(|f| { f.register_database_driver(A::new(rivers_plugin_exec::ExecDriver)); })),
+            // RW2.7.d: neo4j was listed in Cargo.toml as optional but was not
+            // registered here. Added to complete the static-plugin inventory.
+            ("neo4j",          Box::new(|f| { f.register_database_driver(A::new(rivers_plugin_neo4j::Neo4jDriver)); })),
         ];
         for (name, register_fn) in static_plugins {
             if ignore.iter().any(|i| i == name) {
@@ -48,5 +54,78 @@ pub fn register_all_drivers(
 
     if !ignore.is_empty() {
         tracing::info!(ignored = ?ignore, "drivers ignored — bundles referencing these will fail validation");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that every expected driver name is registered by `register_all_drivers()`.
+    ///
+    /// This test uses the `static-plugins` + `static-builtin-drivers` features to compile
+    /// all drivers in. If a driver is removed from the static list, this test fails,
+    /// preventing silent inventory drift.
+    #[test]
+    #[cfg(all(feature = "static-plugins", feature = "static-builtin-drivers"))]
+    fn static_plugin_inventory_is_complete() {
+        let mut factory = rivers_runtime::rivers_core::DriverFactory::new();
+        register_all_drivers(&mut factory, &[]);
+
+        let db_names: Vec<&str> = factory.driver_names();
+        let broker_names: Vec<&str> = factory.broker_driver_names();
+        let all_names: Vec<&str> = db_names.iter().chain(broker_names.iter()).copied().collect();
+
+        let expected: &[&str] = &[
+            "cassandra",
+            "couchdb",
+            "mongodb",
+            "elasticsearch",
+            "influxdb",
+            "ldap",
+            "kafka",
+            "rabbitmq",
+            "nats",
+            "redis-streams",
+            "rivers-exec",
+            "neo4j",
+        ];
+
+        let mut missing: Vec<&str> = Vec::new();
+        for name in expected {
+            if !all_names.contains(name) {
+                missing.push(name);
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "static plugin inventory is incomplete — missing drivers: {:?}\n\
+             registered database drivers: {:?}\n\
+             registered broker drivers: {:?}",
+            missing,
+            factory.driver_names(),
+            factory.broker_driver_names(),
+        );
+    }
+
+    /// Verify that `register_all_drivers` respects the ignore list.
+    #[test]
+    #[cfg(all(feature = "static-plugins", feature = "static-builtin-drivers"))]
+    fn ignored_drivers_are_not_registered() {
+        let mut factory = rivers_runtime::rivers_core::DriverFactory::new();
+        register_all_drivers(&mut factory, &["cassandra".to_string(), "nats".to_string()]);
+
+        let db_names = factory.driver_names();
+        let broker_names = factory.broker_driver_names();
+
+        assert!(
+            !db_names.contains(&"cassandra"),
+            "cassandra should be ignored"
+        );
+        assert!(
+            !broker_names.contains(&"nats"),
+            "nats should be ignored"
+        );
     }
 }

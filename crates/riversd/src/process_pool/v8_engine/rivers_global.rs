@@ -641,7 +641,7 @@ pub(super) fn inject_rivers_global(
                         let resolved = rivers_runtime::rivers_core::lockbox::fetch_secret_value(
                             metadata, &ctx.keystore_path, &ctx.identity_str,
                         ).map_err(|e| format!("lockbox fetch failed: {e}"))?;
-                        Ok(resolved.value)
+                        Ok(resolved.value.as_str().to_string())
                     }
                     None => {
                         // No lockbox configured -- use as raw key (dev/test mode)

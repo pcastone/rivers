@@ -571,6 +571,8 @@ pub mod error_codes {
     pub const C007: &str = "C007";
     /// Schema `required` array references property not in `properties`.
     pub const C008: &str = "C008";
+    /// Driver-specific schema constraint violated (e.g. missing subject for NATS).
+    pub const C009: &str = "C009";
 
     // ── L: Live checks (Gate 2 only) ────────────────────────────────
 

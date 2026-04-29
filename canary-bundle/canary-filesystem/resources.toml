@@ -1,5 +1,5 @@
 [[datasources]]
-name       = "fs"
+name       = "canary-fs"
 driver     = "filesystem"
 x-type     = "filesystem"
 nopassword = true

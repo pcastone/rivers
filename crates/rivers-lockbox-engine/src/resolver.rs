@@ -47,15 +47,32 @@ impl EntryMetadata {
 
 /// Resolved credential fetched on demand from disk.
 ///
-/// Values are decrypted per-access and should be zeroized after use.
-#[derive(Debug, Clone)]
+/// Values are decrypted per-access. The `value` field is wrapped in
+/// `zeroize::Zeroizing` so it is automatically zeroed on drop.
+///
+/// `Debug` is manually implemented to redact the value; `Clone` is not
+/// implemented — cloning secret material requires an explicit call to
+/// `.clone_value()` to make the intent visible in code review.
 pub struct ResolvedEntry {
     /// Entry name.
     pub name: String,
-    /// Decrypted secret value. Must be zeroized after use.
-    pub value: String,
+    /// Decrypted secret value. Zeroized on drop.
+    ///
+    /// Access the inner string with `.expose_secret()` (from the `zeroize`
+    /// crate's `Zeroizing` wrapper via `Deref`).
+    pub value: zeroize::Zeroizing<String>,
     /// Value type hint.
     pub entry_type: EntryType,
+}
+
+impl std::fmt::Debug for ResolvedEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedEntry")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .field("entry_type", &self.entry_type)
+            .finish()
+    }
 }
 
 /// In-memory secret resolver. Built at startup from decrypted keystore.
@@ -160,8 +177,12 @@ impl LockBoxResolver {
 
 /// Fetch a secret value from the keystore on disk.
 ///
-/// Per SHAPE-5: values are decrypted per-access. The caller must
-/// zeroize the returned `ResolvedEntry.value` after use.
+/// Per SHAPE-5: values are decrypted per-access. The returned
+/// `ResolvedEntry.value` is wrapped in `Zeroizing<String>` and will be
+/// zeroed automatically on drop.
+///
+/// Lookup is by entry **name**, not by index, so rekey/rotation that
+/// reorders entries does not produce stale results.
 pub fn fetch_secret_value(
     metadata: &EntryMetadata,
     keystore_path: &Path,
@@ -169,20 +190,23 @@ pub fn fetch_secret_value(
 ) -> Result<ResolvedEntry, LockBoxError> {
     let keystore = decrypt_keystore(keystore_path, identity_str)?;
 
+    // Locate by name — never by index. After rekey or rotation the entry
+    // order may change, making index-based lookup stale.
     let entry = keystore
         .entries
-        .get(metadata.entry_index)
+        .iter()
+        .find(|e| e.name == metadata.name)
         .ok_or_else(|| LockBoxError::MalformedKeystore {
             reason: format!(
-                "entry index {} out of bounds (keystore has {} entries)",
-                metadata.entry_index,
+                "entry '{}' not found in keystore (keystore has {} entries)",
+                metadata.name,
                 keystore.entries.len()
             ),
         })?;
 
     Ok(ResolvedEntry {
         name: metadata.name.clone(),
-        value: entry.value.clone(),
+        value: zeroize::Zeroizing::new(entry.value.clone()),
         entry_type: metadata.entry_type,
     })
 }

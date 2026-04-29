@@ -136,13 +136,53 @@ pub fn validate_crossref(bundle: &LoadedBundle) -> Vec<ValidationResult> {
             }
 
             for (view_name, view_config) in &mcp_views {
-                // VAL-1: Tool DataView references
+                // VAL-1: Tool backend references — dataview or codecomponent view
                 for (tool_name, tool_config) in &view_config.tools {
-                    if !app.config.data.dataviews.contains_key(&tool_config.dataview) {
+                    if let Some(ref view_name) = tool_config.view {
+                        // CB-P0.1.c: validate the referenced view exists and is a codecomponent
+                        match app.config.api.views.get(view_name) {
+                            None => {
+                                results.push(ValidationResult::fail(
+                                    "MCP-VAL-1",
+                                    &format!("{}/app.toml", app.manifest.app_name),
+                                    format!(
+                                        "MCP tool '{}' references undeclared view '{}'",
+                                        tool_name, view_name
+                                    ),
+                                ));
+                            }
+                            Some(target_view) => {
+                                if !matches!(target_view.handler, crate::view::HandlerConfig::Codecomponent { .. }) {
+                                    results.push(ValidationResult::fail(
+                                        "MCP-VAL-1",
+                                        &format!("{}/app.toml", app.manifest.app_name),
+                                        format!(
+                                            "MCP tool '{}' references view '{}' which is not a codecomponent handler",
+                                            tool_name, view_name
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                    } else if !tool_config.dataview.is_empty() {
+                        if !app.config.data.dataviews.contains_key(&tool_config.dataview) {
+                            results.push(ValidationResult::fail(
+                                "MCP-VAL-1",
+                                &format!("{}/app.toml", app.manifest.app_name),
+                                format!(
+                                    "MCP tool '{}' references undeclared DataView '{}'",
+                                    tool_name, tool_config.dataview
+                                ),
+                            ));
+                        }
+                    } else {
                         results.push(ValidationResult::fail(
                             "MCP-VAL-1",
                             &format!("{}/app.toml", app.manifest.app_name),
-                            format!("MCP tool '{}' references undeclared DataView '{}'", tool_name, tool_config.dataview),
+                            format!(
+                                "MCP tool '{}' must specify either 'dataview' or 'view'",
+                                tool_name
+                            ),
                         ));
                     }
                 }
@@ -2371,5 +2411,162 @@ mod tests {
         let results = validate_crossref(&bundle);
 
         assert!(!has_warn(&results, error_codes::CB001));
+    }
+
+    // ── CB-P0.1: MCP tool → codecomponent view validation ──────────
+
+    fn make_mcp_view_with_tool(tool_name: &str, tool: crate::view::McpToolConfig) -> ApiViewConfig {
+        let mut tools = HashMap::new();
+        tools.insert(tool_name.to_string(), tool);
+        ApiViewConfig {
+            view_type: "Mcp".into(),
+            path: Some("/mcp".into()),
+            method: None,
+            handler: HandlerConfig::None {},
+            parameter_mapping: None,
+            dataviews: vec![],
+            primary: None,
+            streaming: None,
+            streaming_format: None,
+            stream_timeout_ms: None,
+            guard: false,
+            auth: None,
+            guard_config: None,
+            allow_outbound_http: false,
+            rate_limit_per_minute: None,
+            rate_limit_burst_size: None,
+            websocket_mode: None,
+            max_connections: None,
+            sse_tick_interval_ms: None,
+            sse_trigger_events: vec![],
+            sse_event_buffer_size: None,
+            session_revalidation_interval_s: None,
+            polling: None,
+            event_handlers: None,
+            on_stream: None,
+            ws_hooks: None,
+            on_event: None,
+            tools,
+            resources: HashMap::new(),
+            prompts: HashMap::new(),
+            instructions: None,
+            session: None,
+        }
+    }
+
+    #[test]
+    fn mcp_val1_view_backed_tool_with_valid_codecomponent_view_passes() {
+        let mut views = HashMap::new();
+        views.insert("handler-view".into(), make_view_codecomponent(vec![]));
+        views.insert(
+            "mcp".into(),
+            make_mcp_view_with_tool("my_tool", crate::view::McpToolConfig {
+                view: Some("handler-view".into()),
+                ..Default::default()
+            }),
+        );
+
+        let app = make_app(
+            "test-app", "app-service", "00000000-0000-0000-0000-000000000001",
+            vec![], vec![], HashMap::new(), HashMap::new(), views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(!has_fail(&results, "MCP-VAL-1"), "valid codecomponent view ref must pass MCP-VAL-1");
+    }
+
+    #[test]
+    fn mcp_val1_view_backed_tool_referencing_nonexistent_view_fails() {
+        let mut views = HashMap::new();
+        views.insert(
+            "mcp".into(),
+            make_mcp_view_with_tool("my_tool", crate::view::McpToolConfig {
+                view: Some("does-not-exist".into()),
+                ..Default::default()
+            }),
+        );
+
+        let app = make_app(
+            "test-app", "app-service", "00000000-0000-0000-0000-000000000001",
+            vec![], vec![], HashMap::new(), HashMap::new(), views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(has_fail(&results, "MCP-VAL-1"), "undeclared view must fail MCP-VAL-1");
+        let fail = results.iter().find(|r| r.error_code.as_deref() == Some("MCP-VAL-1")).unwrap();
+        assert!(fail.message.contains("does-not-exist"), "message must name the missing view");
+    }
+
+    #[test]
+    fn mcp_val1_view_backed_tool_referencing_non_codecomponent_view_fails() {
+        let mut views = HashMap::new();
+        views.insert("rest-view".into(), make_view_dataview("Rest", "list_contacts"));
+        views.insert(
+            "mcp".into(),
+            make_mcp_view_with_tool("my_tool", crate::view::McpToolConfig {
+                view: Some("rest-view".into()),
+                ..Default::default()
+            }),
+        );
+
+        let app = make_app(
+            "test-app", "app-service", "00000000-0000-0000-0000-000000000001",
+            vec![], vec![], HashMap::new(), HashMap::new(), views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(has_fail(&results, "MCP-VAL-1"), "dataview-backed view must fail MCP-VAL-1");
+        let fail = results.iter().find(|r| r.error_code.as_deref() == Some("MCP-VAL-1")).unwrap();
+        assert!(fail.message.contains("not a codecomponent"), "message must explain the handler type mismatch");
+    }
+
+    #[test]
+    fn mcp_val1_tool_with_neither_dataview_nor_view_fails() {
+        let mut views = HashMap::new();
+        views.insert(
+            "mcp".into(),
+            make_mcp_view_with_tool("my_tool", crate::view::McpToolConfig::default()),
+        );
+
+        let app = make_app(
+            "test-app", "app-service", "00000000-0000-0000-0000-000000000001",
+            vec![], vec![], HashMap::new(), HashMap::new(), views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(has_fail(&results, "MCP-VAL-1"), "tool with no backend must fail MCP-VAL-1");
+        let fail = results.iter().find(|r| r.error_code.as_deref() == Some("MCP-VAL-1")).unwrap();
+        assert!(fail.message.contains("must specify either"), "message must state the requirement");
+    }
+
+    #[test]
+    fn mcp_val1_dataview_backed_tool_still_validates_correctly() {
+        let mut datasources = HashMap::new();
+        datasources.insert("db".into(), make_ds_config("db", "faker"));
+        let mut dataviews = HashMap::new();
+        dataviews.insert("list_items".into(), make_dv_config("list_items", "db"));
+
+        let mut views = HashMap::new();
+        views.insert(
+            "mcp".into(),
+            make_mcp_view_with_tool("list_items_tool", crate::view::McpToolConfig {
+                dataview: "list_items".into(),
+                ..Default::default()
+            }),
+        );
+
+        let app = make_app(
+            "test-app", "app-service", "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("db", "faker")], vec![],
+            datasources, dataviews, views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(!has_fail(&results, "MCP-VAL-1"), "valid dataview ref must still pass MCP-VAL-1");
     }
 }

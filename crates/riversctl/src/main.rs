@@ -23,6 +23,15 @@ async fn main() {
     let admin_url = std::env::var("RIVERS_ADMIN_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:9090".into());
 
+    // Load [base.admin_api].private_key from config if present; env var takes priority
+    // inside sign_request, so this is only the fallback source.
+    #[cfg(feature = "admin-api")]
+    {
+        let config_key = doctor::load_config_for_tls().ok()
+            .and_then(|cfg| cfg.base.admin_api.private_key);
+        admin::init_config_key(config_key);
+    }
+
     let result: Result<(), String> = match args[1].as_str() {
         "start"  => start::cmd_start(&args[2..]),
         "stop"   => stop::cmd_stop(&args[2..]),
@@ -151,7 +160,7 @@ fn print_usage() {
     eprintln!("  api-stop        Stop riversd immediately via HTTP admin API (SIGKILL fallback)");
     eprintln!("  graceful        Stop riversd gracefully — drain in-flight requests (SIGTERM fallback)");
     eprintln!("  log levels      View current log levels");
-    eprintln!("  log set <e> <l> Change log level");
+    eprintln!("  log set <target> <level> Change log level");
     eprintln!("  log reset       Reset to defaults");
     eprintln!("  breaker --app=<appId> --list                    List all circuit breakers for an app");
     eprintln!("  breaker --app=<appId> --name=<id>              Show circuit breaker status");
@@ -175,7 +184,8 @@ mod tests {
     #[cfg(feature = "admin-api")]
     #[test]
     fn sign_request_produces_timestamp() {
-        let headers = admin::sign_request("GET", "/admin/status", "test body");
+        std::env::remove_var("RIVERS_ADMIN_KEY");
+        let headers = admin::sign_request("GET", "/admin/status", "test body", None).unwrap();
         assert!(headers.contains_key("X-Rivers-Timestamp"));
     }
 
@@ -183,7 +193,7 @@ mod tests {
     #[test]
     fn sign_request_without_key_has_no_signature() {
         std::env::remove_var("RIVERS_ADMIN_KEY");
-        let headers = admin::sign_request("GET", "/admin/status", "body");
+        let headers = admin::sign_request("GET", "/admin/status", "body", None).unwrap();
         assert!(!headers.contains_key("X-Rivers-Signature"));
         assert!(headers.contains_key("X-Rivers-Timestamp"));
     }

@@ -153,8 +153,10 @@ export function kafkaPublishThenConsume(ctx: any): void {
     try {
         const broker = ctx.datasource("canary-kafka");
         const marker = "br4-marker-" + ctx.trace_id;
+        // destination must match the MessageConsumer on_event.topic ("kafka_consume")
+        // so the broker bridge forwards the message to the consumer view handler.
         const receipt = broker.publish({
-            destination: "canary.kafka.test",
+            destination: "kafka_consume",
             payload: marker,
             headers: { "trace_id": ctx.trace_id }
         });

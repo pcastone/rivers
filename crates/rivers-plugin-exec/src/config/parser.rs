@@ -180,10 +180,22 @@ fn parse_commands(
             None => None,
         };
 
-        let env_clear = opts
-            .get(&format!("{prefix}env_clear"))
-            .map(|s| s == "true")
-            .unwrap_or(true);
+        // RW1.2.f: fail closed on invalid env_clear values.
+        // Accept "true"/"false" case-insensitively; anything else (e.g. "yes",
+        // "True", typos) is rejected with a config error rather than silently
+        // inheriting the host environment.
+        let env_clear = match opts.get(&format!("{prefix}env_clear")) {
+            None => true, // default: clear env
+            Some(s) => match s.to_ascii_lowercase().as_str() {
+                "true" => true,
+                "false" => false,
+                other => {
+                    return Err(DriverError::Connection(format!(
+                        "exec driver: command '{name}' invalid env_clear value: '{other}' — expected 'true' or 'false'"
+                    )));
+                }
+            },
+        };
 
         let env_allow = parse_indexed_list(opts, &format!("{prefix}env_allow"));
 
@@ -350,5 +362,70 @@ mod tests {
         let cmd = &config.commands["cmd"];
         assert_eq!(cmd.env_set.get("HOME").unwrap(), "/tmp");
         assert_eq!(cmd.env_set.get("LANG").unwrap(), "en_US.UTF-8");
+    }
+
+    // ── env_clear parsing (RW1.2.f) ────────────────────────────────────
+
+    #[test]
+    fn parse_env_clear_true_lowercase() {
+        let params = make_params(vec![
+            ("run_as_user", "rivers"),
+            ("commands.cmd.path", "/bin/cmd"),
+            ("commands.cmd.sha256", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"),
+            ("commands.cmd.env_clear", "true"),
+        ]);
+        let config = ExecConfig::parse(&params).unwrap();
+        assert!(config.commands["cmd"].env_clear);
+    }
+
+    #[test]
+    fn parse_env_clear_false_lowercase() {
+        let params = make_params(vec![
+            ("run_as_user", "rivers"),
+            ("commands.cmd.path", "/bin/cmd"),
+            ("commands.cmd.sha256", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"),
+            ("commands.cmd.env_clear", "false"),
+        ]);
+        let config = ExecConfig::parse(&params).unwrap();
+        assert!(!config.commands["cmd"].env_clear);
+    }
+
+    #[test]
+    fn parse_env_clear_true_mixed_case() {
+        let params = make_params(vec![
+            ("run_as_user", "rivers"),
+            ("commands.cmd.path", "/bin/cmd"),
+            ("commands.cmd.sha256", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"),
+            ("commands.cmd.env_clear", "True"),
+        ]);
+        let config = ExecConfig::parse(&params).unwrap();
+        assert!(config.commands["cmd"].env_clear);
+    }
+
+    #[test]
+    fn parse_env_clear_invalid_rejects() {
+        let params = make_params(vec![
+            ("run_as_user", "rivers"),
+            ("commands.cmd.path", "/bin/cmd"),
+            ("commands.cmd.sha256", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"),
+            ("commands.cmd.env_clear", "yes"),
+        ]);
+        let err = ExecConfig::parse(&params).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid env_clear"),
+            "expected env_clear error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_env_clear_default_is_true() {
+        // When env_clear is absent, it defaults to true (fail-safe).
+        let params = make_params(vec![
+            ("run_as_user", "rivers"),
+            ("commands.cmd.path", "/bin/cmd"),
+            ("commands.cmd.sha256", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"),
+        ]);
+        let config = ExecConfig::parse(&params).unwrap();
+        assert!(config.commands["cmd"].env_clear);
     }
 }

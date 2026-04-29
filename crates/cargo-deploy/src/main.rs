@@ -43,17 +43,69 @@ fn main() {
 
     let version = read_workspace_version(&workspace_root);
 
+    // ── Staging / atomic swap ────────────────────────────────────────
+    // All file operations target a staging directory.  On success the staging
+    // directory is atomically renamed to the final deploy path.  Any crash or
+    // error between steps leaves the existing live directory untouched.
+    let staging_path = PathBuf::from(format!("{}.staging", deploy_path.display()));
+
+    // Remove a leftover staging dir from a previous interrupted run.
+    if staging_path.exists() {
+        println!("Removing leftover staging dir: {}", staging_path.display());
+        std::fs::remove_dir_all(&staging_path).unwrap_or_else(|e| {
+            eprintln!("error: failed to remove staging dir: {e}");
+            std::process::exit(1);
+        });
+    }
+
     if static_mode {
         println!("=== Rivers Deploy (static) v{version} ===");
         println!("Target: {}", deploy_path.display());
         println!();
-        deploy_static(&workspace_root, &target_dir, &deploy_path, &version);
+        deploy_static(&workspace_root, &target_dir, &staging_path, &version);
     } else {
         println!("=== Rivers Deploy (dynamic) v{version} ===");
         println!("Target: {}", deploy_path.display());
         println!();
-        deploy_dynamic(&workspace_root, &target_dir, &deploy_path, &version);
+        deploy_dynamic(&workspace_root, &target_dir, &staging_path, &version);
     }
+
+    // Preserve TLS certs from the live directory into staging so redeployment
+    // does not rotate the certificate. This runs after staging assembly so the
+    // staging tls dir already exists, and before the atomic rename.
+    preserve_tls_from_live(&deploy_path, &staging_path);
+
+    // Atomic transition: rename live → live.old, then staging → live.
+    // This ensures the live path is never absent during the swap — if the
+    // process crashes between the two renames, the old version is still at
+    // live.old and can be recovered manually. A crash BEFORE staging is complete
+    // leaves the existing live dir untouched (staging dir is cleaned on next run).
+    let old_path = PathBuf::from(format!("{}.old", deploy_path.display()));
+    if old_path.exists() {
+        std::fs::remove_dir_all(&old_path).unwrap_or_else(|e| {
+            eprintln!("error: failed to remove leftover .old dir: {e}");
+            std::process::exit(1);
+        });
+    }
+    if deploy_path.exists() {
+        std::fs::rename(&deploy_path, &old_path).unwrap_or_else(|e| {
+            eprintln!("error: failed to rename live → live.old: {e}");
+            std::process::exit(1);
+        });
+    }
+    std::fs::rename(&staging_path, &deploy_path).unwrap_or_else(|e| {
+        eprintln!("error: atomic rename staging → final failed: {e}");
+        // Attempt to restore the old dir so the live path is not left absent.
+        if old_path.exists() {
+            let _ = std::fs::rename(&old_path, &deploy_path);
+        }
+        std::process::exit(1);
+    });
+    // Best-effort cleanup of the previous live dir.
+    if old_path.exists() {
+        let _ = std::fs::remove_dir_all(&old_path);
+    }
+    println!("Deployed: {}", deploy_path.display());
 }
 
 /// Parse CLI arguments. Returns (path, static_mode).
@@ -147,15 +199,24 @@ fn deploy_dynamic(workspace_root: &Path, target_dir: &Path, deploy_path: &Path, 
         copy_file(&target_dir.join(name), &bin_dir.join(name));
     }
 
-    // Copy engine dylibs
+    // Copy engine dylibs — required for dynamic mode; absence is fatal.
+    let mut missing_engines = Vec::new();
     for engine in &["rivers_engine_v8", "rivers_engine_wasm"] {
         let filename = format!("lib{engine}.{DYLIB_EXT}");
         let src = target_dir.join(&filename);
         if src.exists() {
             copy_file(&src, &lib_dir.join(&filename));
         } else {
-            eprintln!("  warn: {filename} not found, skipping");
+            missing_engines.push(filename);
         }
+    }
+    if !missing_engines.is_empty() {
+        eprintln!("error: dynamic deploy requires engine libraries that were not built:");
+        for name in &missing_engines {
+            eprintln!("  missing: {name}");
+        }
+        eprintln!("  Run: cargo build --release -p rivers-engine-v8 -p rivers-engine-wasm");
+        std::process::exit(1);
     }
 
     // Step 4: Runtime scaffolding
@@ -321,6 +382,28 @@ fn generate_tls(tls_dir: &Path) {
     println!("  key:  {}", key_path.display());
 }
 
+/// If the live deploy directory already has TLS certs, copy them into staging
+/// so that redeployment does not rotate the cert unexpectedly. Use
+/// `riversctl tls renew` to intentionally rotate certificates.
+fn preserve_tls_from_live(live_deploy_path: &Path, staging_deploy_path: &Path) {
+    let live_cert = live_deploy_path.join("config/tls/server.crt");
+    let live_key = live_deploy_path.join("config/tls/server.key");
+    if !live_cert.exists() || !live_key.exists() {
+        return;
+    }
+    let staging_cert = staging_deploy_path.join("config/tls/server.crt");
+    let staging_key = staging_deploy_path.join("config/tls/server.key");
+    if let Err(e) = std::fs::copy(&live_cert, &staging_cert) {
+        eprintln!("warning: could not preserve live TLS cert: {e}");
+        return;
+    }
+    if let Err(e) = std::fs::copy(&live_key, &staging_key) {
+        eprintln!("warning: could not preserve live TLS key: {e}");
+        return;
+    }
+    println!("  TLS: preserved existing cert from live path (use `riversctl tls renew` to rotate)");
+}
+
 /// Write the default riversd.toml config.
 fn write_default_config(deploy_path: &Path) {
     let config_path = deploy_path.join("config/riversd.toml");
@@ -470,14 +553,29 @@ fn generate_self_signed_cert(
 
     std::fs::write(cert_path, cert_pem)
         .map_err(|e| format!("failed to write cert to {}: {e}", cert_path.display()))?;
-    std::fs::write(key_path, key_pem)
-        .map_err(|e| format!("failed to write key to {}: {e}", key_path.display()))?;
 
+    // Write the private key with 0o600 permissions from the start so there is
+    // never a window where it is world-readable. On Unix, `OpenOptions::mode`
+    // sets the permission bits at create time before any bytes are written.
+    // On non-Unix targets we fall back to a plain write.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("chmod key file {}: {e}", key_path.display()))?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(key_path)
+            .map_err(|e| format!("failed to create key file {}: {e}", key_path.display()))?;
+        f.write_all(key_pem.as_bytes())
+            .map_err(|e| format!("failed to write key to {}: {e}", key_path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(key_path, key_pem)
+            .map_err(|e| format!("failed to write key to {}: {e}", key_path.display()))?;
     }
 
     Ok(())

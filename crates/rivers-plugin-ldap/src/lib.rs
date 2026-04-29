@@ -18,6 +18,7 @@ use ldap3::{LdapConnAsync, LdapConnSettings, Ldap, Scope, SearchEntry};
 use tracing::debug;
 
 use rivers_driver_sdk::{
+    read_connect_timeout, read_max_rows,
     ABI_VERSION, Connection, ConnectionParams, DatabaseDriver, DriverError, DriverRegistrar,
     Query, QueryResult, QueryValue,
 };
@@ -40,7 +41,9 @@ impl DatabaseDriver for LdapDriver {
         let port = if params.port == 0 { 389 } else { params.port };
         let url = format!("ldap://{}:{}", params.host, port);
 
-        let settings = LdapConnSettings::new();
+        let connect_timeout_secs = read_connect_timeout(params);
+        let settings = LdapConnSettings::new()
+            .set_conn_timeout(std::time::Duration::from_secs(connect_timeout_secs));
         let (conn, mut ldap) = LdapConnAsync::with_settings(settings, &url)
             .await
             .map_err(|e| DriverError::Connection(format!("ldap connect: {e}")))?;
@@ -73,7 +76,9 @@ impl DatabaseDriver for LdapDriver {
             "ldap: connected"
         );
 
-        Ok(Box::new(LdapConnection { ldap }))
+        let max_rows = read_max_rows(params);
+
+        Ok(Box::new(LdapConnection { ldap, max_rows }))
     }
 
     /// G_R7.2: cdylib plugin runs connect() in an isolated runtime.
@@ -85,6 +90,8 @@ impl DatabaseDriver for LdapDriver {
 /// Active LDAP connection for search, add, modify, and delete operations.
 pub struct LdapConnection {
     ldap: Ldap,
+    /// Maximum number of rows returned by a single search (per-connection cap).
+    max_rows: usize,
 }
 
 #[async_trait]
@@ -197,8 +204,12 @@ impl LdapConnection {
             .success()
             .map_err(|e| DriverError::Query(format!("ldap search failed: {e}")))?;
 
+        let total = results.len();
+        let truncated = total > self.max_rows;
+
         let rows: Vec<HashMap<String, QueryValue>> = results
             .into_iter()
+            .take(self.max_rows)
             .map(|entry| {
                 let se = SearchEntry::construct(entry);
                 let mut row = HashMap::new();
@@ -231,6 +242,14 @@ impl LdapConnection {
                 row
             })
             .collect();
+
+        if truncated {
+            tracing::warn!(
+                total = total,
+                cap = self.max_rows,
+                "ldap search: result truncated to max_rows cap (set max_rows option to increase)"
+            );
+        }
 
         let count = rows.len() as u64;
         Ok(QueryResult {
@@ -506,5 +525,33 @@ mod tests {
             Ok(Ok(_)) => {} // Some environments may accept the TCP connect
             Err(_) => {}    // timeout OK
         }
+    }
+
+    #[test]
+    fn read_max_rows_default_is_ten_thousand() {
+        let params = ConnectionParams {
+            host: "localhost".into(),
+            port: 389,
+            database: "".into(),
+            username: "".into(),
+            password: "".into(),
+            options: HashMap::new(),
+        };
+        assert_eq!(rivers_driver_sdk::read_max_rows(&params), 10_000);
+    }
+
+    #[test]
+    fn read_max_rows_from_option() {
+        let mut options = HashMap::new();
+        options.insert("max_rows".to_string(), "50".to_string());
+        let params = ConnectionParams {
+            host: "localhost".into(),
+            port: 389,
+            database: "".into(),
+            username: "".into(),
+            password: "".into(),
+            options,
+        };
+        assert_eq!(rivers_driver_sdk::read_max_rows(&params), 50);
     }
 }

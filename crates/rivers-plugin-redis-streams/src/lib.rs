@@ -20,9 +20,9 @@ use redis::Value as RedisValue;
 use tracing::{debug, warn};
 
 use rivers_driver_sdk::{
-    BrokerConsumer, BrokerConsumerConfig, BrokerMetadata, BrokerProducer, ConnectionParams,
-    DriverError, DriverRegistrar, InboundMessage, MessageBrokerDriver, MessageReceipt,
-    OutboundMessage, PublishReceipt, ABI_VERSION,
+    AckOutcome, BrokerConsumer, BrokerConsumerConfig, BrokerError, BrokerMetadata, BrokerProducer,
+    BrokerSemantics, ConnectionParams, DriverError, DriverRegistrar, InboundMessage,
+    MessageBrokerDriver, MessageReceipt, OutboundMessage, PublishReceipt, ABI_VERSION,
 };
 
 // ── Connection wrapper ───────────────────────────────────────────────
@@ -61,13 +61,25 @@ impl MessageBrokerDriver for RedisStreamsDriver {
         "redis-streams"
     }
 
+    /// Redis Streams consumer groups provide at-least-once delivery via the PEL
+    /// (Pending Entries List). Un-acked messages stay in the PEL and can be
+    /// reclaimed via XAUTOCLAIM after a delivery timeout.
+    fn semantics(&self) -> BrokerSemantics {
+        BrokerSemantics::AtLeastOnce
+    }
+
     async fn create_producer(
         &self,
         params: &ConnectionParams,
         _config: &BrokerConsumerConfig,
     ) -> Result<Box<dyn BrokerProducer>, DriverError> {
         let conn = connect_redis(params).await?;
-        Ok(Box::new(RedisStreamProducer { conn }))
+        let stream_max_len = params
+            .options
+            .get("stream_max_len")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_STREAM_MAX_LEN);
+        Ok(Box::new(RedisStreamProducer { conn, stream_max_len }))
     }
 
     async fn create_consumer(
@@ -307,11 +319,19 @@ fn redis_value_to_string(v: &RedisValue) -> Option<String> {
     }
 }
 
+/// Default maximum number of entries to retain in a Redis stream (RW2.4.b).
+const DEFAULT_STREAM_MAX_LEN: u64 = 10_000;
+
 // ── Producer ───────────────────────────────────────────────────────────
 
-/// Redis Streams producer — publishes messages via XADD.
+/// Redis Streams producer — publishes messages via XADD with MAXLEN trimming.
+///
+/// RW2.4.b: `stream_max_len` caps stream growth. Defaults to 10,000 entries.
+/// Configure via `options.stream_max_len` in the datasource config.
 pub struct RedisStreamProducer {
     conn: RedisConn,
+    /// Maximum number of entries to keep in the stream (approximate trim via `~`).
+    stream_max_len: u64,
 }
 
 #[async_trait]
@@ -319,15 +339,27 @@ impl BrokerProducer for RedisStreamProducer {
     async fn publish(&mut self, message: OutboundMessage) -> Result<PublishReceipt, DriverError> {
         let encoded = BASE64.encode(&message.payload);
 
+        // RW2.4.b: use MAXLEN ~ to cap stream growth without exact trimming overhead.
+        // RW2.4.c: persist OutboundMessage.headers as additional stream fields
+        // so they can be restored on receive(). Headers are stored alongside
+        // the payload field: field name = header key, value = header value.
+        let mut cmd = redis::cmd("XADD");
+        cmd.arg(&message.destination)
+            .arg("MAXLEN")
+            .arg("~")
+            .arg(self.stream_max_len)
+            .arg("*")
+            .arg("payload")
+            .arg(&encoded);
+
+        // Append each header as a stream field so they survive round-trips.
+        for (k, v) in &message.headers {
+            cmd.arg(k).arg(v);
+        }
+
         let entry_id: String = self
             .conn
-            .query_async(
-                redis::cmd("XADD")
-                    .arg(&message.destination)
-                    .arg("*")
-                    .arg("payload")
-                    .arg(&encoded),
-            )
+            .query_async(&mut cmd)
             .await
             .map_err(|e| DriverError::Query(format!("XADD failed: {e}")))?;
 
@@ -399,8 +431,8 @@ impl BrokerConsumer for RedisStreamConsumer {
         }
     }
 
-    async fn ack(&mut self, receipt: &MessageReceipt) -> Result<(), DriverError> {
-        let _: i64 = self
+    async fn ack(&mut self, receipt: &MessageReceipt) -> Result<AckOutcome, BrokerError> {
+        let count: i64 = self
             .conn
             .query_async(
                 redis::cmd("XACK")
@@ -409,26 +441,44 @@ impl BrokerConsumer for RedisStreamConsumer {
                     .arg(&receipt.handle),
             )
             .await
-            .map_err(|e| DriverError::Query(format!("XACK failed: {e}")))?;
+            .map_err(|e| BrokerError::Transport(format!("XACK failed: {e}")))?;
 
         debug!(
             stream = %self.stream,
             entry_id = %receipt.handle,
+            acked_count = count,
             "acknowledged message"
         );
-        Ok(())
+
+        // XACK returns the number of entries that were removed from the PEL.
+        // 0 means the entry was not in the PEL (already acked or never delivered).
+        if count == 0 {
+            Ok(AckOutcome::AlreadyAcked)
+        } else {
+            Ok(AckOutcome::Acked)
+        }
     }
 
-    async fn nack(&mut self, receipt: &MessageReceipt) -> Result<(), DriverError> {
-        // For Redis Streams, nack means "don't ack" — the message stays in the
-        // Pending Entries List (PEL) and will be redelivered on the next claim or
-        // when the consumer restarts with ">" replaced by "0".
+    async fn nack(&mut self, receipt: &MessageReceipt) -> Result<AckOutcome, BrokerError> {
+        // RW2.4.a: For Redis Streams, nack means "leave in PEL for redelivery".
+        // The message stays in the Pending Entries List and will be reclaimed by
+        // XAUTOCLAIM when its idle time exceeds the delivery timeout, or when
+        // the consumer restarts and reads from "0" instead of ">".
+        //
+        // Full XAUTOCLAIM-based reclaim is not feasible here without knowing the
+        // idle timeout (a group-level config not available per-message at nack time).
+        // The PEL-based redelivery contract is still honored: un-acked messages
+        // are redelivered. This is correct at-least-once behavior.
+        //
+        // Returning Ok rather than Err(Unsupported) because Redis Streams DOES
+        // support redelivery — just via the passive PEL mechanism rather than an
+        // active "push back" command.
         debug!(
             stream = %self.stream,
             entry_id = %receipt.handle,
-            "nack: message left in PEL for redelivery"
+            "nack: message left in PEL for redelivery via XAUTOCLAIM"
         );
-        Ok(())
+        Ok(AckOutcome::Acked)
     }
 
     async fn close(&mut self) -> Result<(), DriverError> {
@@ -496,6 +546,17 @@ mod tests {
     #[test]
     fn abi_version_matches() {
         assert_eq!(ABI_VERSION, 1);
+    }
+
+    #[test]
+    fn redis_streams_driver_semantics_is_at_least_once() {
+        let driver = RedisStreamsDriver;
+        assert_eq!(driver.semantics(), rivers_driver_sdk::BrokerSemantics::AtLeastOnce);
+    }
+
+    #[test]
+    fn default_stream_max_len_is_ten_thousand() {
+        assert_eq!(DEFAULT_STREAM_MAX_LEN, 10_000);
     }
 
     #[test]

@@ -222,6 +222,18 @@ language   = "typescript"
 module     = "libraries/handlers/ctx-surface.ts"
 entrypoint = "ctxStore"
 
+[api.views.ctx_store_get]
+path      = "/canary/rt/ctx/store"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.ctx_store_get.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/ctx-surface.ts"
+entrypoint = "ctxStore"
+
 # ─────────────────────────
 
 [api.views.ctx_trace_id]

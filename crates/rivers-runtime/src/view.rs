@@ -351,11 +351,19 @@ pub struct ChangeDetectConfig {
 
 // ── MCP Config Types ─────────────────────────────────────
 
-/// MCP tool declaration — maps a DataView to an MCP tool.
+/// MCP tool declaration — maps a DataView or a codecomponent view to an MCP tool.
+///
+/// Exactly one of `dataview` or `view` must be set:
+/// - `dataview`: dispatches through the DataView executor (existing behavior).
+/// - `view`: dispatches through the ProcessPool like a REST codecomponent handler.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct McpToolConfig {
-    /// Target DataView name.
+    /// Target DataView name. Empty string when `view` is set instead.
+    #[serde(default)]
     pub dataview: String,
+    /// Target codecomponent view name (alternative to `dataview`).
+    #[serde(default)]
+    pub view: Option<String>,
     /// Human-readable description for the AI model.
     #[serde(default)]
     pub description: String,

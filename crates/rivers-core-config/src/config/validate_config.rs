@@ -14,7 +14,7 @@ const SERVER_CONFIG_KEYS: &[&str] = &[
 const BASE_CONFIG_KEYS: &[&str] = &[
     "host", "port", "workers", "request_timeout_seconds", "log_level",
     "backpressure", "http2", "admin_api", "tls", "cluster",
-    "init_timeout_seconds", "logging",
+    "init_timeout_s", "logging",
 ];
 
 /// Check for unknown keys in a parsed TOML value tree.

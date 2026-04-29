@@ -48,13 +48,20 @@ impl CommandIntegrity {
 
     /// Whether the integrity hash should be checked on this invocation.
     ///
-    /// Call this before `verify` to skip the (relatively expensive) file
-    /// read + hash when the mode allows it.
+    /// **For `Every(n)` mode**: increments the execution counter and returns
+    /// `true` every N calls.  This method must only be called **after**
+    /// semaphore acquisition so that rejected concurrency attempts (which
+    /// never actually run the command) do not consume scheduled checks.
+    /// (RW1.2.e)
+    ///
+    /// For `EachTime` and `StartupOnly` this is side-effect-free.
     pub fn should_check(&self) -> bool {
         match &self.mode {
             IntegrityMode::EachTime => true,
             IntegrityMode::StartupOnly => false,
             IntegrityMode::Every(n) => {
+                // Increment only here — after the caller has acquired the
+                // semaphore — so rejected attempts don't burn scheduled checks.
                 (self.exec_count.fetch_add(1, Ordering::Relaxed) + 1) % n == 0
             }
         }

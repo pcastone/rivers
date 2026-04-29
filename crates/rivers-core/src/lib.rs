@@ -16,6 +16,8 @@ pub use rivers_core_config::lockbox_config;
 
 /// Per-application log file routing.
 pub mod app_log_router;
+/// `Secret<T>` — a zeroizing wrapper that redacts `Debug` output.
+pub mod secret;
 /// Driver registry and plugin loading.
 pub mod driver_factory;
 /// Built-in driver re-exports (feature-gated).
@@ -43,6 +45,7 @@ pub use rivers_core_config::{
 };
 
 // Re-exports from this crate
+pub use secret::Secret;
 pub use driver_factory::{DriverFactory, DriverRegistrar, EventNotifier};
 #[cfg(feature = "drivers")]
 pub use drivers::register_builtin_drivers;

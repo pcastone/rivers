@@ -74,18 +74,10 @@ impl ExecConnection {
             compiled_schema.validate(&args)?;
         }
 
-        // Step 5: Integrity check (mode-dependent)
-        if cmd.integrity.should_check() {
-            if let Err(e) = cmd.integrity.verify(&cmd.config.path) {
-                tracing::error!(
-                    datasource = "exec",
-                    command = %command_name,
-                    trace_id = %trace_id,
-                    "exec: integrity check failed"
-                );
-                return Err(e);
-            }
-        }
+        // Step 5 (schema only): Schema validation already done above.
+        // Integrity check is deferred to step 5b, after semaphore acquisition,
+        // so that rejected concurrency attempts do not consume Every(N) checks.
+        // (RW1.2.e)
 
         // Step 6: Acquire global semaphore
         let _global_permit = self.global_semaphore.try_acquire().map_err(|_| {
@@ -118,6 +110,21 @@ impl ExecConnection {
         } else {
             None
         };
+
+        // Step 5b: Integrity check — after semaphore acquisition (RW1.2.e).
+        // should_check() increments the Every(N) counter here, ensuring only
+        // executions that actually run the command consume scheduled checks.
+        if cmd.integrity.should_check() {
+            if let Err(e) = cmd.integrity.verify(&cmd.config.path) {
+                tracing::error!(
+                    datasource = "exec",
+                    command = %command_name,
+                    trace_id = %trace_id,
+                    "exec: integrity check failed"
+                );
+                return Err(e);
+            }
+        }
 
         // Steps 8-11: Execute process (spawn, write stdin, read stdout, evaluate)
         match executor::execute_command(&cmd.config, &self.config, &args).await {

@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -20,6 +21,7 @@ use serde::Deserialize;
 use tracing::debug;
 
 use rivers_driver_sdk::{
+    read_connect_timeout, read_request_timeout,
     Connection, ConnectionParams, DatabaseDriver, DriverError, DriverRegistrar, Query, QueryResult,
     QueryValue, ABI_VERSION,
 };
@@ -46,7 +48,11 @@ impl DatabaseDriver for ElasticsearchDriver {
             .unwrap_or("http");
         let base_url = format!("{}://{}:{}", scheme, params.host, params.port);
 
-        let client = Client::new();
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(read_connect_timeout(params)))
+            .timeout(Duration::from_secs(read_request_timeout(params)))
+            .build()
+            .map_err(|e| DriverError::Connection(format!("elasticsearch client build failed: {e}")))?;
 
         // Verify connectivity with GET /
         let resp = client
@@ -91,6 +97,23 @@ pub struct ElasticConnection {
 }
 
 impl ElasticConnection {
+    /// Construct a connection for testing (uses same timeout policy as production).
+    #[cfg(test)]
+    fn test_instance() -> Self {
+        use rivers_driver_sdk::{DEFAULT_CONNECT_TIMEOUT_SECS, DEFAULT_REQUEST_TIMEOUT_SECS};
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
+            .timeout(std::time::Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS))
+            .build()
+            .expect("test reqwest client");
+        Self {
+            client,
+            base_url: "http://127.0.0.1:1".into(),
+            username: "".into(),
+            password: "".into(),
+        }
+    }
+
     /// Build a request builder with optional basic auth.
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let url = format!("{}{}", self.base_url, path);
@@ -124,6 +147,20 @@ impl Connection for ElasticConnection {
                 "elasticsearch: unsupported operation '{other}'"
             ))),
         }
+    }
+
+    /// Elasticsearch DDL operations (create_index, delete_index, put_mapping,
+    /// update_settings) are declared in `admin_operations()` but Elasticsearch
+    /// REST API index management is not implemented in this driver.
+    ///
+    /// All DDL/admin operations return `Unsupported` — use the Elasticsearch
+    /// REST API directly or a management tool for index lifecycle operations.
+    async fn ddl_execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
+        Err(DriverError::Unsupported(format!(
+            "elasticsearch: '{}' is not implemented — Elasticsearch index management \
+             requires direct REST API calls outside Rivers",
+            query.operation
+        )))
     }
 
     async fn ping(&mut self) -> Result<(), DriverError> {
@@ -616,6 +653,40 @@ mod tests {
             }
             Err(other) => panic!("expected DriverError::Connection, got: {other:?}"),
             Ok(_) => panic!("expected connection error, but got Ok"),
+        }
+    }
+
+    // ── ddl_execute returns Unsupported ───────────────────────────────
+
+    #[tokio::test]
+    async fn ddl_execute_create_index_is_unsupported() {
+        let mut conn = ElasticConnection::test_instance();
+        let query = Query::with_operation("create_index", "my_index", "");
+        let result = conn.ddl_execute(&query).await;
+        match result {
+            Err(DriverError::Unsupported(msg)) => {
+                assert!(
+                    msg.contains("create_index"),
+                    "error should name the operation: {msg}"
+                );
+                assert!(
+                    msg.contains("elasticsearch"),
+                    "error should mention elasticsearch: {msg}"
+                );
+            }
+            other => panic!("expected DriverError::Unsupported, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ddl_execute_all_admin_ops_are_unsupported() {
+        let mut conn = ElasticConnection::test_instance();
+        for op in &["create_index", "delete_index", "put_mapping", "update_settings"] {
+            let query = Query::with_operation(op, "my_index", "");
+            match conn.ddl_execute(&query).await {
+                Err(DriverError::Unsupported(_)) => {}
+                other => panic!("op '{}' expected Unsupported, got: {other:?}", op),
+            }
         }
     }
 }

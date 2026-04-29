@@ -118,11 +118,25 @@ fn guard_ddl_takes_precedence_over_operation() {
 }
 
 #[test]
-fn guard_truncates_statement_in_message() {
+fn guard_sanitizes_statement_not_echoed_in_message() {
+    // RW1.1.b: error messages must NOT echo raw statement content —
+    // a long statement containing credential material must not leak
+    // into the user-facing error.
     let long_stmt = "DROP TABLE very_long_table_name_that_exceeds_forty_characters_easily CASCADE";
     let query = Query::new("db", long_stmt);
     let result = check_admin_guard(&query, &[]).unwrap();
-    // Should not contain the full statement
-    assert!(!result.contains("CASCADE"));
-    assert!(result.contains("DROP TABLE very_long_table_name_that_exc"));
+    // Raw statement text must not appear in the error.
+    assert!(
+        !result.contains("CASCADE"),
+        "error must not echo raw statement: {result}"
+    );
+    assert!(
+        !result.contains("very_long_table_name"),
+        "error must not echo raw statement: {result}"
+    );
+    // The error must still communicate that DDL was rejected.
+    assert!(
+        result.contains("DDL") || result.contains("rejected"),
+        "error must indicate rejection: {result}"
+    );
 }

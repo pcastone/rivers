@@ -214,15 +214,67 @@ fn cmd_import(config: &ServerConfig, cert: &str, key: &str, port: Option<u16>) -
 
     rivers_runtime::rivers_core::tls::validate_cert_key_pair(cert, key)?;
 
+    // Copy the certificate (cert files are not secret — standard permissions).
     std::fs::copy(cert, &dest_cert)
         .map_err(|e| format!("failed to copy cert to {dest_cert}: {e}"))?;
-    std::fs::copy(key, &dest_key)
-        .map_err(|e| format!("failed to copy key to {dest_key}: {e}"))?;
+
+    // Copy the private key atomically with 0600 permissions.
+    // Strategy: write to a sibling temp file with mode 0600 from the start,
+    // then rename() into place so the final path is never world-readable.
+    import_key_atomic(key, &dest_key)?;
 
     println!("Imported:");
     println!("  cert → {dest_cert}");
     println!("  key  → {dest_key}");
     println!("Restart riversd to apply.");
+    Ok(())
+}
+
+/// Write a private-key file atomically with mode 0600.
+///
+/// The key is first written to `<dest>.tmp` with 0600 permissions, then
+/// `rename()`'d into `dest` in a single atomic operation. This ensures the
+/// destination path is never created with looser permissions.
+fn import_key_atomic(src: &str, dest: &str) -> Result<(), String> {
+    let key_bytes = std::fs::read(src)
+        .map_err(|e| format!("failed to read key from '{src}': {e}"))?;
+
+    let tmp_path = format!("{dest}.tmp");
+
+    // Open the temp file with mode 0600 from the start.
+    {
+        use std::io::Write;
+        #[cfg(unix)]
+        let mut file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp_path)
+                .map_err(|e| format!("failed to create temp key file '{tmp_path}': {e}"))?
+        };
+        #[cfg(not(unix))]
+        let mut file = {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)
+                .map_err(|e| format!("failed to create temp key file '{tmp_path}': {e}"))?
+        };
+        file.write_all(&key_bytes)
+            .map_err(|e| format!("failed to write temp key file '{tmp_path}': {e}"))?;
+    }
+
+    // Atomically rename into place.
+    std::fs::rename(&tmp_path, dest)
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            format!("failed to install key to '{dest}': {e}")
+        })?;
+
     Ok(())
 }
 

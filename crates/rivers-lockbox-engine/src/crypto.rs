@@ -4,6 +4,7 @@ use std::path::Path;
 
 use zeroize::Zeroize;
 
+use crate::key_source::check_file_permissions;
 use crate::types::*;
 
 // ── Keystore Decryption ─────────────────────────────────────────────
@@ -11,10 +12,16 @@ use crate::types::*;
 /// Decrypt and parse a keystore file.
 ///
 /// Per spec S8.1, steps 4-9.
+///
+/// Permission check runs on every call — a runtime `chmod` after startup
+/// will be caught here and not silently bypass security.
 pub fn decrypt_keystore(
     keystore_path: &Path,
     identity_str: &str,
 ) -> Result<Keystore, LockBoxError> {
+    // Check permissions on every decrypt, not just at startup.
+    check_file_permissions(keystore_path)?;
+
     // Read encrypted file
     let encrypted = std::fs::read(keystore_path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {

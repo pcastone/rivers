@@ -79,7 +79,13 @@ impl DatabaseDriver for MongoDriver {
             "mongodb: connected"
         );
 
-        Ok(Box::new(MongoConnection { db, session: None }))
+        let max_rows = params
+            .options
+            .get("max_rows")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_MAX_ROWS);
+
+        Ok(Box::new(MongoConnection { db, session: None, max_rows }))
     }
 
     /// G_R7.2: cdylib plugin runs connect() in an isolated runtime.
@@ -88,10 +94,15 @@ impl DatabaseDriver for MongoDriver {
 
 // ── Connection ─────────────────────────────────────────────────────────
 
+/// Default maximum number of documents returned by a find() query (RW2.6.b).
+const DEFAULT_MAX_ROWS: usize = 1_000;
+
 /// Active MongoDB connection wrapping a database handle.
 pub struct MongoConnection {
     db: Database,
     session: Option<ClientSession>,
+    /// Maximum number of rows returned by find(). Configurable via connect options.
+    max_rows: usize,
 }
 
 #[async_trait]
@@ -197,28 +208,74 @@ impl MongoConnection {
     }
 
     /// Execute a find query, returning matching documents as rows.
-    async fn exec_find(&self, query: &Query) -> Result<QueryResult, DriverError> {
+    ///
+    /// RW2.6.a: passes session to collection.find() when a transaction is active.
+    /// RW2.6.b: enforces `max_rows` cap — returns DriverError if exceeded.
+    async fn exec_find(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
         let col_name = self.resolve_collection(query);
         let collection = self.db.collection::<Document>(&col_name);
         let filter = self.resolve_filter(query);
+        let max_rows = self.max_rows;
 
-        let mut cursor = collection
-            .find(filter)
-            .await
-            .map_err(|e| DriverError::Query(format!("mongodb find failed: {e}")))?;
+        // RW2.6.a: session-aware find. MongoDB 3.x returns different cursor types
+        // for session vs non-session finds, so we handle both branches independently.
+        // SessionCursor::advance() requires the session to be passed on each call.
+        let rows = if self.session.is_some() {
+            // We need both cursor and session in scope simultaneously. Take a ref
+            // to the db to build the cursor while the session is held by self.
+            let session = self.session.as_mut().unwrap();
+            let mut cursor = collection
+                .find(filter)
+                .session(&mut *session)
+                .await
+                .map_err(|e| DriverError::Query(format!("mongodb find (txn) failed: {e}")))?;
 
-        let mut rows = Vec::new();
-        // mongodb 3.x Cursor provides advance()/deserialize_current() for iteration.
-        while cursor
-            .advance()
-            .await
-            .map_err(|e| DriverError::Query(format!("mongodb cursor error: {e}")))?
-        {
-            let doc: Document = cursor
-                .deserialize_current()
-                .map_err(|e| DriverError::Query(format!("mongodb deserialize error: {e}")))?;
-            rows.push(document_to_row(&doc));
-        }
+            let mut rows: Vec<std::collections::HashMap<String, QueryValue>> = Vec::new();
+            // SessionCursor::advance() requires the session on each call.
+            let session = self.session.as_mut().unwrap();
+            while cursor
+                .advance(session)
+                .await
+                .map_err(|e| DriverError::Query(format!("mongodb cursor error: {e}")))?
+            {
+                if rows.len() >= max_rows {
+                    return Err(DriverError::Query(format!(
+                        "mongodb find: result set exceeds max_rows limit ({max_rows}). \
+                         Use pagination or increase max_rows in datasource options."
+                    )));
+                }
+                let doc: Document = cursor
+                    .deserialize_current()
+                    .map_err(|e| DriverError::Query(format!("mongodb deserialize error: {e}")))?;
+                rows.push(document_to_row(&doc));
+            }
+            rows
+        } else {
+            let mut cursor = collection
+                .find(filter)
+                .await
+                .map_err(|e| DriverError::Query(format!("mongodb find failed: {e}")))?;
+
+            let mut rows: Vec<std::collections::HashMap<String, QueryValue>> = Vec::new();
+            // mongodb 3.x Cursor provides advance()/deserialize_current() for iteration.
+            while cursor
+                .advance()
+                .await
+                .map_err(|e| DriverError::Query(format!("mongodb cursor error: {e}")))?
+            {
+                if rows.len() >= max_rows {
+                    return Err(DriverError::Query(format!(
+                        "mongodb find: result set exceeds max_rows limit ({max_rows}). \
+                         Use pagination or increase max_rows in datasource options."
+                    )));
+                }
+                let doc: Document = cursor
+                    .deserialize_current()
+                    .map_err(|e| DriverError::Query(format!("mongodb deserialize error: {e}")))?;
+                rows.push(document_to_row(&doc));
+            }
+            rows
+        };
 
         let count = rows.len() as u64;
         Ok(QueryResult {
@@ -230,15 +287,25 @@ impl MongoConnection {
     }
 
     /// Execute an insert_one, returning the inserted document's _id.
-    async fn exec_insert(&self, query: &Query) -> Result<QueryResult, DriverError> {
+    ///
+    /// RW2.6.a: passes session to insert_one() when a transaction is active.
+    async fn exec_insert(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
         let col_name = self.resolve_collection(query);
         let collection = self.db.collection::<Document>(&col_name);
         let doc = params_to_document(&query.parameters);
 
-        let result = collection
-            .insert_one(doc)
-            .await
-            .map_err(|e| DriverError::Query(format!("mongodb insert_one failed: {e}")))?;
+        let result = if let Some(ref mut session) = self.session {
+            collection
+                .insert_one(doc)
+                .session(session)
+                .await
+                .map_err(|e| DriverError::Query(format!("mongodb insert_one (txn) failed: {e}")))?
+        } else {
+            collection
+                .insert_one(doc)
+                .await
+                .map_err(|e| DriverError::Query(format!("mongodb insert_one failed: {e}")))?
+        };
 
         let insert_id = bson_to_string(&result.inserted_id);
 
@@ -251,19 +318,46 @@ impl MongoConnection {
     }
 
     /// Execute an update_many with filter and $set from parameters.
-    async fn exec_update(&self, query: &Query) -> Result<QueryResult, DriverError> {
+    ///
+    /// RW2.6.a: passes session to update_many() when a transaction is active.
+    /// RW2.6.c: requires a non-empty filter to prevent broad updates.
+    async fn exec_update(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
         let col_name = self.resolve_collection(query);
         let collection = self.db.collection::<Document>(&col_name);
 
         // Split parameters: "_filter" key holds the filter doc, rest is the update.
         let (filter, update_fields) = split_filter_and_fields(&query.parameters);
 
+        // RW2.6.c: require a non-empty filter for update/delete to prevent
+        // accidental broad modifications. An explicit `allow_full_scan: true`
+        // query option (passed via parameters) bypasses this guard.
+        let allow_full_scan = query.parameters
+            .get("allow_full_scan")
+            .and_then(|v| if let QueryValue::Boolean(b) = v { Some(*b) } else { None })
+            .unwrap_or(false);
+
+        if filter.is_empty() && !allow_full_scan {
+            return Err(DriverError::Query(
+                "mongodb update: empty filter would modify all documents. \
+                 Add a filter via the '_filter' parameter, or set allow_full_scan=true \
+                 to explicitly allow collection-wide updates.".into()
+            ));
+        }
+
         let update = doc! { "$set": params_to_document(&update_fields) };
 
-        let result = collection
-            .update_many(filter, update)
-            .await
-            .map_err(|e| DriverError::Query(format!("mongodb update_many failed: {e}")))?;
+        let result = if let Some(ref mut session) = self.session {
+            collection
+                .update_many(filter, update)
+                .session(session)
+                .await
+                .map_err(|e| DriverError::Query(format!("mongodb update_many (txn) failed: {e}")))?
+        } else {
+            collection
+                .update_many(filter, update)
+                .await
+                .map_err(|e| DriverError::Query(format!("mongodb update_many failed: {e}")))?
+        };
 
         Ok(QueryResult {
             rows: Vec::new(),
@@ -274,15 +368,40 @@ impl MongoConnection {
     }
 
     /// Execute a delete_many with filter from parameters.
-    async fn exec_delete(&self, query: &Query) -> Result<QueryResult, DriverError> {
+    ///
+    /// RW2.6.a: passes session to delete_many() when a transaction is active.
+    /// RW2.6.c: requires a non-empty filter to prevent broad deletes.
+    async fn exec_delete(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
         let col_name = self.resolve_collection(query);
         let collection = self.db.collection::<Document>(&col_name);
         let filter = params_to_document(&query.parameters);
 
-        let result = collection
-            .delete_many(filter)
-            .await
-            .map_err(|e| DriverError::Query(format!("mongodb delete_many failed: {e}")))?;
+        // RW2.6.c: require a non-empty filter for delete.
+        let allow_full_scan = query.parameters
+            .get("allow_full_scan")
+            .and_then(|v| if let QueryValue::Boolean(b) = v { Some(*b) } else { None })
+            .unwrap_or(false);
+
+        if filter.is_empty() && !allow_full_scan {
+            return Err(DriverError::Query(
+                "mongodb delete: empty filter would delete all documents. \
+                 Add a filter via query parameters, or set allow_full_scan=true \
+                 to explicitly allow collection-wide deletes.".into()
+            ));
+        }
+
+        let result = if let Some(ref mut session) = self.session {
+            collection
+                .delete_many(filter)
+                .session(session)
+                .await
+                .map_err(|e| DriverError::Query(format!("mongodb delete_many (txn) failed: {e}")))?
+        } else {
+            collection
+                .delete_many(filter)
+                .await
+                .map_err(|e| DriverError::Query(format!("mongodb delete_many failed: {e}")))?
+        };
 
         Ok(QueryResult {
             rows: Vec::new(),
@@ -668,6 +787,22 @@ mod tests {
         let (filter, fields) = split_filter_and_fields(&params);
         assert!(filter.is_empty());
         assert!(fields.contains_key("name"));
+    }
+
+    // ── RW2.6 contract tests ──────────────────────────────────────────
+
+    #[test]
+    fn default_max_rows_is_one_thousand() {
+        assert_eq!(DEFAULT_MAX_ROWS, 1_000);
+    }
+
+    #[test]
+    fn split_filter_empty_without_filter_key() {
+        // Confirms that an empty params map produces an empty filter —
+        // the guard in exec_update/exec_delete will reject this.
+        let params = HashMap::new();
+        let (filter, _) = split_filter_and_fields(&params);
+        assert!(filter.is_empty());
     }
 
     // ── connect with bad host ─────────────────────────────────────────
