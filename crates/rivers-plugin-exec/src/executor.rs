@@ -681,7 +681,10 @@ printf ']'
             "#!/bin/sh\necho 'not json'\n",
         );
         let global = make_global_config(dir.path());
-        let cmd = make_command_config(script, InputMode::Stdin, None, None);
+        // Use args mode — script outputs bad JSON unconditionally; stdin mode
+        // causes a broken-pipe race on Linux when the child exits before the
+        // parent writes, masking the "invalid JSON" error we're testing for.
+        let cmd = make_command_config(script, InputMode::Args, None, None);
         let params = json!({});
         let err = execute_command(&cmd, &global, &params).await.unwrap_err();
         let msg = err.to_string();
