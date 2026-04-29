@@ -480,6 +480,17 @@ mod tests {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
+    /// On Linux the executor uses /proc/self/fd/N (TOCTOU mitigation, RW1.2.b).
+    /// GitHub Actions and other restricted sandboxes mount proc without fd
+    /// access, causing spawns to fail with "cannot open /proc/self/fd/N".
+    /// Tests that spawn real scripts check this first and skip gracefully.
+    #[cfg(target_os = "linux")]
+    fn proc_fd_accessible() -> bool {
+        std::fs::metadata("/proc/self/fd/1").is_ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    fn proc_fd_accessible() -> bool { true }
+
     fn create_test_script(dir: &Path, name: &str, content: &str) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, content).unwrap();
@@ -565,6 +576,7 @@ mod tests {
 
     #[tokio::test]
     async fn stdin_mode_echo_back() {
+        if !proc_fd_accessible() { return; }
         let dir = tempfile::tempdir().unwrap();
         let script = create_test_script(dir.path(), "echo_stdin.sh", "#!/bin/sh\ncat\n");
         let global = make_global_config(dir.path());
@@ -578,6 +590,7 @@ mod tests {
 
     #[tokio::test]
     async fn args_mode_echoes_argv() {
+        if !proc_fd_accessible() { return; }
         let dir = tempfile::tempdir().unwrap();
         let script = create_test_script(
             dir.path(),
@@ -648,6 +661,7 @@ printf ']'
 
     #[tokio::test]
     async fn invalid_json_output_returns_error() {
+        if !proc_fd_accessible() { return; }
         let dir = tempfile::tempdir().unwrap();
         let script = create_test_script(
             dir.path(),
@@ -666,6 +680,7 @@ printf ']'
 
     #[tokio::test]
     async fn timeout_kills_process() {
+        if !proc_fd_accessible() { return; }
         let dir = tempfile::tempdir().unwrap();
         let script = create_test_script(
             dir.path(),
@@ -688,6 +703,7 @@ printf ']'
 
     #[tokio::test]
     async fn stdin_blocking_respects_timeout() {
+        if !proc_fd_accessible() { return; }
         let dir = tempfile::tempdir().unwrap();
         let script = create_test_script(
             dir.path(),
@@ -707,6 +723,7 @@ printf ']'
 
     #[tokio::test]
     async fn env_clear_filters_environment() {
+        if !proc_fd_accessible() { return; }
         let dir = tempfile::tempdir().unwrap();
         let script = create_test_script(
             dir.path(),
@@ -758,6 +775,7 @@ printf '}'
 
     #[tokio::test]
     async fn both_mode_stdin_and_args() {
+        if !proc_fd_accessible() { return; }
         let dir = tempfile::tempdir().unwrap();
         let script = create_test_script(
             dir.path(),
@@ -794,6 +812,7 @@ printf '"]}'
 
     #[tokio::test]
     async fn output_overflow_kills_process() {
+        if !proc_fd_accessible() { return; }
         let dir = tempfile::tempdir().unwrap();
         let script = create_test_script(
             dir.path(),

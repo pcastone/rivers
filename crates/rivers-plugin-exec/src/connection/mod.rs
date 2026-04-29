@@ -33,6 +33,16 @@ mod tests {
     use tokio::sync::Semaphore;
 
     use crate::integrity::{self, CommandIntegrity};
+
+    /// On Linux the executor uses /proc/self/fd/N (TOCTOU mitigation, RW1.2.b).
+    /// GitHub Actions and other restricted sandboxes mount proc without fd
+    /// access, causing spawns to fail with "cannot open /proc/self/fd/N".
+    #[cfg(target_os = "linux")]
+    fn proc_fd_accessible() -> bool {
+        std::fs::metadata("/proc/self/fd/1").is_ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    fn proc_fd_accessible() -> bool { true }
     use crate::schema::CompiledSchema;
 
     /// Create a test script, make it executable, and return (path, sha256_hex).
@@ -119,6 +129,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_pipeline_stdin_echo() {
+        if !proc_fd_accessible() { return; }
         let dir = tempfile::tempdir().unwrap();
         let (script_path, hash) = create_test_script(
             dir.path(),
@@ -161,6 +172,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_pipeline_command_from_statement() {
+        if !proc_fd_accessible() { return; }
         let dir = tempfile::tempdir().unwrap();
         let (script_path, hash) = create_test_script(
             dir.path(),
@@ -439,6 +451,7 @@ mod tests {
 
     #[tokio::test]
     async fn schema_validation_in_pipeline() {
+        if !proc_fd_accessible() { return; }
         let dir = tempfile::tempdir().unwrap();
         let (script_path, hash) = create_test_script(
             dir.path(),
@@ -501,6 +514,7 @@ mod tests {
 
     #[tokio::test]
     async fn args_mode_pipeline() {
+        if !proc_fd_accessible() { return; }
         let dir = tempfile::tempdir().unwrap();
         let script_content = r#"#!/bin/sh
 printf '['
