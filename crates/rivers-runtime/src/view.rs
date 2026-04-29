@@ -364,6 +364,10 @@ pub struct McpToolConfig {
     /// Target codecomponent view name (alternative to `dataview`).
     #[serde(default)]
     pub view: Option<String>,
+    /// Path to a JSON Schema file (relative to app bundle root) describing the tool's input.
+    /// Loaded at tools/list time and served as the MCP `inputSchema` for codecomponent-backed tools.
+    #[serde(default)]
+    pub input_schema: Option<String>,
     /// Human-readable description for the AI model.
     #[serde(default)]
     pub description: String,

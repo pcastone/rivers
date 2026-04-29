@@ -30,7 +30,7 @@ pub async fn dispatch(
     match req.method.as_str() {
         "initialize" => handle_initialize(req, tools, resources, prompts, ctx, app_dir, instructions, dv_namespace).await,
         "ping" => JsonRpcResponse::success(req.id.clone(), serde_json::json!({})),
-        "tools/list" => handle_tools_list(req, tools, ctx, dv_namespace).await,
+        "tools/list" => handle_tools_list(req, tools, ctx, dv_namespace, app_dir).await,
         "tools/call" => handle_tools_call(req, tools, ctx, app_id, dv_namespace).await,
         "resources/list" => handle_resources_list(req, resources),
         "resources/read" => handle_resources_read(req, resources, ctx, dv_namespace).await,
@@ -103,15 +103,26 @@ async fn handle_tools_list(
     tools: &HashMap<String, McpToolConfig>,
     ctx: &AppContext,
     dv_namespace: &str,
+    app_dir: &std::path::Path,
 ) -> JsonRpcResponse {
     let dv_guard = ctx.dataview_executor.read().await;
     let executor_opt = dv_guard.as_ref();
 
     let tool_list: Vec<serde_json::Value> = tools.iter().map(|(name, config)| {
-        // CB-P0.1: codecomponent-backed tools use an open schema for now;
-        // CB-P0.2 will derive a precise schema from the TypeScript handler signature.
         let schema = if config.view.is_some() {
-            serde_json::json!({"type": "object", "properties": {}})
+            // CB-P0.2.c: load explicit JSON Schema file when declared.
+            if let Some(schema_path) = &config.input_schema {
+                let full_path = app_dir.join(schema_path);
+                match std::fs::read_to_string(&full_path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                {
+                    Some(v) => v,
+                    None => serde_json::json!({"type": "object", "properties": {}}),
+                }
+            } else {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
         } else if let Some(executor) = executor_opt {
             let namespaced = format!("{}:{}", dv_namespace, config.dataview);
             let method = config.method.as_deref().unwrap_or("GET");

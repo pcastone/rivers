@@ -187,6 +187,23 @@ pub fn validate_crossref(bundle: &LoadedBundle) -> Vec<ValidationResult> {
                     }
                 }
 
+                // VAL-8: input_schema file exists (CB-P0.2.c)
+                for (tool_name, tool_config) in &view_config.tools {
+                    if let Some(ref schema_path) = tool_config.input_schema {
+                        let full_path = app.app_dir.join(schema_path);
+                        if !full_path.exists() {
+                            results.push(ValidationResult::fail(
+                                "MCP-VAL-8",
+                                &format!("{}/app.toml", app.manifest.app_name),
+                                format!(
+                                    "MCP tool '{}' input_schema file '{}' not found",
+                                    tool_name, schema_path
+                                ),
+                            ));
+                        }
+                    }
+                }
+
                 // VAL-2: Resource DataView references
                 for (resource_name, resource_config) in &view_config.resources {
                     if !app.config.data.dataviews.contains_key(&resource_config.dataview) {
@@ -2568,5 +2585,90 @@ mod tests {
         let results = validate_crossref(&bundle);
 
         assert!(!has_fail(&results, "MCP-VAL-1"), "valid dataview ref must still pass MCP-VAL-1");
+    }
+
+    // ── CB-P0.2.c: MCP tool input_schema file validation ──────────
+
+    #[test]
+    fn mcp_val8_tool_with_existing_input_schema_file_passes() {
+        let app_name = "mcp-val8-pass";
+        let schema_path = "schemas/tool-input.json";
+        let dir = std::path::PathBuf::from(format!("/tmp/{}", app_name));
+        std::fs::create_dir_all(dir.join("schemas")).unwrap();
+        std::fs::write(dir.join(schema_path), r#"{"type":"object","properties":{}}"#).unwrap();
+
+        let mut views = HashMap::new();
+        views.insert("handler-view".into(), make_view_codecomponent(vec![]));
+        views.insert(
+            "mcp".into(),
+            make_mcp_view_with_tool("my_tool", crate::view::McpToolConfig {
+                view: Some("handler-view".into()),
+                input_schema: Some(schema_path.into()),
+                ..Default::default()
+            }),
+        );
+
+        let app = make_app(
+            app_name, "app-service", "00000000-0000-0000-0000-000000000001",
+            vec![], vec![], HashMap::new(), HashMap::new(), views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(!has_fail(&results, "MCP-VAL-8"), "existing schema file must pass MCP-VAL-8");
+    }
+
+    #[test]
+    fn mcp_val8_tool_with_missing_input_schema_file_fails() {
+        let app_name = "mcp-val8-fail";
+        let dir = std::path::PathBuf::from(format!("/tmp/{}", app_name));
+        std::fs::create_dir_all(&dir).unwrap();
+        // deliberately do NOT create the schema file
+
+        let mut views = HashMap::new();
+        views.insert("handler-view".into(), make_view_codecomponent(vec![]));
+        views.insert(
+            "mcp".into(),
+            make_mcp_view_with_tool("my_tool", crate::view::McpToolConfig {
+                view: Some("handler-view".into()),
+                input_schema: Some("schemas/missing.json".into()),
+                ..Default::default()
+            }),
+        );
+
+        let app = make_app(
+            app_name, "app-service", "00000000-0000-0000-0000-000000000001",
+            vec![], vec![], HashMap::new(), HashMap::new(), views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(has_fail(&results, "MCP-VAL-8"), "missing schema file must fail MCP-VAL-8");
+        let fail = results.iter().find(|r| r.error_code.as_deref() == Some("MCP-VAL-8")).unwrap();
+        assert!(fail.message.contains("my_tool"), "error must name the tool");
+        assert!(fail.message.contains("schemas/missing.json"), "error must name the path");
+    }
+
+    #[test]
+    fn mcp_val8_tool_without_input_schema_passes_unconditionally() {
+        let mut views = HashMap::new();
+        views.insert("handler-view".into(), make_view_codecomponent(vec![]));
+        views.insert(
+            "mcp".into(),
+            make_mcp_view_with_tool("my_tool", crate::view::McpToolConfig {
+                view: Some("handler-view".into()),
+                input_schema: None,
+                ..Default::default()
+            }),
+        );
+
+        let app = make_app(
+            "mcp-val8-none", "app-service", "00000000-0000-0000-0000-000000000001",
+            vec![], vec![], HashMap::new(), HashMap::new(), views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(!has_fail(&results, "MCP-VAL-8"), "tool without input_schema must never trigger MCP-VAL-8");
     }
 }
