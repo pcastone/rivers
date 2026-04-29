@@ -31,7 +31,7 @@ pub async fn dispatch(
         "initialize" => handle_initialize(req, tools, resources, prompts, ctx, app_dir, instructions, dv_namespace).await,
         "ping" => JsonRpcResponse::success(req.id.clone(), serde_json::json!({})),
         "tools/list" => handle_tools_list(req, tools, ctx, dv_namespace).await,
-        "tools/call" => handle_tools_call(req, tools, ctx, dv_namespace).await,
+        "tools/call" => handle_tools_call(req, tools, ctx, app_id, dv_namespace).await,
         "resources/list" => handle_resources_list(req, resources),
         "resources/read" => handle_resources_read(req, resources, ctx, dv_namespace).await,
         "resources/templates/list" => handle_resource_templates(req, resources, app_id),
@@ -105,17 +105,22 @@ async fn handle_tools_list(
     dv_namespace: &str,
 ) -> JsonRpcResponse {
     let dv_guard = ctx.dataview_executor.read().await;
-    let executor: &Arc<DataViewExecutor> = match dv_guard.as_ref() {
-        Some(e) => e,
-        None => return JsonRpcResponse::server_error(req.id.clone(), "DataView engine not available"),
-    };
+    let executor_opt = dv_guard.as_ref();
 
     let tool_list: Vec<serde_json::Value> = tools.iter().map(|(name, config)| {
-        let namespaced = format!("{}:{}", dv_namespace, config.dataview);
-        let method = config.method.as_deref().unwrap_or("GET");
-        let schema = if let Some(dv_config) = executor.get_dataview_config(&namespaced) {
-            let params = dv_config.parameters_for_method(method);
-            project_input_schema(params)
+        // CB-P0.1: codecomponent-backed tools use an open schema for now;
+        // CB-P0.2 will derive a precise schema from the TypeScript handler signature.
+        let schema = if config.view.is_some() {
+            serde_json::json!({"type": "object", "properties": {}})
+        } else if let Some(executor) = executor_opt {
+            let namespaced = format!("{}:{}", dv_namespace, config.dataview);
+            let method = config.method.as_deref().unwrap_or("GET");
+            if let Some(dv_config) = executor.get_dataview_config(&namespaced) {
+                let params = dv_config.parameters_for_method(method);
+                project_input_schema(params)
+            } else {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
         } else {
             serde_json::json!({"type": "object", "properties": {}})
         };
@@ -140,6 +145,7 @@ async fn handle_tools_call(
     req: &JsonRpcRequest,
     tools: &HashMap<String, McpToolConfig>,
     ctx: &AppContext,
+    app_id: &str,
     dv_namespace: &str,
 ) -> JsonRpcResponse {
     let tool_name = match req.params.get("name").and_then(|n| n.as_str()) {
@@ -159,6 +165,11 @@ async fn handle_tools_call(
         .and_then(|a| a.as_object())
         .cloned()
         .unwrap_or_default();
+
+    // CB-P0.1: codecomponent-backed tools dispatch through the ProcessPool.
+    if let Some(ref view_name) = tool_config.view {
+        return dispatch_codecomponent_tool(req, ctx, app_id, dv_namespace, view_name, arguments).await;
+    }
 
     let params: HashMap<String, QueryValue> = arguments.into_iter().map(|(k, v)| {
         let qv = crate::view_engine::json_value_to_query_value(&v);
@@ -203,6 +214,91 @@ async fn handle_tools_call(
                 JsonRpcResponse::server_error(req.id.clone(), msg)
             }
         }
+    }
+}
+
+/// Dispatch an MCP tool call to a codecomponent view's handler via the ProcessPool.
+///
+/// CB-P0.1: Locates the codecomponent entrypoint from the loaded bundle, builds a
+/// TaskContext with the tool arguments as the handler's args, and dispatches it
+/// through the default process pool.  The handler receives its full capabilities
+/// (storage, driver_factory, dataview_executor, lockbox, keystore) via
+/// task_enrichment::enrich — identical to REST, WebSocket, and SSE handlers.
+async fn dispatch_codecomponent_tool(
+    req: &JsonRpcRequest,
+    ctx: &AppContext,
+    app_id: &str,
+    dv_namespace: &str,
+    view_name: &str,
+    arguments: serde_json::Map<String, serde_json::Value>,
+) -> JsonRpcResponse {
+    use crate::process_pool::{Entrypoint, TaskContextBuilder, TaskKind};
+    use rivers_runtime::view::HandlerConfig;
+
+    // Locate the app in the loaded bundle by dv_namespace (entry_point slug).
+    let entrypoint = {
+        let bundle = match ctx.loaded_bundle.as_ref() {
+            Some(b) => b,
+            None => return JsonRpcResponse::server_error(req.id.clone(), "no bundle loaded"),
+        };
+        let app = bundle.apps.iter().find(|a| {
+            a.manifest.entry_point.as_deref() == Some(dv_namespace)
+                || a.manifest.app_entry_point.as_deref() == Some(dv_namespace)
+        });
+        let app = match app {
+            Some(a) => a,
+            None => return JsonRpcResponse::server_error(
+                req.id.clone(),
+                format!("app '{}' not found in bundle", dv_namespace),
+            ),
+        };
+        let view_config = match app.config.api.views.get(view_name) {
+            Some(v) => v,
+            None => return JsonRpcResponse::server_error(
+                req.id.clone(),
+                format!("view '{}' not found", view_name),
+            ),
+        };
+        match &view_config.handler {
+            HandlerConfig::Codecomponent { language, module, entrypoint, .. } => Entrypoint {
+                language: language.clone(),
+                module: module.clone(),
+                function: entrypoint.clone(),
+            },
+            _ => return JsonRpcResponse::server_error(
+                req.id.clone(),
+                format!("view '{}' is not a codecomponent handler", view_name),
+            ),
+        }
+    };
+
+    let trace_id = uuid::Uuid::new_v4().to_string();
+    let args = serde_json::Value::Object(arguments);
+
+    let builder = TaskContextBuilder::new()
+        .entrypoint(entrypoint)
+        .args(args)
+        .trace_id(trace_id.clone());
+    let builder = crate::task_enrichment::enrich(builder, app_id, TaskKind::Rest);
+    let task_ctx = match builder.build() {
+        Ok(c) => c,
+        Err(e) => return JsonRpcResponse::server_error(
+            req.id.clone(),
+            format!("task context build failed: {e}"),
+        ),
+    };
+
+    match ctx.pool.dispatch("default", task_ctx).await {
+        Ok(result) => {
+            let text = serde_json::to_string(&result.value).unwrap_or_default();
+            JsonRpcResponse::success(req.id.clone(), serde_json::json!({
+                "content": [{ "type": "text", "text": text }]
+            }))
+        }
+        Err(e) => JsonRpcResponse::server_error(
+            req.id.clone(),
+            format!("handler error: {e}"),
+        ),
     }
 }
 

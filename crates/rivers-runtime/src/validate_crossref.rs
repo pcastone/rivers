@@ -136,13 +136,53 @@ pub fn validate_crossref(bundle: &LoadedBundle) -> Vec<ValidationResult> {
             }
 
             for (view_name, view_config) in &mcp_views {
-                // VAL-1: Tool DataView references
+                // VAL-1: Tool backend references — dataview or codecomponent view
                 for (tool_name, tool_config) in &view_config.tools {
-                    if !app.config.data.dataviews.contains_key(&tool_config.dataview) {
+                    if let Some(ref view_name) = tool_config.view {
+                        // CB-P0.1.c: validate the referenced view exists and is a codecomponent
+                        match app.config.api.views.get(view_name) {
+                            None => {
+                                results.push(ValidationResult::fail(
+                                    "MCP-VAL-1",
+                                    &format!("{}/app.toml", app.manifest.app_name),
+                                    format!(
+                                        "MCP tool '{}' references undeclared view '{}'",
+                                        tool_name, view_name
+                                    ),
+                                ));
+                            }
+                            Some(target_view) => {
+                                if !matches!(target_view.handler, crate::view::HandlerConfig::Codecomponent { .. }) {
+                                    results.push(ValidationResult::fail(
+                                        "MCP-VAL-1",
+                                        &format!("{}/app.toml", app.manifest.app_name),
+                                        format!(
+                                            "MCP tool '{}' references view '{}' which is not a codecomponent handler",
+                                            tool_name, view_name
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                    } else if !tool_config.dataview.is_empty() {
+                        if !app.config.data.dataviews.contains_key(&tool_config.dataview) {
+                            results.push(ValidationResult::fail(
+                                "MCP-VAL-1",
+                                &format!("{}/app.toml", app.manifest.app_name),
+                                format!(
+                                    "MCP tool '{}' references undeclared DataView '{}'",
+                                    tool_name, tool_config.dataview
+                                ),
+                            ));
+                        }
+                    } else {
                         results.push(ValidationResult::fail(
                             "MCP-VAL-1",
                             &format!("{}/app.toml", app.manifest.app_name),
-                            format!("MCP tool '{}' references undeclared DataView '{}'", tool_name, tool_config.dataview),
+                            format!(
+                                "MCP tool '{}' must specify either 'dataview' or 'view'",
+                                tool_name
+                            ),
                         ));
                     }
                 }
