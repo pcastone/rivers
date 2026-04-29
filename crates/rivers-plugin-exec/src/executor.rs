@@ -481,12 +481,22 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     /// On Linux the executor uses /proc/self/fd/N (TOCTOU mitigation, RW1.2.b).
-    /// GitHub Actions and other restricted sandboxes mount proc without fd
-    /// access, causing spawns to fail with "cannot open /proc/self/fd/N".
-    /// Tests that spawn real scripts check this first and skip gracefully.
+    /// GitHub Actions and other restricted sandboxes mount proc without exposing
+    /// dynamically-opened fds (only 0/1/2 are visible), causing spawns to fail
+    /// with "cannot open /proc/self/fd/N". Tests that spawn real scripts check
+    /// this first and skip gracefully.
+    ///
+    /// We verify by actually opening a file and checking if that fd's proc entry
+    /// is accessible — checking /proc/self/fd/1 (stdout, always present) is
+    /// insufficient because sandboxes may expose only std-stream fds.
     #[cfg(target_os = "linux")]
     fn proc_fd_accessible() -> bool {
-        std::fs::metadata("/proc/self/fd/1").is_ok()
+        use std::os::unix::io::IntoRawFd;
+        let Ok(f) = std::fs::File::open("/dev/null") else { return false; };
+        let fd = f.into_raw_fd();
+        let ok = std::fs::metadata(format!("/proc/self/fd/{fd}")).is_ok();
+        unsafe { libc::close(fd); }
+        ok
     }
     #[cfg(not(target_os = "linux"))]
     fn proc_fd_accessible() -> bool { true }

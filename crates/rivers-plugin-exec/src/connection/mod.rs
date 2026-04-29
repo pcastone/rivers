@@ -35,11 +35,17 @@ mod tests {
     use crate::integrity::{self, CommandIntegrity};
 
     /// On Linux the executor uses /proc/self/fd/N (TOCTOU mitigation, RW1.2.b).
-    /// GitHub Actions and other restricted sandboxes mount proc without fd
-    /// access, causing spawns to fail with "cannot open /proc/self/fd/N".
+    /// GitHub Actions and other restricted sandboxes expose only std-stream fds
+    /// (0/1/2) in proc, causing spawns to fail with "cannot open /proc/self/fd/N".
+    /// We verify by opening a new fd and checking if its proc entry exists.
     #[cfg(target_os = "linux")]
     fn proc_fd_accessible() -> bool {
-        std::fs::metadata("/proc/self/fd/1").is_ok()
+        use std::os::unix::io::IntoRawFd;
+        let Ok(f) = std::fs::File::open("/dev/null") else { return false; };
+        let fd = f.into_raw_fd();
+        let ok = std::fs::metadata(format!("/proc/self/fd/{fd}")).is_ok();
+        unsafe { libc::close(fd); }
+        ok
     }
     #[cfg(not(target_os = "linux"))]
     fn proc_fd_accessible() -> bool { true }
