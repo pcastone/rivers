@@ -418,6 +418,12 @@ pub struct McpResourceConfig {
     /// MIME type for the resource. Default: "application/json".
     #[serde(default = "default_mime")]
     pub mime_type: String,
+    /// Optional RFC 6570 URI template (e.g. `cb://{project_id}/decisions{?since,limit}`).
+    /// When set, served in `resources/templates/list` instead of the default
+    /// `rivers://<app_id>/<name>` URI. Variables in the template are extracted
+    /// from the incoming URI at `resources/read` time and passed as DataView params.
+    #[serde(default)]
+    pub uri_template: Option<String>,
 }
 
 fn default_mime() -> String { "application/json".into() }

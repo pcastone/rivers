@@ -391,8 +391,12 @@ fn handle_resource_templates(
     app_id: &str,
 ) -> JsonRpcResponse {
     let templates: Vec<serde_json::Value> = resources.iter().map(|(name, config)| {
+        let uri_template = config.uri_template.as_deref()
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| format!("rivers://{}/{}", app_id, name));
         serde_json::json!({
-            "uriTemplate": format!("rivers://{}/{}", app_id, name),
+            "uriTemplate": uri_template,
             "name": name,
             "description": config.description,
             "mimeType": config.mime_type,
@@ -488,6 +492,53 @@ fn handle_prompts_get(
             "content": { "type": "text", "text": resolved }
         }]
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_req(method: &str) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(serde_json::json!(1)),
+            method: method.into(),
+            params: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn resource_template_uses_uri_template_when_set() {
+        let mut resources = HashMap::new();
+        resources.insert("decisions".into(), McpResourceConfig {
+            dataview: "decisions_list".into(),
+            description: "CB decisions".into(),
+            mime_type: "application/json".into(),
+            uri_template: Some("cb://{project_id}/decisions{?since,limit}".into()),
+        });
+        let resp = handle_resource_templates(&make_req("resources/templates/list"), &resources, "app-id");
+        // Serialize to inspect result
+        let v = serde_json::to_value(&resp).unwrap();
+        let templates = v["result"]["resourceTemplates"].as_array().unwrap().clone();
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0]["uriTemplate"], "cb://{project_id}/decisions{?since,limit}");
+    }
+
+    #[test]
+    fn resource_template_falls_back_to_default_uri_when_not_set() {
+        let mut resources = HashMap::new();
+        resources.insert("tasks".into(), McpResourceConfig {
+            dataview: "tasks_list".into(),
+            description: "Tasks".into(),
+            mime_type: "application/json".into(),
+            uri_template: None,
+        });
+        let resp = handle_resource_templates(&make_req("resources/templates/list"), &resources, "my-app");
+        let v = serde_json::to_value(&resp).unwrap();
+        let templates = v["result"]["resourceTemplates"].as_array().unwrap().clone();
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0]["uriTemplate"], "rivers://my-app/tasks");
+    }
 }
 
 /// Project DataView parameters into MCP JSON Schema inputSchema.
