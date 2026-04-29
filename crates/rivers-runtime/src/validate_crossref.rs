@@ -207,11 +207,16 @@ pub fn validate_crossref(bundle: &LoadedBundle) -> Vec<ValidationResult> {
                 // VAL-2: Resource DataView references
                 for (resource_name, resource_config) in &view_config.resources {
                     if !app.config.data.dataviews.contains_key(&resource_config.dataview) {
-                        results.push(ValidationResult::fail(
+                        let mut result = ValidationResult::fail(
                             "MCP-VAL-2",
                             &format!("{}/app.toml", app.manifest.app_name),
                             format!("MCP resource '{}' references undeclared DataView '{}'", resource_name, resource_config.dataview),
-                        ));
+                        );
+                        let known: Vec<&str> = app.config.data.dataviews.keys().map(|s| s.as_str()).collect();
+                        if let Some(sug) = crate::validate_format::suggest_key(&resource_config.dataview, &known) {
+                            result = result.with_suggestion(sug);
+                        }
+                        results.push(result);
                     }
                 }
 
@@ -487,8 +492,7 @@ fn check_dataview_datasource_refs(
                 ),
             );
         } else {
-            results.push(
-                ValidationResult::fail(
+            let mut result = ValidationResult::fail(
                     error_codes::X001,
                     format!("{}/app.toml", app_name),
                     format!(
@@ -501,8 +505,14 @@ fn check_dataview_datasource_refs(
                     format!("data.dataviews.{}", dv_name),
                     ds_ref,
                     "datasource",
-                ),
-            );
+                );
+            let known: Vec<&str> = resource_ds_names.iter().copied()
+                .chain(config_ds_names.iter().copied())
+                .collect();
+            if let Some(sug) = crate::validate_format::suggest_key(ds_ref, &known) {
+                result = result.with_suggestion(sug);
+            }
+            results.push(result);
         }
     }
 }
@@ -605,8 +615,7 @@ fn check_view_refs(
                         ),
                     );
                 } else {
-                    results.push(
-                        ValidationResult::fail(
+                    let mut result = ValidationResult::fail(
                             error_codes::X002,
                             format!("{}/app.toml", app_name),
                             format!(
@@ -619,8 +628,12 @@ fn check_view_refs(
                             format!("api.views.{}.handler", view_name),
                             dataview.as_str(),
                             "dataview",
-                        ),
-                    );
+                        );
+                    let known: Vec<&str> = dataview_names.iter().copied().collect();
+                    if let Some(sug) = crate::validate_format::suggest_key(dataview.as_str(), &known) {
+                        result = result.with_suggestion(sug);
+                    }
+                    results.push(result);
                 }
             }
             HandlerConfig::Codecomponent { resources, .. } => {
@@ -2475,6 +2488,133 @@ mod tests {
             cb001.message.contains("did you mean 'orders_cb'?"),
             "expected Levenshtein suggestion in message, got: {}",
             cb001.message,
+        );
+    }
+
+    // ── X001/X002/MCP-VAL-2: did-you-mean suggestions ──────────────
+
+    #[test]
+    fn x001_typo_datasource_name_includes_suggestion() {
+        // Datasource is "my_db"; DataView references "mydb" (missing underscore).
+        let mut datasources = HashMap::new();
+        datasources.insert("my_db".into(), make_ds_config("my_db", "faker"));
+
+        let mut dataviews = HashMap::new();
+        dataviews.insert(
+            "list_items".into(),
+            make_dv_config("list_items", "mydb"), // typo
+        );
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("my_db", "faker")],
+            vec![],
+            datasources,
+            dataviews,
+            HashMap::new(),
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        let fail = results
+            .iter()
+            .find(|r| r.error_code.as_deref() == Some(error_codes::X001))
+            .expect("expected X001 failure");
+        assert!(
+            fail.suggestion.as_deref().map(|s| s.contains("my_db")).unwrap_or(false),
+            "expected suggestion containing 'my_db', got: {:?}",
+            fail.suggestion,
+        );
+    }
+
+    #[test]
+    fn x002_typo_dataview_name_includes_suggestion() {
+        // DataView is "list_orders"; view references "list_order" (missing 's').
+        let mut datasources = HashMap::new();
+        datasources.insert("db".into(), make_ds_config("db", "faker"));
+
+        let mut dataviews = HashMap::new();
+        dataviews.insert(
+            "list_orders".into(),
+            make_dv_config("list_orders", "db"),
+        );
+
+        let mut views = HashMap::new();
+        views.insert(
+            "get_orders".into(),
+            make_view_dataview("Rest", "list_order"), // typo: missing 's'
+        );
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("db", "faker")],
+            vec![],
+            datasources,
+            dataviews,
+            views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        let fail = results
+            .iter()
+            .find(|r| r.error_code.as_deref() == Some(error_codes::X002))
+            .expect("expected X002 failure");
+        assert!(
+            fail.suggestion.as_deref().map(|s| s.contains("list_orders")).unwrap_or(false),
+            "expected suggestion containing 'list_orders', got: {:?}",
+            fail.suggestion,
+        );
+    }
+
+    #[test]
+    fn mcp_val2_typo_dataview_name_includes_suggestion() {
+        // DataView is "decisions_list"; MCP resource references "decision_list" (missing 's').
+        let mut datasources = HashMap::new();
+        datasources.insert("db".into(), make_ds_config("db", "faker"));
+
+        let mut dataviews = HashMap::new();
+        dataviews.insert(
+            "decisions_list".into(),
+            make_dv_config("decisions_list", "db"),
+        );
+
+        let mut views = HashMap::new();
+        views.insert(
+            "decisions".into(),
+            make_mcp_view_with_resource("decisions", crate::view::McpResourceConfig {
+                dataview: "decision_list".into(), // typo: missing 's'
+                description: String::new(),
+                mime_type: "application/json".into(),
+                uri_template: None,
+            }),
+        );
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("db", "faker")],
+            vec![],
+            datasources,
+            dataviews,
+            views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        let fail = results
+            .iter()
+            .find(|r| r.error_code.as_deref() == Some("MCP-VAL-2"))
+            .expect("expected MCP-VAL-2 failure");
+        assert!(
+            fail.suggestion.as_deref().map(|s| s.contains("decisions_list")).unwrap_or(false),
+            "expected suggestion containing 'decisions_list', got: {:?}",
+            fail.suggestion,
         );
     }
 
