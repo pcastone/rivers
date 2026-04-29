@@ -253,7 +253,9 @@ async fn exec_driver_error_propagation() {
         "#!/bin/sh\necho 'script error: invalid input' >&2\nexit 1\n"
     );
     let hash = sha256_file(&script);
-    let params = make_exec_params(dir.path(), &[("failing", &script, &hash, "stdin")]);
+    // Use "args" mode so no stdin write is attempted — fail.sh exits immediately
+    // and the broken-pipe race that plagues CI stdin-mode tests is avoided.
+    let params = make_exec_params(dir.path(), &[("failing", &script, &hash, "args")]);
 
     let mut factory = DriverFactory::new();
     factory.register_database_driver(std::sync::Arc::new(rivers_plugin_exec::ExecDriver));
