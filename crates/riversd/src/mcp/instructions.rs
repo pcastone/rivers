@@ -133,6 +133,7 @@ mod tests {
         let mut tools = HashMap::new();
         tools.insert("search".into(), McpToolConfig {
             dataview: "search_dv".into(),
+            view: None,
             description: "Search records".into(),
             method: None,
             hints: McpToolHints::default(),
