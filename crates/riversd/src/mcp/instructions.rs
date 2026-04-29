@@ -134,6 +134,7 @@ mod tests {
         tools.insert("search".into(), McpToolConfig {
             dataview: "search_dv".into(),
             view: None,
+            input_schema: None,
             description: "Search records".into(),
             method: None,
             hints: McpToolHints::default(),

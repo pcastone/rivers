@@ -12,6 +12,10 @@ use super::jsonrpc::{JsonRpcRequest, JsonRpcResponse};
 use crate::server::AppContext;
 
 /// Dispatch a JSON-RPC request to the appropriate MCP handler.
+///
+/// `auth_context` is the caller identity retrieved from the MCP session store
+/// (the `"auth"` sub-object stored at `initialize` time). It is `None` for
+/// `initialize`/`ping` and for MCP views with no storage backend.
 pub async fn dispatch(
     ctx: &AppContext,
     req: &JsonRpcRequest,
@@ -22,6 +26,7 @@ pub async fn dispatch(
     dv_namespace: &str,
     app_dir: &std::path::Path,
     instructions: Option<&str>,
+    auth_context: Option<&serde_json::Value>,
 ) -> JsonRpcResponse {
     if req.jsonrpc != "2.0" {
         return JsonRpcResponse::invalid_request(req.id.clone());
@@ -31,7 +36,7 @@ pub async fn dispatch(
         "initialize" => handle_initialize(req, tools, resources, prompts, ctx, app_dir, instructions, dv_namespace).await,
         "ping" => JsonRpcResponse::success(req.id.clone(), serde_json::json!({})),
         "tools/list" => handle_tools_list(req, tools, ctx, dv_namespace, app_dir).await,
-        "tools/call" => handle_tools_call(req, tools, ctx, app_id, dv_namespace).await,
+        "tools/call" => handle_tools_call(req, tools, ctx, app_id, dv_namespace, auth_context).await,
         "resources/list" => handle_resources_list(req, resources),
         "resources/read" => handle_resources_read(req, resources, ctx, dv_namespace).await,
         "resources/templates/list" => handle_resource_templates(req, resources, app_id),
@@ -158,6 +163,7 @@ async fn handle_tools_call(
     ctx: &AppContext,
     app_id: &str,
     dv_namespace: &str,
+    auth_context: Option<&serde_json::Value>,
 ) -> JsonRpcResponse {
     let tool_name = match req.params.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
@@ -179,7 +185,7 @@ async fn handle_tools_call(
 
     // CB-P0.1: codecomponent-backed tools dispatch through the ProcessPool.
     if let Some(ref view_name) = tool_config.view {
-        return dispatch_codecomponent_tool(req, ctx, app_id, dv_namespace, view_name, arguments).await;
+        return dispatch_codecomponent_tool(req, ctx, app_id, dv_namespace, view_name, arguments, auth_context).await;
     }
 
     let params: HashMap<String, QueryValue> = arguments.into_iter().map(|(k, v)| {
@@ -230,11 +236,11 @@ async fn handle_tools_call(
 
 /// Dispatch an MCP tool call to a codecomponent view's handler via the ProcessPool.
 ///
-/// CB-P0.1: Locates the codecomponent entrypoint from the loaded bundle, builds a
-/// TaskContext with the tool arguments as the handler's args, and dispatches it
-/// through the default process pool.  The handler receives its full capabilities
-/// (storage, driver_factory, dataview_executor, lockbox, keystore) via
-/// task_enrichment::enrich — identical to REST, WebSocket, and SSE handlers.
+/// CB-P0.1/P0.3: Locates the codecomponent entrypoint from the loaded bundle, builds a
+/// TaskContext with the tool arguments as `ctx.request` and the caller identity as
+/// `ctx.session`, and dispatches it through the default process pool. The handler
+/// receives its full capabilities (storage, driver_factory, dataview_executor, lockbox,
+/// keystore) via task_enrichment::enrich — identical to REST, WebSocket, and SSE handlers.
 async fn dispatch_codecomponent_tool(
     req: &JsonRpcRequest,
     ctx: &AppContext,
@@ -242,6 +248,7 @@ async fn dispatch_codecomponent_tool(
     dv_namespace: &str,
     view_name: &str,
     arguments: serde_json::Map<String, serde_json::Value>,
+    auth_context: Option<&serde_json::Value>,
 ) -> JsonRpcResponse {
     use crate::process_pool::{Entrypoint, TaskContextBuilder, TaskKind};
     use rivers_runtime::view::HandlerConfig;
@@ -284,7 +291,13 @@ async fn dispatch_codecomponent_tool(
     };
 
     let trace_id = uuid::Uuid::new_v4().to_string();
-    let args = serde_json::Value::Object(arguments);
+
+    // Wrap tool arguments as ctx.request and propagate caller identity as ctx.session,
+    // matching the REST pipeline's injection pattern (pipeline.rs).
+    let args = serde_json::json!({
+        "request": serde_json::Value::Object(arguments),
+        "session": auth_context,
+    });
 
     let builder = TaskContextBuilder::new()
         .entrypoint(entrypoint)
