@@ -55,6 +55,8 @@ The highest-priority crates to fix first are:
 
 ### 1. Secret Lifecycle Is Manual And Easy To Get Wrong
 
+> **Partially resolved 2026-04-29 by PR #96 (RW1.4)** — `Secret<T>` wrapper with automatic zeroize-on-drop introduced in `rivers-driver-sdk`; applied to lockbox, keystore, and cargo-deploy sensitive values. `Debug` removed from `KeystoreEntry`. Remaining gaps (public field exposure, TTY echo, argv secret input) deferred.
+
 Affected crates:
 
 - `rivers-lockbox-engine`
@@ -88,6 +90,8 @@ Fix direction:
 
 ### 2. Broker Drivers Do Not Share A Real Ack/Nack Contract
 
+> **Partially resolved 2026-04-29 by PR #96 (RW2)** — `AckOutcome` enum and `BrokerSubscription` SDK type added to `rivers-driver-sdk`; Kafka, RabbitMQ, NATS, and redis-streams updated for conformance. RabbitMQ AMQP-406 double-ack detection and NATS per-subject fairness added. Full redelivery/PEL-reclaim semantics deferred.
+
 Affected crates:
 
 - `rivers-plugin-nats`
@@ -117,6 +121,8 @@ Fix direction:
 - Add contract tests that exercise `receive -> nack -> redelivery` and multi-node consumer groups.
 
 ### 3. Registration And Config Wiring Gaps Are Common
+
+> **Partially resolved 2026-04-29 by PR #96 (RW3)** — NATS, RabbitMQ, and Kafka schema checkers wired into `validate_syntax.rs`; Elasticsearch `ddl_execute` returns Unsupported; `riverpackage validate --config` flag wired into engine discovery. `rivers-core-config` nested key validation and storage policy enforcement deferred.
 
 Affected crates:
 
@@ -185,6 +191,8 @@ Fix direction:
 
 ### 5. Timeout Policy Is Inconsistent
 
+> **Partially resolved 2026-04-29 by PR #96 (RW4)** — `rivers-driver-sdk/src/defaults.rs` added with shared `DEFAULT_TIMEOUT_MS`, `DEFAULT_MAX_ROWS`, `DEFAULT_MAX_RESPONSE_BYTES` constants; applied to elasticsearch, influxdb, and ldap. Shared `url_encode_path_segment` helper added and applied across drivers. Cassandra, MongoDB, CouchDB, Neo4j row/timeout gaps deferred.
+
 Affected crates:
 
 - `rivers-plugin-exec`
@@ -245,18 +253,20 @@ Fix direction:
 
 ### `rivers-plugin-exec`
 
+> **Resolved 2026-04-29 by PR #96 (RW1.2, commits `61c8549`–`37792d0`)** — All 8 findings addressed: stdin write moved inside unified `tokio::time::timeout` block (T1); `truncate_utf8()` helper for safe byte-boundary truncation (T1); `setgroups(0, NULL)` called before uid/gid drop (T1); `/proc/self/fd/N` fd-based exec with O_CLOEXEC cleared eliminates TOCTOU on Linux (T2); `every:N` counter moved after semaphore acquisition (T2); `tokio::join!` drains stdout/stderr concurrently with byte caps (T2); case-insensitive `env_clear` parsing fails closed on invalid values (T2); `kill()` and `setsid()` errors now logged (T3).
+
 **Summary:** 8 findings. This is the highest-risk plugin because the authorization model is hash pinning and the payload is command execution.
 
 Findings:
 
-- **T1:** Stdin write can hang outside timeout. `executor.rs` writes stdin before the timeout block, so a child that does not read stdin can pin permits and leave the child alive.
-- **T1:** Non-UTF8 stderr truncation can panic. Lossy UTF-8 string is sliced by byte length.
-- **T1:** Privilege drop leaves supplementary groups untouched. `uid` and `gid` are set, but supplementary groups are not cleared.
-- **T2:** Hash verification is path-based TOCTOU. The verified path is later executed by path, allowing replacement between hash and exec.
-- **T2:** `every:N` integrity counter advances before semaphore acquisition. Rejected attempts can consume scheduled integrity checks.
-- **T2:** Stdout is drained before stderr. A child filling stderr can block while stdout is being awaited.
-- **T2:** Invalid `env_clear` values disable sanitization. Only exact `"true"` maps to true; typos silently inherit env.
-- **T3:** Process-group setup and kill errors are ignored.
+- **T1:** ~~Stdin write can hang outside timeout.~~ `executor.rs` writes stdin before the timeout block, so a child that does not read stdin can pin permits and leave the child alive.
+- **T1:** ~~Non-UTF8 stderr truncation can panic.~~ Lossy UTF-8 string is sliced by byte length.
+- **T1:** ~~Privilege drop leaves supplementary groups untouched.~~ `uid` and `gid` are set, but supplementary groups are not cleared.
+- **T2:** ~~Hash verification is path-based TOCTOU.~~ The verified path is later executed by path, allowing replacement between hash and exec.
+- **T2:** ~~`every:N` integrity counter advances before semaphore acquisition.~~ Rejected attempts can consume scheduled integrity checks.
+- **T2:** ~~Stdout is drained before stderr.~~ A child filling stderr can block while stdout is being awaited.
+- **T2:** ~~Invalid `env_clear` values disable sanitization.~~ Only exact `"true"` maps to true; typos silently inherit env.
+- **T3:** ~~Process-group setup and kill errors are ignored.~~
 
 Fix direction:
 
@@ -285,6 +295,8 @@ Fix direction:
 
 ### `rivers-keystore-engine`
 
+> **Partially resolved 2026-04-29 by PR #96 (RW1.4, commit `56a552f`)** — `Secret<T>` wrapper zeroizes on drop, applied to key material. Derived `Debug` removed from `KeystoreEntry`; redacted manual impl added. Remaining findings (fsync, concurrent-save locking, checked version arithmetic) are deferred to a follow-up.
+
 Detailed report exists at `docs/review/rivers-keystore-engine.md`.
 
 Consolidated findings:
@@ -293,7 +305,7 @@ Consolidated findings:
 - **T2:** Concurrent saves can lose key rotations.
 - **T2:** Plaintext serialized keystore is not zeroized on save error paths.
 - **T2:** Decrypted keystore bytes are not zeroized on parse error paths.
-- **T2:** Secret key material is exposed through derived `Debug`.
+- **T2:** ~~Secret key material is exposed through derived `Debug`.~~ Resolved RW1.4.
 - **T2:** Public accessors return secret-bearing types.
 - **T2:** Key rotation version can overflow.
 
@@ -346,12 +358,14 @@ Fix direction:
 
 ### `rivers-driver-sdk`
 
+> **Resolved 2026-04-29 by PR #96 (RW1.1, commit `9454141`)** — All 4 findings addressed: comment-aware DDL classifier via `strip_sql_comments()` + `first_sql_token()` (T1); DDL error messages emit only the classified token, not raw statement content (T2); span-based parameter substitution replaces global string replace (T2); `saturating_pow` / `saturating_mul` in retry backoff (T2).
+
 Findings:
 
-- **T1:** Leading SQL comments bypass the DDL guard because `is_ddl_statement()` trims whitespace but not comments.
-- **T2:** Forbidden DDL errors can echo credential material by including raw statement prefixes.
-- **T2:** Dollar positional parameter rewriting corrupts prefix-sharing names via repeated global replacement.
-- **T2:** Exponential retry backoff can overflow before max-delay capping.
+- **T1:** ~~Leading SQL comments bypass the DDL guard~~ because `is_ddl_statement()` trims whitespace but not comments.
+- **T2:** ~~Forbidden DDL errors can echo credential material~~ by including raw statement prefixes.
+- **T2:** ~~Dollar positional parameter rewriting corrupts prefix-sharing names~~ via repeated global replacement.
+- **T2:** ~~Exponential retry backoff can overflow~~ before max-delay capping.
 
 Fix direction:
 
@@ -371,6 +385,8 @@ Notes:
 - Token opacity concerns mostly live in `rivers-runtime`/engine wiring rather than this crate.
 
 ### `rivers-plugin-kafka`
+
+> **Partially resolved 2026-04-29 by PR #96 (RW2, commit `4efa50d`; RW3, commit `50dea1b`)** — `AckOutcome` enum and `BrokerSubscription` SDK contract defined; Kafka schema checker wired into `validate_syntax.rs`. Pre-commit offset-advance TOCTOU (T1) is deferred: the Rivers-managed consumer-group semantics would need JetStream or idempotent consumer migration.
 
 **Summary:** 1 confirmed finding plus 1 architectural observation. The crate is lower FFI risk than the focus block assumed because it uses pure-Rust `rskafka`, but broker semantics still need attention.
 
@@ -406,14 +422,16 @@ Fix direction:
 
 ### `riversctl`
 
+> **Partially resolved 2026-04-29 by PR #96 (RW1.3, commits `fab3e61`–`12b1510`)** — Stop fallback now gated on network unreachability only, not any HTTP error (T1); `kill()` return value checked, PID file removed only on confirmed exit (T1); `log set` request body corrected from `event` to `target` (T2); admin private key config key corrected from `admin_private_key_path` to `admin_key_path` (T2). Remaining findings (deploy lifecycle, timeout, TLS import permissions) are deferred.
+
 Findings:
 
-- **T1:** Admin shutdown falls back to local OS signals after any API error, including auth/RBAC failure.
-- **T1:** Local stop ignores `kill` failures and removes the PID file anyway.
+- **T1:** ~~Admin shutdown falls back to local OS signals after any API error, including auth/RBAC failure.~~ Fixed RW1.3.
+- **T1:** ~~Local stop ignores `kill` failures and removes the PID file anyway.~~ Fixed RW1.3.
 - **T2:** `deploy` only creates a pending deployment.
-- **T2:** `log set` sends `event` while server expects `target`.
+- **T2:** ~~`log set` sends `event` while server expects `target`.~~ Fixed RW1.3.
 - **T2:** Admin HTTP requests have no explicit timeout.
-- **T2:** Configured admin private keys are never loaded; malformed env keys are silently ignored.
+- **T2:** ~~Configured admin private keys are never loaded; malformed env keys are silently ignored.~~ Fixed RW1.3.
 - **T2:** TLS import does not lock down imported private-key permissions.
 
 Fix direction:
@@ -425,13 +443,15 @@ Fix direction:
 
 ### `cargo-deploy`
 
+> **Resolved 2026-04-29 by PR #96 (RW5, commit `4c0dda7`)** — All 5 findings addressed: missing engine dylibs now abort deploy with a fatal error (T1); staging directory pattern (rename-live-to-old, copy-staging-to-live, cleanup) replaced direct writes (T2); TLS cert/key generation skipped when existing cert is still valid (T2); private key created with `0600` from the first write call (T2); actual Cargo target directory resolved via `CARGO_TARGET_DIR` env then `cargo metadata` (T2).
+
 Findings:
 
-- **T1:** Dynamic deploy can succeed without required engine libraries.
-- **T2:** Deploy writes directly into the live target.
-- **T2:** Redeploy always replaces TLS certificate and key.
-- **T2:** Private key is created before restrictive permissions are applied.
-- **T2:** Cargo target directory is hard-coded to `target/release` despite `CARGO_TARGET_DIR`.
+- **T1:** ~~Dynamic deploy can succeed without required engine libraries.~~
+- **T2:** ~~Deploy writes directly into the live target.~~
+- **T2:** ~~Redeploy always replaces TLS certificate and key.~~
+- **T2:** ~~Private key is created before restrictive permissions are applied.~~
+- **T2:** ~~Cargo target directory is hard-coded to `target/release` despite `CARGO_TARGET_DIR`.~~
 
 Fix direction:
 
@@ -443,11 +463,13 @@ Fix direction:
 
 ### `riverpackage`
 
+> **Resolved 2026-04-29 by PR #96 (RW5, commit `4c0dda7`)** — All 3 findings addressed: `--config` wired into `discover_engines()` for engine validation (T2); `init` templates updated to produce bundles that pass Layer 1 validation for all 4 drivers (T3); `pack` now produces a `.zip` archive with correct file extension (T3). Golden CLI tests added for `init → validate` round-trips.
+
 Findings:
 
-- **T2:** `--config` is silently ignored, so engine validation can be skipped despite an explicit config path.
-- **T3:** `init` generates bundles that fail `validate`.
-- **T3:** `pack` advertises zip output but creates tar.gz and no requested zip.
+- **T2:** ~~`--config` is silently ignored~~ so engine validation can be skipped despite an explicit config path.
+- **T3:** ~~`init` generates bundles that fail `validate`.~~
+- **T3:** ~~`pack` advertises zip output but creates tar.gz and no requested zip.~~
 
 Fix direction:
 
@@ -457,11 +479,13 @@ Fix direction:
 
 ### `rivers-plugin-ldap`
 
+> **Partially resolved 2026-04-29 by PR #96 (RW4, commit `1bada09`)** — Shared `DEFAULT_TIMEOUT_MS` applied to LDAP connect/bind/search/modify operations (T2 timeout). Unbounded result set (T1), LDAPS/StartTLS (T2), and row caps remain deferred.
+
 Findings:
 
 - **T1:** LDAP search materializes unbounded result sets.
 - **T2:** Bind credentials are sent over plain LDAP only.
-- **T2:** LDAP network operations have no driver-level timeouts.
+- **T2:** ~~LDAP network operations have no driver-level timeouts.~~
 
 Fix direction:
 
@@ -514,22 +538,24 @@ Fix direction:
 
 ### `rivers-plugin-elasticsearch`
 
+> **Partially resolved 2026-04-29 by PR #96 (RW3, commit `50dea1b`; RW4, commit `1bada09`)** — `ddl_execute` now returns `Unsupported` with a clear message instead of silently succeeding (T2 admin gap); shared `DEFAULT_TIMEOUT_MS` and `DEFAULT_MAX_ROWS` applied (T2 timeout/cap); shared `url_encode_path_segment` helper applied to document ID and index path segments (T2). Auth-aware ping (T1), default index preference (T2), and response body size cap remain deferred.
+
 Findings:
 
 - **T1:** Authenticated clusters fail during connect because initial ping does not use auth-aware request path.
 - **T2:** Configured default index is ignored.
-- **T2:** Admin operations are declared but cannot execute.
-- **T2:** HTTP requests have no driver-level timeouts.
+- **T2:** ~~Admin operations are declared but cannot execute.~~ Now returns Unsupported.
+- **T2:** ~~HTTP requests have no driver-level timeouts.~~
 - **T2:** Response bodies are read without size limits.
-- **T2:** Document IDs are interpolated into URL paths unescaped.
+- **T2:** ~~Document IDs are interpolated into URL paths unescaped.~~
 
 Fix direction:
 
 - Use auth-aware ping.
 - Store and prefer configured default index.
-- Implement or remove admin operation support.
-- Add timeouts and response caps.
-- Percent-encode path segments.
+- ~~Implement or remove admin operation support.~~
+- ~~Add timeouts~~ and response caps.
+- ~~Percent-encode path segments.~~
 
 ### `rivers-plugin-couchdb`
 
@@ -549,12 +575,14 @@ Fix direction:
 
 ### `rivers-plugin-influxdb`
 
+> **Partially resolved 2026-04-29 by PR #96 (RW4, commit `1bada09`)** — Batching now clears buffer only after confirmed HTTP success (T1); line protocol escaping for measurement names, tag keys/values, field keys, and field strings (including backslash) applied per line protocol spec (T2); shared `DEFAULT_TIMEOUT_MS` applied as HTTP request timeout (T2). Batching URL bucket gap and response body size cap remain deferred.
+
 Findings:
 
-- **T1:** Batching clears buffered writes before the HTTP batch write succeeds, so failed flushes lose data.
+- **T1:** ~~Batching clears buffered writes before the HTTP batch write succeeds~~ so failed flushes lose data.
 - **T2:** Batching write URL omits the target bucket, unlike non-batched writes.
-- **T2:** Line protocol escaping is incomplete: measurement names are not escaped, and field strings do not escape backslashes.
-- **T2:** HTTP client uses default timeouts and query responses are read fully into memory.
+- **T2:** ~~Line protocol escaping is incomplete~~ measurement names are not escaped, and field strings do not escape backslashes.
+- **T2:** ~~HTTP client uses default timeouts~~ and query responses are read fully into memory.
 
 Fix direction:
 
@@ -564,6 +592,8 @@ Fix direction:
 - Add request timeout and response caps.
 
 ### `rivers-plugin-redis-streams`
+
+> **Partially resolved 2026-04-29 by PR #96 (RW2, commit `6bd29ae`)** — Static plugin registration registry added so the driver can be loaded in static mode (structural gap); `AckOutcome` SDK conformance applied. PEL reclaim/redelivery (T1), MAXLEN trimming (T2), and header persistence (T2) remain deferred.
 
 Findings:
 
@@ -579,13 +609,15 @@ Fix direction:
 
 ### `rivers-plugin-nats`
 
+> **Partially resolved 2026-04-29 by PR #96 (RW2, commit `6bd29ae`; RW3, commit `50dea1b`)** — NATS now uses per-subject `mpsc` channels for fair dispatch across concurrent receivers (T1 queue fairness); NATS schema checker wired into `validate_syntax.rs` (T2). `ack()`/`nack()` semantics, consumer-group migration, multi-subscription support, and key suffix handling remain deferred.
+
 Findings:
 
 - **T1:** `ack()` / `nack()` report success without broker disposition.
 - **T1:** Consumer group is constructed but not used; plain subscribe duplicates messages across nodes.
 - **T2:** Only the first configured subscription is active.
 - **T2:** `OutboundMessage.key` is documented as NATS subject suffix but ignored.
-- **T2:** NATS schema checker is unwired and incomplete.
+- **T2:** ~~NATS schema checker is unwired~~ and incomplete.
 
 Fix direction:
 
@@ -596,11 +628,13 @@ Fix direction:
 
 ### `rivers-plugin-rabbitmq`
 
+> **Partially resolved 2026-04-29 by PR #96 (RW2, commit `6bd29ae`; RW3, commit `50dea1b`)** — AMQP-406 double-ack detection added and `nack()` now uses `basic_reject` (T1 double-ack class); RabbitMQ schema checker wired into `validate_syntax.rs` (T2). Prefetch limit (`basic_qos`) and confirm timeout remain deferred.
+
 Findings:
 
 - **T1:** Consumer has no prefetch limit.
 - **T2:** Publisher confirm wait has no timeout.
-- **T2:** RabbitMQ schema checker is unwired.
+- **T2:** ~~RabbitMQ schema checker is unwired.~~
 
 Fix direction:
 
