@@ -211,6 +211,11 @@ pub async fn execute_command(
         match std::fs::File::open(&config.path) {
             Ok(f) => {
                 let fd = f.into_raw_fd();
+                // Rust's File::open sets O_CLOEXEC by default. Clear it so the fd
+                // survives both the script exec and the subsequent shebang-handler
+                // exec (which would otherwise close all CLOEXEC fds, making
+                // /proc/self/fd/N invisible to the interpreter).
+                unsafe { libc::fcntl(fd, libc::F_SETFD, 0); }
                 let proc_path = format!("/proc/self/fd/{fd}");
                 let mut fd_cmd = Command::new(&proc_path);
 
@@ -480,20 +485,17 @@ mod tests {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
-    /// On Linux the executor uses /proc/self/fd/N (TOCTOU mitigation, RW1.2.b).
-    /// GitHub Actions and other restricted sandboxes mount proc without exposing
-    /// dynamically-opened fds (only 0/1/2 are visible), causing spawns to fail
-    /// with "cannot open /proc/self/fd/N". Tests that spawn real scripts check
-    /// this first and skip gracefully.
-    ///
-    /// We verify by actually opening a file and checking if that fd's proc entry
-    /// is accessible — checking /proc/self/fd/1 (stdout, always present) is
-    /// insufficient because sandboxes may expose only std-stream fds.
+    /// On Linux the executor opens binaries and execs via /proc/self/fd/N (RW1.2.b).
+    /// The production code clears O_CLOEXEC so the fd survives through shebang
+    /// interpreter execs. Tests verify the full pipeline is functional before running.
+    /// Some environments restrict /proc/self/fd/ even for non-CLOEXEC fds; detect
+    /// this by opening a file, clearing CLOEXEC, and checking if the fd is visible.
     #[cfg(target_os = "linux")]
     fn proc_fd_accessible() -> bool {
         use std::os::unix::io::IntoRawFd;
         let Ok(f) = std::fs::File::open("/dev/null") else { return false; };
         let fd = f.into_raw_fd();
+        unsafe { libc::fcntl(fd, libc::F_SETFD, 0); }
         let ok = std::fs::metadata(format!("/proc/self/fd/{fd}")).is_ok();
         unsafe { libc::close(fd); }
         ok
