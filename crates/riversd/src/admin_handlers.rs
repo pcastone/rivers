@@ -385,6 +385,93 @@ pub async fn admin_reset_breaker_handler(
     }
 }
 
+// ── Bundle Introspection ─────────────────────────────────────────
+
+/// Build the JSON payload for `GET /admin/bundle`.
+///
+/// When no bundle is deployed (`None`), returns a minimal "not deployed" object.
+/// When a bundle is loaded (`Some`), iterates all apps and emits datasources,
+/// DataView names, view summaries, and MCP surface lists.
+pub fn bundle_introspection_json(
+    bundle: Option<&std::sync::Arc<rivers_runtime::LoadedBundle>>,
+) -> serde_json::Value {
+    let Some(bundle) = bundle else {
+        return serde_json::json!({
+            "bundle_name": "none",
+            "bundle_version": "none",
+            "apps": [],
+            "note": "no bundle deployed",
+        });
+    };
+
+    let apps: Vec<serde_json::Value> = bundle.apps.iter().map(|app| {
+        // Datasource names from resources
+        let datasources: Vec<&str> = app.resources.datasources.iter()
+            .map(|ds| ds.name.as_str())
+            .collect();
+
+        // DataView names from app config
+        let dataviews: Vec<&str> = app.config.data.dataviews.keys()
+            .map(|k| k.as_str())
+            .collect();
+
+        // Views summary + MCP accumulation
+        let mut mcp_tools: Vec<&str> = Vec::new();
+        let mut mcp_resources: Vec<&str> = Vec::new();
+        let mut mcp_prompts: Vec<&str> = Vec::new();
+
+        let views: Vec<serde_json::Value> = app.config.api.views.iter().map(|(name, view)| {
+            let handler_label = match &view.handler {
+                rivers_runtime::view::HandlerConfig::Dataview { .. } => "dataview",
+                rivers_runtime::view::HandlerConfig::Codecomponent { .. } => "codecomponent",
+                rivers_runtime::view::HandlerConfig::None {} => "none",
+            };
+
+            // Collect MCP surfaces from Mcp-type views
+            if view.view_type == "Mcp" {
+                for k in view.tools.keys() { mcp_tools.push(k.as_str()); }
+                for k in view.resources.keys() { mcp_resources.push(k.as_str()); }
+                for k in view.prompts.keys() { mcp_prompts.push(k.as_str()); }
+            }
+
+            serde_json::json!({
+                "name": name,
+                "type": view.view_type,
+                "path": view.path.as_deref().unwrap_or(""),
+                "method": view.method.as_deref().unwrap_or(""),
+                "handler": handler_label,
+            })
+        }).collect();
+
+        serde_json::json!({
+            "app_name": app.manifest.app_name,
+            "app_id": app.manifest.app_id,
+            "app_type": app.manifest.app_type,
+            "datasources": datasources,
+            "dataviews": dataviews,
+            "views": views,
+            "mcp": {
+                "tools": mcp_tools,
+                "resources": mcp_resources,
+                "prompts": mcp_prompts,
+            },
+        })
+    }).collect();
+
+    serde_json::json!({
+        "bundle_name": bundle.manifest.bundle_name,
+        "bundle_version": bundle.manifest.bundle_version,
+        "apps": apps,
+    })
+}
+
+/// GET /admin/bundle — structured introspection of the loaded bundle.
+///
+/// Returns all apps, views, DataViews, datasources, and MCP surfaces.
+pub async fn admin_bundle_handler(State(ctx): State<AppContext>) -> impl IntoResponse {
+    Json(bundle_introspection_json(ctx.loaded_bundle.as_ref()))
+}
+
 // ── Shutdown Endpoint ────────────────────────────────────────────
 
 /// POST /admin/shutdown
@@ -428,5 +515,17 @@ pub async fn admin_shutdown_handler(
                 "mode": "graceful"
             })).into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundle_introspection_none_returns_not_deployed() {
+        let result = bundle_introspection_json(None);
+        assert_eq!(result["bundle_name"], "none");
+        assert!(result["apps"].as_array().unwrap().is_empty());
     }
 }

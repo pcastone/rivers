@@ -19,6 +19,7 @@ use super::admin_auth::admin_auth_middleware;
 
 use crate::admin_handlers::{
     admin_status_handler, admin_drivers_handler, admin_datasources_handler,
+    admin_bundle_handler,
     admin_deploy_handler, admin_deploy_test_handler,
     admin_deploy_approve_handler, admin_deploy_reject_handler,
     admin_deploy_promote_handler, admin_deployments_handler,
@@ -155,6 +156,7 @@ pub fn build_admin_router(ctx: AppContext) -> Router {
         .route("/admin/status", get(admin_status_handler))
         .route("/admin/drivers", get(admin_drivers_handler))
         .route("/admin/datasources", get(admin_datasources_handler))
+        .route("/admin/bundle", get(admin_bundle_handler))
         // Deployment lifecycle endpoints per spec §15.6
         .route("/admin/deploy", axum::routing::post(admin_deploy_handler))
         .route("/admin/deploy/test", axum::routing::post(admin_deploy_test_handler))
