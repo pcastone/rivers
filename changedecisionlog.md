@@ -874,3 +874,19 @@ The Cassandra synthetic affected-row count, storage policy enforcement gap, and 
 **Spec reference:** `docs/bugs/canary-fleet-gap-analysis.md` P0/P1 blockers.
 
 **Resolution method:** Cross-referenced `grep -A2 '[[datasources]]'` across all resources.toml against `datasource =` fields in app.toml and handler `ctx.datasource("…")` calls. Confirmed all 4 proxy handlers have spec-correct test IDs before adding them to the runner.
+
+---
+
+## G-2026-04-29 — O_CLOEXEC fix for /proc/self/fd shebang exec on Linux CI + CB-P0.1 MCP codecomponent tools
+
+**Files affected:** `crates/rivers-plugin-exec/src/executor.rs`, `crates/rivers-plugin-exec/src/connection/mod.rs`, `crates/riversd/src/process_pool/tests/exec_and_keystore.rs`, `crates/rivers-runtime/src/view.rs`, `crates/rivers-runtime/src/validate_crossref.rs`, `crates/riversd/src/mcp/dispatch.rs`
+
+**Decision (O_CLOEXEC):** After `f.into_raw_fd()`, call `libc::fcntl(fd, F_SETFD, 0)` to clear the O_CLOEXEC flag set by Rust's `File::open`. Without this, the fd is closed during the kernel's execve for the shebang interpreter (`/bin/sh`), making `/proc/self/fd/N` invisible. Updated `proc_fd_accessible()` test helper to also clear O_CLOEXEC before checking, so it accurately reflects production behavior.
+
+**Decision (exec_driver_error_propagation test):** Changed `input_mode` from `"stdin"` to `"args"` for the failing shell script. In stdin mode the parent writes JSON to the child's stdin pipe; `fail.sh` exits before reading it, causing a broken-pipe error that masks the actual stderr. Args mode avoids the stdin pipe entirely so the script error propagates correctly.
+
+**Decision (CB-P0.1):** Added `view: Option<String>` to `McpToolConfig` (alternative to `dataview`) so `[[mcp.tools]]` entries can reference a codecomponent view instead of a DataView. MCP-VAL-1 now validates both cases. `handle_tools_call` dispatches through `ProcessPoolManager.dispatch("default", ctx)` when `view` is set, passing tool arguments as the handler's args object — identical pipeline to REST/WebSocket/SSE handlers. `handle_tools_list` returns an open schema for view-backed tools; CB-P0.2 will derive precise schemas from TypeScript signatures.
+
+**Spec reference:** PR 96 CI fix; `tasks.md` CB-P0.1.
+
+**Resolution method:** Traced O_CLOEXEC behavior in Linux kernel execve path; confirmed double-exec pattern (shebang script → /bin/sh re-exec with fd path) requires fd survives both. For CB-P0.1, mirrored the WebSocket `dispatch_ws_lifecycle` pattern exactly. `task_enrichment::enrich` wires all shared capabilities in one call.
