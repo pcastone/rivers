@@ -12,6 +12,10 @@ use super::jsonrpc::{JsonRpcRequest, JsonRpcResponse};
 use crate::server::AppContext;
 
 /// Dispatch a JSON-RPC request to the appropriate MCP handler.
+///
+/// `auth_context` is the caller identity retrieved from the MCP session store
+/// (the `"auth"` sub-object stored at `initialize` time). It is `None` for
+/// `initialize`/`ping` and for MCP views with no storage backend.
 pub async fn dispatch(
     ctx: &AppContext,
     req: &JsonRpcRequest,
@@ -22,6 +26,7 @@ pub async fn dispatch(
     dv_namespace: &str,
     app_dir: &std::path::Path,
     instructions: Option<&str>,
+    auth_context: Option<&serde_json::Value>,
 ) -> JsonRpcResponse {
     if req.jsonrpc != "2.0" {
         return JsonRpcResponse::invalid_request(req.id.clone());
@@ -30,10 +35,10 @@ pub async fn dispatch(
     match req.method.as_str() {
         "initialize" => handle_initialize(req, tools, resources, prompts, ctx, app_dir, instructions, dv_namespace).await,
         "ping" => JsonRpcResponse::success(req.id.clone(), serde_json::json!({})),
-        "tools/list" => handle_tools_list(req, tools, ctx, dv_namespace).await,
-        "tools/call" => handle_tools_call(req, tools, ctx, app_id, dv_namespace).await,
+        "tools/list" => handle_tools_list(req, tools, ctx, dv_namespace, app_dir).await,
+        "tools/call" => handle_tools_call(req, tools, ctx, app_id, dv_namespace, auth_context).await,
         "resources/list" => handle_resources_list(req, resources),
-        "resources/read" => handle_resources_read(req, resources, ctx, dv_namespace).await,
+        "resources/read" => handle_resources_read(req, resources, ctx, dv_namespace, app_id).await,
         "resources/templates/list" => handle_resource_templates(req, resources, app_id),
         "prompts/list" => handle_prompts_list(req, prompts),
         "prompts/get" => handle_prompts_get(req, prompts, app_dir),
@@ -103,15 +108,26 @@ async fn handle_tools_list(
     tools: &HashMap<String, McpToolConfig>,
     ctx: &AppContext,
     dv_namespace: &str,
+    app_dir: &std::path::Path,
 ) -> JsonRpcResponse {
     let dv_guard = ctx.dataview_executor.read().await;
     let executor_opt = dv_guard.as_ref();
 
     let tool_list: Vec<serde_json::Value> = tools.iter().map(|(name, config)| {
-        // CB-P0.1: codecomponent-backed tools use an open schema for now;
-        // CB-P0.2 will derive a precise schema from the TypeScript handler signature.
         let schema = if config.view.is_some() {
-            serde_json::json!({"type": "object", "properties": {}})
+            // CB-P0.2.c: load explicit JSON Schema file when declared.
+            if let Some(schema_path) = &config.input_schema {
+                let full_path = app_dir.join(schema_path);
+                match std::fs::read_to_string(&full_path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                {
+                    Some(v) => v,
+                    None => serde_json::json!({"type": "object", "properties": {}}),
+                }
+            } else {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
         } else if let Some(executor) = executor_opt {
             let namespaced = format!("{}:{}", dv_namespace, config.dataview);
             let method = config.method.as_deref().unwrap_or("GET");
@@ -147,6 +163,7 @@ async fn handle_tools_call(
     ctx: &AppContext,
     app_id: &str,
     dv_namespace: &str,
+    auth_context: Option<&serde_json::Value>,
 ) -> JsonRpcResponse {
     let tool_name = match req.params.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
@@ -168,7 +185,7 @@ async fn handle_tools_call(
 
     // CB-P0.1: codecomponent-backed tools dispatch through the ProcessPool.
     if let Some(ref view_name) = tool_config.view {
-        return dispatch_codecomponent_tool(req, ctx, app_id, dv_namespace, view_name, arguments).await;
+        return dispatch_codecomponent_tool(req, ctx, app_id, dv_namespace, view_name, arguments, auth_context).await;
     }
 
     let params: HashMap<String, QueryValue> = arguments.into_iter().map(|(k, v)| {
@@ -219,11 +236,11 @@ async fn handle_tools_call(
 
 /// Dispatch an MCP tool call to a codecomponent view's handler via the ProcessPool.
 ///
-/// CB-P0.1: Locates the codecomponent entrypoint from the loaded bundle, builds a
-/// TaskContext with the tool arguments as the handler's args, and dispatches it
-/// through the default process pool.  The handler receives its full capabilities
-/// (storage, driver_factory, dataview_executor, lockbox, keystore) via
-/// task_enrichment::enrich — identical to REST, WebSocket, and SSE handlers.
+/// CB-P0.1/P0.3: Locates the codecomponent entrypoint from the loaded bundle, builds a
+/// TaskContext with the tool arguments as `ctx.request` and the caller identity as
+/// `ctx.session`, and dispatches it through the default process pool. The handler
+/// receives its full capabilities (storage, driver_factory, dataview_executor, lockbox,
+/// keystore) via task_enrichment::enrich — identical to REST, WebSocket, and SSE handlers.
 async fn dispatch_codecomponent_tool(
     req: &JsonRpcRequest,
     ctx: &AppContext,
@@ -231,6 +248,7 @@ async fn dispatch_codecomponent_tool(
     dv_namespace: &str,
     view_name: &str,
     arguments: serde_json::Map<String, serde_json::Value>,
+    auth_context: Option<&serde_json::Value>,
 ) -> JsonRpcResponse {
     use crate::process_pool::{Entrypoint, TaskContextBuilder, TaskKind};
     use rivers_runtime::view::HandlerConfig;
@@ -273,7 +291,13 @@ async fn dispatch_codecomponent_tool(
     };
 
     let trace_id = uuid::Uuid::new_v4().to_string();
-    let args = serde_json::Value::Object(arguments);
+
+    // Wrap tool arguments as ctx.request and propagate caller identity as ctx.session,
+    // matching the REST pipeline's injection pattern (pipeline.rs).
+    let args = serde_json::json!({
+        "request": serde_json::Value::Object(arguments),
+        "session": auth_context,
+    });
 
     let builder = TaskContextBuilder::new()
         .entrypoint(entrypoint)
@@ -317,25 +341,101 @@ fn handle_resources_list(
     JsonRpcResponse::success(req.id.clone(), serde_json::json!({ "resources": list }))
 }
 
+/// Extract path variable values from a URI by matching it against an RFC 6570 template.
+///
+/// Only handles simple path variables (`{varname}`) and strips `{?...}` query expansions
+/// from the template before matching. Returns `Some(vars)` when the URI matches the template
+/// (vars may be empty for a no-variable template), or `None` when it doesn't match.
+fn extract_uri_template_vars(template: &str, uri: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    // Strip {?...} query expansion from template before path matching
+    let template_path = match template.find("{?") {
+        Some(pos) => &template[..pos],
+        None => template,
+    };
+    // Strip query string from URI before path matching
+    let uri_path = match uri.find('?') {
+        Some(pos) => &uri[..pos],
+        None => uri,
+    };
+
+    let mut vars = serde_json::Map::new();
+    let t_segs: Vec<&str> = template_path.split('/').collect();
+    let u_segs: Vec<&str> = uri_path.split('/').collect();
+
+    if t_segs.len() != u_segs.len() {
+        return None;
+    }
+
+    for (t_seg, u_seg) in t_segs.iter().zip(u_segs.iter()) {
+        if t_seg.starts_with('{') && t_seg.ends_with('}') && !u_seg.is_empty() {
+            let name = &t_seg[1..t_seg.len() - 1];
+            vars.insert(name.to_string(), serde_json::Value::String(u_seg.to_string()));
+        } else if t_seg != u_seg {
+            // Literal segment mismatch — URI doesn't match this template
+            return None;
+        }
+    }
+    Some(vars)
+}
+
+/// Parse query string parameters from a URI (everything after `?`).
+fn extract_query_params(uri: &str) -> serde_json::Map<String, serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    let qs = match uri.find('?') {
+        Some(pos) => &uri[pos + 1..],
+        None => return map,
+    };
+    for pair in qs.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
+            if !k.is_empty() {
+                map.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+            }
+        }
+    }
+    map
+}
+
 async fn handle_resources_read(
     req: &JsonRpcRequest,
     resources: &HashMap<String, McpResourceConfig>,
     ctx: &AppContext,
     dv_namespace: &str,
+    app_id: &str,
 ) -> JsonRpcResponse {
     let uri = match req.params.get("uri").and_then(|u| u.as_str()) {
         Some(u) => u,
         None => return JsonRpcResponse::invalid_params(req.id.clone(), "missing 'uri' in params"),
     };
 
-    let resource_name = uri.rsplit('/').next().unwrap_or(uri);
-    let config = match resources.get(resource_name) {
-        Some(c) => c,
+    // Match the incoming URI against each resource's template (config template or default).
+    let matched = resources.iter().find_map(|(name, config)| {
+        let template = config.uri_template.as_deref()
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| format!("rivers://{}/{}", app_id, name));
+
+        extract_uri_template_vars(&template, uri).map(|path_vars| {
+            let query_vars = extract_query_params(uri);
+            (name.clone(), config.clone(), path_vars, query_vars)
+        })
+    });
+
+    let (_, config, path_vars, query_vars) = match matched {
+        Some(m) => m,
         None => return JsonRpcResponse::invalid_params(
             req.id.clone(),
-            format!("Unknown resource: {}", resource_name),
+            format!("No resource matches URI: {}", uri),
         ),
     };
+
+    // Merge path and query vars into DataView params
+    let mut params: HashMap<String, QueryValue> = HashMap::new();
+    for (k, v) in path_vars.iter().chain(query_vars.iter()) {
+        if let Some(s) = v.as_str() {
+            params.insert(k.clone(), QueryValue::String(s.to_string()));
+        }
+    }
 
     let namespaced = format!("{}:{}", dv_namespace, config.dataview);
     let trace_id = uuid::Uuid::new_v4().to_string();
@@ -346,7 +446,7 @@ async fn handle_resources_read(
         None => return JsonRpcResponse::server_error(req.id.clone(), "DataView engine not available"),
     };
 
-    match executor.execute(&namespaced, HashMap::new(), "GET", &trace_id, None).await {
+    match executor.execute(&namespaced, params, "GET", &trace_id, None).await {
         Ok(response) => {
             let text = serde_json::to_string(&response.query_result.rows).unwrap_or_default();
             JsonRpcResponse::success(req.id.clone(), serde_json::json!({
@@ -367,8 +467,12 @@ fn handle_resource_templates(
     app_id: &str,
 ) -> JsonRpcResponse {
     let templates: Vec<serde_json::Value> = resources.iter().map(|(name, config)| {
+        let uri_template = config.uri_template.as_deref()
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| format!("rivers://{}/{}", app_id, name));
         serde_json::json!({
-            "uriTemplate": format!("rivers://{}/{}", app_id, name),
+            "uriTemplate": uri_template,
             "name": name,
             "description": config.description,
             "mimeType": config.mime_type,
@@ -464,6 +568,90 @@ fn handle_prompts_get(
             "content": { "type": "text", "text": resolved }
         }]
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_req(method: &str) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(serde_json::json!(1)),
+            method: method.into(),
+            params: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn resource_template_uses_uri_template_when_set() {
+        let mut resources = HashMap::new();
+        resources.insert("decisions".into(), McpResourceConfig {
+            dataview: "decisions_list".into(),
+            description: "CB decisions".into(),
+            mime_type: "application/json".into(),
+            uri_template: Some("cb://{project_id}/decisions{?since,limit}".into()),
+        });
+        let resp = handle_resource_templates(&make_req("resources/templates/list"), &resources, "app-id");
+        // Serialize to inspect result
+        let v = serde_json::to_value(&resp).unwrap();
+        let templates = v["result"]["resourceTemplates"].as_array().unwrap().clone();
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0]["uriTemplate"], "cb://{project_id}/decisions{?since,limit}");
+    }
+
+    #[test]
+    fn resource_template_falls_back_to_default_uri_when_not_set() {
+        let mut resources = HashMap::new();
+        resources.insert("tasks".into(), McpResourceConfig {
+            dataview: "tasks_list".into(),
+            description: "Tasks".into(),
+            mime_type: "application/json".into(),
+            uri_template: None,
+        });
+        let resp = handle_resource_templates(&make_req("resources/templates/list"), &resources, "my-app");
+        let v = serde_json::to_value(&resp).unwrap();
+        let templates = v["result"]["resourceTemplates"].as_array().unwrap().clone();
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0]["uriTemplate"], "rivers://my-app/tasks");
+    }
+
+    #[test]
+    fn extract_template_vars_path_only() {
+        let vars = extract_uri_template_vars(
+            "cb://{project_id}/decisions",
+            "cb://proj-abc/decisions",
+        ).unwrap_or_default();
+        assert_eq!(vars.get("project_id").and_then(|v| v.as_str()), Some("proj-abc"));
+    }
+
+    #[test]
+    fn extract_template_vars_with_query_expansion() {
+        // {?since,limit} means those arrive as query string — not extracted by template matching
+        let vars = extract_uri_template_vars(
+            "cb://{project_id}/decisions{?since,limit}",
+            "cb://proj-abc/decisions?since=2024-01-01&limit=20",
+        ).unwrap_or_default();
+        assert_eq!(vars.get("project_id").and_then(|v| v.as_str()), Some("proj-abc"));
+        // query params from {?...} expansion are parsed separately
+        assert!(vars.get("since").is_none());
+    }
+
+    #[test]
+    fn extract_template_vars_no_match_returns_none() {
+        let result = extract_uri_template_vars(
+            "cb://{project_id}/decisions",
+            "cb://proj-abc/tasks",  // different path segment
+        );
+        assert!(result.is_none(), "structural mismatch should return None");
+    }
+
+    #[test]
+    fn parse_query_string_from_uri() {
+        let qs = extract_query_params("cb://proj/decisions?since=2024-01-01&limit=20");
+        assert_eq!(qs.get("since").and_then(|v| v.as_str()), Some("2024-01-01"));
+        assert_eq!(qs.get("limit").and_then(|v| v.as_str()), Some("20"));
+    }
 }
 
 /// Project DataView parameters into MCP JSON Schema inputSchema.

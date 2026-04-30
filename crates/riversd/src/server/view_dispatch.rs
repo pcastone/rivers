@@ -509,9 +509,13 @@ async fn execute_mcp_view(
             .unwrap();
     }
 
-    // Extract session header BEFORE consuming body (into_body() moves the request)
+    // Extract headers BEFORE consuming body (into_body() moves the request)
     let session_id = request.headers()
         .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let auth_header = request.headers()
+        .get("authorization")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
@@ -557,6 +561,10 @@ async fn execute_mcp_view(
         .unwrap_or(3600);
 
     // Handle batch or single request
+    // Parse auth header once — used at initialize time to store identity in the session,
+    // and threaded into dispatch for every tool call that reaches a codecomponent handler.
+    let init_auth_context = crate::mcp::session::parse_auth_header(auth_header.as_deref());
+
     if let Some(batch) = body.as_array() {
         let mut responses = Vec::new();
         for item in batch {
@@ -564,21 +572,34 @@ async fn execute_mcp_view(
                 Ok(req) => {
                     if req.id.is_some() {
                         // Session validation for non-initialize methods in batch
-                        if req.method != "initialize" && req.method != "ping" {
+                        let auth_context = if req.method != "initialize" && req.method != "ping" {
                             if let Some(ref storage) = ctx.storage_engine {
-                                let valid = match &session_id {
-                                    Some(sid) => crate::mcp::session::validate_session(storage, sid, session_ttl).await,
-                                    None => false,
-                                };
-                                if !valid {
-                                    let resp = crate::mcp::jsonrpc::JsonRpcResponse::session_required(req.id.clone());
-                                    responses.push(serde_json::to_value(&resp).unwrap_or_default());
-                                    continue;
+                                match &session_id {
+                                    Some(sid) => {
+                                        match crate::mcp::session::validate_session(storage, sid, session_ttl).await {
+                                            Some(data) => data.get("auth").cloned(),
+                                            None => {
+                                                let resp = crate::mcp::jsonrpc::JsonRpcResponse::session_required(req.id.clone());
+                                                responses.push(serde_json::to_value(&resp).unwrap_or_default());
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                        let resp = crate::mcp::jsonrpc::JsonRpcResponse::session_required(req.id.clone());
+                                        responses.push(serde_json::to_value(&resp).unwrap_or_default());
+                                        continue;
+                                    }
                                 }
+                            } else {
+                                None
                             }
-                        }
+                        } else {
+                            None
+                        };
                         let resp = crate::mcp::dispatch::dispatch(
                             &ctx, &req, tools, resources, prompts, app_id, dv_namespace, app_dir, instructions,
+                            auth_context.as_ref(),
                         ).await;
                         responses.push(serde_json::to_value(&resp).unwrap_or_default());
                     }
@@ -599,28 +620,40 @@ async fn execute_mcp_view(
                     return axum::http::StatusCode::NO_CONTENT.into_response();
                 }
 
-                // For non-initialize methods: validate session
-                if req.method != "initialize" && req.method != "ping" {
+                // For non-initialize methods: validate session and extract stored auth context
+                let auth_context = if req.method != "initialize" && req.method != "ping" {
                     if let Some(ref storage) = ctx.storage_engine {
-                        let valid = match &session_id {
-                            Some(sid) => crate::mcp::session::validate_session(storage, sid, session_ttl).await,
-                            None => false,
-                        };
-                        if !valid {
-                            let resp = crate::mcp::jsonrpc::JsonRpcResponse::session_required(req.id.clone());
-                            return axum::Json(resp).into_response();
+                        match &session_id {
+                            Some(sid) => {
+                                match crate::mcp::session::validate_session(storage, sid, session_ttl).await {
+                                    Some(data) => data.get("auth").cloned(),
+                                    None => {
+                                        let resp = crate::mcp::jsonrpc::JsonRpcResponse::session_required(req.id.clone());
+                                        return axum::Json(resp).into_response();
+                                    }
+                                }
+                            }
+                            None => {
+                                let resp = crate::mcp::jsonrpc::JsonRpcResponse::session_required(req.id.clone());
+                                return axum::Json(resp).into_response();
+                            }
                         }
+                    } else {
+                        None
                     }
-                }
+                } else {
+                    None
+                };
 
                 let resp = crate::mcp::dispatch::dispatch(
                     &ctx, &req, tools, resources, prompts, app_id, dv_namespace, app_dir, instructions,
+                    auth_context.as_ref(),
                 ).await;
 
-                // For initialize: create session and attach Mcp-Session-Id header
+                // For initialize: create session (storing auth identity) and attach Mcp-Session-Id header
                 if req.method == "initialize" {
                     if let Some(ref storage) = ctx.storage_engine {
-                        match crate::mcp::session::create_session(storage, session_ttl).await {
+                        match crate::mcp::session::create_session(storage, session_ttl, init_auth_context).await {
                             Ok(new_sid) => {
                                 let body_str = serde_json::to_string(&resp).unwrap_or_default();
                                 let mut response = axum::response::Response::builder()

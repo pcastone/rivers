@@ -187,14 +187,79 @@ pub fn validate_crossref(bundle: &LoadedBundle) -> Vec<ValidationResult> {
                     }
                 }
 
+                // VAL-8: input_schema file exists (CB-P0.2.c)
+                for (tool_name, tool_config) in &view_config.tools {
+                    if let Some(ref schema_path) = tool_config.input_schema {
+                        let full_path = app.app_dir.join(schema_path);
+                        if !full_path.exists() {
+                            results.push(ValidationResult::fail(
+                                "MCP-VAL-8",
+                                &format!("{}/app.toml", app.manifest.app_name),
+                                format!(
+                                    "MCP tool '{}' input_schema file '{}' not found",
+                                    tool_name, schema_path
+                                ),
+                            ));
+                        }
+                    }
+                }
+
                 // VAL-2: Resource DataView references
                 for (resource_name, resource_config) in &view_config.resources {
                     if !app.config.data.dataviews.contains_key(&resource_config.dataview) {
-                        results.push(ValidationResult::fail(
+                        let mut result = ValidationResult::fail(
                             "MCP-VAL-2",
                             &format!("{}/app.toml", app.manifest.app_name),
                             format!("MCP resource '{}' references undeclared DataView '{}'", resource_name, resource_config.dataview),
-                        ));
+                        );
+                        let known: Vec<&str> = app.config.data.dataviews.keys().map(|s| s.as_str()).collect();
+                        if let Some(sug) = crate::validate_format::suggest_key(&resource_config.dataview, &known) {
+                            result = result.with_suggestion(sug);
+                        }
+                        results.push(result);
+                    }
+                }
+
+                // VAL-9: URI template variables must be declared DataView parameters
+                for (resource_name, resource_config) in &view_config.resources {
+                    if let Some(ref template) = resource_config.uri_template {
+                        let vars = extract_template_var_names(template);
+                        if vars.is_empty() {
+                            continue;
+                        }
+                        let dv_param_names: Vec<String> = app.config.data.dataviews
+                            .get(&resource_config.dataview)
+                            .map(|dv| {
+                                // Collect from all methods; GET params cover the most common case
+                                let mut names: Vec<String> = Vec::new();
+                                for p in dv.parameters_for_method("GET") {
+                                    names.push(p.name.clone());
+                                }
+                                for p in dv.parameters_for_method("POST") {
+                                    if !names.contains(&p.name) { names.push(p.name.clone()); }
+                                }
+                                for p in dv.parameters_for_method("PUT") {
+                                    if !names.contains(&p.name) { names.push(p.name.clone()); }
+                                }
+                                for p in dv.parameters_for_method("DELETE") {
+                                    if !names.contains(&p.name) { names.push(p.name.clone()); }
+                                }
+                                names
+                            })
+                            .unwrap_or_default();
+
+                        for var in &vars {
+                            if !dv_param_names.iter().any(|p| p == var) {
+                                results.push(ValidationResult::fail(
+                                    "MCP-VAL-9",
+                                    &format!("{}/app.toml", app.manifest.app_name),
+                                    format!(
+                                        "MCP resource '{}' uri_template variable '{{{}}}' has no matching DataView parameter in '{}'",
+                                        resource_name, var, resource_config.dataview
+                                    ),
+                                ));
+                            }
+                        }
                     }
                 }
 
@@ -427,8 +492,7 @@ fn check_dataview_datasource_refs(
                 ),
             );
         } else {
-            results.push(
-                ValidationResult::fail(
+            let mut result = ValidationResult::fail(
                     error_codes::X001,
                     format!("{}/app.toml", app_name),
                     format!(
@@ -441,8 +505,14 @@ fn check_dataview_datasource_refs(
                     format!("data.dataviews.{}", dv_name),
                     ds_ref,
                     "datasource",
-                ),
-            );
+                );
+            let known: Vec<&str> = resource_ds_names.iter().copied()
+                .chain(config_ds_names.iter().copied())
+                .collect();
+            if let Some(sug) = crate::validate_format::suggest_key(ds_ref, &known) {
+                result = result.with_suggestion(sug);
+            }
+            results.push(result);
         }
     }
 }
@@ -545,8 +615,7 @@ fn check_view_refs(
                         ),
                     );
                 } else {
-                    results.push(
-                        ValidationResult::fail(
+                    let mut result = ValidationResult::fail(
                             error_codes::X002,
                             format!("{}/app.toml", app_name),
                             format!(
@@ -559,8 +628,12 @@ fn check_view_refs(
                             format!("api.views.{}.handler", view_name),
                             dataview.as_str(),
                             "dataview",
-                        ),
-                    );
+                        );
+                    let known: Vec<&str> = dataview_names.iter().copied().collect();
+                    if let Some(sug) = crate::validate_format::suggest_key(dataview.as_str(), &known) {
+                        result = result.with_suggestion(sug);
+                    }
+                    results.push(result);
                 }
             }
             HandlerConfig::Codecomponent { resources, .. } => {
@@ -974,6 +1047,35 @@ fn check_parameter_mappings(app: &LoadedApp, results: &mut Vec<ValidationResult>
             }
         }
     }
+}
+
+/// Extract `{varname}` and `{?varname,...}` variable names from a URI template string.
+///
+/// Handles RFC 6570 level 1 and query-string expansion:
+///   `{project_id}` → ["project_id"]
+///   `{?since,limit}` → ["since", "limit"]
+fn extract_template_var_names(template: &str) -> Vec<String> {
+    let mut vars = Vec::new();
+    let mut chars = template.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '{' {
+            let mut name = String::new();
+            for inner in chars.by_ref() {
+                if inner == '}' { break; }
+                name.push(inner);
+            }
+            // Strip leading '?' from query expansion: {?var1,var2}
+            let name = name.trim_start_matches(|c| matches!(c, '?' | '+' | '#' | '.' | '/' | ';' | '&'));
+            // Split comma-separated lists: {?var1,var2}
+            for part in name.split(',') {
+                let part = part.trim();
+                if !part.is_empty() {
+                    vars.push(part.to_string());
+                }
+            }
+        }
+    }
+    vars
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -2389,6 +2491,133 @@ mod tests {
         );
     }
 
+    // ── X001/X002/MCP-VAL-2: did-you-mean suggestions ──────────────
+
+    #[test]
+    fn x001_typo_datasource_name_includes_suggestion() {
+        // Datasource is "my_db"; DataView references "mydb" (missing underscore).
+        let mut datasources = HashMap::new();
+        datasources.insert("my_db".into(), make_ds_config("my_db", "faker"));
+
+        let mut dataviews = HashMap::new();
+        dataviews.insert(
+            "list_items".into(),
+            make_dv_config("list_items", "mydb"), // typo
+        );
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("my_db", "faker")],
+            vec![],
+            datasources,
+            dataviews,
+            HashMap::new(),
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        let fail = results
+            .iter()
+            .find(|r| r.error_code.as_deref() == Some(error_codes::X001))
+            .expect("expected X001 failure");
+        assert!(
+            fail.suggestion.as_deref().map(|s| s.contains("my_db")).unwrap_or(false),
+            "expected suggestion containing 'my_db', got: {:?}",
+            fail.suggestion,
+        );
+    }
+
+    #[test]
+    fn x002_typo_dataview_name_includes_suggestion() {
+        // DataView is "list_orders"; view references "list_order" (missing 's').
+        let mut datasources = HashMap::new();
+        datasources.insert("db".into(), make_ds_config("db", "faker"));
+
+        let mut dataviews = HashMap::new();
+        dataviews.insert(
+            "list_orders".into(),
+            make_dv_config("list_orders", "db"),
+        );
+
+        let mut views = HashMap::new();
+        views.insert(
+            "get_orders".into(),
+            make_view_dataview("Rest", "list_order"), // typo: missing 's'
+        );
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("db", "faker")],
+            vec![],
+            datasources,
+            dataviews,
+            views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        let fail = results
+            .iter()
+            .find(|r| r.error_code.as_deref() == Some(error_codes::X002))
+            .expect("expected X002 failure");
+        assert!(
+            fail.suggestion.as_deref().map(|s| s.contains("list_orders")).unwrap_or(false),
+            "expected suggestion containing 'list_orders', got: {:?}",
+            fail.suggestion,
+        );
+    }
+
+    #[test]
+    fn mcp_val2_typo_dataview_name_includes_suggestion() {
+        // DataView is "decisions_list"; MCP resource references "decision_list" (missing 's').
+        let mut datasources = HashMap::new();
+        datasources.insert("db".into(), make_ds_config("db", "faker"));
+
+        let mut dataviews = HashMap::new();
+        dataviews.insert(
+            "decisions_list".into(),
+            make_dv_config("decisions_list", "db"),
+        );
+
+        let mut views = HashMap::new();
+        views.insert(
+            "decisions".into(),
+            make_mcp_view_with_resource("decisions", crate::view::McpResourceConfig {
+                dataview: "decision_list".into(), // typo: missing 's'
+                description: String::new(),
+                mime_type: "application/json".into(),
+                uri_template: None,
+            }),
+        );
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("db", "faker")],
+            vec![],
+            datasources,
+            dataviews,
+            views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        let fail = results
+            .iter()
+            .find(|r| r.error_code.as_deref() == Some("MCP-VAL-2"))
+            .expect("expected MCP-VAL-2 failure");
+        assert!(
+            fail.suggestion.as_deref().map(|s| s.contains("decisions_list")).unwrap_or(false),
+            "expected suggestion containing 'decisions_list', got: {:?}",
+            fail.suggestion,
+        );
+    }
+
     #[test]
     fn cb001_no_warning_when_no_breaker_ids() {
         let mut datasources = HashMap::new();
@@ -2568,5 +2797,234 @@ mod tests {
         let results = validate_crossref(&bundle);
 
         assert!(!has_fail(&results, "MCP-VAL-1"), "valid dataview ref must still pass MCP-VAL-1");
+    }
+
+    // ── CB-P0.2.c: MCP tool input_schema file validation ──────────
+
+    #[test]
+    fn mcp_val8_tool_with_existing_input_schema_file_passes() {
+        let app_name = "mcp-val8-pass";
+        let schema_path = "schemas/tool-input.json";
+        let dir = std::path::PathBuf::from(format!("/tmp/{}", app_name));
+        std::fs::create_dir_all(dir.join("schemas")).unwrap();
+        std::fs::write(dir.join(schema_path), r#"{"type":"object","properties":{}}"#).unwrap();
+
+        let mut views = HashMap::new();
+        views.insert("handler-view".into(), make_view_codecomponent(vec![]));
+        views.insert(
+            "mcp".into(),
+            make_mcp_view_with_tool("my_tool", crate::view::McpToolConfig {
+                view: Some("handler-view".into()),
+                input_schema: Some(schema_path.into()),
+                ..Default::default()
+            }),
+        );
+
+        let app = make_app(
+            app_name, "app-service", "00000000-0000-0000-0000-000000000001",
+            vec![], vec![], HashMap::new(), HashMap::new(), views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(!has_fail(&results, "MCP-VAL-8"), "existing schema file must pass MCP-VAL-8");
+    }
+
+    #[test]
+    fn mcp_val8_tool_with_missing_input_schema_file_fails() {
+        let app_name = "mcp-val8-fail";
+        let dir = std::path::PathBuf::from(format!("/tmp/{}", app_name));
+        std::fs::create_dir_all(&dir).unwrap();
+        // deliberately do NOT create the schema file
+
+        let mut views = HashMap::new();
+        views.insert("handler-view".into(), make_view_codecomponent(vec![]));
+        views.insert(
+            "mcp".into(),
+            make_mcp_view_with_tool("my_tool", crate::view::McpToolConfig {
+                view: Some("handler-view".into()),
+                input_schema: Some("schemas/missing.json".into()),
+                ..Default::default()
+            }),
+        );
+
+        let app = make_app(
+            app_name, "app-service", "00000000-0000-0000-0000-000000000001",
+            vec![], vec![], HashMap::new(), HashMap::new(), views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(has_fail(&results, "MCP-VAL-8"), "missing schema file must fail MCP-VAL-8");
+        let fail = results.iter().find(|r| r.error_code.as_deref() == Some("MCP-VAL-8")).unwrap();
+        assert!(fail.message.contains("my_tool"), "error must name the tool");
+        assert!(fail.message.contains("schemas/missing.json"), "error must name the path");
+    }
+
+    #[test]
+    fn mcp_val8_tool_without_input_schema_passes_unconditionally() {
+        let mut views = HashMap::new();
+        views.insert("handler-view".into(), make_view_codecomponent(vec![]));
+        views.insert(
+            "mcp".into(),
+            make_mcp_view_with_tool("my_tool", crate::view::McpToolConfig {
+                view: Some("handler-view".into()),
+                input_schema: None,
+                ..Default::default()
+            }),
+        );
+
+        let app = make_app(
+            "mcp-val8-none", "app-service", "00000000-0000-0000-0000-000000000001",
+            vec![], vec![], HashMap::new(), HashMap::new(), views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(!has_fail(&results, "MCP-VAL-8"), "tool without input_schema must never trigger MCP-VAL-8");
+    }
+
+    // ── MCP-VAL-9: URI template variable → DataView parameter validation ──
+
+    fn make_mcp_view_with_resource(resource_name: &str, resource: crate::view::McpResourceConfig) -> ApiViewConfig {
+        let mut resources = HashMap::new();
+        resources.insert(resource_name.to_string(), resource);
+        ApiViewConfig {
+            view_type: "Mcp".into(),
+            path: Some("/mcp".into()),
+            method: None,
+            handler: HandlerConfig::None {},
+            parameter_mapping: None,
+            dataviews: vec![],
+            primary: None,
+            streaming: None,
+            streaming_format: None,
+            stream_timeout_ms: None,
+            guard: false,
+            auth: None,
+            guard_config: None,
+            allow_outbound_http: false,
+            rate_limit_per_minute: None,
+            rate_limit_burst_size: None,
+            websocket_mode: None,
+            max_connections: None,
+            sse_tick_interval_ms: None,
+            sse_trigger_events: vec![],
+            sse_event_buffer_size: None,
+            session_revalidation_interval_s: None,
+            polling: None,
+            event_handlers: None,
+            on_stream: None,
+            ws_hooks: None,
+            on_event: None,
+            tools: HashMap::new(),
+            resources,
+            prompts: HashMap::new(),
+            instructions: None,
+            session: None,
+        }
+    }
+
+    #[test]
+    fn mcp_val9_all_template_vars_declared_as_dv_params_passes() {
+        let mut datasources = HashMap::new();
+        datasources.insert("db".into(), make_ds_config("db", "faker"));
+        let mut dataviews = HashMap::new();
+        let mut dv = make_dv_config("decisions_list", "db");
+        dv.get_parameters = vec![
+            crate::dataview::DataViewParameterConfig {
+                name: "project_id".into(),
+                param_type: "string".into(),
+                required: true,
+                default: None,
+                location: None,
+            },
+            crate::dataview::DataViewParameterConfig {
+                name: "since".into(),
+                param_type: "string".into(),
+                required: false,
+                default: None,
+                location: None,
+            },
+        ];
+        dataviews.insert("decisions_list".into(), dv);
+
+        let mut views = HashMap::new();
+        views.insert(
+            "mcp".into(),
+            make_mcp_view_with_resource("decisions", crate::view::McpResourceConfig {
+                dataview: "decisions_list".into(),
+                description: String::new(),
+                mime_type: "application/json".into(),
+                uri_template: Some("cb://{project_id}/decisions{?since}".into()),
+            }),
+        );
+
+        let app = make_app(
+            "mcp-val9-pass", "app-service", "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("db", "faker")], vec![],
+            datasources, dataviews, views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(!has_fail(&results, "MCP-VAL-9"), "all template vars declared must pass MCP-VAL-9");
+    }
+
+    #[test]
+    fn mcp_val9_undeclared_template_var_fails() {
+        let mut datasources = HashMap::new();
+        datasources.insert("db".into(), make_ds_config("db", "faker"));
+        let mut dataviews = HashMap::new();
+        // DataView with NO parameters
+        dataviews.insert("decisions_list".into(), make_dv_config("decisions_list", "db"));
+
+        let mut views = HashMap::new();
+        views.insert(
+            "mcp".into(),
+            make_mcp_view_with_resource("decisions", crate::view::McpResourceConfig {
+                dataview: "decisions_list".into(),
+                description: String::new(),
+                mime_type: "application/json".into(),
+                uri_template: Some("cb://{project_id}/decisions".into()),
+            }),
+        );
+
+        let app = make_app(
+            "mcp-val9-fail", "app-service", "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("db", "faker")], vec![],
+            datasources, dataviews, views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(has_fail(&results, "MCP-VAL-9"), "undeclared template var must fail MCP-VAL-9");
+        let fail = results.iter().find(|r| r.error_code.as_deref() == Some("MCP-VAL-9")).unwrap();
+        assert!(fail.message.contains("project_id"), "error message must name the offending variable");
+    }
+
+    #[test]
+    fn mcp_val9_no_uri_template_skips_check() {
+        let mut views = HashMap::new();
+        views.insert(
+            "mcp".into(),
+            make_mcp_view_with_resource("tasks", crate::view::McpResourceConfig {
+                dataview: "tasks_list".into(),
+                description: String::new(),
+                mime_type: "application/json".into(),
+                uri_template: None,
+            }),
+        );
+
+        // Intentionally no datasources/dataviews — VAL-2 would fire for the missing DV,
+        // but VAL-9 must NOT fire (it should skip when uri_template is None).
+        let app = make_app(
+            "mcp-val9-none", "app-service", "00000000-0000-0000-0000-000000000001",
+            vec![], vec![], HashMap::new(), HashMap::new(), views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(!has_fail(&results, "MCP-VAL-9"), "no uri_template must skip MCP-VAL-9 check");
     }
 }
