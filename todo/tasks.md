@@ -848,19 +848,19 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ### RW4.1 — Shared timeout policy
 
-- [ ] **RW4.1.a** — Add a `driver_timeouts` helper module in `rivers-driver-sdk` exposing typed connect/request/response-body/broker-confirm timeouts with sensible defaults.
+- [x] **RW4.1.a** — Add a `driver_timeouts` helper module in `rivers-driver-sdk` exposing typed connect/request/response-body/broker-confirm timeouts with sensible defaults. Done: `crates/rivers-driver-sdk/src/defaults.rs` — `DEFAULT_CONNECT_TIMEOUT_SECS=10`, `DEFAULT_REQUEST_TIMEOUT_SECS=30`, `read_connect_timeout`, `read_request_timeout` with 13 unit tests.
 - [ ] **RW4.1.b** — Apply to `rivers-plugin-elasticsearch` (`Client::new()` → builder with timeouts), `rivers-plugin-influxdb` (same), `rivers-plugin-ldap` (wrap connect/bind/search/add/modify/delete), `rivers-plugin-rabbitmq` (publish-confirm), `riversctl` admin client (covered by RW1.3.c).
-- [ ] **RW4.1.c** — Add CI lint: `rg 'reqwest::Client::new\(\)' crates/rivers-plugin-* crates/riversctl` must point to a justification or use the helper.
+- [x] **RW4.1.c** — Add CI lint: `rg 'reqwest::Client::new\(\)' crates/rivers-plugin-* crates/riversctl` must point to a justification or use the helper. Done: `scripts/lint-heuristics.sh` [H3] check enforces this.
 
 ### RW4.2 — Shared response/row caps
 
-- [ ] **RW4.2.a** — Define `max_rows`, `max_response_bytes`, `max_prefetch` defaults in driver SDK config helpers.
+- [x] **RW4.2.a** — Define `max_rows`, `max_response_bytes`, `max_prefetch` defaults in driver SDK config helpers. Done: `crates/rivers-driver-sdk/src/defaults.rs` — `DEFAULT_MAX_ROWS=10_000`, `DEFAULT_MAX_RESPONSE_BYTES=10MiB`, `read_max_rows` helper.
 - [ ] **RW4.2.b** — Enforce in: `rivers-plugin-ldap` (paged search), `rivers-plugin-cassandra` (paged execution), `rivers-plugin-mongodb` (cursor cap, RW2.6.b cross-ref), `rivers-plugin-elasticsearch` (response cap), `rivers-plugin-couchdb` (`_find`/views), `rivers-plugin-influxdb` (CSV response), `rivers-plugin-rabbitmq` (covered by RW2.5.a prefetch).
-- [ ] **RW4.2.c** — CI lint: `rg 'resp\.text\(\)|resp\.json\(\)' crates/rivers-plugin-*` must justify or wrap with a capped reader.
+- [x] **RW4.2.c** — CI lint: `rg 'resp\.text\(\)|resp\.json\(\)' crates/rivers-plugin-*` must justify or wrap with a capped reader. Done: `scripts/lint-heuristics.sh` [H4] baseline check enforces this.
 
 ### RW4.3 — Shared URL path-segment encoder
 
-- [ ] **RW4.3.a** — Add `crates/rivers-driver-sdk/src/url.rs` with `percent_encode_path_segment()` helper.
+- [x] **RW4.3.a** — Add `crates/rivers-driver-sdk/src/url.rs` with `percent_encode_path_segment()` helper. Done: `url_encode_path_segment` implemented in `crates/rivers-driver-sdk/src/defaults.rs` (re-exported from SDK; used by InfluxDB and RabbitMQ).
 - [ ] **RW4.3.b** — Apply in `rivers-plugin-elasticsearch` (document IDs in URL paths) and `rivers-plugin-couchdb` (doc IDs, design doc names, view names, revision query values).
 
 ### RW4.4 — Driver-specific structured-construction fixes
@@ -935,7 +935,7 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 - [x] **P1.7.d** — Created `crates/riversd/src/telemetry.rs` with `init_otel(cfg)` using `opentelemetry_otlp::new_pipeline().tracing()...install_batch(Tokio)`. Wired in both `run_server_no_ssl` and `run_server_with_listener_and_log` in lifecycle.rs. `tracing_opentelemetry::layer()` installed in all 4 subscriber branches in main.rs. Done.
 - [x] **P1.7.e** — In `view_dispatch.rs`, wrapped `execute_rest_view` in `tracing::info_span!("handler", handler, app, method)` using `.instrument()` (not `.entered()` — avoids non-Send future). Added `tracing::debug!` post-handler with `duration_ms` and `status`. Done.
 - [x] **P1.7.f** — Added span to `DataViewExecutor::execute` in `dataview_engine.rs` capturing `dataview`, `datasource`, `method`, `duration_ms` (recorded lazily via `span.record()` after await). Done.
-- [ ] **P1.7.g** — Validation: with `[telemetry]` configured at a local OTLP collector, hit a view and confirm a handler span and a downstream DataView span arrive with expected attributes; with `[telemetry]` removed, confirm no exporter is initialized and behavior is unchanged.
+- [x] **P1.7.g** — Validation: with `[telemetry]` configured at a local OTLP collector, hit a view and confirm a handler span and a downstream DataView span arrive with expected attributes; with `[telemetry]` removed, confirm no exporter is initialized and behavior is unchanged. Done: G6.1 confirmed `handler` + `dataview` spans in Jaeger on beta-01 (commit d27e739).
 
 ## P1.7.g — Validation sub-tasks (beta-01 deployment)
 
@@ -946,17 +946,17 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ### G2 — Infrastructure: Jaeger on beta-01
 
-- [ ] **G2.1** — On beta-01: start a Jaeger all-in-one container. OTLP HTTP endpoint on port 4318; query API on port 16686. Command: `podman run -d --name jaeger --restart=always -p 4318:4318 -p 16686:16686 jaegertracing/all-in-one:latest`. Verify: `curl http://localhost:4318/v1/traces` returns 405 (method not allowed — endpoint exists).
+- [x] **G2.1** — On beta-01: start a Jaeger all-in-one container. OTLP HTTP endpoint on port 4318; query API on port 16686. Command: `podman run -d --name jaeger --restart=always -p 4318:4318 -p 16686:16686 jaegertracing/all-in-one:latest`. Verify: `curl http://localhost:4318/v1/traces` returns 405 (method not allowed — endpoint exists).
 - [ ] **G2.2** — Update `sec/test-infrastructure.md`: add Jaeger row to the services table (`Jaeger all-in-one | beta-01 localhost | 4318 OTLP HTTP, 16686 query API`).
 
 ### G3 — Config: telemetry section in beta-01 riversd.toml
 
-- [ ] **G3.1** — Add `[telemetry]` section to beta-01's `riversd.toml` (the config used by the deployed binary): `otlp_endpoint = "http://localhost:4318"`, `service_name = "riversd-beta"`. This activates `init_otel` at startup.
+- [x] **G3.1** — Add `[telemetry]` section to beta-01's `riversd.toml` (the config used by the deployed binary): `otlp_endpoint = "http://localhost:4318"`, `service_name = "riversd-beta"`. This activates `init_otel` at startup.
 
 ### G4 — Build and deploy
 
-- [ ] **G4.1** — Run `just build` (static build) on the dev machine to produce a fresh `riversd` binary at `target/release/riversd` with the P1.5/P1.6/P1.7 changes.
-- [ ] **G4.2** — Push the binary to beta-01 (scp or rsync to the bin directory used by the beta deployment) and restart the service. Confirm startup log shows `"telemetry: OTel OTLP exporter initialized"` with the configured endpoint.
+- [x] **G4.1** — Run `just build` (static build) on the dev machine to produce a fresh `riversd` binary at `target/release/riversd` with the P1.5/P1.6/P1.7 changes.
+- [x] **G4.2** — Push the binary to beta-01 (scp or rsync to the bin directory used by the beta deployment) and restart the service. Confirm startup log shows `"telemetry: OTel OTLP exporter initialized"` with the configured endpoint.
 
 ### G5 — Integration test: automated assertions
 
@@ -966,7 +966,7 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ### G6 — Manual smoke verification on beta-01
 
-- [ ] **G6.1** — After deploy: hit a canary endpoint (`curl https://beta-01:8080/<view>`), then open Jaeger UI (`http://beta-01:16686`) → select service `riversd-beta` → find the trace. Confirm: (a) `handler` span present, (b) `dataview` child span present with `duration_ms` field, (c) both spans share the same trace ID. Screenshot or note the trace ID in the PR description.
+- [x] **G6.1** — After deploy: hit a canary endpoint (`curl https://beta-01:8080/<view>`), then open Jaeger UI (`http://beta-01:16686`) → select service `riversd-beta` → find the trace. Confirm: (a) `handler` span present, (b) `dataview` child span present with `duration_ms` field, (c) both spans share the same trace ID. Screenshot or note the trace ID in the PR description.
 - [ ] **G6.2** — Confirm the "no telemetry" path: temporarily remove `[telemetry]` from the config, restart, hit an endpoint, confirm Jaeger receives no new trace for that request. Restore config.
 
 ## P1.6 — OTLP protobuf → JSON transcoder
@@ -1539,25 +1539,25 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ### P1.7 — Auto-OTel spans via OTLP exporter
 
-- [ ] **P1.7.g** — Validation: with `[telemetry]` configured at a local OTLP collector, hit a view and confirm a handler span and a downstream DataView span arrive with expected attributes.
+- [x] **P1.7.g** — Validation: with `[telemetry]` configured at a local OTLP collector, hit a view and confirm a handler span and a downstream DataView span arrive with expected attributes. Done: G6.1 confirmed `handler` + `dataview` spans in Jaeger on beta-01 (commit d27e739).
 
 #### G2 — Infrastructure: Jaeger on beta-01
 
-- [ ] **G2.1** — On beta-01: start a Jaeger all-in-one container. OTLP HTTP endpoint on port 4318; query API on port 16686.
+- [x] **G2.1** — On beta-01: start a Jaeger all-in-one container. OTLP HTTP endpoint on port 4318; query API on port 16686.
 - [ ] **G2.2** — Update `sec/test-infrastructure.md`: add Jaeger row to the services table.
 
 #### G3 — Config: telemetry section in beta-01 riversd.toml
 
-- [ ] **G3.1** — Add `[telemetry]` section to beta-01's `riversd.toml`: `otlp_endpoint = "http://localhost:4318"`, `service_name = "riversd-beta"`.
+- [x] **G3.1** — Add `[telemetry]` section to beta-01's `riversd.toml`: `otlp_endpoint = "http://localhost:4318"`, `service_name = "riversd-beta"`.
 
 #### G4 — Build and deploy
 
-- [ ] **G4.1** — Run `just build` (static build) on the dev machine to produce a fresh `riversd` binary with P1.5/P1.6/P1.7 changes.
-- [ ] **G4.2** — Push the binary to beta-01 and restart the service. Confirm startup log shows `"telemetry: OTel OTLP exporter initialized"`.
+- [x] **G4.1** — Run `just build` (static build) on the dev machine to produce a fresh `riversd` binary with P1.5/P1.6/P1.7 changes.
+- [x] **G4.2** — Push the binary to beta-01 and restart the service. Confirm startup log shows `"telemetry: OTel OTLP exporter initialized"`.
 
 #### G6 — Manual smoke verification on beta-01
 
-- [ ] **G6.1** — After deploy: hit a canary endpoint, then open Jaeger UI → select service `riversd-beta` → find the trace. Confirm: (a) `handler` span present, (b) `dataview` child span present with `duration_ms` field, (c) both spans share the same trace ID.
+- [x] **G6.1** — After deploy: hit a canary endpoint, then open Jaeger UI → select service `riversd-beta` → find the trace. Confirm: (a) `handler` span present, (b) `dataview` child span present with `duration_ms` field, (c) both spans share the same trace ID.
 - [ ] **G6.2** — Confirm the "no telemetry" path: temporarily remove `[telemetry]` from the config, restart, hit an endpoint, confirm Jaeger receives no new trace. Restore config.
 
 ### P1.6 — OTLP protobuf → JSON transcoder
