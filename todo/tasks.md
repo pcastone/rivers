@@ -913,3 +913,92 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 - [ ] **RW-X.2 — Canary regression run** after Phase RW1 lands and again after Phase RW2 lands. 135/135 must remain green.
 - [ ] **RW-X.3 — De-duplicate vs. existing H-tasks and RXE follow-ups.** Several RW1.2.x items overlap with the prior `rivers-plugin-exec` review; before starting RW1.2, walk the existing RXE Tier 1 findings list and mark RW1.2 sub-items as "duplicate of RXE-Tx-y" where appropriate.
 
+# CB P1 Batch 2 — P1.5, P1.6, P1.7
+
+> **Source:** `docs/superpowers/specs/2026-04-29-cb-p1-batch2-design.md`
+> **Goal:** close P1.5 (per-DataView `skip_introspect`), P1.6 (OTLP protobuf→JSON transcoder), P1.7 (auto-OTel spans via OTLP exporter).
+> **Implementation order:** P1.5 → P1.7 (deps + config + exporter) → P1.6 (transcoder, aligns to P1.7 dep versions).
+> **Version bump:** all three together → `bump-patch`.
+
+## P1.5 — Per-view introspection skip
+
+- [ ] **P1.5.a** — Add `skip_introspect: bool` field (with `#[serde(default)]` and doc comment) to `DataViewConfig` in `crates/rivers-runtime/src/dataview.rs`.
+- [ ] **P1.5.b** — In `crates/riversd/src/bundle_loader/load.rs`, in the inner DataView introspection loop after the datasource-level `introspect` check, skip introspection when `dv_config.skip_introspect` is true and emit `tracing::debug!` with dataview name.
+- [ ] **P1.5.c** — Add structural validation rule `S-DV-1` in `crates/rivers-runtime/src/validate_structural.rs`: warn (non-fatal) when `skip_introspect = true` and the DataView has a non-empty GET query.
+- [ ] **P1.5.d** — Validation: build a minimal mutation DataView (`INSERT INTO ...`) on an introspect-enabled datasource with `skip_introspect = true` and confirm bundle loads without the previous LIMIT-0 wrap failure.
+
+## P1.7 — Auto-OTel spans via OTLP exporter (deps before P1.6)
+
+- [ ] **P1.7.a** — Add OTel deps to `crates/riversd/Cargo.toml`: `opentelemetry` (feat `trace`), `opentelemetry-otlp` (feat `http-proto`, `reqwest-client`), `opentelemetry_sdk` (feat `rt-tokio`), `tracing-opentelemetry`. Pin versions consistent with `opentelemetry-proto` so P1.6 can align.
+- [ ] **P1.7.b** — Create `crates/rivers-core-config/src/config/telemetry.rs` with `TelemetryConfig { otlp_endpoint: String, service_name: String (default fn) }`.
+- [ ] **P1.7.c** — Export `TelemetryConfig` from `crates/rivers-core-config/src/config/mod.rs` and add `pub telemetry: Option<TelemetryConfig>` to `ServerConfig` in `crates/rivers-core-config/src/config/runtime.rs`.
+- [ ] **P1.7.d** — In `crates/riversd/src/server/lifecycle.rs`, when `[telemetry]` is present at startup: init `opentelemetry-otlp` HTTP exporter at `otlp_endpoint`, build `opentelemetry_sdk::trace::TracerProvider`, install `tracing_opentelemetry::layer()` into the global `tracing` subscriber. Auto-fill `service_version` from the binary version. When absent, behavior unchanged.
+- [ ] **P1.7.e** — In `crates/riversd/src/server/view_dispatch.rs`, wrap handler dispatch in a `tracing::info_span!` capturing `handler`, `app`, `method`, `req_bytes`, `status` (post), `duration_ms` (post).
+- [ ] **P1.7.f** — Add a span around DataView execution in the DataView executor capturing `dataview`, `datasource`, `method`, `duration_ms`.
+- [ ] **P1.7.g** — Validation: with `[telemetry]` configured at a local OTLP collector, hit a view and confirm a handler span and a downstream DataView span arrive with expected attributes; with `[telemetry]` removed, confirm no exporter is initialized and behavior is unchanged.
+
+## P1.6 — OTLP protobuf → JSON transcoder
+
+- [ ] **P1.6.a** — Add `opentelemetry-proto` (features `gen-tonic-messages`, `with-serde`) and `prost` to `crates/riversd/Cargo.toml`. Versions must match the OTel stack pinned in P1.7.a.
+- [ ] **P1.6.b** — Create `crates/riversd/src/otlp_transcoder.rs` exposing `TranscodeError { UnknownSignal(String), DecodeFailed(String) }` and `pub fn transcode_otlp_protobuf(path: &str, body: &[u8]) -> Result<Vec<u8>, TranscodeError>`. Map `/v1/traces`, `/v1/metrics`, `/v1/logs` to the corresponding `opentelemetry_proto::tonic::collector::*::v1::Export*ServiceRequest`; decode via `prost::Message::decode`, serialize via `serde_json::to_vec`.
+- [ ] **P1.6.c** — Register module in `crates/riversd/src/lib.rs` (`pub mod otlp_transcoder`).
+- [ ] **P1.6.d** — In `crates/riversd/src/server/view_dispatch.rs`, in the body extraction path before the codecomponent executor: when `Content-Type` starts with `application/x-protobuf`, call the transcoder. On success replace body bytes with JSON and treat as `application/json` downstream. On `UnknownSignal` pass through unchanged. On `DecodeFailed` return HTTP 415 with the error message.
+- [ ] **P1.6.e** — Validation: POST a real OTLP-protobuf trace payload to `/v1/traces` and confirm the handler receives JSON; POST garbage protobuf and confirm 415; POST `application/x-protobuf` to a non-OTLP path and confirm pass-through.
+
+## CB-Batch2 Cross-Cutting
+
+- [ ] **CB-B2.X.1** — Run `just bump-patch` once all three items are merged together (single PR or coordinated patch series).
+- [ ] **CB-B2.X.2** — Update `changelog.md` and `changedecisionlog.md` entries per Standards 6 & 7 referencing `docs/superpowers/specs/2026-04-29-cb-p1-batch2-design.md`.
+- [ ] **CB-B2.X.3** — Confirm canary remains green (135/135) after the batch lands.
+
+# CB P1.1 — MCP Resource Subscriptions / Push Notifications
+
+> **Source:** `docs/superpowers/specs/2026-04-29-cb-p1-1-mcp-subscriptions-design.md`
+> **Goal:** implement MCP `resources/subscribe` + `notifications/resources/updated` over a Streamable HTTP (SSE) transport. v1 uses polling for change detection.
+> **Implementation order:** Layer 4 (config) → Layer 2 (registry) → Layer 1 (SSE transport) → Layer 5 (handlers) → Layer 3 (poller).
+> **Version bump:** `bump-minor` — new transport + change-detection subsystem.
+
+## Layer 4 — Config surface
+
+- [ ] **P1.1.4.a** — Add `subscribable: bool` (default false) and `poll_interval_seconds: u64` (default 5) to `McpResourceConfig` in `crates/rivers-runtime/src/view.rs`.
+- [ ] **P1.1.4.b** — Create `crates/rivers-core-config/src/config/mcp.rs` with `McpConfig { max_subscriptions_per_session: u64 (default 100), min_poll_interval_seconds: u64 (default 1) }`.
+- [ ] **P1.1.4.c** — Export `McpConfig` from `crates/rivers-core-config/src/config/mod.rs`; add `pub mcp: Option<McpConfig>` to `ServerConfig` in `runtime.rs`.
+- [ ] **P1.1.4.d** — Add validation rule `S-MCP-2` in `crates/rivers-runtime/src/validate_structural.rs`: warn when `subscribable = true` and the bound DataView has no GET method.
+
+## Layer 2 — Subscription registry
+
+- [ ] **P1.1.2.a** — Create `crates/riversd/src/mcp/subscriptions.rs` with `SubscriptionRegistry`, `SessionChannel { sender: mpsc::Sender<sse::Event>, subscribed_uris: HashSet<String>, app_id: String }`. Bounded mpsc capacity 64.
+- [ ] **P1.1.2.b** — Implement `attach_sse`, `detach`, `subscribe` (enforce `max_subscriptions_per_session`, return `SubscribeError::TooMany`), `unsubscribe`, `notify_changed` (URI-dedupe before send; drop + WARN on full channel), `snapshot_subscriptions`.
+- [ ] **P1.1.2.c** — Unit tests: subscribe/unsubscribe round-trip, max-subscriptions enforcement, notification delivery, slow-consumer drop, dedupe.
+- [ ] **P1.1.2.d** — Wire `Arc<SubscriptionRegistry>` onto `AppContext` and construct in `crates/riversd/src/server/lifecycle.rs` at startup.
+
+## Layer 1 — Streamable HTTP (SSE) transport
+
+- [ ] **P1.1.1.a** — In `crates/riversd/src/server/view_dispatch.rs::execute_mcp_view`, add a branch for `GET` + `Accept: text/event-stream` + valid `Mcp-Session-Id`: build `axum::response::sse::Sse`, register with registry via `attach_sse`, on disconnect call `detach`.
+- [ ] **P1.1.1.b** — Add 30-second SSE keepalive (comment frames) using `Sse::keep_alive`.
+- [ ] **P1.1.1.c** — In `handle_initialize` (`dispatch.rs`), advertise `capabilities.resources.subscribe = true` only when ≥1 resource has `subscribable = true`.
+- [ ] **P1.1.1.d** — Integration test: open SSE stream against an MCP endpoint with a valid session-id; observe keepalive frames; close cleanly.
+
+## Layer 5 — Subscribe / unsubscribe handlers
+
+- [ ] **P1.1.5.a** — Thread `session_id: &str` parameter through `crate::mcp::dispatch::dispatch` (currently extracted at `view_dispatch.rs:514` but not passed into `dispatch`).
+- [ ] **P1.1.5.b** — Add `"resources/subscribe"` and `"resources/unsubscribe"` arms in `dispatch.rs:35-46`. Implement `handle_resources_subscribe` (validate URI matches a `subscribable = true` resource, call `registry.subscribe`, ensure poller running) and `handle_resources_unsubscribe`.
+- [ ] **P1.1.5.c** — Define notification frame format: `{"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"..."}}` — emitted by registry on `notify_changed`.
+- [ ] **P1.1.5.d** — Integration test: subscribe over POST → JSON ack; mutate underlying DataView → SSE delivers notification; unsubscribe → no further notifications.
+
+## Layer 3 — Change poller
+
+- [ ] **P1.1.3.a** — Create `crates/riversd/src/mcp/poller.rs` with `ChangePoller { registry, dataview_executor, handles: Mutex<HashMap<(app_id, uri), JoinHandle>> }`.
+- [ ] **P1.1.3.b** — Implement `ensure_running((app_id, uri))`: spawn task that resolves URI → DataView (re-using logic from `handle_resources_read`), executes, BLAKE3-hashes `query_result.rows`, sleeps `poll_interval_seconds.max(min_poll_interval_seconds)`, re-executes, calls `notify_changed` on hash diff.
+- [ ] **P1.1.3.c** — Refcount cleanup: poller exits when `registry.snapshot_subscriptions()` reports zero subscribers for its `(app_id, uri)`.
+- [ ] **P1.1.3.d** — Construct `ChangePoller` in `lifecycle.rs`, place on `AppContext`.
+- [ ] **P1.1.3.e** — Integration test: two sessions subscribe to the same URI → only one poller runs (verify via debug log or poller-count metric); both receive notifications; first session disconnects → poller continues; second disconnects → poller exits within one cycle.
+
+## P1.1 Cross-cutting
+
+- [ ] **P1.1.X.1** — Document the `read-then-subscribe` pattern (subscribers receive deltas only, not initial snapshot) in `docs/guide/tutorials/` (new file or extend MCP tutorial).
+- [ ] **P1.1.X.2** — Document the deterministic-ORDER-BY requirement for subscribable DataViews (hash includes row order).
+- [ ] **P1.1.X.3** — Run `just bump-minor` once feature is merged.
+- [ ] **P1.1.X.4** — Update `changelog.md` and `changedecisionlog.md` referencing the design spec.
+- [ ] **P1.1.X.5** — Confirm canary stays green; add a P1.1-specific canary covering subscribe → mutate → notification round-trip.
+
