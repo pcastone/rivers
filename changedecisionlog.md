@@ -890,3 +890,13 @@ The Cassandra synthetic affected-row count, storage policy enforcement gap, and 
 **Spec reference:** PR 96 CI fix; `tasks.md` CB-P0.1.
 
 **Resolution method:** Traced O_CLOEXEC behavior in Linux kernel execve path; confirmed double-exec pattern (shebang script → /bin/sh re-exec with fd path) requires fd survives both. For CB-P0.1, mirrored the WebSocket `dispatch_ws_lifecycle` pattern exactly. `task_enrichment::enrich` wires all shared capabilities in one call.
+
+## CB P1 Batch 2 — P1.5 + P1.7 (2026-04-29)
+
+| File | Decision | Spec ref | Resolution method |
+|------|----------|----------|-------------------|
+| `crates/riversd/Cargo.toml` | `opentelemetry-otlp = { default-features = false, features = ["http-proto", "reqwest-client", "trace"] }` — disabled grpc-tonic default feature to avoid tonic 0.12 → axum 0.7 dep conflict | P1.7 | Root cause: OTLP crate defaults include gRPC transport; disabling defaults removes tonic dep entirely for our HTTP-only use case |
+| `crates/riversd/src/server/view_dispatch.rs` | Handler span uses `.instrument()` not `.entered()` for async span | P1.7.e | `.entered()` returns a non-Send guard; holding it across `.await` makes the future non-Send, breaking axum's Handler trait bound |
+| `crates/rivers-runtime/src/dataview_engine.rs` | `span.clone()` passed to `.instrument()` while original `span` used for `span.record("duration_ms", ...)` after await | P1.7.f | tracing Span is ref-counted; clone refers to same span; record() on original updates span before it's dropped |
+| `todo/tasks.md` — P1.6 | P1.6 OTLP protobuf transcoder deferred. All `opentelemetry-proto` versions up to 0.26 require `gen-tonic-messages` which brings tonic 0.12 + axum 0.7. Cannot be resolved without either OTel stack upgrade (0.31+) or prost build.rs proto embed approach | P1.6 | Documented as blocked; P1.7 proceeds independently using HTTP/JSON OTLP only |
+| `crates/rivers-runtime/src/dataview.rs` | `skip_introspect` added with `#[serde(default)]` — false by default, no breaking change to existing DataView configs | P1.5 | serde default ensures all existing bundles continue to work; opt-in per-DataView |
