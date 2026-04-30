@@ -937,6 +937,38 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 - [x] **P1.7.f** — Added span to `DataViewExecutor::execute` in `dataview_engine.rs` capturing `dataview`, `datasource`, `method`, `duration_ms` (recorded lazily via `span.record()` after await). Done.
 - [ ] **P1.7.g** — Validation: with `[telemetry]` configured at a local OTLP collector, hit a view and confirm a handler span and a downstream DataView span arrive with expected attributes; with `[telemetry]` removed, confirm no exporter is initialized and behavior is unchanged.
 
+## P1.7.g — Validation sub-tasks (beta-01 deployment)
+
+### G1 — Code: provider lifecycle
+
+- [ ] **G1.1** — In `crates/riversd/src/telemetry.rs`: store the `SdkTracerProvider` returned by `.build()` in a `static OnceLock<SdkTracerProvider>`. Expose `pub fn force_flush()` that calls `provider.force_flush()` (needed by tests to drain the batch exporter synchronously) and `pub fn shutdown()` that calls `provider.shutdown()` (needed by graceful shutdown to flush the last batch before process exit).
+- [ ] **G1.2** — In `crates/riversd/src/server/lifecycle.rs`, in the post-drain shutdown sequence (after `wait_for_drain().await`, before "server shutdown complete" log): call `crate::telemetry::shutdown()` so the final span batch is flushed before the process exits.
+
+### G2 — Infrastructure: Jaeger on beta-01
+
+- [ ] **G2.1** — On beta-01: start a Jaeger all-in-one container. OTLP HTTP endpoint on port 4318; query API on port 16686. Command: `podman run -d --name jaeger --restart=always -p 4318:4318 -p 16686:16686 jaegertracing/all-in-one:latest`. Verify: `curl http://localhost:4318/v1/traces` returns 405 (method not allowed — endpoint exists).
+- [ ] **G2.2** — Update `sec/test-infrastructure.md`: add Jaeger row to the services table (`Jaeger all-in-one | beta-01 localhost | 4318 OTLP HTTP, 16686 query API`).
+
+### G3 — Config: telemetry section in beta-01 riversd.toml
+
+- [ ] **G3.1** — Add `[telemetry]` section to beta-01's `riversd.toml` (the config used by the deployed binary): `otlp_endpoint = "http://localhost:4318"`, `service_name = "riversd-beta"`. This activates `init_otel` at startup.
+
+### G4 — Build and deploy
+
+- [ ] **G4.1** — Run `just build` (static build) on the dev machine to produce a fresh `riversd` binary at `target/release/riversd` with the P1.5/P1.6/P1.7 changes.
+- [ ] **G4.2** — Push the binary to beta-01 (scp or rsync to the bin directory used by the beta deployment) and restart the service. Confirm startup log shows `"telemetry: OTel OTLP exporter initialized"` with the configured endpoint.
+
+### G5 — Integration test: automated assertions
+
+- [ ] **G5.1** — Create `crates/riversd/tests/telemetry_otel_tests.rs`. Test `spans_arrive_at_jaeger`: spin up a test server (pattern: `TcpListener::bind("127.0.0.1:0")` + `run_server_with_listener_with_control`) with a minimal faker DataView bundle and `config.telemetry = Some(TelemetryConfig { otlp_endpoint: "http://beta-01:4318".into(), service_name: "rivers-test".into() })`. Make one GET request. Call `riversd::telemetry::force_flush()`. Query Jaeger HTTP API (`GET http://beta-01:16686/api/traces?service=rivers-test&limit=10`); assert response contains a trace with a span named `"handler"` and a child span named `"dataview"`. Assert `handler` span has fields `handler`, `app`, `method`. Assert `dataview` span has fields `dataview`, `datasource`, `method`, `duration_ms`.
+- [ ] **G5.2** — Test `no_exporter_without_telemetry_config`: same server setup but `config.telemetry = None`. Make a request. Query Jaeger for `service=rivers-test-no-otel`. Assert no traces found (service not registered). Confirms the no-op path is clean.
+- [ ] **G5.3** — Guard G5.1 and G5.2 behind `#[cfg_attr(not(feature = "integration"), ignore)]` or a `RIVERS_INTEGRATION_TEST=1` env var check so they are skipped in local `cargo test` (Jaeger not available) but run in the beta-01 verification pass.
+
+### G6 — Manual smoke verification on beta-01
+
+- [ ] **G6.1** — After deploy: hit a canary endpoint (`curl https://beta-01:8080/<view>`), then open Jaeger UI (`http://beta-01:16686`) → select service `riversd-beta` → find the trace. Confirm: (a) `handler` span present, (b) `dataview` child span present with `duration_ms` field, (c) both spans share the same trace ID. Screenshot or note the trace ID in the PR description.
+- [ ] **G6.2** — Confirm the "no telemetry" path: temporarily remove `[telemetry]` from the config, restart, hit an endpoint, confirm Jaeger receives no new trace for that request. Restore config.
+
 ## P1.6 — OTLP protobuf → JSON transcoder
 
 - [x] **P1.6.a** — Upgraded full OTel stack from 0.26 → 0.31: `opentelemetry-otlp 0.31` uses `tonic 0.14` → `axum ^0.8` — conflict resolved. Deps: `opentelemetry 0.31`, `opentelemetry-otlp 0.31` (default-features=false, http-proto+reqwest-client+trace), `opentelemetry_sdk 0.31`, `tracing-opentelemetry 0.32`, `opentelemetry-proto 0.31` (gen-tonic-messages+with-serde+trace+metrics+logs), `prost 0.14`. Rewrote `telemetry.rs` for new 0.31 API (`SpanExporter::builder().with_http()`, `SdkTracerProvider::builder()`, `Resource::builder_empty()`). Done.
