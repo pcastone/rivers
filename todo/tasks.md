@@ -1034,3 +1034,953 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 - [ ] **P1.1.X.4** — Update `changelog.md` and `changedecisionlog.md` referencing the design spec.
 - [ ] **P1.1.X.5** — Confirm canary stays green; add a P1.1-specific canary covering subscribe → mutate → notification round-trip.
 
+
+---
+
+# Consolidated from gutter.md — 2026-04-30
+
+## CS — Canary Scenarios (pending deploy / deferred items)
+
+- [ ] **CS1.5 (HTTP)** Full envelope round-trip via `curl $BASE/canary/scenarios/{profile}/probe` — deferred to first canary deploy + `riversd` foreground run. Expect: `passed=true`, `type=="scenario"`, `steps.length==1`, `failed_at_step==null`, `total_steps==1`, `steps[0].assertions.length==2`. Run before starting CS2.
+
+### CS3 — Scenario B: Activity Feed (canary-streams)
+
+- [ ] **CS3.1** Table schema: `events(id, actor, target_user, event_type, payload, published_at, consumed_at)`. Stored by consumer per AF-2 / AF-7.
+- [ ] **CS3.2** Init DDL for events table (AF-9). Idempotent.
+- [ ] **CS3.3** DataView definitions:
+    - [ ] **CS3.3.1** `events_insert` — called from the consumer handler (not REST)
+    - [ ] **CS3.3.2** `events_for_user` — SELECT with `target_user=?`, pagination (limit + offset), date range `published_at >= ?` / `<= ?` (AF-4)
+    - [ ] **CS3.3.3** `events_count_by_user` — COUNT for test asserts
+    - [ ] **CS3.3.4** `events_delete_cleanup` — for CS3.9
+- [ ] **CS3.4** MessageConsumer view registration — Kafka topic via `canary-kafka` LockBox alias (AF-8). Consumer entrypoint = `events-consumer.ts::consumeEvent` which parses the Kafka payload and calls `ctx.dataview("events_insert", ...)`.
+- [ ] **CS3.5** REST history endpoint `/canary/scenarios/stream/activity-feed` — POST, auth=session, dispatches to `scenario-activity-feed.ts`. Implementation reads `target_user = ctx.session.sub` (AF-3 scoping).
+- [ ] **CS3.6** Handler file `scenario-activity-feed.ts` — 11 steps per §6.
+- [ ] **CS3.7** Step implementation:
+    - [ ] **CS3.7.1** Step 1: Publish event for Bob ("Alice commented on your post"). Assert Kafka produce OK.
+    - [ ] **CS3.7.2** Step 2: Poll-wait for consumer (§10 exponential backoff 100/200/400/800/1600/3200 ms, 5s total cap). Assert history shows the event.
+    - [ ] **CS3.7.3** Step 3: Bob REST history. Assert `count==1`, content matches.
+    - [ ] **CS3.7.4** Step 4: Publish 3 more Bob events in rapid succession. Assert all 3 produce calls OK.
+    - [ ] **CS3.7.5** Step 5: Wait + Bob history. Assert `count==4`, publish order preserved (AF-5).
+    - [ ] **CS3.7.6** Step 6: Bob history with date range (before last 3). Assert `count==1` (first event).
+    - [ ] **CS3.7.7** Step 7: Carol history. Assert `count==0`.
+    - [ ] **CS3.7.8** Step 8: Publish event for Carol. Assert Kafka OK.
+    - [ ] **CS3.7.9** Step 9: Carol history (after poll-wait). Assert `count==1`, only Carol's.
+    - [ ] **CS3.7.10** Step 10: Bob history. Assert `count==4` unchanged — scoping (AF-3).
+    - [ ] **CS3.7.11** Step 11: Bob pagination (limit=2 offset=0, then limit=2 offset=2). Assert 2 pages × 2 events, all 4 distinct, no duplicates (AF-4).
+- [ ] **CS3.8** Cleanup — `DELETE FROM events WHERE target_user IN ('alice','bob','carol')`. Best-effort (§10).
+- [ ] **CS3.9** run-tests.sh: `test_ep "scen-stream-activity-feed" POST "$BASE/canary/scenarios/stream/activity-feed" '{}'` behind `KAFKA_AVAIL` (add a Kafka-ping gate if one doesn't exist yet).
+
+### CS5 — Dashboard (deferred)
+
+- [ ] **CS5.2 (DEFERRED)** Dedicated per-step UI — scenario card with failed_at_step banner, expand/collapse list, per-step pass/fail indicators, skip-step visual distinction. Needs the SPA source tree. Requires resurrecting or rebuilding the Svelte build pipeline.
+- [ ] **CS5.3 (DEFERRED)** Skipped-step visual distinction — blocked on CS5.2.
+- [ ] **CS5.4 (DEFERRED)** Dedicated Scenarios tab — same as CS5.2.
+
+### CS6 — run-tests.sh wiring (deferred)
+
+- [ ] **CS6.3 (DEFERRED)** Per-step summary pretty-printing on failure — bundled with CS5.2 follow-on.
+
+### CS7 — End-to-end verification (pending deploy)
+
+- [ ] **CS7.1 (PENDING DEPLOY)** Full-infra run: `./run-tests.sh` — expects SQLite Messaging + Doc Pipeline + 3 probes PASS unconditionally; PG/MySQL Messaging PASS on live infra. Requires `cargo deploy` + `riversctl start`.
+- [ ] **CS7.2 (PENDING DEPLOY)** No-infra run: SQLite Messaging + Doc Pipeline + probes PASS; PG/MySQL Messaging SKIP cleanly via PG_AVAIL/MYSQL_AVAIL gates.
+- [ ] **CS7.3 (PENDING DEPLOY)** Deliberate-failure probe — edit one step's assertion, verify `failed_at_step=N`, SV-7 subsequent steps execute, SV-8 dependent steps show skipped.
+- [ ] **CS7.4 (PENDING DEPLOY)** Dashboard smoke — canary-main loaded in browser shows SCENARIOS profile section with per-scenario pass/fail + expandable flat-assertion detail.
+
+---
+
+## BR — MessageBrokerDriver TS Bridge (pending deploy / deferred items)
+
+### BR3 — Driver-side integration verification (pending deploy)
+
+- [ ] **BR3.1 (PENDING DEPLOY)** Kafka end-to-end: `ctx.datasource("kafka").publish(...)` from canary + kafkacat consumer verify.
+- [ ] **BR3.2 (PENDING DEPLOY)** RabbitMQ — `key` field → AMQP routing-key.
+- [ ] **BR3.3 (PENDING DEPLOY)** NATS — publish to subject + subscriber verify.
+- [ ] **BR3.4 (PENDING DEPLOY)** Redis Streams — XADD publish + XREAD verify.
+
+### BR4 — Testing (deferred)
+
+- [ ] **BR4.6 (DEFERRED)** Equivalent publish-roundtrip tests for NATS + RabbitMQ + Redis-Streams if the canary hosts those brokers (otherwise SKIP-gate them).
+
+### BR6 — Documentation (deferred spec doc edits)
+
+- [ ] **BR6.1 (DEFERRED — spec doc edits)** Update `docs/arch/rivers-processpool-runtime-spec-v2.md` — document `ctx.datasource("<broker>").publish(...)` as a first-class surface alongside filesystem direct-dispatch.
+- [ ] **BR6.2 (DEFERRED — spec doc edits)** Update `docs/arch/rivers-driver-spec.md` §MessageBrokerDriver — note that `publish` is now reachable from TS handlers via the V8 bridge; cross-reference the new runtime spec section.
+
+### BR7 — Verification (pending deploy)
+
+- [ ] **BR7.3 (PENDING DEPLOY)** `cargo deploy /tmp/rivers-br` — deploy with the new runtime.
+- [ ] **BR7.4 (PENDING DEPLOY)** `canary-bundle/run-tests.sh` against the deployed instance — existing atomic count unchanged; new STREAM atomic tests PASS; new `scen-stream-activity-feed` PASS (Kafka reachable).
+
+---
+
+## Unit Test Infrastructure (Phase 2 / Phase 3 / Phase 6 remaining items)
+
+### Phase 2 — Driver Conformance Matrix (remaining cluster-only)
+
+- [ ] Admin guard tests (redis, mongodb, elasticsearch)
+- [ ] NULL handling round-trip
+- [ ] max_rows truncation
+
+### Phase 3 — V8 Bridge Contract Tests (remaining)
+
+- [ ] ctx.dataview() param forwarding with capture (BUG-008)
+- [ ] ctx.dataview() namespace resolution with capture (BUG-009)
+- [ ] Store TTL type validation (BUG-021)
+
+### Phase 6 — Feature Inventory Gaps (0-test areas)
+
+#### 6.1 — DataView engine tests (Feature 3.1 — 0 tests)
+- [ ] `crates/rivers-runtime/tests/dataview_engine_tests.rs`
+  - DataView execution with faker datasource (no cluster needed)
+  - Parameter passing through DataView to driver
+  - DataView registry lookup (namespaced keys)
+  - max_rows truncation at engine level
+  - `invalidates` list triggers cache clear on write
+  - Operation inference from SQL first token (SHAPE-7)
+
+#### 6.2 — Tiered cache tests (Feature 3.3 — 0 tests)
+- [ ] `crates/rivers-runtime/tests/cache_tests.rs`
+  - L1 LRU eviction when memory limit exceeded
+  - L1 returns `Arc<QueryResult>` (pointer, not clone)
+  - L1 entry count safety valve (100K)
+  - L2 skip when result exceeds `l2_max_value_bytes`
+  - Cache key derivation: BTreeMap → serde_json → SHA-256 → hex (SHAPE-3)
+  - Cache invalidation by view name
+  - `NoopDataViewCache` fallback when unconfigured
+
+#### 6.3 — Schema validation chain tests (Feature 4.1-4.8 — 0 tests)
+- [ ] `crates/rivers-driver-sdk/tests/schema_validation_tests.rs`
+  - SchemaSyntaxChecker: valid schema accepted
+  - SchemaSyntaxChecker: missing required fields rejected
+  - SchemaSyntaxChecker: invalid types rejected
+  - Validator: type mismatch caught at request time
+  - Validator: missing required field caught
+  - Validator: constraint violations (min/max/pattern)
+  - Per-driver validation: Redis schema vs Postgres schema different shapes
+
+#### 6.4 — Config validation tests (Feature 17)
+- [ ] `crates/rivers-core-config/tests/config_validation_tests.rs`
+  - Environment variable substitution `${VAR}`
+  - All validation rules from spec table (feature inventory §17.4)
+  - Invalid TOML rejected with clear errors
+  - Missing required sections caught
+  - DDL whitelist format validation
+  - Session cookie validation (http_only enforcement)
+
+#### 6.5 — Security headers tests (Feature 1.5)
+- [ ] `crates/riversd/tests/security_headers_tests.rs`
+  - X-Content-Type-Options: nosniff present
+  - X-Frame-Options: DENY present
+  - X-XSS-Protection present
+  - Referrer-Policy present
+  - Vary: Origin on CORS responses
+  - Handler header blocklist: Set-Cookie, access-control-*, host silently dropped
+
+#### 6.6 — Pipeline stage isolation tests (Feature 2.2)
+- [ ] `crates/riversd/tests/pipeline_tests.rs`
+  - pre_process fires before DataView execution
+  - handlers fire after DataView, can modify ctx.resdata
+  - post_process fires after handlers, side-effect only
+  - on_error fires on any stage failure
+  - Sequential execution order (SHAPE-12)
+
+#### 6.7 — Cross-app session propagation tests (Feature 7.5 — 0 tests)
+- [ ] `crates/riversd/tests/session_propagation_tests.rs`
+  - Authorization header forwarded from app-main to app-service
+  - X-Rivers-Claims header carries claims
+  - Session scope preserved across app boundaries
+
+### Validation (Phase 6+)
+
+- [ ] `cargo test -p rivers-drivers-builtin` — conformance matrix (SQLite without cluster)
+- [ ] `cargo test -p riversd` — bridge, boot, bundle, regression tests
+- [ ] `RIVERS_TEST_CLUSTER=1 cargo test -p rivers-drivers-builtin` — full cluster tests (when available)
+- [ ] All 33 bug-sourced tests mapped in coverage table
+
+---
+
+## CG — Canary Green Again (pending deploy items)
+
+### CG2 (deferred)
+
+- [ ] **CG2.3 (DEFERRED)** Dedicated wire.rs subscription-extraction unit test — will add when the CG5 canary deploy proves the path end-to-end.
+
+### CG4 (pending deploy)
+
+- [ ] **CG4.3 (PENDING DEPLOY)** Runtime regression check — deploy + run the canary MySQL CRUD lane, assert no "Tokio 1.x context was found, but it is being shutdown" errors in the log.
+- [ ] **CG4.4 (PENDING DEPLOY)** Runtime-verified pool-reuse — verify via canary that MySQL CRUD latency drops vs the pre-CG4 baseline.
+
+### CG5 — Deploy + verify
+
+- [ ] **CG5.1** `cargo deploy /tmp/rivers-cg` — clean build with static-engines + static-plugins.
+- [ ] **CG5.2** `riversctl start --foreground` on the deployed instance. Assert log line "main server listening" appears. Record startup wall-clock.
+- [ ] **CG5.3** `canary-bundle/run-tests.sh` — count PASS / FAIL / SKIP. Expected: startup blocker gone; Kafka consumer-store lane green (2 tests from CG1+CG2); MySQL CRUD lane green (7 tests from CG4); PG lane should also improve.
+- [ ] **CG5.4** Categorise remaining failures into: (1) Pre-existing driver/config issues unrelated to this plan. (2) Anything new introduced by CG1–CG4 (should be zero).
+- [ ] **CG5.5** Append `canary-bundle/CHANGELOG.md` with the CG entry: what shipped, expected canary delta, known remaining lanes.
+- [ ] **CG5.6** Commit per CG tier: CG1+CG2 as one commit, CG3 as one commit, CG4 as one commit, CG5 as doc commit.
+
+---
+
+## RCC — Cross-Crate Consolidation Review (archived, pending)
+
+> **Status:** Superseded by user clarification (only review `rivers-plugin-exec`); a separate session will consolidate findings.
+
+- [ ] **RCC0.1 — Re-check report inputs.** Validate whether any 22-report input set has appeared under `reviews/`, `docs/review/`, or another obvious report path before writing the final consolidation.
+- [ ] **RCC0.2 — Choose source basis honestly.** If the 22 per-crate reports are present, read every report in full and consolidate from them. If absent, produce a clearly labeled fallback consolidation from `docs/code_review.md`.
+- [ ] **RCC1.1 — Extract Rivers-wide repeated patterns.** Group findings that appear across 3+ crates or across shared runtime/driver surfaces.
+- [ ] **RCC1.2 — Extract contract violations.** Compare findings against the `rivers-driver-sdk`, engine host callback, and runtime datasource contracts.
+- [ ] **RCC1.3 — Extract cross-crate wiring gaps.** Identify any registration, callback, datasource, engine, or handler path where the implementation exists in one crate but the production caller path is missing, stubbed, or bypassed.
+- [ ] **RCC1.4 — Build severity distribution.**
+- [ ] **RCC2.1 — Write report to `docs/review/cross-crate-consolidation.md`.**
+- [ ] **RCC2.2 — Update logs.**
+- [ ] **RCC2.3 — Verify markdown and whitespace.**
+
+---
+
+## TS Pipeline Deferred Items (from archived plan)
+
+- [ ] **1.7** Deploy probe — run at Phase 1 end after full deploy + service registry + infra are available.
+- [ ] **3.4** Deferred to Phase 8.1 (tutorial covers `rivers.d.ts` + handler patterns + TS gotchas in one pass).
+- [ ] **4.5** Deferred to Phase 5 end-to-end probe run. Case F requires module-namespace entrypoint lookup (Phase 5) to complete.
+- [ ] **6.2** `PrepareStackTraceCallback` — `extern "C" fn(Context, Value, Array)` registration (~20 LOC).
+- [ ] **6.3** Callback body — extract `scriptName/line/column` from `v8::CallSite`, look up source map in `get_module_cache()`, use `swc_sourcemap::SourceMap::lookup_token` to remap, build remapped frames array.
+- [ ] **6.4** `AppLogRouter` integration to route remapped traces into `log/apps/<app>.log` with trace_id correlation.
+- [ ] **6.5** Debug-mode envelope rendering — small once 6.3 lands.
+- [ ] **6.6** Documentation update — closes when 6.2–6.5 land.
+- [ ] **7.8** Spec §6.4 MongoDB row — amend spec §6.4 to mark plugin-driver rows "verify at plugin load" rather than baking a false assertion into the document.
+- [ ] **7.9** Deferred — needs live PG cluster (192.168.2.209) access. End-to-end commit/rollback/data-persistence validation rolls into Phase 10's canary extension.
+- [ ] **10.1** Deferred — TS syntax-compliance handlers. Real value is exercising the full V8 dispatch pipeline against a running riversd; requires infra setup + probe-bundle adoption.
+- [ ] **10.4** Deferred — see 10.1.
+- [ ] **10.6** Deferred — standalone circular-import test against a cycle-fixture bundle.
+- [ ] **10.7** Deferred — source-map assertion. Phase 6 remapping callback must land first.
+- [ ] **10.8** Deferred — requires live riversd + canary run against 192.168.2.161 cluster.
+- [ ] **11.6** Deferred — `cargo deploy` + full canary + probe 9/9 needs the 192.168.2.161 infrastructure.
+
+---
+
+# Consolidated from RiverbedPlan.md — 2026-04-30
+
+# Riverbed HTTPD — Build Plan
+
+**Spec:** `docs/arch/riverbed-httpd-spec.md`
+**Status:** Future consideration
+**Crate:** `riverbed-httpd` (new workspace member)
+
+## Phase 1: Core Engine (crate: `riverbed-httpd`)
+
+### 1.1 Server & Worker Model (spec §3–4)
+- [ ] `Server::start()` — spawn N OS threads, each with own `current_thread` tokio runtime
+- [ ] `SO_REUSEPORT` TCP listener binding per worker
+- [ ] `WorkerConfig` struct with all tunable parameters
+- [ ] Supervisor thread — holds reload/shutdown senders, joins workers on shutdown
+
+**Validate:**
+- [ ] Verify N workers spawn and each binds its own listener (log port + thread ID)
+- [ ] Verify workers are fully independent — no shared mutable state
+- [ ] Stress test: start/stop 100 times, no leaked threads or dangling listeners
+
+### 1.2 TLS & Protocol Negotiation (spec §5)
+- [ ] TLS accept via `tokio-rustls` with consumer-provided `ServerConfig`
+- [ ] ALPN negotiation — route to H1 or H2 branch
+- [ ] mTLS support (client cert verification)
+
+**Validate:**
+- [ ] H1 client connects and gets response over TLS
+- [ ] H2 client connects via ALPN and gets response over TLS
+- [ ] Plain HTTP request rejected (TLS-only)
+- [ ] Invalid TLS handshake does not crash worker
+
+### 1.3 Request & Response Types (spec §6–7)
+- [ ] `Request` type with lazy body reading (`BodyReader` enum: H1/H2/Empty)
+- [ ] `Response` type with `ResponseBody` enum (Fixed/Stream/Upgrade)
+- [ ] `BodyConsumeState` tracking (Untouched/Partial/Consumed)
+- [ ] Reset methods for pool recycling
+
+**Validate:**
+- [ ] Request body read lazily — headers available before body is consumed
+- [ ] Large body streamed without full buffering
+- [ ] Response with Fixed body writes correctly
+- [ ] Response with Stream body delivers chunks in order
+- [ ] Reset clears all fields, object is reusable
+
+### 1.4 Object Pooling (spec §8)
+- [ ] `ObjectPool<T>` with checkout/checkin lifecycle
+- [ ] `Poolable` trait (`new_default`, `reset`)
+- [ ] Implement `Poolable` for `Request` and `Response`
+
+**Validate:**
+- [ ] Pool recycles objects — no allocation after warmup under steady load
+- [ ] Pool respects capacity limit — excess objects dropped, not queued
+- [ ] Recycled request/response has no data from previous use
+
+### 1.5 Worker Loop State Machine (spec §9)
+- [ ] Connection accept loop with `select!` (accept, reload, shutdown)
+- [ ] Per-request state machine for H1 (read → dispatch → write → drain → loop/close)
+- [ ] Per-stream state machine for H2 (accept stream → dispatch → send response)
+
+**Validate:**
+- [ ] H1 keep-alive — multiple requests on one connection
+- [ ] H1 connection closed after idle timeout
+- [ ] H2 concurrent streams on one connection
+- [ ] Slow client does not block other connections
+
+### 1.6 Dispatcher & EngineFactory Traits (spec §10–11)
+- [ ] `Dispatcher` trait — `async fn dispatch(&self, req: &mut Request, res: &mut Response)`
+- [ ] `EngineFactory` trait — config policies (body limit, timeouts, pool capacity)
+- [ ] Clone semantics for dispatcher (one clone per worker)
+
+**Validate:**
+- [ ] Custom dispatcher receives requests and can set response status/body
+- [ ] EngineFactory config values are respected (body limit enforced, timeouts fire)
+- [ ] Dispatcher panic does not crash worker (caught via `catch_unwind`)
+
+### 1.7 H1/H2 Normalization (spec §15)
+- [ ] `fill_from_h1` — parse raw HTTP/1.1 into `Request`
+- [ ] `fill_from_h2` — map `h2::RecvStream` into `Request`
+- [ ] Field mapping table (method, path, headers normalized across protocols)
+
+**Validate:**
+- [ ] Same dispatcher code works for both H1 and H2 requests
+- [ ] Headers normalized consistently (lowercase, no pseudo-headers leaked)
+- [ ] Malformed H1 request line returns 400, does not crash
+
+### 1.8 Body Handling (spec §13–14)
+- [ ] Lazy body reading with configurable body limit
+- [ ] Unconsumed body drain with timeout
+- [ ] Response drain loops — Fixed body, Stream body, Upgrade
+- [ ] Body limit exceeded returns 413
+
+**Validate:**
+- [ ] Body over limit returns 413 and closes connection
+- [ ] Unconsumed request body drained before next request on keep-alive
+- [ ] Drain timeout fires — connection closed, no hang
+- [ ] Stream response completes even if client reads slowly
+
+### 1.9 Error Handling (spec §12)
+- [ ] `EngineError` enum (BodyReadFailed, BodyLimitExceeded, StreamWriteFailed, DispatchPanicked, Timeout, Custom)
+- [ ] `CustomError` with status, close_connection flag, optional body
+- [ ] Worker error response behavior — minimal fixed responses for engine errors
+
+**Validate:**
+- [ ] Each `EngineError` variant produces correct HTTP status code
+- [ ] `CustomError` with `close_connection = true` closes after response
+- [ ] Dispatcher panic produces 500, connection stays open for next request
+
+### 1.10 Hot Reload (spec §16)
+- [ ] Supervisor broadcasts new `Dispatcher` to workers via mpsc
+- [ ] Workers swap dispatcher on reload timer tick
+- [ ] In-flight requests on old dispatcher complete naturally
+
+**Validate:**
+- [ ] Reload under load — no dropped requests, no 500s
+- [ ] New dispatcher takes effect within `reload_check_interval`
+- [ ] Old dispatcher dropped after all in-flight requests complete
+
+### 1.11 Graceful Shutdown (spec §17)
+- [ ] `ServerHandle::shutdown()` broadcasts to all workers
+- [ ] Workers stop accepting new connections, drain in-flight requests
+- [ ] `shutdown_with_timeout()` — force-close after timeout
+- [ ] `ServerHandle::shutdown()` blocks until all workers exit
+
+**Validate:**
+- [ ] In-flight request completes during shutdown drain
+- [ ] No new connections accepted after shutdown signal
+- [ ] Workers exit within timeout — no hung threads
+- [ ] After shutdown, port is released (can rebind immediately)
+
+### 1.12 Standalone Mode (spec §19)
+- [ ] `DefaultEngineFactory` with `DefaultEngineConfig` defaults
+- [ ] Minimal consumer example compiles and runs (HelloWorld dispatcher)
+
+**Validate:**
+- [ ] HelloWorld example starts, responds to requests, shuts down cleanly
+- [ ] All `DefaultEngineConfig` defaults match spec values
+
+### 1.13 Validation Rules (spec §20)
+- [ ] Null bytes in headers rejected
+- [ ] Malformed request lines rejected
+- [ ] Header size overflow rejected
+- [ ] Content-length integrity enforced
+- [ ] Chunked encoding framing validated
+
+**Validate:**
+- [ ] Each validation rule has a dedicated test with crafted malformed input
+- [ ] Rejected requests return appropriate 4xx status
+- [ ] No crash or panic on any malformed input
+
+## Phase 2: Integration with riversd
+
+### 2.1 Dispatcher Bridge
+- [ ] Implement `Dispatcher` in riversd — bridge to existing view engine pipeline
+- [ ] Map Riverbed `Request` → view engine context
+- [ ] Map view engine result → Riverbed `Response`
+
+**Validate:**
+- [ ] Existing bundle endpoints return same responses as Axum stack
+- [ ] Request headers, path, query params, body all forwarded correctly
+
+### 2.2 EngineFactory Bridge
+- [ ] Implement `EngineFactory` in riversd — map `ServerConfig` to engine policies
+- [ ] Body limit, timeouts, worker count sourced from `riversd.toml`
+
+**Validate:**
+- [ ] Config changes in `riversd.toml` reflected in engine behavior
+
+### 2.3 Routing
+- [ ] Replace Axum router with direct route matching (reuse `matchit` or custom)
+- [ ] Path parameter extraction without Axum extractors
+
+**Validate:**
+- [ ] All existing routes resolve identically
+- [ ] Path parameters extracted correctly (`:id`, wildcards)
+- [ ] 404 for unknown routes
+
+### 2.4 Middleware Pipeline
+- [ ] Convert Tower middleware to explicit dispatch pipeline
+- [ ] CORS handling
+- [ ] Authentication / session validation
+- [ ] Rate limiting
+- [ ] Compression
+
+**Validate:**
+- [ ] CORS preflight returns correct headers
+- [ ] Auth rejection returns 401/403
+- [ ] Rate limiting triggers at configured threshold
+- [ ] Compressed responses decode correctly
+
+### 2.5 Streaming Protocols
+- [ ] WebSocket upgrade via `ResponseBody::Upgrade`
+- [ ] SSE via `ResponseBody::Stream`
+
+**Validate:**
+- [ ] WebSocket connect, send, receive, close lifecycle works
+- [ ] SSE stream delivers events, client reconnect works
+
+### 2.6 Admin API
+- [ ] Admin API as second `Server` instance (spec §18)
+- [ ] All admin endpoints functional
+
+**Validate:**
+- [ ] Admin API responds on separate port
+- [ ] Admin auth still enforced
+
+### 2.7 Static Files
+- [ ] Static file serving without Axum extractors
+- [ ] SPA fallback routing
+
+**Validate:**
+- [ ] Static files served with correct content-type
+- [ ] SPA fallback returns index.html for unknown paths
+
+### 2.8 Dependency Removal
+- [ ] Remove `axum`, `tower`, `tower-http`, `hyper`, `hyper-util` from workspace
+
+**Validate:**
+- [ ] `cargo build` succeeds with no Axum/Tower/Hyper references
+- [ ] Binary size comparison (expect smaller)
+
+## Phase 3: System Validation
+
+- [ ] Full canary suite (69/69 tests) passes on Riverbed engine
+- [ ] Load test: compare throughput/latency vs Axum stack (wrk or k6)
+- [ ] Hot reload under load — swap bundle, verify zero dropped requests
+- [ ] Graceful shutdown under load — verify in-flight requests complete
+- [ ] Memory profile — verify object pooling reduces allocation pressure vs Axum
+- [ ] Fuzz testing — malformed HTTP input does not crash or hang
+- [ ] All existing integration tests pass without modification
+
+---
+
+# Consolidated from validation-epics.md — 2026-04-30
+
+# Validation Layer — Epic & Sprint Breakdown
+
+**Spec:** `docs/arch/rivers-bundle-validation-spec.md`
+**Amendments:** `docs/arch/rivers-bundle-validation-amendments.md`
+
+## Epic 1: Foundation (ValidationReport + Error Codes + Formatters)
+
+### Sprint 1.1 — ValidationReport types
+- [ ] Create `crates/rivers-runtime/src/validate_result.rs`
+- [ ] `ValidationError` struct: code, severity, message, file_path, toml_path, suggestion
+- [ ] `ValidationSeverity` enum: Error, Warning, Info
+- [ ] `ValidationReport` struct: layers map, summary (pass/fail/warn counts, exit_code)
+- [ ] Error code constants: S001-S010, E001-E005, X001-X013, C001-C008, L001-L005, W001-W004
+- [ ] Export from `lib.rs`
+- [ ] Unit tests for report builder
+
+### Sprint 1.2 — Text + JSON formatters
+- [ ] Create `crates/rivers-runtime/src/validate_format.rs`
+- [ ] Text formatter: `[PASS]`/`[FAIL]`/`[WARN]`/`[SKIP]` per check (spec §8)
+- [ ] JSON formatter: stable contract matching spec §8 (`summary`, `layers`, `results[]`)
+- [ ] "did you mean?" suggestion helper (Levenshtein distance ≤ 2)
+- [ ] Unit tests for both formatters
+
+## Epic 2: Layer 1 — Structural TOML Validation
+
+### Sprint 2.1 — deny_unknown_fields + TOML parsing
+- [ ] Create `crates/rivers-runtime/src/validate_structural.rs`
+- [ ] Add `#[serde(deny_unknown_fields)]` to all config structs (per FR-1 field tables)
+  - BundleManifest, AppManifest, ResourceDatasource, ResourceKeystore
+  - AppDataConfig, DatasourceConfig, DataViewConfig, ApiViewConfig
+- [ ] Custom deserializer wrapper that captures unknown field names for "did you mean?"
+- [ ] Tests: valid TOML passes, unknown key fails with suggestion
+
+### Sprint 2.2 — Field value validation
+- [ ] appId UUID format validation (S007)
+- [ ] bundleVersion semver validation (S009)
+- [ ] app_type enum validation ("service", "main") (S008)
+- [ ] nopassword vs credentials_source mutual exclusion (S006)
+- [ ] Required field presence checks (S003)
+- [ ] Tests for each error code
+
+## Epic 3: Layer 2 — Resource Existence
+
+### Sprint 3.1 — File existence checks
+- [ ] Create `crates/rivers-runtime/src/validate_existence.rs`
+- [ ] Handler module files (.js, .ts, .wasm) (E001)
+- [ ] Init handler modules (E001)
+- [ ] Schema JSON files (E001) — already partially implemented, migrate
+- [ ] SPA root_path and index_file (E002)
+- [ ] App directory existence (E003)
+- [ ] manifest.toml, resources.toml, app.toml per app (E004, E005)
+- [ ] Tests with temp bundle fixtures (per FR-9)
+
+## Epic 4: Layer 3 — Cross-Reference Validation
+
+### Sprint 4.1 — Datasource + DataView references
+- [ ] Create `crates/rivers-runtime/src/validate_crossref.rs`
+- [ ] DataView → datasource reference resolves (X001)
+- [ ] View handler → resources[] resolve to declared datasources (X003)
+- [ ] Invalidates targets exist as DataView names (X004)
+- [ ] Migrate existing checks from `validate.rs`
+- [ ] Tests
+
+### Sprint 4.2 — Uniqueness + consistency
+- [ ] Duplicate appId across apps (X006)
+- [ ] Duplicate datasource names within app (X007)
+- [ ] Duplicate DataView names within app (X007)
+- [ ] Service dependency → appId resolves within bundle (X005)
+- [ ] x-type matches driver name (X011)
+- [ ] nopassword=true but credentials_source set (X012)
+- [ ] Views exist (warn if empty — W004) (X013)
+- [ ] Tests
+
+## Epic 5: CLI + Removals
+
+### Sprint 5.1 — Upgrade riverpackage validate
+- [ ] Replace current `cmd_validate()` with full 4-layer pipeline
+- [ ] Add `--format text|json` flag (default: text)
+- [ ] Add `--config <path>` flag for engine discovery (Layer 4)
+- [ ] Wire `validate_bundle_full()` → format → print
+- [ ] Exit codes: 0 (pass), 1 (errors), 2 (config error), 3 (internal error)
+- [ ] Tests
+
+### Sprint 5.2 — Remove old commands
+- [ ] Delete `crates/riversctl/src/commands/validate.rs`
+- [ ] Remove `validate` match arm from `riversctl/src/main.rs`
+- [ ] Remove `--lint` flag from `doctor.rs` (keep `--fix`)
+- [ ] Remove `lint_app_conventions()` function
+- [ ] Update help text
+- [ ] Update `riversctl` docs
+
+### Sprint 5.3 — Backward compatibility
+- [ ] Keep `validate_bundle()` and `validate_known_drivers()` as thin wrappers
+- [ ] Ensure `riversd` deploy path still calls validation (uses new modules)
+- [ ] Integration test: `riverpackage validate address-book-bundle/` passes
+
+## Epic 6: Layer 4 — Engine FFI + Syntax Verification
+
+### Sprint 6.1 — Engine dylib FFI contract
+- [ ] Create `crates/rivers-runtime/src/validate_engine.rs`
+- [ ] `EngineHandle` struct with libloading symbol resolution (per FR-2)
+- [ ] Discovery: read `[engines]` from config, scan lib/ dir
+- [ ] Load `_rivers_compile_check` and `_rivers_free_string` symbols
+- [ ] JSON request/response serialization (per FR-3)
+- [ ] Graceful fallback: skip Layer 4 with W002 warning if engines unavailable
+
+### Sprint 6.2 — V8 compile_check export
+- [ ] Add `_rivers_compile_check` to `crates/rivers-engine-v8/src/lib.rs`
+- [ ] TS → JS transpilation via internal swc (per FR-6)
+- [ ] JS syntax validation via V8::Script::Compile
+- [ ] Export enumeration from compiled script
+- [ ] JSON response: `{"ok":true,"exports":[...]}` or `{"ok":false,"error":{...}}`
+- [ ] Add `_rivers_free_string` for heap cleanup
+- [ ] Tests
+
+### Sprint 6.3 — Wasmtime compile_check export
+- [ ] Add `_rivers_compile_check` to `crates/rivers-engine-wasm/src/lib.rs`
+- [ ] WASM module validation via `wasmtime::Module::validate`
+- [ ] Export enumeration from WASM module
+- [ ] JSON response matching V8 contract
+- [ ] Add `_rivers_free_string`
+- [ ] Tests
+
+### Sprint 6.4 — Syntax validation module
+- [ ] Create `crates/rivers-runtime/src/validate_syntax.rs`
+- [ ] Schema JSON validation: parse, check type field, validate field types (C006-C008)
+- [ ] Handler module compile check via engine FFI (C001-C002)
+- [ ] Export verification: handler entrypoint exists in exports (C002)
+- [ ] Import path resolution: relative paths only (per FR-10) (C004-C005)
+- [ ] WASM validation: module parse + export check (C003)
+- [ ] Tests with fixture .js/.ts/.wasm files
+
+## Epic 7: Gate 2 — Deploy-Time Live Validation
+
+### Sprint 7.1 — VALIDATING state
+- [ ] Add `VALIDATING` to deploy state machine (per FR-7, VAL-2)
+- [ ] Insert between `PENDING` and `RESOLVING` in `crates/riversd/src/`
+- [ ] Log state transition: `app → VALIDATING`
+- [ ] On validation failure: app → `FAILED` with collected errors
+
+### Sprint 7.2 — validate_bundle_live()
+- [ ] Implement `validate_bundle_live()` in `rivers-runtime`
+- [ ] LockBox alias existence check (L001)
+- [ ] Driver name → registered driver check (L002)
+- [ ] Schema syntax check with live driver `check_schema_syntax()` (L003)
+- [ ] x-type → driver type match (L004)
+- [ ] Required service health check (L005)
+- [ ] Wire into `crates/riversd/src/bundle_loader/load.rs` after config parse
+
+## Epic 8: Canary + Documentation
+
+### Sprint 8.1 — Canary test updates
+- [ ] Rename `OPS-DOCTOR-LINT-*` → `OPS-VALIDATE-*` (per VAL-7)
+- [ ] Add 10 new validation tests in canary-ops (per VAL-9):
+  - OPS-VALIDATE-PASS, OPS-VALIDATE-STRUCTURAL-FAIL
+  - OPS-VALIDATE-EXISTENCE-FAIL, OPS-VALIDATE-CROSSREF-FAIL
+  - OPS-VALIDATE-SYNTAX-FAIL, OPS-VALIDATE-JSON-FORMAT
+  - OPS-VALIDATE-EXIT-CODE, OPS-VALIDATE-DID-YOU-MEAN
+  - OPS-VALIDATE-ENGINE-SKIP, OPS-VALIDATE-GATE2-LIVE
+- [ ] Update canary-fleet-spec test counts (107 → 116)
+
+### Sprint 8.2 — Tutorial + guide updates
+- [ ] Create `docs/guide/tutorials/tutorial-bundle-validation.md`
+  - How to validate a bundle before deployment
+  - Reading validation output (text + JSON)
+  - Common errors and how to fix them
+  - Engine dylib setup for Layer 4
+- [ ] Update `docs/guide/cli.md` — replace `riversctl validate` with `riverpackage validate`
+- [ ] Update `docs/guide/installation.md` — validation in deploy workflow
+- [ ] Update `docs/guide/developer.md` — validation in app development workflow
+- [ ] Update `docs/guide/AI/rivers-skill.md` — new validation commands
+- [ ] Update `docs/guide/AI/rivers-app-development.md` — validation step
+
+### Sprint 8.3 — Spec cross-references
+- [ ] Apply amendments VAL-1 through VAL-6 to affected spec docs
+- [ ] Update `docs/arch/rivers-feature-inventory.md` with validation layer
+- [ ] Update `CLAUDE.md` with validation commands and modules
+- [ ] Update `README.md` quick reference
+
+---
+
+# Consolidated from ProgramReviewTasks.md — 2026-04-30
+
+## Circuit Breaker — Auto-Trip (v2, future)
+
+- [ ] Threshold-based auto-tripping (failure count/rate within time window)
+- [ ] Config for trip thresholds, recovery strategy, half-open probing
+- [ ] Spec: `mode = "auto" | "manual" | "both"` on breaker config
+
+## Gap: Schema Validation Plugin Coverage
+
+- [ ] Define introspection strategy for each plugin driver beyond postgres/mysql/mongodb:
+  - Cassandra (`system_schema.columns`)
+  - Elasticsearch (index mappings API)
+  - InfluxDB (measurements)
+  - CouchDB (schemaless — skip or sample-based)
+  - Redis (key-type check only)
+  - LDAP (schema subentry)
+
+## RW Phase RW1 (open items)
+
+### RW1.3 — `riversctl` shutdown fallback + stop-signal correctness
+
+- [ ] **RW1.3.a** — Distinguish network-unreachable from HTTP-status/auth/RBAC failures in admin shutdown. Auth failure must NOT silently fall back to local OS signals — that bypasses the admin authorization model.
+- [ ] **RW1.3.validate** — `cargo test -p riversctl` green; integration test asserts auth failure on admin shutdown does NOT trigger local signal fallback.
+
+### RW1.4 — Secret wrapper rollout: LockBox + keystore zeroization/Debug/Clone
+
+- [ ] **RW1.4.b — `rivers-lockbox-engine`** — Replace `ResolvedEntry`'s public `String` plaintext with `Secret<String>`. Strip `Debug` and `Clone` derives on secret-bearing types. Zeroize plaintext buffers on error paths.
+- [ ] **RW1.4.c — `rivers-lockbox-engine` resolver.** Resolve secrets by stable name/alias during per-access fetch instead of metadata index; current path returns the wrong secret after rotation/reorder.
+- [ ] **RW1.4.d — `rivers-lockbox-engine` permissions.** Move keystore permission checks into the actual decrypt/read call path so runtime reads recheck, not just startup.
+- [ ] **RW1.4.e — `rivers-keystore-engine` durable save.** Atomic save with file + parent-directory fsync. Lock + version-guard against concurrent saves losing rotations.
+- [ ] **RW1.4.f — `rivers-keystore-engine` types.** Make `key_material` private; remove `Debug` derives from `AppKeystore`, `AppKeystoreKey`, `KeyVersion`. Use `Secret<>` wrapper.
+- [ ] **RW1.4.g — `rivers-keystore-engine` rotation overflow.** Use checked arithmetic on key version increment.
+- [ ] **RW1.4.h — `rivers-lockbox` CLI.** Route storage through `rivers-lockbox-engine` (kill the bespoke per-entry directory store). Remove `--value` argv input. Use hidden TTY input (`rpassword` or equivalent). Atomic writes everywhere. Validate user-provided names as paths. Make `rekey` transactional.
+- [ ] **RW1.4.i — `rivers-lockbox` alias safety.** Stop overwriting alias file with `{}` on read/parse failure — fail loudly.
+- [ ] **RW1.4.j — `rivers-keystore` CLI.** Fail `init` if target keystore exists unless `--force` (with confirmation). Use `Secret<>` for age identity. Lock keystore across read-modify-write.
+- [ ] **RW1.4.k — `cargo-deploy` TLS key.** Create private-key file with `0600` from the start (open with restrictive mode), not chmod-after.
+- [ ] **RW1.4.validate** — Each crate's `cargo test -p <crate>` green; new unit test on `Secret<String>` confirming redacted debug and drop-zeroization.
+
+## RW Phase RW2 (open items)
+
+### RW2.1 — Broker ack/nack/group contract
+
+- [ ] **RW2.1.validate** — Fixtures compile and run against an in-memory mock driver implementing all three semantics modes.
+
+### RW2.2 — NATS driver
+
+- [ ] **RW2.2.validate** — Run new SDK contract fixtures (RW2.1.c) against `rivers-plugin-nats`.
+
+## RW Phase RW3 — Kill Unwired Features
+
+### RW3.1 — Schema checker / DDL implementation gaps
+
+- [ ] **RW3.1.a** — `rivers-plugin-elasticsearch`: implement `ddl_execute()` for the declared admin operations, OR remove `admin_operations()` returns so they're not advertised.
+- [ ] **RW3.1.b** — Cross-reference `rg 'pub fn check_.*schema' crates/rivers-plugin-*` and `rg 'fn admin_operations' crates/rivers-plugin-*` against production callers; close every gap.
+
+### RW3.2 — Static plugin registration inventory
+
+- [ ] **RW3.2.a** — Add `crates/riversd/tests/static_plugin_registry.rs` that fails if a `rivers-plugin-*` crate is built with the static feature but isn't in the `riversd` static driver inventory.
+- [ ] **RW3.2.b** — Audit current static-feature wiring and either register or drop each plugin.
+
+### RW3.3 — Config field consumption tests
+
+- [~] **RW3.3.a — `rivers-core-config`** — Centralize full `ServerConfig` validation in the loader; add recursive unknown-key validation for nested sections. Bind `SessionCookieConfig::validate()` to every load path including hot reload. (Partial: `init_timeout_s` fixed; recursive validation and SessionCookieConfig binding still open.)
+- [ ] **RW3.3.b — Storage policy fields** — Add tests that set retention/cache policy fields and assert runtime behavior changes; fail or warn loudly if a parsed field is ignored.
+- [ ] **RW3.3.c — `riverpackage --config`** — Either wire `--config` into engine config loading or remove/reject the flag so it can't silently no-op.
+
+## RW Phase RW4 — Add Shared Driver Guardrails
+
+### RW4.1 — Shared timeout policy
+
+- [ ] **RW4.1.a** — Add a `driver_timeouts` helper module in `rivers-driver-sdk` exposing typed connect/request/response-body/broker-confirm timeouts with sensible defaults.
+- [ ] **RW4.1.b** — Apply to `rivers-plugin-elasticsearch`, `rivers-plugin-influxdb`, `rivers-plugin-ldap`, `rivers-plugin-rabbitmq`.
+- [ ] **RW4.1.c** — Add CI lint: `rg 'reqwest::Client::new\(\)' crates/rivers-plugin-* crates/riversctl` must point to a justification or use the helper.
+
+### RW4.2 — Shared response/row caps
+
+- [ ] **RW4.2.a** — Define `max_rows`, `max_response_bytes`, `max_prefetch` defaults in driver SDK config helpers.
+- [ ] **RW4.2.b** — Enforce in: `rivers-plugin-ldap`, `rivers-plugin-cassandra`, `rivers-plugin-mongodb`, `rivers-plugin-elasticsearch`, `rivers-plugin-couchdb`, `rivers-plugin-influxdb`.
+- [ ] **RW4.2.c** — CI lint: `rg 'resp\.text\(\)|resp\.json\(\)' crates/rivers-plugin-*` must justify or wrap with a capped reader.
+
+### RW4.3 — Shared URL path-segment encoder
+
+- [ ] **RW4.3.a** — Add `crates/rivers-driver-sdk/src/url.rs` with `percent_encode_path_segment()` helper.
+- [ ] **RW4.3.b** — Apply in `rivers-plugin-elasticsearch` and `rivers-plugin-couchdb`.
+
+### RW4.4 — Driver-specific structured-construction fixes
+
+- [ ] **RW4.4.a — CouchDB Mango selectors** — Build selectors structurally (serde_json::Value) instead of string-replacement.
+- [ ] **RW4.4.b — CouchDB insert** — Check HTTP status before parsing response body and returning success.
+- [ ] **RW4.4.d — InfluxDB batching URL** — Carry the bucket per buffered line, OR reject batching when target bucket varies.
+- [ ] **RW4.4.e — InfluxDB line-protocol escaping** — Escape measurement names; escape backslashes in field strings; full line-protocol conformance test.
+- [ ] **RW4.4.f — Elasticsearch auth ping** — Use auth-aware request path on initial ping so authenticated clusters don't fail at connect.
+- [ ] **RW4.4.g — Elasticsearch default index** — Read and prefer the configured default index; currently silently ignored.
+- [ ] **RW4.4.h — Cassandra write affected_rows** — Report `0`/unknown for writes unless the driver returns a real count; current always-`1` is misleading.
+- [ ] **RW4.4.i — LDAP TLS** — Support LDAPS/StartTLS with cert verification on by default before bind.
+
+## RW Phase RW5 — Make Tooling Honest
+
+### RW5.1 — `cargo-deploy`
+
+- [ ] **RW5.1.c** — Generate TLS certs only on bootstrap; require an explicit `--renew-tls` to replace on redeploy.
+- [ ] **RW5.1.d** — Open private-key files with `0600` from creation (covered by RW1.4.k cross-ref).
+- [ ] **RW5.1.e** — Resolve actual cargo target directory honoring `CARGO_TARGET_DIR`; stop hard-coding `target/release`.
+
+### RW5.2 — `riverpackage` scaffolding + packaging
+
+- [ ] **RW5.2.a** — Update `init` scaffold templates so generated bundles pass current-validator-schema `riverpackage validate` cleanly.
+- [ ] **RW5.2.b** — Implement real zip output for `pack`, OR change the documented contract to tar.gz only and update help text.
+- [ ] **RW5.2.c** — `--config` wiring (cross-ref RW3.3.c).
+
+### RW5.3 — CLI golden tests
+
+- [ ] **RW5.3.a** — Add golden tests for `cargo deploy <staging>` happy path + each fatal error case.
+- [ ] **RW5.3.b** — Add golden tests for `riverpackage init → validate → pack` round-trip.
+- [ ] **RW5.3.c** — Add golden tests for `riversctl status`, `riversctl stop`, `riversctl admin shutdown` covering auth-failure-no-fallback.
+
+## RW Phase RW-CI
+
+- [ ] **RW-CI.2** — Broker plugin tests must source ack/nack/group fixtures from RW2.1.c (one shared contract test set).
+
+## RW Cross-Cutting
+
+- [ ] **RW-X.1 — Annotate the source review.** After each phase lands, add "Resolved YYYY-MM-DD by `<commit-sha>`" annotations to `docs/review/rivers-wide-code-review-2026-04-27.md` under the relevant findings.
+- [ ] **RW-X.2 — Canary regression run** after Phase RW1 lands and again after Phase RW2 lands. 135/135 must remain green.
+- [ ] **RW-X.3 — De-duplicate vs. existing H-tasks and RXE follow-ups.** Several RW1.2.x items overlap with the prior `rivers-plugin-exec` review; before starting RW1.2, walk the existing RXE Tier 1 findings list and mark RW1.2 sub-items as duplicates where appropriate.
+
+## CB P1 Batch 2 — P1.5, P1.6, P1.7 (remaining)
+
+### P1.5 — Per-view introspection skip
+
+- [ ] **P1.5.d** — Validation: build a minimal mutation DataView (`INSERT INTO ...`) on an introspect-enabled datasource with `skip_introspect = true` and confirm bundle loads without the previous LIMIT-0 wrap failure.
+
+### P1.7 — Auto-OTel spans via OTLP exporter
+
+- [ ] **P1.7.g** — Validation: with `[telemetry]` configured at a local OTLP collector, hit a view and confirm a handler span and a downstream DataView span arrive with expected attributes.
+
+#### G2 — Infrastructure: Jaeger on beta-01
+
+- [ ] **G2.1** — On beta-01: start a Jaeger all-in-one container. OTLP HTTP endpoint on port 4318; query API on port 16686.
+- [ ] **G2.2** — Update `sec/test-infrastructure.md`: add Jaeger row to the services table.
+
+#### G3 — Config: telemetry section in beta-01 riversd.toml
+
+- [ ] **G3.1** — Add `[telemetry]` section to beta-01's `riversd.toml`: `otlp_endpoint = "http://localhost:4318"`, `service_name = "riversd-beta"`.
+
+#### G4 — Build and deploy
+
+- [ ] **G4.1** — Run `just build` (static build) on the dev machine to produce a fresh `riversd` binary with P1.5/P1.6/P1.7 changes.
+- [ ] **G4.2** — Push the binary to beta-01 and restart the service. Confirm startup log shows `"telemetry: OTel OTLP exporter initialized"`.
+
+#### G6 — Manual smoke verification on beta-01
+
+- [ ] **G6.1** — After deploy: hit a canary endpoint, then open Jaeger UI → select service `riversd-beta` → find the trace. Confirm: (a) `handler` span present, (b) `dataview` child span present with `duration_ms` field, (c) both spans share the same trace ID.
+- [ ] **G6.2** — Confirm the "no telemetry" path: temporarily remove `[telemetry]` from the config, restart, hit an endpoint, confirm Jaeger receives no new trace. Restore config.
+
+### P1.6 — OTLP protobuf → JSON transcoder
+
+- [ ] **P1.6.e** — Validation: POST a real OTLP-protobuf trace payload to `/v1/traces` and confirm the handler receives JSON; POST garbage protobuf and confirm 415; POST `application/x-protobuf` to a non-OTLP path and confirm pass-through.
+
+### CB-Batch2 Cross-Cutting
+
+- [ ] **CB-B2.X.3** — Confirm canary remains green (135/135) after the batch lands.
+
+## CB P1.1 — MCP Resource Subscriptions / Push Notifications
+
+### Layer 4 — Config surface
+
+- [ ] **P1.1.4.a** — Add `subscribable: bool` (default false) and `poll_interval_seconds: u64` (default 5) to `McpResourceConfig` in `crates/rivers-runtime/src/view.rs`.
+- [ ] **P1.1.4.b** — Create `crates/rivers-core-config/src/config/mcp.rs` with `McpConfig { max_subscriptions_per_session: u64 (default 100), min_poll_interval_seconds: u64 (default 1) }`.
+- [ ] **P1.1.4.c** — Export `McpConfig` from `crates/rivers-core-config/src/config/mod.rs`; add `pub mcp: Option<McpConfig>` to `ServerConfig` in `runtime.rs`.
+- [ ] **P1.1.4.d** — Add validation rule `S-MCP-2` in `crates/rivers-runtime/src/validate_structural.rs`: warn when `subscribable = true` and the bound DataView has no GET method.
+
+### Layer 2 — Subscription registry
+
+- [ ] **P1.1.2.a** — Create `crates/riversd/src/mcp/subscriptions.rs` with `SubscriptionRegistry`, `SessionChannel { sender: mpsc::Sender<sse::Event>, subscribed_uris: HashSet<String>, app_id: String }`. Bounded mpsc capacity 64.
+- [ ] **P1.1.2.b** — Implement `attach_sse`, `detach`, `subscribe` (enforce `max_subscriptions_per_session`, return `SubscribeError::TooMany`), `unsubscribe`, `notify_changed`, `snapshot_subscriptions`.
+- [ ] **P1.1.2.c** — Unit tests: subscribe/unsubscribe round-trip, max-subscriptions enforcement, notification delivery, slow-consumer drop, dedupe.
+- [ ] **P1.1.2.d** — Wire `Arc<SubscriptionRegistry>` onto `AppContext` and construct in `crates/riversd/src/server/lifecycle.rs` at startup.
+
+### Layer 1 — Streamable HTTP (SSE) transport
+
+- [ ] **P1.1.1.a** — In `crates/riversd/src/server/view_dispatch.rs::execute_mcp_view`, add a branch for `GET` + `Accept: text/event-stream` + valid `Mcp-Session-Id`: build `axum::response::sse::Sse`, register with registry via `attach_sse`, on disconnect call `detach`.
+- [ ] **P1.1.1.b** — Add 30-second SSE keepalive (comment frames) using `Sse::keep_alive`.
+- [ ] **P1.1.1.c** — In `handle_initialize` (`dispatch.rs`), advertise `capabilities.resources.subscribe = true` only when ≥1 resource has `subscribable = true`.
+- [ ] **P1.1.1.d** — Integration test: open SSE stream against an MCP endpoint with a valid session-id; observe keepalive frames; close cleanly.
+
+### Layer 5 — Subscribe / unsubscribe handlers
+
+- [ ] **P1.1.5.a** — Thread `session_id: &str` parameter through `crate::mcp::dispatch::dispatch`.
+- [ ] **P1.1.5.b** — Add `"resources/subscribe"` and `"resources/unsubscribe"` arms in `dispatch.rs`. Implement `handle_resources_subscribe` and `handle_resources_unsubscribe`.
+- [ ] **P1.1.5.c** — Define notification frame format: `{"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"..."}}`.
+- [ ] **P1.1.5.d** — Integration test: subscribe over POST → JSON ack; mutate underlying DataView → SSE delivers notification; unsubscribe → no further notifications.
+
+### Layer 3 — Change poller
+
+- [ ] **P1.1.3.a** — Create `crates/riversd/src/mcp/poller.rs` with `ChangePoller { registry, dataview_executor, handles: Mutex<HashMap<(app_id, uri), JoinHandle>> }`.
+- [ ] **P1.1.3.b** — Implement `ensure_running((app_id, uri))`: spawn task that resolves URI → DataView, executes, BLAKE3-hashes `query_result.rows`, sleeps `poll_interval_seconds.max(min_poll_interval_seconds)`, re-executes, calls `notify_changed` on hash diff.
+- [ ] **P1.1.3.c** — Refcount cleanup: poller exits when `registry.snapshot_subscriptions()` reports zero subscribers for its `(app_id, uri)`.
+- [ ] **P1.1.3.d** — Construct `ChangePoller` in `lifecycle.rs`, place on `AppContext`.
+- [ ] **P1.1.3.e** — Integration test: two sessions subscribe to same URI → only one poller runs; both receive notifications; second disconnects → poller exits within one cycle.
+
+### P1.1 Cross-cutting
+
+- [ ] **P1.1.X.1** — Document the `read-then-subscribe` pattern in `docs/guide/tutorials/`.
+- [ ] **P1.1.X.2** — Document the deterministic-ORDER-BY requirement for subscribable DataViews.
+- [ ] **P1.1.X.3** — Run `just bump-minor` once feature is merged.
+- [ ] **P1.1.X.4** — Update `changelog.md` and `changedecisionlog.md` referencing the design spec.
+- [ ] **P1.1.X.5** — Confirm canary stays green; add a P1.1-specific canary covering subscribe → mutate → notification round-trip.
+
+## Platform Standards Alignment (open items)
+
+### Phase 1 — OpenAPI + Probes (P0)
+
+#### OpenAPI Support (spec §4)
+
+- [ ] Write child execution spec `docs/arch/rivers-openapi-spec.md` from §4
+- [ ] Add `OpenApiConfig` struct (`enabled`, `path`, `title`, `version`, `include_playground`) to `rivers-runtime/src/view.rs`
+- [ ] Add view metadata fields: `summary`, `description`, `tags`, `operation_id`, `deprecated` to `ApiViewConfig`
+- [ ] Add to structural validation known fields in `validate_structural.rs`
+- [ ] Create `crates/riversd/src/openapi.rs` — walk REST views, DataView params, schemas → produce OpenAPI 3.1 JSON
+- [ ] Map DataView parameter types to OpenAPI `in: path/query/header` from parameter_mapping; map schemas to request/response bodies
+- [ ] Register `GET /<bundle>/<app>/openapi.json` route when `api.openapi.enabled = true`
+- [ ] Validation: unique `operation_id` per app; no duplicate path+method; fail if enabled but cannot generate
+- [ ] Unit tests for OpenAPI generation; integration test with address-book-bundle
+- [ ] Tutorial: `docs/guide/tutorials/tutorial-openapi.md`
+
+#### Liveness/Readiness/Startup Probes (spec §5)
+
+- [ ] Write child execution spec `docs/arch/rivers-probes-spec.md` from §5
+- [ ] Add `ProbesConfig` struct (`enabled`, `live_path`, `ready_path`, `startup_path`) to `rivers-core-config`
+- [ ] Add `probes` to known `[base]` fields in structural validation
+- [ ] Implement `/live` handler — always 200 unless catastrophic
+- [ ] Implement `/ready` handler — 200 when bundle loaded, required datasources connected, pools healthy; 503 otherwise
+- [ ] Implement `/startup` handler — 503 until initialization complete, then 200
+- [ ] Add startup-complete flag to `AppContext`, set after bundle wiring completes
+- [ ] Tests: each probe response; failing datasource → /ready returns 503
+- [ ] Add probe configuration to admin guide
+
+### Phase 2 — OTel + Transaction Completion (P1)
+
+#### OpenTelemetry Trace Export (spec §6)
+
+- [ ] Write child execution spec `docs/arch/rivers-otel-spec.md` from §6
+- [ ] Add `OtelConfig` struct (`enabled`, `service_name`, `service_version`, `environment`, `exporter`, `endpoint`, `headers`, `sample_ratio`, `propagate_w3c`) to `rivers-core-config`
+- [ ] Add `opentelemetry`, `opentelemetry-otlp`, `tracing-opentelemetry` to workspace dependencies
+- [ ] Create spans: HTTP receive → route match → guard/auth → DataView execute → response write
+- [ ] Span attributes: `http.method`, `http.route`, `http.status_code`, `rivers.app`, `rivers.dataview`, `rivers.driver`, `rivers.trace_id`
+- [ ] W3C propagation: extract `traceparent`/`tracestate` inbound, inject on outbound HTTP driver requests
+- [ ] Failure policy: OTel export failures log warning, never block requests
+- [ ] Initialize OTel exporter at startup in `server/lifecycle.rs`
+- [ ] Tests: verify spans created for request lifecycle; verify W3C headers propagated
+- [ ] Tutorial: `docs/guide/tutorials/tutorial-otel.md`
+
+#### Runtime Transaction & Batch Completion (spec §7)
+
+- [ ] Gap analysis: compare §7 against current implementation (Connection trait, TransactionMap, Rivers.db.batch stubs)
+- [ ] Wire `host_db_begin/commit/rollback/batch` callbacks to actual pool acquisition and TransactionMap
+- [ ] Implement batch `onError` policy: `fail_fast` (default) and `continue` modes per §7.4
+- [ ] Verify auto-rollback on handler exit without commit
+- [ ] Integration tests: Postgres transaction roundtrip via handler; batch insert with partial failure
+- [ ] Verify existing canary transaction tests pass end-to-end
+
+### Phase 3 — Standards-Based Auth (P1)
+
+#### JWT / OIDC / API Key Auth Providers (spec §8)
+
+- [ ] Write child execution spec `docs/arch/rivers-auth-providers-spec.md` from §8
+- [ ] Add `AuthProviderConfig` enum (JWT, OIDC, APIKey) to `rivers-core-config`
+- [ ] Add `auth_config` to `ApiViewConfig` with `provider`, `required_scopes`, `required_roles`, claim fields
+- [ ] JWT provider: validate signature (RS256/ES256), check `iss`/`aud`/`exp`, extract claims → `ctx.auth`
+- [ ] OIDC provider: discover JWKS from `/.well-known/openid-configuration`, cache keys, validate tokens
+- [ ] API key provider: lookup hashed key in StorageEngine
+- [ ] Authorization: check `required_scopes` and `required_roles` against token claims
+- [ ] Add `ctx.auth` object to handler context (subject, scopes, roles, claims)
+- [ ] Compatibility: `auth = "none"` / `auth = "session"` unchanged; new `auth = "jwt"` / `"oidc"` / `"api_key"`
+- [ ] Security: HTTPS required for JWT/OIDC; tokens never logged; JWKS cached with TTL
+- [ ] Tests: JWT validation with test keys; OIDC discovery mock; API key lookup
+- [ ] Tutorial: `docs/guide/tutorials/tutorial-api-auth.md`
+
+### Phase 4 — AsyncAPI (P2)
+
+#### AsyncAPI Support (spec §9)
+
+- [ ] Write child execution spec `docs/arch/rivers-asyncapi-spec.md` from §9
+- [ ] Add `AsyncApiConfig` struct (`enabled`, `path`, `title`, `version`)
+- [ ] Create `crates/riversd/src/asyncapi.rs` — walk MessageConsumer, SSE, WebSocket views → produce AsyncAPI 3.0 JSON
+- [ ] Kafka/RabbitMQ/NATS: map consumer subscriptions to AsyncAPI channels with message schemas
+- [ ] SSE: map SSE views to AsyncAPI channels (optional in v1)
+- [ ] WebSocket: map WebSocket views to AsyncAPI channels (optional in v1)
+- [ ] Register `GET /<bundle>/<app>/asyncapi.json` when enabled
+- [ ] Validation: broker consumers must have schemas; SSE/WS optional
+- [ ] Tests: unit tests for AsyncAPI generation from broker configs
+- [ ] Add to developer guide
+
+### Phase 5 — Polish (Future)
+
+- [ ] OpenAPI HTML playground (Swagger UI / ReDoc)
+- [ ] OTel metrics signal (bridge Prometheus → OTel)
+- [ ] OTel log signal (bridge tracing → OTel logs)
+- [ ] Richer AsyncAPI bindings (Kafka headers, AMQP routing keys)
+
+### Cross-Cutting Rules (spec §10)
+
+- [ ] All new features opt-in by default (`enabled = false` or absent)
+- [ ] No new feature breaks existing bundles
+- [ ] All new config fields have sensible defaults
+- [ ] Error responses follow existing `ErrorResponse` envelope format
+- [ ] Validation runs at startup (fail-fast), not at request time
