@@ -195,11 +195,39 @@ async fn view_dispatch_handler(
     // Check if this is a streaming REST view before consuming the body
     let is_streaming = matched.config.streaming.unwrap_or(false);
 
-    // Extract body for non-GET/HEAD requests
+    // Extract body for non-GET/HEAD requests.
+    // P1.6: when Content-Type is application/x-protobuf, transcode to JSON first.
+    let is_protobuf = headers.get("content-type")
+        .map(|ct| ct.starts_with("application/x-protobuf"))
+        .unwrap_or(false);
+
     let body = if method != "GET" && method != "HEAD" {
         let bytes = axum::body::to_bytes(request.into_body(), 16 * 1024 * 1024).await;
         match bytes {
-            Ok(b) if !b.is_empty() => serde_json::from_slice(&b).unwrap_or(serde_json::Value::Null),
+            Ok(b) if !b.is_empty() => {
+                if is_protobuf {
+                    match crate::otlp_transcoder::transcode_otlp_protobuf(&path, &b) {
+                        Ok(json_bytes) => serde_json::from_slice(&json_bytes)
+                            .unwrap_or(serde_json::Value::Null),
+                        Err(crate::otlp_transcoder::TranscodeError::UnknownSignal(_)) => {
+                            // Not an OTLP path — pass bytes through as-is
+                            serde_json::from_slice(&b).unwrap_or(serde_json::Value::Null)
+                        }
+                        Err(crate::otlp_transcoder::TranscodeError::DecodeFailed { reason, .. }) => {
+                            return axum::http::Response::builder()
+                                .status(415)
+                                .header("content-type", "application/json")
+                                .body(axum::body::Body::from(
+                                    format!(r#"{{"error":"protobuf decode failed: {reason}"}}"#)
+                                ))
+                                .unwrap_or_else(|_| axum::http::Response::new(axum::body::Body::empty()))
+                                .into_response();
+                        }
+                    }
+                } else {
+                    serde_json::from_slice(&b).unwrap_or(serde_json::Value::Null)
+                }
+            }
             _ => serde_json::Value::Null,
         }
     } else {

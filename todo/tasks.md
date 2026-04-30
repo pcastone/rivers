@@ -939,11 +939,11 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ## P1.6 — OTLP protobuf → JSON transcoder
 
-- [ ] **P1.6.a** — BLOCKED: `opentelemetry-proto 0.26.1` (used by `opentelemetry-otlp 0.26`) and standalone `opentelemetry-proto 0.5` both require `tonic 0.12` (for `gen-tonic-messages`) which transitively pulls `axum 0.7.9`, conflicting with workspace `axum 0.8`. Resolution options: (a) upgrade full OTel stack to 0.31 which may use tonic 0.13+axum 0.8; (b) embed prost-generated OTLP proto types directly with a build.rs + proto files approach. Deferred.
-- [ ] **P1.6.b** — (Blocked by P1.6.a) Create `crates/riversd/src/otlp_transcoder.rs`.
-- [ ] **P1.6.c** — (Blocked by P1.6.a) Register `pub mod otlp_transcoder` in lib.rs.
-- [ ] **P1.6.d** — (Blocked by P1.6.a) View dispatch protobuf detection.
-- [ ] **P1.6.e** — (Blocked by P1.6.a) Validation test.
+- [x] **P1.6.a** — Upgraded full OTel stack from 0.26 → 0.31: `opentelemetry-otlp 0.31` uses `tonic 0.14` → `axum ^0.8` — conflict resolved. Deps: `opentelemetry 0.31`, `opentelemetry-otlp 0.31` (default-features=false, http-proto+reqwest-client+trace), `opentelemetry_sdk 0.31`, `tracing-opentelemetry 0.32`, `opentelemetry-proto 0.31` (gen-tonic-messages+with-serde+trace+metrics+logs), `prost 0.14`. Rewrote `telemetry.rs` for new 0.31 API (`SpanExporter::builder().with_http()`, `SdkTracerProvider::builder()`, `Resource::builder_empty()`). Done.
+- [x] **P1.6.b** — Created `crates/riversd/src/otlp_transcoder.rs`: `TranscodeError { UnknownSignal, DecodeFailed }` + `transcode_otlp_protobuf(path, body)`. Decodes `/v1/traces` → `ExportTraceServiceRequest`, `/v1/metrics` → `ExportMetricsServiceRequest`, `/v1/logs` → `ExportLogsServiceRequest` via `prost::Message::decode` then `serde_json::to_vec`. Done.
+- [x] **P1.6.c** — Registered `pub mod otlp_transcoder` in `crates/riversd/src/lib.rs`. Done.
+- [x] **P1.6.d** — In `view_dispatch.rs` body extraction: checks `content-type: application/x-protobuf`, calls transcoder. `UnknownSignal` passes through unchanged; `DecodeFailed` returns HTTP 415. Done.
+- [ ] **P1.6.e** — Validation: POST a real OTLP-protobuf trace payload to `/v1/traces` and confirm the handler receives JSON; POST garbage protobuf and confirm 415; POST `application/x-protobuf` to a non-OTLP path and confirm pass-through. (Requires live infra.)
 
 ## CB-Batch2 Cross-Cutting
 

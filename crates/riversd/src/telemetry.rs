@@ -13,39 +13,41 @@ use rivers_runtime::rivers_core::config::TelemetryConfig;
 /// Initialize the OTel OTLP exporter and set the global tracer provider.
 ///
 /// Idempotent in practice — called at most once per process from lifecycle.
-/// Logs a warning and returns without error on provider install failure.
+/// Logs a warning and returns without error on exporter build failure.
 pub fn init_otel(cfg: &TelemetryConfig) {
-    let resource = Resource::new(vec![
-        KeyValue::new("service.name", cfg.service_name.clone()),
-        KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-    ]);
+    let resource = Resource::builder_empty()
+        .with_attributes([
+            KeyValue::new("service.name", cfg.service_name.clone()),
+            KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+        ])
+        .build();
 
-    let pipeline = opentelemetry_otlp::new_pipeline()
-        .tracing()
-        .with_exporter(
-            opentelemetry_otlp::new_exporter()
-                .http()
-                .with_endpoint(&cfg.otlp_endpoint),
-        )
-        .with_trace_config(
-            opentelemetry_sdk::trace::Config::default().with_resource(resource),
-        );
-
-    match pipeline.install_batch(opentelemetry_sdk::runtime::Tokio) {
-        Ok(tracer) => {
-            let _ = tracer; // provider is now global
-            tracing::info!(
-                endpoint = %cfg.otlp_endpoint,
-                service = %cfg.service_name,
-                "telemetry: OTel OTLP exporter initialized"
-            );
-        }
+    let exporter = match opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .with_endpoint(&cfg.otlp_endpoint)
+        .build()
+    {
+        Ok(e) => e,
         Err(e) => {
             tracing::warn!(
                 endpoint = %cfg.otlp_endpoint,
                 error = %e,
-                "telemetry: failed to install OTel OTLP exporter — OTel disabled"
+                "telemetry: failed to build OTLP span exporter — OTel disabled"
             );
+            return;
         }
-    }
+    };
+
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(resource)
+        .build();
+
+    opentelemetry::global::set_tracer_provider(provider);
+
+    tracing::info!(
+        endpoint = %cfg.otlp_endpoint,
+        service = %cfg.service_name,
+        "telemetry: OTel OTLP exporter initialized"
+    );
 }

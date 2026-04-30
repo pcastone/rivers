@@ -52,3 +52,5 @@ pub mod websocket;
 pub mod mcp;
 /// OTel span export initialization (P1.7).
 pub mod telemetry;
+/// OTLP protobuf → JSON transcoder (P1.6).
+pub mod otlp_transcoder;
