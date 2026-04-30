@@ -947,9 +947,9 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ## CB-Batch2 Cross-Cutting
 
-- [ ] **CB-B2.X.1** — Run `just bump-patch` once all three items are merged together (single PR or coordinated patch series).
-- [ ] **CB-B2.X.2** — Update `changelog.md` and `changedecisionlog.md` entries per Standards 6 & 7 referencing `docs/superpowers/specs/2026-04-29-cb-p1-batch2-design.md`.
-- [ ] **CB-B2.X.3** — Confirm canary remains green (135/135) after the batch lands.
+- [x] **CB-B2.X.1** — `just bump-patch` run: 0.55.22 → 0.55.23. Done.
+- [x] **CB-B2.X.2** — `changelog.md` and `changedecisionlog.md` updated with P1.5/P1.7 entries including P1.6 blocker rationale. Done.
+- [ ] **CB-B2.X.3** — Confirm canary remains green (135/135) after the batch lands. (Requires live canary run — P1.5.d and P1.7.g also require infra.)
 
 # CB P1.1 — MCP Resource Subscriptions / Push Notifications
 
