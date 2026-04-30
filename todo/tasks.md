@@ -1565,7 +1565,6 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 - [ ] x-type matches driver name (X011)
 - [ ] nopassword=true but credentials_source set (X012)
 - [ ] Views exist (warn if empty — W004) (X013)
-- [ ] Tests
 
 ## Epic 5: CLI + Removals
 
@@ -1575,7 +1574,6 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 - [ ] Add `--config <path>` flag for engine discovery (Layer 4)
 - [ ] Wire `validate_bundle_full()` → format → print
 - [ ] Exit codes: 0 (pass), 1 (errors), 2 (config error), 3 (internal error)
-- [ ] Tests
 
 ### Sprint 5.2 — Remove old commands
 - [ ] Delete `crates/riversctl/src/commands/validate.rs`
@@ -1607,7 +1605,6 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 - [ ] Export enumeration from compiled script
 - [ ] JSON response: `{"ok":true,"exports":[...]}` or `{"ok":false,"error":{...}}`
 - [ ] Add `_rivers_free_string` for heap cleanup
-- [ ] Tests
 
 ### Sprint 6.3 — Wasmtime compile_check export
 - [ ] Add `_rivers_compile_check` to `crates/rivers-engine-wasm/src/lib.rs`
@@ -1615,7 +1612,6 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 - [ ] Export enumeration from WASM module
 - [ ] JSON response matching V8 contract
 - [ ] Add `_rivers_free_string`
-- [ ] Tests
 
 ### Sprint 6.4 — Syntax validation module
 - [ ] Create `crates/rivers-runtime/src/validate_syntax.rs`
@@ -1697,38 +1693,25 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ### RW1.3 — `riversctl` shutdown fallback + stop-signal correctness
 
-- [ ] **RW1.3.a** — Distinguish network-unreachable from HTTP-status/auth/RBAC failures in admin shutdown. Auth failure must NOT silently fall back to local OS signals — that bypasses the admin authorization model.
-- [ ] **RW1.3.validate** — `cargo test -p riversctl` green; integration test asserts auth failure on admin shutdown does NOT trigger local signal fallback.
 
 ### RW1.4 — Secret wrapper rollout: LockBox + keystore zeroization/Debug/Clone
 
 - [ ] **RW1.4.b — `rivers-lockbox-engine`** — Replace `ResolvedEntry`'s public `String` plaintext with `Secret<String>`. Strip `Debug` and `Clone` derives on secret-bearing types. Zeroize plaintext buffers on error paths.
-- [ ] **RW1.4.c — `rivers-lockbox-engine` resolver.** Resolve secrets by stable name/alias during per-access fetch instead of metadata index; current path returns the wrong secret after rotation/reorder.
-- [ ] **RW1.4.d — `rivers-lockbox-engine` permissions.** Move keystore permission checks into the actual decrypt/read call path so runtime reads recheck, not just startup.
-- [ ] **RW1.4.e — `rivers-keystore-engine` durable save.** Atomic save with file + parent-directory fsync. Lock + version-guard against concurrent saves losing rotations.
-- [ ] **RW1.4.f — `rivers-keystore-engine` types.** Make `key_material` private; remove `Debug` derives from `AppKeystore`, `AppKeystoreKey`, `KeyVersion`. Use `Secret<>` wrapper.
-- [ ] **RW1.4.g — `rivers-keystore-engine` rotation overflow.** Use checked arithmetic on key version increment.
 - [ ] **RW1.4.h — `rivers-lockbox` CLI.** Route storage through `rivers-lockbox-engine` (kill the bespoke per-entry directory store). Remove `--value` argv input. Use hidden TTY input (`rpassword` or equivalent). Atomic writes everywhere. Validate user-provided names as paths. Make `rekey` transactional.
-- [ ] **RW1.4.i — `rivers-lockbox` alias safety.** Stop overwriting alias file with `{}` on read/parse failure — fail loudly.
-- [ ] **RW1.4.j — `rivers-keystore` CLI.** Fail `init` if target keystore exists unless `--force` (with confirmation). Use `Secret<>` for age identity. Lock keystore across read-modify-write.
-- [ ] **RW1.4.k — `cargo-deploy` TLS key.** Create private-key file with `0600` from the start (open with restrictive mode), not chmod-after.
 - [ ] **RW1.4.validate** — Each crate's `cargo test -p <crate>` green; new unit test on `Secret<String>` confirming redacted debug and drop-zeroization.
 
 ## RW Phase RW2 (open items)
 
 ### RW2.1 — Broker ack/nack/group contract
 
-- [ ] **RW2.1.validate** — Fixtures compile and run against an in-memory mock driver implementing all three semantics modes.
 
 ### RW2.2 — NATS driver
 
-- [ ] **RW2.2.validate** — Run new SDK contract fixtures (RW2.1.c) against `rivers-plugin-nats`.
 
 ## RW Phase RW3 — Kill Unwired Features
 
 ### RW3.1 — Schema checker / DDL implementation gaps
 
-- [ ] **RW3.1.a** — `rivers-plugin-elasticsearch`: implement `ddl_execute()` for the declared admin operations, OR remove `admin_operations()` returns so they're not advertised.
 - [ ] **RW3.1.b** — Cross-reference `rg 'pub fn check_.*schema' crates/rivers-plugin-*` and `rg 'fn admin_operations' crates/rivers-plugin-*` against production callers; close every gap.
 
 ### RW3.2 — Static plugin registration inventory
@@ -1739,74 +1722,52 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 ### RW3.3 — Config field consumption tests
 
 - [~] **RW3.3.a — `rivers-core-config`** — Centralize full `ServerConfig` validation in the loader; add recursive unknown-key validation for nested sections. Bind `SessionCookieConfig::validate()` to every load path including hot reload. (Partial: `init_timeout_s` fixed; recursive validation and SessionCookieConfig binding still open.)
-- [ ] **RW3.3.b — Storage policy fields** — Add tests that set retention/cache policy fields and assert runtime behavior changes; fail or warn loudly if a parsed field is ignored.
-- [ ] **RW3.3.c — `riverpackage --config`** — Either wire `--config` into engine config loading or remove/reject the flag so it can't silently no-op.
 
 ## RW Phase RW4 — Add Shared Driver Guardrails
 
 ### RW4.1 — Shared timeout policy
 
-- [ ] **RW4.1.a** — Add a `driver_timeouts` helper module in `rivers-driver-sdk` exposing typed connect/request/response-body/broker-confirm timeouts with sensible defaults.
 - [ ] **RW4.1.b** — Apply to `rivers-plugin-elasticsearch`, `rivers-plugin-influxdb`, `rivers-plugin-ldap`, `rivers-plugin-rabbitmq`.
-- [ ] **RW4.1.c** — Add CI lint: `rg 'reqwest::Client::new\(\)' crates/rivers-plugin-* crates/riversctl` must point to a justification or use the helper.
 
 ### RW4.2 — Shared response/row caps
 
-- [ ] **RW4.2.a** — Define `max_rows`, `max_response_bytes`, `max_prefetch` defaults in driver SDK config helpers.
 - [ ] **RW4.2.b** — Enforce in: `rivers-plugin-ldap`, `rivers-plugin-cassandra`, `rivers-plugin-mongodb`, `rivers-plugin-elasticsearch`, `rivers-plugin-couchdb`, `rivers-plugin-influxdb`.
-- [ ] **RW4.2.c** — CI lint: `rg 'resp\.text\(\)|resp\.json\(\)' crates/rivers-plugin-*` must justify or wrap with a capped reader.
 
 ### RW4.3 — Shared URL path-segment encoder
 
-- [ ] **RW4.3.a** — Add `crates/rivers-driver-sdk/src/url.rs` with `percent_encode_path_segment()` helper.
 - [ ] **RW4.3.b** — Apply in `rivers-plugin-elasticsearch` and `rivers-plugin-couchdb`.
 
 ### RW4.4 — Driver-specific structured-construction fixes
 
 - [ ] **RW4.4.a — CouchDB Mango selectors** — Build selectors structurally (serde_json::Value) instead of string-replacement.
-- [ ] **RW4.4.b — CouchDB insert** — Check HTTP status before parsing response body and returning success.
 - [ ] **RW4.4.d — InfluxDB batching URL** — Carry the bucket per buffered line, OR reject batching when target bucket varies.
-- [ ] **RW4.4.e — InfluxDB line-protocol escaping** — Escape measurement names; escape backslashes in field strings; full line-protocol conformance test.
-- [ ] **RW4.4.f — Elasticsearch auth ping** — Use auth-aware request path on initial ping so authenticated clusters don't fail at connect.
-- [ ] **RW4.4.g — Elasticsearch default index** — Read and prefer the configured default index; currently silently ignored.
-- [ ] **RW4.4.h — Cassandra write affected_rows** — Report `0`/unknown for writes unless the driver returns a real count; current always-`1` is misleading.
 - [ ] **RW4.4.i — LDAP TLS** — Support LDAPS/StartTLS with cert verification on by default before bind.
 
 ## RW Phase RW5 — Make Tooling Honest
 
 ### RW5.1 — `cargo-deploy`
 
-- [ ] **RW5.1.c** — Generate TLS certs only on bootstrap; require an explicit `--renew-tls` to replace on redeploy.
-- [ ] **RW5.1.d** — Open private-key files with `0600` from creation (covered by RW1.4.k cross-ref).
-- [ ] **RW5.1.e** — Resolve actual cargo target directory honoring `CARGO_TARGET_DIR`; stop hard-coding `target/release`.
 
 ### RW5.2 — `riverpackage` scaffolding + packaging
 
-- [ ] **RW5.2.a** — Update `init` scaffold templates so generated bundles pass current-validator-schema `riverpackage validate` cleanly.
-- [ ] **RW5.2.b** — Implement real zip output for `pack`, OR change the documented contract to tar.gz only and update help text.
-- [ ] **RW5.2.c** — `--config` wiring (cross-ref RW3.3.c).
 
 ### RW5.3 — CLI golden tests
 
 - [ ] **RW5.3.a** — Add golden tests for `cargo deploy <staging>` happy path + each fatal error case.
-- [ ] **RW5.3.b** — Add golden tests for `riverpackage init → validate → pack` round-trip.
 - [ ] **RW5.3.c** — Add golden tests for `riversctl status`, `riversctl stop`, `riversctl admin shutdown` covering auth-failure-no-fallback.
 
 ## RW Phase RW-CI
 
-- [ ] **RW-CI.2** — Broker plugin tests must source ack/nack/group fixtures from RW2.1.c (one shared contract test set).
 
 ## RW Cross-Cutting
 
 - [ ] **RW-X.1 — Annotate the source review.** After each phase lands, add "Resolved YYYY-MM-DD by `<commit-sha>`" annotations to `docs/review/rivers-wide-code-review-2026-04-27.md` under the relevant findings.
-- [ ] **RW-X.2 — Canary regression run** after Phase RW1 lands and again after Phase RW2 lands. 135/135 must remain green.
 - [ ] **RW-X.3 — De-duplicate vs. existing H-tasks and RXE follow-ups.** Several RW1.2.x items overlap with the prior `rivers-plugin-exec` review; before starting RW1.2, walk the existing RXE Tier 1 findings list and mark RW1.2 sub-items as duplicates where appropriate.
 
 ## CB P1 Batch 2 — P1.5, P1.6, P1.7 (remaining)
 
 ### P1.5 — Per-view introspection skip
 
-- [ ] **P1.5.d** — Validation: build a minimal mutation DataView (`INSERT INTO ...`) on an introspect-enabled datasource with `skip_introspect = true` and confirm bundle loads without the previous LIMIT-0 wrap failure.
 
 ### P1.7 — Auto-OTel spans via OTLP exporter
 
@@ -1843,47 +1804,29 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ### Layer 4 — Config surface
 
-- [ ] **P1.1.4.a** — Add `subscribable: bool` (default false) and `poll_interval_seconds: u64` (default 5) to `McpResourceConfig` in `crates/rivers-runtime/src/view.rs`.
-- [ ] **P1.1.4.b** — Create `crates/rivers-core-config/src/config/mcp.rs` with `McpConfig { max_subscriptions_per_session: u64 (default 100), min_poll_interval_seconds: u64 (default 1) }`.
-- [ ] **P1.1.4.c** — Export `McpConfig` from `crates/rivers-core-config/src/config/mod.rs`; add `pub mcp: Option<McpConfig>` to `ServerConfig` in `runtime.rs`.
-- [ ] **P1.1.4.d** — Add validation rule `S-MCP-2` in `crates/rivers-runtime/src/validate_structural.rs`: warn when `subscribable = true` and the bound DataView has no GET method.
 
 ### Layer 2 — Subscription registry
 
-- [ ] **P1.1.2.a** — Create `crates/riversd/src/mcp/subscriptions.rs` with `SubscriptionRegistry`, `SessionChannel { sender: mpsc::Sender<sse::Event>, subscribed_uris: HashSet<String>, app_id: String }`. Bounded mpsc capacity 64.
 - [ ] **P1.1.2.b** — Implement `attach_sse`, `detach`, `subscribe` (enforce `max_subscriptions_per_session`, return `SubscribeError::TooMany`), `unsubscribe`, `notify_changed`, `snapshot_subscriptions`.
-- [ ] **P1.1.2.c** — Unit tests: subscribe/unsubscribe round-trip, max-subscriptions enforcement, notification delivery, slow-consumer drop, dedupe.
-- [ ] **P1.1.2.d** — Wire `Arc<SubscriptionRegistry>` onto `AppContext` and construct in `crates/riversd/src/server/lifecycle.rs` at startup.
 
 ### Layer 1 — Streamable HTTP (SSE) transport
 
-- [ ] **P1.1.1.a** — In `crates/riversd/src/server/view_dispatch.rs::execute_mcp_view`, add a branch for `GET` + `Accept: text/event-stream` + valid `Mcp-Session-Id`: build `axum::response::sse::Sse`, register with registry via `attach_sse`, on disconnect call `detach`.
-- [ ] **P1.1.1.b** — Add 30-second SSE keepalive (comment frames) using `Sse::keep_alive`.
-- [ ] **P1.1.1.c** — In `handle_initialize` (`dispatch.rs`), advertise `capabilities.resources.subscribe = true` only when ≥1 resource has `subscribable = true`.
-- [ ] **P1.1.1.d** — Integration test: open SSE stream against an MCP endpoint with a valid session-id; observe keepalive frames; close cleanly.
 
 ### Layer 5 — Subscribe / unsubscribe handlers
 
 - [ ] **P1.1.5.a** — Thread `session_id: &str` parameter through `crate::mcp::dispatch::dispatch`.
 - [ ] **P1.1.5.b** — Add `"resources/subscribe"` and `"resources/unsubscribe"` arms in `dispatch.rs`. Implement `handle_resources_subscribe` and `handle_resources_unsubscribe`.
 - [ ] **P1.1.5.c** — Define notification frame format: `{"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"..."}}`.
-- [ ] **P1.1.5.d** — Integration test: subscribe over POST → JSON ack; mutate underlying DataView → SSE delivers notification; unsubscribe → no further notifications.
 
 ### Layer 3 — Change poller
 
-- [ ] **P1.1.3.a** — Create `crates/riversd/src/mcp/poller.rs` with `ChangePoller { registry, dataview_executor, handles: Mutex<HashMap<(app_id, uri), JoinHandle>> }`.
 - [ ] **P1.1.3.b** — Implement `ensure_running((app_id, uri))`: spawn task that resolves URI → DataView, executes, BLAKE3-hashes `query_result.rows`, sleeps `poll_interval_seconds.max(min_poll_interval_seconds)`, re-executes, calls `notify_changed` on hash diff.
-- [ ] **P1.1.3.c** — Refcount cleanup: poller exits when `registry.snapshot_subscriptions()` reports zero subscribers for its `(app_id, uri)`.
-- [ ] **P1.1.3.d** — Construct `ChangePoller` in `lifecycle.rs`, place on `AppContext`.
 - [ ] **P1.1.3.e** — Integration test: two sessions subscribe to same URI → only one poller runs; both receive notifications; second disconnects → poller exits within one cycle.
 
 ### P1.1 Cross-cutting
 
 - [ ] **P1.1.X.1** — Document the `read-then-subscribe` pattern in `docs/guide/tutorials/`.
 - [ ] **P1.1.X.2** — Document the deterministic-ORDER-BY requirement for subscribable DataViews.
-- [ ] **P1.1.X.3** — Run `just bump-minor` once feature is merged.
-- [ ] **P1.1.X.4** — Update `changelog.md` and `changedecisionlog.md` referencing the design spec.
-- [ ] **P1.1.X.5** — Confirm canary stays green; add a P1.1-specific canary covering subscribe → mutate → notification round-trip.
 
 ## Platform Standards Alignment (open items)
 
