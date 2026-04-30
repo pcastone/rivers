@@ -1168,6 +1168,7 @@ mod tests {
             validate_result: false,
             strict_parameters: false,
             max_rows: 1000,
+            skip_introspect: false,
         }
     }
 

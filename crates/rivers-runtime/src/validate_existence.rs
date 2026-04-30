@@ -571,6 +571,7 @@ nopassword = true
                 validate_result: false,
                 strict_parameters: false,
                 max_rows: 1000,
+                skip_introspect: false,
             },
         );
     }
@@ -827,6 +828,7 @@ nopassword = true
             validate_result: false,
             strict_parameters: false,
             max_rows: 1000,
+            skip_introspect: false,
         };
         bundle.apps[0]
             .config

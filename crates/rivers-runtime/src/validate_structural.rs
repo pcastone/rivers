@@ -71,7 +71,7 @@ const DATAVIEW_FIELDS: &[&str] = &[
     "get_query", "post_query", "put_query", "delete_query",
     "return_schema", "get_parameters", "post_parameters", "put_parameters",
     "delete_parameters", "streaming", "validate_result", "strict_parameters",
-    "circuitBreakerId", "prepared",
+    "circuitBreakerId", "prepared", "skip_introspect", "query_params",
 ];
 const DATAVIEW_REQUIRED: &[&str] = &["name", "datasource"];
 
@@ -661,6 +661,32 @@ fn validate_dataview(
             check_unknown_keys(caching_table, CACHING_FIELDS, file, &caching_path, results);
             check_required_fields(caching_table, CACHING_REQUIRED, file, &caching_path, results);
         }
+    }
+
+    // S-DV-1: warn when skip_introspect = true but a GET query is present —
+    // read DataViews should not need to skip introspection.
+    let has_skip = table.get("skip_introspect")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let has_get_query = table.get("get_query")
+        .or_else(|| table.get("query"))
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    if has_skip && has_get_query {
+        results.push(
+            ValidationResult::warn(
+                error_codes::W005,
+                format!(
+                    "{}: skip_introspect = true on a DataView with a GET query — \
+                     likely a misconfiguration; skip_introspect is intended for \
+                     mutation DataViews",
+                    table_path
+                ),
+            )
+            .with_table_path(table_path)
+            .with_app(app_name),
+        );
     }
 
     // Validate parameters arrays

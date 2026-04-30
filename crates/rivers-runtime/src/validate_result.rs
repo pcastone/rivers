@@ -602,6 +602,8 @@ pub mod error_codes {
     pub const W003: &str = "W003";
     /// No views defined — check `[api.views.*]`.
     pub const W004: &str = "W004";
+    /// skip_introspect = true on a DataView that has a GET query (likely misconfiguration).
+    pub const W005: &str = "W005";
 }
 
 // ── Tests ──────────────────────────────────────────────────────────

@@ -53,6 +53,7 @@ fn test_config() -> DataViewConfig {
         prepared: false,
         query_params: std::collections::HashMap::new(),
         max_rows: 1000,
+        skip_introspect: false,
     }
 }
 
@@ -584,6 +585,7 @@ async fn executor_invalidates_cache_after_write() {
         prepared: false,
         query_params: std::collections::HashMap::new(),
         max_rows: 1000,
+        skip_introspect: false,
     };
     registry.register(write_config);
 
@@ -881,6 +883,7 @@ mod d3_timeout {
             prepared: false,
             query_params: HashMap::new(),
             max_rows: 1000,
+            skip_introspect: false,
         }
     }
 

@@ -219,6 +219,12 @@ pub struct DataViewConfig {
     /// Maximum rows returned from a query. 0 = no limit. Default: 1000.
     #[serde(default = "default_max_rows")]
     pub max_rows: usize,
+
+    /// When true, skip schema introspection for this DataView at startup.
+    /// Use for mutation DataViews (INSERT/UPDATE/DELETE) whose queries cannot
+    /// be wrapped in a LIMIT 0 subquery.
+    #[serde(default)]
+    pub skip_introspect: bool,
 }
 
 fn default_max_rows() -> usize {

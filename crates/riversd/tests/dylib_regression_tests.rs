@@ -300,6 +300,7 @@ fn dataview_namespace_suffix_resolution() {
         validate_result: false,
         strict_parameters: false,
         max_rows: 1000,
+        skip_introspect: false,
     });
 
     let factory = Arc::new(DriverFactory::new());

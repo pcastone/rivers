@@ -664,6 +664,15 @@ pub async fn load_and_wire_bundle(
                         continue;
                     }
 
+                    if dv_config.skip_introspect {
+                        tracing::debug!(
+                            dataview = %dv_name,
+                            app = %entry_point,
+                            "schema introspection skipped (skip_introspect = true)"
+                        );
+                        continue;
+                    }
+
                     // Use the GET query for introspection (primary read query)
                     let query_str = match dv_config.query_for_method("GET") {
                         Some(q) if !q.is_empty() => q.to_string(),

@@ -698,6 +698,7 @@ mod d2 {
             prepared: false,
             query_params: HashMap::new(),
             max_rows: 1000,
+            skip_introspect: false,
         }
     }
 

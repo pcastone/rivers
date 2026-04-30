@@ -278,6 +278,7 @@ mod tests {
                 put_parameters: vec![], delete_parameters: vec![],
                 streaming: false,
                 max_rows: 1000,
+                skip_introspect: false,
             });
         }
 

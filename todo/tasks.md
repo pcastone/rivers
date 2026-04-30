@@ -922,9 +922,9 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ## P1.5 — Per-view introspection skip
 
-- [ ] **P1.5.a** — Add `skip_introspect: bool` field (with `#[serde(default)]` and doc comment) to `DataViewConfig` in `crates/rivers-runtime/src/dataview.rs`.
-- [ ] **P1.5.b** — In `crates/riversd/src/bundle_loader/load.rs`, in the inner DataView introspection loop after the datasource-level `introspect` check, skip introspection when `dv_config.skip_introspect` is true and emit `tracing::debug!` with dataview name.
-- [ ] **P1.5.c** — Add structural validation rule `S-DV-1` in `crates/rivers-runtime/src/validate_structural.rs`: warn (non-fatal) when `skip_introspect = true` and the DataView has a non-empty GET query.
+- [x] **P1.5.a** — Add `skip_introspect: bool` field (with `#[serde(default)]` and doc comment) to `DataViewConfig` in `crates/rivers-runtime/src/dataview.rs`. Done: field added with doc comment; also added to `DATAVIEW_FIELDS` allowlist in `validate_structural.rs`; all test struct literals updated with `skip_introspect: false`.
+- [x] **P1.5.b** — In `crates/riversd/src/bundle_loader/load.rs`, in the inner DataView introspection loop after the datasource-level `introspect` check, skip introspection when `dv_config.skip_introspect` is true and emit `tracing::debug!` with dataview name. Done.
+- [x] **P1.5.c** — Add structural validation rule `S-DV-1` in `crates/rivers-runtime/src/validate_structural.rs`: warn (non-fatal) when `skip_introspect = true` and the DataView has a non-empty GET query. Done: emits W005 warning; `W005` code added to `validate_result.rs::error_codes`.
 - [ ] **P1.5.d** — Validation: build a minimal mutation DataView (`INSERT INTO ...`) on an introspect-enabled datasource with `skip_introspect = true` and confirm bundle loads without the previous LIMIT-0 wrap failure.
 
 ## P1.7 — Auto-OTel spans via OTLP exporter (deps before P1.6)
