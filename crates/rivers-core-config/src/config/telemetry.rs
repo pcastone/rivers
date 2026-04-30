@@ -10,7 +10,7 @@ use serde::Deserialize;
 /// configured endpoint. When absent, no exporter is initialized.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TelemetryConfig {
-    /// OTLP HTTP endpoint to export spans to (e.g. `http://collector:4318`).
+    /// OTLP HTTP endpoint to export spans to (e.g. `http://collector:4318/v1/traces`).
     pub otlp_endpoint: String,
 
     /// Service name reported in span metadata.

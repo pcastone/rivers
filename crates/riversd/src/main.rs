@@ -112,10 +112,20 @@ async fn async_main(
         tracing_subscriber::reload::Layer::new(initial_filter);
     let filter_handle = std::sync::Arc::new(filter_handle);
 
+    // Initialize OTel before creating the subscriber layer.
+    // init_otel calls set_tracer_provider synchronously; the global::tracer()
+    // call immediately after picks up the OTLP-backed provider.
+    if let Some(ref tel) = config.telemetry {
+        riversd::telemetry::init_otel(tel);
+    }
+    // Always use .with_tracer(global::tracer()) so the layer type is uniform.
+    // If init_otel was called, this tracer is backed by the OTLP exporter.
+    // If not, it's backed by the global no-op provider.
+    let otel_layer = tracing_opentelemetry::layer()
+        .with_tracer(opentelemetry::global::tracer("riversd"));
+
     // Optional file appender alongside stdout
     let use_json = config.base.logging.format == "json";
-    // OTel bridge layer — active only after init_otel() installs a provider in lifecycle.
-    let otel_layer = tracing_opentelemetry::layer();
 
     let _file_guard = if let Some(ref file_path) = config.base.logging.local_file_path {
         use tracing_subscriber::layer::SubscriberExt;

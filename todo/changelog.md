@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-04-30 — P1.7 G6: OTel spans verified in Jaeger on beta-01
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `crates/riversd/Cargo.toml` | Changed `reqwest-client` → `reqwest-blocking-client` for `opentelemetry-otlp`. Root cause: OTel SDK 0.31 `BatchSpanProcessor` uses a sync OS thread; async reqwest needs a tokio runtime on the background thread, panics without one, causing thread exit and `Disconnected` span sender. Blocking reqwest creates its own runtime per-call. | P1.7 | Matched OTel SDK 0.31 design intent (blocking client is the 0.31 default). |
+| `crates/riversd/Cargo.toml` | Updated comment to explain reqwest-blocking-client requirement. | P1.7 | Documents non-obvious constraint. |
+| `crates/riversd/tests/telemetry_otel_tests.rs` | Fixed `otlp_endpoint` to include `/v1/traces` path. OTLP HTTP exporter does not auto-append the path. Was hitting root `/` → 404. | P1.7.g | Full path required per OTLP spec. |
+| `crates/rivers-core-config/src/config/telemetry.rs` | Updated `otlp_endpoint` doc comment example to include `/v1/traces`. | P1.7 | Prevents misconfiguration. |
+| `packaging/config/riversd.toml` (beta-01 `/etc/rivers/riversd.toml`) | Changed `otlp_endpoint` to `http://localhost:4318/v1/traces`. | P1.7.g | Required for successful export. |
+| `crates/riversd/src/main.rs` | OTel init before subscriber setup; uses `global::tracer("riversd")` via `.with_tracer()` for uniform `BoxedTracer` type across all subscriber branches. | P1.7 | Single type, no match-arm type mismatch. |
+| `crates/riversd/src/server/lifecycle.rs` | Removed `init_otel()` calls from both SSL and no-SSL paths — moved exclusively to `main.rs` (before subscriber install). `shutdown()` kept at post-drain position. | P1.7 | OTel layer captures global tracer at creation time; must initialize provider first. |
+
+**G6 result:** `handler` + `dataview` spans for `/address-book/service/contacts` confirmed in Jaeger (`riversd-beta` service) on beta-01.
+
 ## 2026-04-28 — RW5: Tooling honesty (cargo-deploy staging, riverpackage templates, pack, golden tests)
 
 | File | What changed | Spec ref | Resolution |
@@ -735,3 +749,10 @@ Plan correction: task 4.3 said "thread via closure capture (not thread-local)." 
 | `crates/rivers-runtime/src/dataview_engine.rs` | P1.7: Added `tracing::info_span!("dataview", dataview, datasource, method, duration_ms=Empty)` in `DataViewExecutor::execute`. Uses `span.clone().instrument()` on the sub-call; records `duration_ms` lazily after await via `span.record()`. | P1.7 | |
 | `crates/riversd/Cargo.toml` | P1.6 deferred: `opentelemetry-proto` all features require `tonic 0.12` → `axum 0.7`, conflicting with workspace `axum 0.8`. Resolution: upgrade full OTel stack to 0.31 or use prost build.rs approach. | P1.6 | Blocked |
 | `Cargo.toml` (workspace) | Version bumped `0.55.22+1415300426` → `0.55.23+1445300426` | CLAUDE.md versioning rules | Patch bump — P1.5 skip_introspect + P1.7 OTel spans |
+| `crates/riversd/Cargo.toml` | Upgraded full OTel stack to 0.31: `opentelemetry 0.31`, `opentelemetry-otlp 0.31` (http-proto+reqwest-client, no grpc-tonic), `opentelemetry_sdk 0.31`, `tracing-opentelemetry 0.32`, `opentelemetry-proto 0.31` (gen-tonic-messages+with-serde+trace+metrics+logs), `prost 0.14`. Resolves tonic 0.12→axum 0.7 conflict; tonic 0.14→axum ^0.8 is compatible. | P1.6 | dep conflict resolved by full stack upgrade |
+| `crates/riversd/src/otlp_transcoder.rs` | P1.6: Created OTLP protobuf→JSON transcoder. `transcode_otlp_protobuf(path, body)` dispatches on `/v1/traces`, `/v1/metrics`, `/v1/logs` using `prost::Message::decode` + `serde_json::to_vec` on `opentelemetry-proto 0.31` types. Returns `TranscodeError::UnknownSignal` for unrecognized paths, `DecodeFailed` on malformed proto. | P1.6 | |
+| `crates/riversd/src/server/view_dispatch.rs` | P1.6: Body extraction for OTLP routes: detects `content-type: application/x-protobuf`, calls `otlp_transcoder::transcode_otlp_protobuf`, returns HTTP 415 on `DecodeFailed`, falls through to JSON path on `UnknownSignal`. | P1.6 | |
+| `crates/riversd/src/lib.rs` | Added `pub mod otlp_transcoder` (P1.6) and `pub mod telemetry` (P1.7). | P1.6 / P1.7 | |
+| `crates/riversd/src/telemetry.rs` | G1: Rewrote to use `static PROVIDER: OnceLock<SdkTracerProvider>`. Added `force_flush()` (for tests — drain batch exporter synchronously) and `shutdown()` (for graceful shutdown — export last batch before exit). Uses 0.31 API: `SpanExporter::builder().with_http().with_endpoint()`, `SdkTracerProvider::builder().with_batch_exporter()`. | P1.7.g G1 | OnceLock keeps handle for flush/shutdown without global provider API |
+| `crates/riversd/src/server/lifecycle.rs` | G1.2: Added `crate::telemetry::shutdown()` in post-drain shutdown sequence so final span batch is exported before process exit. | P1.7.g G1 | |
+| `crates/riversd/tests/telemetry_otel_tests.rs` | G5: Created OTel integration test file. `spans_arrive_at_jaeger`: real TCP server + `init_otel` → GET /health → `force_flush()` → Jaeger query API assertion. `no_exporter_without_telemetry_config`: confirms no traces when telemetry=None. Both guarded by `RIVERS_INTEGRATION_TEST=1` env var. | P1.7.g G5 | |

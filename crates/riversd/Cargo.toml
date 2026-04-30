@@ -56,9 +56,11 @@ once_cell = "1"
 
 # OTel span export (P1.7) + OTLP protobuf transcoder (P1.6)
 # 0.31 stack: tonic 0.14 → axum ^0.8 (resolves the 0.26 axum 0.7 conflict).
-# default-features = false: avoids reqwest-blocking-client pulling blocking deps.
+# BatchSpanProcessor in 0.31 uses a sync OS thread → reqwest-blocking-client
+# is required so futures_executor::block_on works without a tokio runtime
+# on the background thread.
 opentelemetry = { version = "0.31", features = ["trace"] }
-opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "reqwest-client", "trace"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 tracing-opentelemetry = "0.32"
 opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "with-serde", "trace", "metrics", "logs"] }
@@ -130,6 +132,8 @@ summary = "Declarative app-service framework — build APIs with TOML config"
 license = "Apache-2.0"
 url = "https://github.com/pcastone/rivers"
 requires = { systemd = "*" }
+# Static binary — no shared libs to auto-detect; ldd is unavailable on macOS cross builds.
+auto-req = "disabled"
 
 assets = [
     # Binaries — paths resolved relative to workspace root, --target prefixes target dir.

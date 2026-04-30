@@ -941,8 +941,8 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ### G1 — Code: provider lifecycle
 
-- [ ] **G1.1** — In `crates/riversd/src/telemetry.rs`: store the `SdkTracerProvider` returned by `.build()` in a `static OnceLock<SdkTracerProvider>`. Expose `pub fn force_flush()` that calls `provider.force_flush()` (needed by tests to drain the batch exporter synchronously) and `pub fn shutdown()` that calls `provider.shutdown()` (needed by graceful shutdown to flush the last batch before process exit).
-- [ ] **G1.2** — In `crates/riversd/src/server/lifecycle.rs`, in the post-drain shutdown sequence (after `wait_for_drain().await`, before "server shutdown complete" log): call `crate::telemetry::shutdown()` so the final span batch is flushed before the process exits.
+- [x] **G1.1** — `telemetry.rs`: `static PROVIDER: OnceLock<SdkTracerProvider>` + `force_flush()` + `shutdown()`. ✓
+- [x] **G1.2** — `lifecycle.rs`: `crate::telemetry::shutdown()` in post-drain sequence. ✓
 
 ### G2 — Infrastructure: Jaeger on beta-01
 
@@ -960,9 +960,9 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ### G5 — Integration test: automated assertions
 
-- [ ] **G5.1** — Create `crates/riversd/tests/telemetry_otel_tests.rs`. Test `spans_arrive_at_jaeger`: spin up a test server (pattern: `TcpListener::bind("127.0.0.1:0")` + `run_server_with_listener_with_control`) with a minimal faker DataView bundle and `config.telemetry = Some(TelemetryConfig { otlp_endpoint: "http://beta-01:4318".into(), service_name: "rivers-test".into() })`. Make one GET request. Call `riversd::telemetry::force_flush()`. Query Jaeger HTTP API (`GET http://beta-01:16686/api/traces?service=rivers-test&limit=10`); assert response contains a trace with a span named `"handler"` and a child span named `"dataview"`. Assert `handler` span has fields `handler`, `app`, `method`. Assert `dataview` span has fields `dataview`, `datasource`, `method`, `duration_ms`.
-- [ ] **G5.2** — Test `no_exporter_without_telemetry_config`: same server setup but `config.telemetry = None`. Make a request. Query Jaeger for `service=rivers-test-no-otel`. Assert no traces found (service not registered). Confirms the no-op path is clean.
-- [ ] **G5.3** — Guard G5.1 and G5.2 behind `#[cfg_attr(not(feature = "integration"), ignore)]` or a `RIVERS_INTEGRATION_TEST=1` env var check so they are skipped in local `cargo test` (Jaeger not available) but run in the beta-01 verification pass.
+- [x] **G5.1** — `crates/riversd/tests/telemetry_otel_tests.rs`: `spans_arrive_at_jaeger` — real TCP server + `force_flush()` + Jaeger query API assertion. ✓
+- [x] **G5.2** — `no_exporter_without_telemetry_config` test: no-telemetry path asserts empty Jaeger response. ✓
+- [x] **G5.3** — Both tests guarded by `RIVERS_INTEGRATION_TEST=1` env var; skip locally, run on beta-01. ✓
 
 ### G6 — Manual smoke verification on beta-01
 

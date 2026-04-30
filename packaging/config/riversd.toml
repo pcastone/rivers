@@ -33,3 +33,7 @@ backend = "memory"
 
 # [graphql]
 # enabled = true
+
+# [telemetry]
+# otlp_endpoint = "http://otel-collector:4318/v1/traces"
+# service_name  = "riversd"
