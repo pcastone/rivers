@@ -82,6 +82,10 @@ pub struct ServerConfig {
     #[serde(default)]
     pub metrics: Option<MetricsConfig>,
 
+    /// OTel span export via OTLP HTTP.
+    #[serde(default)]
+    pub telemetry: Option<super::telemetry::TelemetryConfig>,
+
     /// Per-environment config overrides (keyed by environment name).
     #[serde(default)]
     pub environment_overrides: std::collections::HashMap<String, EnvironmentOverride>,

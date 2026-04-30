@@ -300,7 +300,26 @@ async fn view_dispatch_handler(
     let dv_ref = dv_guard.as_deref();
     #[cfg(feature = "metrics")]
     let exec_start = std::time::Instant::now();
-    let view_result = view_engine::execute_rest_view(&mut view_ctx, &config, Some(&ctx.pool), dv_ref).await;
+    let handler_start = std::time::Instant::now();
+    let view_result = {
+        use tracing::Instrument;
+        let span = tracing::info_span!(
+            "handler",
+            handler = %matched.view_id,
+            app = %manifest_app_id,
+            method = %method,
+        );
+        view_engine::execute_rest_view(&mut view_ctx, &config, Some(&ctx.pool), dv_ref)
+            .instrument(span)
+            .await
+    };
+    let handler_duration_ms = handler_start.elapsed().as_millis();
+    tracing::debug!(
+        handler = %matched.view_id,
+        duration_ms = handler_duration_ms,
+        status = if view_result.is_ok() { "ok" } else { "err" },
+        "handler complete"
+    );
     drop(dv_guard);
 
     #[cfg(feature = "metrics")]

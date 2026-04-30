@@ -172,6 +172,11 @@ pub async fn run_server_no_ssl(
         }
     }
 
+    // OTel span export (P1.7): install OTLP pipeline when [telemetry] is configured.
+    if let Some(ref tel) = config.telemetry {
+        crate::telemetry::init_otel(tel);
+    }
+
     // Initialize StorageEngine if configured (prerequisite for sessions, cache, polling)
     if config.storage_engine.backend != "none" {
         match rivers_runtime::rivers_core::storage::create_storage_engine(&config.storage_engine) {
@@ -386,6 +391,11 @@ pub async fn run_server_with_listener_and_log(
                 Err(e) => tracing::warn!(error = %e, "failed to start metrics exporter"),
             }
         }
+    }
+
+    // OTel span export (P1.7): install OTLP pipeline when [telemetry] is configured.
+    if let Some(ref tel) = config.telemetry {
+        crate::telemetry::init_otel(tel);
     }
 
     // Initialize StorageEngine if configured (prerequisite for sessions, cache, polling)

@@ -1211,7 +1211,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-deploy"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "rcgen",
  "rivers-core-config",
@@ -4481,6 +4481,84 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
+name = "opentelemetry"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "570074cc999d1a58184080966e5bd3bf3a9a4af650c3b05047c2621e7405cd17"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "js-sys",
+ "once_cell",
+ "pin-project-lite",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "opentelemetry-http"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6351496aeaa49d7c267fb480678d85d1cd30c5edb20b497c48c56f62a8c14b99"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "http",
+ "opentelemetry",
+ "reqwest",
+]
+
+[[package]]
+name = "opentelemetry-otlp"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29e1f9c8b032d4f635c730c0efcf731d5e2530ea13fa8bef7939ddc8420696bd"
+dependencies = [
+ "async-trait",
+ "futures-core",
+ "http",
+ "opentelemetry",
+ "opentelemetry-http",
+ "opentelemetry-proto",
+ "opentelemetry_sdk",
+ "prost",
+ "reqwest",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "opentelemetry-proto"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9d3968ce3aefdcca5c27e3c4ea4391b37547726a70893aab52d3de95d5f8b34"
+dependencies = [
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "prost",
+ "tonic",
+]
+
+[[package]]
+name = "opentelemetry_sdk"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2c627d9f4c9cdc1f21a29ee4bfbd6028fcb8bcf2a857b43f3abdf72c9c862f3"
+dependencies = [
+ "async-trait",
+ "futures-channel",
+ "futures-executor",
+ "futures-util",
+ "glob",
+ "once_cell",
+ "opentelemetry",
+ "percent-encoding",
+ "rand 0.8.5",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "outref"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5005,6 +5083,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "prost"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2796faa41db3ec313a31f7624d9286acf277b52de526150b7e69f3debf891ee5"
+dependencies = [
+ "bytes",
+ "prost-derive",
+]
+
+[[package]]
+name = "prost-derive"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
+dependencies = [
+ "anyhow",
+ "itertools 0.14.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "ptr_meta"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5503,7 +5604,7 @@ dependencies = [
 
 [[package]]
 name = "riverpackage"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "rivers-core-config",
  "rivers-driver-sdk",
@@ -5518,7 +5619,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-core"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "age",
  "async-trait",
@@ -5551,7 +5652,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-core-config"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5566,7 +5667,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-driver-sdk"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5581,7 +5682,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-drivers-builtin"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "async-memcached",
  "async-trait",
@@ -5607,7 +5708,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-engine-sdk"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "serde",
  "serde_json",
@@ -5615,7 +5716,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-engine-v8"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "base64 0.22.1",
  "bcrypt",
@@ -5634,7 +5735,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-engine-wasm"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "rivers-engine-sdk",
  "serde_json",
@@ -5644,7 +5745,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-keystore"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "age",
  "clap",
@@ -5654,7 +5755,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-keystore-engine"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "aes-gcm",
  "age",
@@ -5671,7 +5772,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-lockbox"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "age",
  "rivers-lockbox-engine",
@@ -5685,7 +5786,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-lockbox-engine"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "age",
  "chrono",
@@ -5699,7 +5800,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-cassandra"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "age",
  "async-trait",
@@ -5715,7 +5816,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-couchdb"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "age",
  "async-trait",
@@ -5732,7 +5833,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-elasticsearch"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "age",
  "async-trait",
@@ -5746,7 +5847,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-exec"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "async-trait",
  "hex",
@@ -5763,7 +5864,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-influxdb"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "age",
  "async-trait",
@@ -5780,7 +5881,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-kafka"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "age",
  "async-trait",
@@ -5793,7 +5894,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-ldap"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "age",
  "async-trait",
@@ -5806,7 +5907,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-mongodb"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "age",
  "async-trait",
@@ -5820,7 +5921,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-nats"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "age",
  "async-nats",
@@ -5835,7 +5936,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-neo4j"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "age",
  "async-trait",
@@ -5850,7 +5951,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-rabbitmq"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "age",
  "async-trait",
@@ -5864,7 +5965,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-redis-streams"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "age",
  "async-trait",
@@ -5881,7 +5982,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-runtime"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "async-trait",
  "hex",
@@ -5904,7 +6005,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-storage-backends"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "async-trait",
  "redis",
@@ -5916,7 +6017,7 @@ dependencies = [
 
 [[package]]
 name = "riversctl"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -5934,7 +6035,7 @@ dependencies = [
 
 [[package]]
 name = "riversd"
-version = "0.55.21+1403300426"
+version = "0.55.22+1415300426"
 dependencies = [
  "async-graphql",
  "async-graphql-axum",
@@ -5954,7 +6055,11 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "once_cell",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
  "percent-encoding",
+ "prost",
  "rand 0.8.5",
  "rcgen",
  "reqwest",
@@ -5991,6 +6096,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-appender",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
  "v8",
@@ -7902,6 +8008,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d282ade6016312faf3e41e57ebbba0c073e4056dab1232ab1cb624199648f8ed"
 
 [[package]]
+name = "tonic"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "877c5b330756d856ffcc4553ab34a5684481ade925ecc54bcd1bf02b1d0d4d52"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "http",
+ "http-body",
+ "http-body-util",
+ "percent-encoding",
+ "pin-project",
+ "prost",
+ "tokio-stream",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
 name = "tower"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8006,6 +8133,24 @@ dependencies = [
  "log",
  "once_cell",
  "tracing-core",
+]
+
+[[package]]
+name = "tracing-opentelemetry"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc58af5d3f6c5811462cabb3289aec0093f7338e367e5a33d28c0433b3c7360b"
+dependencies = [
+ "js-sys",
+ "once_cell",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "smallvec",
+ "tracing",
+ "tracing-core",
+ "tracing-log",
+ "tracing-subscriber",
+ "web-time",
 ]
 
 [[package]]

@@ -114,6 +114,8 @@ async fn async_main(
 
     // Optional file appender alongside stdout
     let use_json = config.base.logging.format == "json";
+    // OTel bridge layer — active only after init_otel() installs a provider in lifecycle.
+    let otel_layer = tracing_opentelemetry::layer();
 
     let _file_guard = if let Some(ref file_path) = config.base.logging.local_file_path {
         use tracing_subscriber::layer::SubscriberExt;
@@ -132,12 +134,14 @@ async fn async_main(
         if use_json {
             tracing_subscriber::registry()
                 .with(reloadable_filter)
+                .with(otel_layer)
                 .with(tracing_subscriber::fmt::layer().json().with_writer(std::io::stdout))
                 .with(tracing_subscriber::fmt::layer().json().with_writer(non_blocking))
                 .init();
         } else {
             tracing_subscriber::registry()
                 .with(reloadable_filter)
+                .with(otel_layer)
                 .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
                 .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
                 .init();
@@ -150,11 +154,13 @@ async fn async_main(
         if use_json {
             tracing_subscriber::registry()
                 .with(reloadable_filter)
+                .with(otel_layer)
                 .with(tracing_subscriber::fmt::layer().json())
                 .init();
         } else {
             tracing_subscriber::registry()
                 .with(reloadable_filter)
+                .with(otel_layer)
                 .with(tracing_subscriber::fmt::layer())
                 .init();
         }

@@ -929,21 +929,21 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ## P1.7 — Auto-OTel spans via OTLP exporter (deps before P1.6)
 
-- [ ] **P1.7.a** — Add OTel deps to `crates/riversd/Cargo.toml`: `opentelemetry` (feat `trace`), `opentelemetry-otlp` (feat `http-proto`, `reqwest-client`), `opentelemetry_sdk` (feat `rt-tokio`), `tracing-opentelemetry`. Pin versions consistent with `opentelemetry-proto` so P1.6 can align.
-- [ ] **P1.7.b** — Create `crates/rivers-core-config/src/config/telemetry.rs` with `TelemetryConfig { otlp_endpoint: String, service_name: String (default fn) }`.
-- [ ] **P1.7.c** — Export `TelemetryConfig` from `crates/rivers-core-config/src/config/mod.rs` and add `pub telemetry: Option<TelemetryConfig>` to `ServerConfig` in `crates/rivers-core-config/src/config/runtime.rs`.
-- [ ] **P1.7.d** — In `crates/riversd/src/server/lifecycle.rs`, when `[telemetry]` is present at startup: init `opentelemetry-otlp` HTTP exporter at `otlp_endpoint`, build `opentelemetry_sdk::trace::TracerProvider`, install `tracing_opentelemetry::layer()` into the global `tracing` subscriber. Auto-fill `service_version` from the binary version. When absent, behavior unchanged.
-- [ ] **P1.7.e** — In `crates/riversd/src/server/view_dispatch.rs`, wrap handler dispatch in a `tracing::info_span!` capturing `handler`, `app`, `method`, `req_bytes`, `status` (post), `duration_ms` (post).
-- [ ] **P1.7.f** — Add a span around DataView execution in the DataView executor capturing `dataview`, `datasource`, `method`, `duration_ms`.
+- [x] **P1.7.a** — Add OTel deps to `crates/riversd/Cargo.toml`: `opentelemetry 0.26` (feat `trace`), `opentelemetry-otlp 0.26` (feat `http-proto`, `reqwest-client`, `trace`; `default-features = false` to avoid grpc-tonic → tonic 0.12 → axum 0.7 conflict), `opentelemetry_sdk 0.26` (feat `rt-tokio`), `tracing-opentelemetry 0.27`, `prost 0.13`. Done.
+- [x] **P1.7.b** — Created `crates/rivers-core-config/src/config/telemetry.rs` with `TelemetryConfig { otlp_endpoint, service_name (default "riversd") }`. Done.
+- [x] **P1.7.c** — Exported `TelemetryConfig` from config/mod.rs; added `pub telemetry: Option<TelemetryConfig>` to `ServerConfig`. Done.
+- [x] **P1.7.d** — Created `crates/riversd/src/telemetry.rs` with `init_otel(cfg)` using `opentelemetry_otlp::new_pipeline().tracing()...install_batch(Tokio)`. Wired in both `run_server_no_ssl` and `run_server_with_listener_and_log` in lifecycle.rs. `tracing_opentelemetry::layer()` installed in all 4 subscriber branches in main.rs. Done.
+- [x] **P1.7.e** — In `view_dispatch.rs`, wrapped `execute_rest_view` in `tracing::info_span!("handler", handler, app, method)` using `.instrument()` (not `.entered()` — avoids non-Send future). Added `tracing::debug!` post-handler with `duration_ms` and `status`. Done.
+- [x] **P1.7.f** — Added span to `DataViewExecutor::execute` in `dataview_engine.rs` capturing `dataview`, `datasource`, `method`, `duration_ms` (recorded lazily via `span.record()` after await). Done.
 - [ ] **P1.7.g** — Validation: with `[telemetry]` configured at a local OTLP collector, hit a view and confirm a handler span and a downstream DataView span arrive with expected attributes; with `[telemetry]` removed, confirm no exporter is initialized and behavior is unchanged.
 
 ## P1.6 — OTLP protobuf → JSON transcoder
 
-- [ ] **P1.6.a** — Add `opentelemetry-proto` (features `gen-tonic-messages`, `with-serde`) and `prost` to `crates/riversd/Cargo.toml`. Versions must match the OTel stack pinned in P1.7.a.
-- [ ] **P1.6.b** — Create `crates/riversd/src/otlp_transcoder.rs` exposing `TranscodeError { UnknownSignal(String), DecodeFailed(String) }` and `pub fn transcode_otlp_protobuf(path: &str, body: &[u8]) -> Result<Vec<u8>, TranscodeError>`. Map `/v1/traces`, `/v1/metrics`, `/v1/logs` to the corresponding `opentelemetry_proto::tonic::collector::*::v1::Export*ServiceRequest`; decode via `prost::Message::decode`, serialize via `serde_json::to_vec`.
-- [ ] **P1.6.c** — Register module in `crates/riversd/src/lib.rs` (`pub mod otlp_transcoder`).
-- [ ] **P1.6.d** — In `crates/riversd/src/server/view_dispatch.rs`, in the body extraction path before the codecomponent executor: when `Content-Type` starts with `application/x-protobuf`, call the transcoder. On success replace body bytes with JSON and treat as `application/json` downstream. On `UnknownSignal` pass through unchanged. On `DecodeFailed` return HTTP 415 with the error message.
-- [ ] **P1.6.e** — Validation: POST a real OTLP-protobuf trace payload to `/v1/traces` and confirm the handler receives JSON; POST garbage protobuf and confirm 415; POST `application/x-protobuf` to a non-OTLP path and confirm pass-through.
+- [ ] **P1.6.a** — BLOCKED: `opentelemetry-proto 0.26.1` (used by `opentelemetry-otlp 0.26`) and standalone `opentelemetry-proto 0.5` both require `tonic 0.12` (for `gen-tonic-messages`) which transitively pulls `axum 0.7.9`, conflicting with workspace `axum 0.8`. Resolution options: (a) upgrade full OTel stack to 0.31 which may use tonic 0.13+axum 0.8; (b) embed prost-generated OTLP proto types directly with a build.rs + proto files approach. Deferred.
+- [ ] **P1.6.b** — (Blocked by P1.6.a) Create `crates/riversd/src/otlp_transcoder.rs`.
+- [ ] **P1.6.c** — (Blocked by P1.6.a) Register `pub mod otlp_transcoder` in lib.rs.
+- [ ] **P1.6.d** — (Blocked by P1.6.a) View dispatch protobuf detection.
+- [ ] **P1.6.e** — (Blocked by P1.6.a) Validation test.
 
 ## CB-Batch2 Cross-Cutting
 

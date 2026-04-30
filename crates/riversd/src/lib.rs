@@ -50,3 +50,5 @@ pub mod view_engine;
 pub mod websocket;
 /// MCP view type — JSON-RPC dispatcher for AI tool access.
 pub mod mcp;
+/// OTel span export initialization (P1.7).
+pub mod telemetry;

@@ -766,7 +766,25 @@ impl DataViewExecutor {
         trace_id: &str,
         txn_conn: Option<&mut Box<dyn rivers_driver_sdk::Connection>>,
     ) -> Result<DataViewResponse, DataViewError> {
-        self.execute_with_timeout(name, params, method, trace_id, txn_conn, None).await
+        let datasource = self.registry.get(name)
+            .map(|c| c.datasource.clone())
+            .unwrap_or_default();
+        let span = tracing::info_span!(
+            "dataview",
+            dataview = %name,
+            datasource = %datasource,
+            method = %method,
+            duration_ms = tracing::field::Empty,
+        );
+        let start = std::time::Instant::now();
+        let result = {
+            use tracing::Instrument;
+            self.execute_with_timeout(name, params, method, trace_id, txn_conn, None)
+                .instrument(span.clone())
+                .await
+        };
+        span.record("duration_ms", start.elapsed().as_millis());
+        result
     }
 
     /// Execute a named DataView with an explicit per-request timeout (D3 / P1-10).
