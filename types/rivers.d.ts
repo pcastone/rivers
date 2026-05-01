@@ -173,6 +173,23 @@ interface ViewContext {
      * `[init]` in the app manifest. Rejected elsewhere.
      */
     ddl(datasource: string, statement: string): void;
+
+    /**
+     * Request structured user input from the MCP client (P2.6).
+     *
+     * Suspends the handler and sends an `elicitation/create` request to the
+     * MCP client over the session's SSE stream. Returns a Promise that
+     * resolves when the client responds (via `elicitation/response`) or times
+     * out after 60 seconds.
+     *
+     * Only available when the handler is invoked via MCP (`tools/call`).
+     * Calling from REST or WebSocket handlers throws an Error.
+     *
+     * On timeout, resolves with `{ action: "cancel" }`.
+     *
+     * @capability mcp — handler must be a codecomponent view invoked via MCP.
+     */
+    elicit(spec: ElicitationSpec): Promise<ElicitationResult>;
 }
 
 interface ParsedRequest {
@@ -260,6 +277,38 @@ interface QueryResult {
 interface ExecuteResult {
     affected_rows: number;
     last_insert_id?: number | string | null;
+}
+
+// ── MCP Elicitation (P2.6) ─────────────────────────────────────
+
+/**
+ * Spec passed to `ctx.elicit()` — describes what the MCP client should
+ * ask the user and what JSON shape the answer should have.
+ *
+ * `requestedSchema` is a JSON Schema object that the MCP client uses to
+ * render a structured input form.
+ */
+interface ElicitationSpec {
+    /** Short title for the input dialog / prompt. */
+    title: string;
+    /** Human-readable description of what is being requested. */
+    message: string;
+    /** JSON Schema describing the expected response shape. */
+    requestedSchema: object;
+}
+
+/**
+ * Result returned by `ctx.elicit()`.
+ *
+ * `action` indicates what the user did:
+ * - `"accept"` — user filled in the form and submitted it. `content` holds the data.
+ * - `"decline"` — user dismissed the dialog. `content` is `undefined`.
+ * - `"cancel"` — the request timed out (60 s) or the SSE stream was unavailable.
+ */
+interface ElicitationResult {
+    action: "accept" | "decline" | "cancel";
+    /** User-supplied data, present only when `action === "accept"`. */
+    content?: object;
 }
 
 // ── TransactionError ───────────────────────────────────────────

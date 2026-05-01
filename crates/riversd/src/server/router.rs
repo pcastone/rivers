@@ -27,6 +27,7 @@ use crate::admin_handlers::{
     admin_shutdown_handler,
     admin_list_breakers_handler, admin_get_breaker_handler,
     admin_trip_breaker_handler, admin_reset_breaker_handler,
+    admin_audit_stream_handler,
 };
 
 /// Build the main server router.
@@ -175,6 +176,8 @@ pub fn build_admin_router(ctx: AppContext) -> Router {
         .route("/admin/apps/{app_id}/breakers/{breaker_id}", get(admin_get_breaker_handler))
         .route("/admin/apps/{app_id}/breakers/{breaker_id}/trip", axum::routing::post(admin_trip_breaker_handler))
         .route("/admin/apps/{app_id}/breakers/{breaker_id}/reset", axum::routing::post(admin_reset_breaker_handler))
+        // Audit event stream (P2.8)
+        .route("/admin/audit/stream", get(admin_audit_stream_handler))
         .with_state(ctx);
 
     // Admin middleware: admin_auth → timeout → security_headers → trace_id → body_limit

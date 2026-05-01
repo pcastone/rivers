@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use rivers_driver_sdk::{read_connect_timeout, read_request_timeout, Connection, ConnectionParams, DatabaseDriver, DriverError};
+use rivers_driver_sdk::{read_connect_timeout, read_max_rows, read_request_timeout, Connection, ConnectionParams, DatabaseDriver, DriverError};
 
 use crate::batching::BatchingInfluxConnection;
 use crate::connection::InfluxConnection;
@@ -72,6 +72,8 @@ impl DatabaseDriver for InfluxDriver {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(1000);
 
+        let max_rows = read_max_rows(params);
+
         if batch_enabled {
             debug!(
                 base_url = %base_url,
@@ -87,7 +89,9 @@ impl DatabaseDriver for InfluxDriver {
                     base_url,
                     org,
                     token,
+                    max_rows,
                 },
+                // RW4.4.d: buffer entries are (bucket, line_protocol_line) pairs.
                 buffer: Mutex::new(Vec::with_capacity(batch_max_size)),
                 max_size: batch_max_size,
                 flush_interval_ms: batch_flush_ms,
@@ -105,6 +109,7 @@ impl DatabaseDriver for InfluxDriver {
                 base_url,
                 org,
                 token,
+                max_rows,
             }))
         }
     }

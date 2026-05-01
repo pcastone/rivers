@@ -21,6 +21,7 @@ use reqwest::Client;
 use tracing::debug;
 
 use rivers_driver_sdk::{
+    url_encode_path_segment, read_max_rows,
     ABI_VERSION, Connection, ConnectionParams, DatabaseDriver, DriverError, DriverRegistrar,
     Query, QueryResult, QueryValue,
 };
@@ -81,12 +82,14 @@ impl DatabaseDriver for CouchDBDriver {
             "couchdb: connected"
         );
 
+        let max_rows = read_max_rows(params);
         Ok(Box::new(CouchDBConnection {
             client,
             base_url,
             database: params.database.clone(),
             username,
             password,
+            max_rows,
         }))
     }
 
@@ -106,6 +109,8 @@ pub struct CouchDBConnection {
     database: String,
     username: Option<String>,
     password: Option<String>,
+    /// Maximum rows returned by find/_view. Truncates with a WARN if exceeded.
+    max_rows: usize,
 }
 
 impl CouchDBConnection {
@@ -168,33 +173,30 @@ impl Connection for CouchDBConnection {
 impl CouchDBConnection {
     /// POST /{db}/_find — Mango query
     async fn exec_find(&self, query: &Query) -> Result<QueryResult, DriverError> {
-        // Parse selector from statement (JSON string) or build from parameters
+        // Parse selector from statement (JSON string) or build from parameters.
+        //
+        // RW4.4.a: Parameters are never interpolated into the JSON string via
+        // string replacement. The statement is parsed as JSON first, then
+        // placeholder keys ($name / $N) are resolved structurally by walking
+        // the parsed Value tree — this prevents injection through values that
+        // contain `"`, `\`, or bare placeholder tokens.
         let selector: serde_json::Value = if !query.statement.is_empty() {
-            let mut sel_str = query.statement.clone();
-            // Substitute $name with parameter values (statement already has $1,$2
-            // from DataView engine translation, or bare $name for direct calls)
-            for (key, val) in &query.parameters {
-                let placeholder_named = format!("${key}");
-                if sel_str.contains(&placeholder_named) {
-                    let replacement = match val {
-                        QueryValue::String(s) => s.clone(),
-                        QueryValue::Integer(n) => n.to_string(),
-                        QueryValue::Float(f) => f.to_string(),
-                        QueryValue::Boolean(b) => b.to_string(),
-                        other => serde_json::to_string(other).unwrap_or_default(),
-                    };
-                    sel_str = sel_str.replace(&placeholder_named, &replacement);
-                }
-            }
-            let mut parsed: serde_json::Value = serde_json::from_str(&sel_str)
+            let mut parsed: serde_json::Value = serde_json::from_str(&query.statement)
                 .map_err(|e| DriverError::Query(format!("couchdb: invalid selector JSON: {e}")))?;
             // Strip "operation" key — it's for Rivers dispatch, not CouchDB
             if let Some(obj) = parsed.as_object_mut() {
                 obj.remove("operation");
             }
-            // If parsed has a "selector" key, use as-is; otherwise wrap it
+            // Resolve parameter placeholders structurally: walk the parsed tree
+            // and replace any string leaf that equals a placeholder ($name / $N)
+            // with the corresponding typed QueryValue. This is safe because we
+            // substitute into the already-parsed JSON Value, not into the source
+            // string, so parameter content cannot alter JSON structure.
+            if !query.parameters.is_empty() {
+                substitute_placeholders(&mut parsed, &query.parameters);
+            }
+            // If parsed has a "selector" key, use as-is; otherwise wrap it.
             if parsed.get("selector").is_none() {
-                // The whole object IS the selector
                 serde_json::json!({ "selector": parsed })
             } else {
                 parsed
@@ -232,10 +234,16 @@ impl CouchDBConnection {
             .cloned()
             .unwrap_or_default();
 
-        let rows: Vec<HashMap<String, QueryValue>> = docs
+        let mut rows: Vec<HashMap<String, QueryValue>> = docs
             .into_iter()
+            .take(self.max_rows + 1)
             .map(|doc| json_object_to_row(&doc))
             .collect();
+
+        if rows.len() > self.max_rows {
+            rows.truncate(self.max_rows);
+            tracing::warn!(max_rows = self.max_rows, "couchdb: result set truncated to max_rows limit");
+        }
 
         let count = rows.len() as u64;
         Ok(QueryResult {
@@ -262,7 +270,9 @@ impl CouchDBConnection {
                     .ok_or_else(|| DriverError::Query("couchdb: missing required parameter '_id'".into()))
             })?;
 
-        let url = format!("{}/{}", self.db_url(), doc_id);
+        // RW4.3.b: URL-encode the document ID so IDs containing `/`, `?`, `#`,
+        // or other reserved characters don't alter the URL structure.
+        let url = format!("{}/{}", self.db_url(), url_encode_path_segment(&doc_id));
         let resp = self
             .auth(self.client.get(&url))
             .send()
@@ -314,6 +324,17 @@ impl CouchDBConnection {
             .await
             .map_err(|e| DriverError::Query(format!("couchdb insert: {e}")))?;
 
+        // RW4.4.b: Check HTTP status before attempting to parse the response
+        // body. A 409 Conflict or other 4xx/5xx must propagate as an error
+        // rather than silently succeeding because the body parsed.
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(DriverError::Query(format!(
+                "couchdb insert failed ({status}): {body}"
+            )));
+        }
+
         let body: serde_json::Value = resp
             .json()
             .await
@@ -334,8 +355,10 @@ impl CouchDBConnection {
         let doc_id = get_param_str(&query.parameters, "id")
             .or_else(|_| get_param_str(&query.parameters, "_id"))?;
 
+        // RW4.3.b: URL-encode the document ID.
+        let encoded_id = url_encode_path_segment(&doc_id);
         // Fetch current _rev
-        let get_url = format!("{}/{}", self.db_url(), doc_id);
+        let get_url = format!("{}/{}", self.db_url(), encoded_id);
         let get_resp = self
             .auth(self.client.get(&get_url))
             .send()
@@ -377,7 +400,7 @@ impl CouchDBConnection {
             obj.insert("_rev".into(), serde_json::Value::String(rev.to_string()));
         }
 
-        let put_url = format!("{}/{}", self.db_url(), doc_id);
+        let put_url = format!("{}/{}", self.db_url(), encoded_id);
         let resp = self
             .auth(self.client.put(&put_url))
             .json(&doc)
@@ -403,8 +426,10 @@ impl CouchDBConnection {
         let doc_id = get_param_str(&query.parameters, "id")
             .or_else(|_| get_param_str(&query.parameters, "_id"))?;
 
+        // RW4.3.b: URL-encode the document ID.
+        let encoded_id = url_encode_path_segment(&doc_id);
         // Fetch current _rev
-        let get_url = format!("{}/{}", self.db_url(), doc_id);
+        let get_url = format!("{}/{}", self.db_url(), encoded_id);
         let get_resp = self
             .auth(self.client.get(&get_url))
             .send()
@@ -430,7 +455,8 @@ impl CouchDBConnection {
             .and_then(|v| v.as_str())
             .ok_or_else(|| DriverError::Query("couchdb delete: missing _rev".into()))?;
 
-        let del_url = format!("{}/{}?rev={}", self.db_url(), doc_id, rev);
+        // rev comes from CouchDB itself (opaque string), URL-encode it for safety.
+        let del_url = format!("{}/{}?rev={}", self.db_url(), encoded_id, url_encode_path_segment(rev));
         let resp = self
             .auth(self.client.delete(&del_url))
             .send()
@@ -460,11 +486,12 @@ impl CouchDBConnection {
             ));
         }
 
+        // RW4.3.b: URL-encode the design doc and view name segments.
         let url = format!(
             "{}/_design/{}/_view/{}",
             self.db_url(),
-            parts[0],
-            parts[1]
+            url_encode_path_segment(parts[0]),
+            url_encode_path_segment(parts[1])
         );
 
         // Build query parameters with proper URL encoding via reqwest
@@ -499,8 +526,9 @@ impl CouchDBConnection {
             .cloned()
             .unwrap_or_default();
 
-        let rows: Vec<HashMap<String, QueryValue>> = view_rows
+        let mut rows: Vec<HashMap<String, QueryValue>> = view_rows
             .into_iter()
+            .take(self.max_rows + 1)
             .map(|row| {
                 let mut map = HashMap::new();
                 if let Some(id) = row.get("id") {
@@ -515,6 +543,11 @@ impl CouchDBConnection {
                 map
             })
             .collect();
+
+        if rows.len() > self.max_rows {
+            rows.truncate(self.max_rows);
+            tracing::warn!(max_rows = self.max_rows, "couchdb: view result set truncated to max_rows limit");
+        }
 
         let count = rows.len() as u64;
         Ok(QueryResult {
@@ -533,6 +566,43 @@ impl CouchDBConnection {
             last_insert_id: None,
             column_names: None,
         })
+    }
+}
+
+// ── Structural parameter substitution ───────────────────────────────
+
+/// Walk a parsed JSON `Value` tree and replace string leaves that match a
+/// `$name` or `$N` placeholder with the corresponding typed `QueryValue`.
+///
+/// This is the safe alternative to string-interpolation (RW4.4.a): by the
+/// time we substitute, the document is already a parsed tree, so parameter
+/// values containing `"`, `\`, or additional JSON tokens cannot alter the
+/// document structure.
+fn substitute_placeholders(
+    value: &mut serde_json::Value,
+    params: &std::collections::HashMap<String, QueryValue>,
+) {
+    match value {
+        serde_json::Value::String(s) => {
+            // Check if the whole string is a placeholder ($name or $N).
+            if let Some(name) = s.strip_prefix('$') {
+                if let Some(param_val) = params.get(name) {
+                    *value = query_value_to_json(param_val);
+                }
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values_mut() {
+                substitute_placeholders(v, params);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                substitute_placeholders(v, params);
+            }
+        }
+        // Null, Bool, Number — not placeholders, nothing to do.
+        _ => {}
     }
 }
 

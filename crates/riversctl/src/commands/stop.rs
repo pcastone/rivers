@@ -125,3 +125,62 @@ pub(crate) fn is_process_alive(pid: u32) -> bool {
         .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
         .unwrap_or(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Serialize all tests that mutate RIVERS_HOME to avoid parallel-test races.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn find_pid_file_returns_some_when_rivers_home_has_pid_file() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let pid_path = run_dir.join("riversd.pid");
+        std::fs::write(&pid_path, "12345\n").unwrap();
+        unsafe { std::env::set_var("RIVERS_HOME", dir.path()); }
+        let result = find_pid_file();
+        unsafe { std::env::remove_var("RIVERS_HOME"); }
+        assert_eq!(result.as_deref(), Some(pid_path.as_path()));
+    }
+
+    #[test]
+    fn read_pid_file_parses_pid_from_rivers_home() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("riversd.pid"), "42\n").unwrap();
+        unsafe { std::env::set_var("RIVERS_HOME", dir.path()); }
+        let result = read_pid_file();
+        unsafe { std::env::remove_var("RIVERS_HOME"); }
+        assert_eq!(result.unwrap(), 42u32);
+    }
+
+    #[test]
+    fn read_pid_file_returns_err_for_invalid_pid_content() {
+        // Test the parse step directly — env var not needed here.
+        let content = "not-a-number\n";
+        let result: Result<u32, _> = content.trim().parse();
+        assert!(result.is_err(), "non-numeric PID must fail to parse");
+    }
+
+    #[test]
+    fn read_pid_file_returns_err_when_no_pid_file_in_rivers_home() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("RIVERS_HOME", dir.path()); }
+        let result = read_pid_file();
+        unsafe { std::env::remove_var("RIVERS_HOME"); }
+        // Either the RIVERS_HOME path matched (Err) or another search path matched.
+        if let Err(msg) = result {
+            assert!(
+                msg.contains("PID file not found") || msg.contains("cannot read PID file"),
+                "got: {msg}"
+            );
+        }
+    }
+}

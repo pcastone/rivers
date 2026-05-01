@@ -14,3 +14,6 @@ rivers-core-config = { path = "../rivers-core-config" }
 rcgen.workspace = true
 time.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

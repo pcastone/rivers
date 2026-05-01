@@ -50,6 +50,7 @@ fn make_view(view_type: &str, guard: bool, auth: Option<&str>) -> ApiViewConfig 
         prompts: HashMap::new(),
         instructions: None,
         session: None,
+        federation: vec![],
     }
 }
 
@@ -89,6 +90,7 @@ fn make_dataview_view() -> ApiViewConfig {
         prompts: HashMap::new(),
         instructions: None,
         session: None,
+        federation: vec![],
     }
 }
 

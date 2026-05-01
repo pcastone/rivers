@@ -2004,6 +2004,11 @@ mod tests {
             strict_parameters: false,
             max_rows: 1000,
             skip_introspect: false,
+            cursor_key: None,
+            source_views: vec![],
+            compose_strategy: None,
+            join_key: None,
+            enrich_mode: "nest".to_string(),
         }
     }
 

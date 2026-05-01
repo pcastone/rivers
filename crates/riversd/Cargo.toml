@@ -38,6 +38,7 @@ tracing-appender = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 sha2 = { workspace = true }
+secrecy = { workspace = true }
 hex = { workspace = true }
 toml = { workspace = true }
 ipnet = { workspace = true }

@@ -7,6 +7,10 @@ use std::collections::HashMap;
 use rivers_driver_sdk::broker::{
     BrokerConsumerConfig, BrokerSubscription, MessageBrokerDriver, OutboundMessage,
 };
+use rivers_driver_sdk::broker_contract_fixtures::{
+    test_ack_returns_acked, test_consumer_group_exclusive,
+    test_multi_subscription, test_nack_redelivery_or_unsupported,
+};
 use rivers_driver_sdk::ConnectionParams;
 use rivers_plugin_rabbitmq::RabbitMqDriver;
 
@@ -150,4 +154,24 @@ async fn rabbitmq_produce_and_consume() {
     consumer.ack(&msg.receipt).await.expect("ack should succeed");
     consumer.close().await.expect("close should succeed");
     println!("RabbitMQ produce→consume roundtrip PASSED");
+}
+
+#[tokio::test]
+async fn rabbitmq_contract_ack_returns_acked() {
+    test_ack_returns_acked(&RabbitMqDriver).await;
+}
+
+#[tokio::test]
+async fn rabbitmq_contract_nack_redelivery_or_unsupported() {
+    test_nack_redelivery_or_unsupported(&RabbitMqDriver).await;
+}
+
+#[tokio::test]
+async fn rabbitmq_contract_consumer_group_exclusive() {
+    test_consumer_group_exclusive(&RabbitMqDriver).await;
+}
+
+#[tokio::test]
+async fn rabbitmq_contract_multi_subscription() {
+    test_multi_subscription(&RabbitMqDriver).await;
 }

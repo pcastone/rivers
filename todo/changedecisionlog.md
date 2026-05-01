@@ -6,6 +6,56 @@ readers.
 
 ---
 
+### P2.8 — Framework Audit Stream (2026-04-30)
+
+**P2.8-D1 — Emit status 200/500 rather than actual HTTP status**
+- File: `crates/riversd/src/server/view_dispatch.rs`
+- Decision: `AuditEvent::HandlerInvoked.status` emits 200 on `Ok(result)` and 500 on `Err`. The actual HTTP status code (which could be 201, 404, 400, etc.) requires serializing the response, which happens after the audit event is emitted.
+- Rationale: Emitting before response serialization avoids cloning the result. The audit event captures success/failure semantics, not the exact HTTP status. If exact HTTP status is needed in a future pass, we can move the emit after `serialize_view_result` at the cost of another variable.
+- Resolution method: Pragmatic — spec says "status" but does not require the exact HTTP code. Acceptable for a v1 audit stream.
+
+**P2.8-D2 — MCP emit in `dispatch()` call site, not `handle_tools_call()`**
+- File: `crates/riversd/src/mcp/dispatch.rs`
+- Decision: The `AuditEvent::McpToolCalled` emit wraps the call to `handle_tools_call` in the `dispatch()` match arm rather than inside `handle_tools_call` itself.
+- Rationale: `handle_tools_call` has two dispatch sub-paths (dataview and codecomponent via `dispatch_codecomponent_tool`). Emitting from the outer call site avoids duplicating the timing/emit logic in both branches and does not require threading `audit_bus` further into the call stack.
+- Resolution method: Consistent with spec guidance: "emit from the surrounding call site rather than deep inside".
+
+**P2.8-D3 — Broadcast capacity 512**
+- File: `crates/riversd/src/audit.rs`
+- Decision: `broadcast::channel(512)` — not a config knob.
+- Rationale: 512 events is ample for single-connection SSE consumers. If the buffer fills, `RecvError::Lagged` silently drops events — the sender never blocks. The spec does not require capacity to be configurable.
+- Resolution method: Fixed constant; can be promoted to config if operational feedback requires.
+
+---
+
+### P1.1 — MCP Resource Subscriptions (2026-04-30)
+
+**P1.1-D1 — Poller GC by polling, not reference counting**
+- File: `crates/riversd/src/mcp/poller.rs`
+- Decision: The change poller checks `snapshot_subscriptions()` at the top of each sleep cycle; if zero subscribers remain for the `(app_id, uri)` key, the task exits. No `Arc` refcount wrapping around `JoinHandle`.
+- Rationale: Ref-counting poller tasks requires synchronization between the registry (which holds subscriber counts) and the poller map (which holds handles). Polling `snapshot_subscriptions()` is already lock-under-`Mutex` — one extra call per cycle. The worst-case over-run is one extra poll interval, which is acceptable at ≥1s intervals.
+- Resolution method: Design review; added `gc()` helper for testing.
+
+**P1.1-D2 — One poller per `(app_id, uri)` pair, not per subscriber**
+- File: `crates/riversd/src/mcp/poller.rs`, `crates/riversd/src/mcp/dispatch.rs`
+- Decision: `ensure_running` is idempotent: if a poller already exists for `(app_id, uri)`, it is not replaced. All subscribers for the same URI receive notifications via the single `SubscriptionRegistry::notify_changed` fan-out call.
+- Rationale: Fanning out at the registry layer is cheaper than N concurrent pollers all executing the same DataView. Consistent with the "one poller per resource" model in the design spec.
+- Resolution method: `ensure_running` checks `handles.contains_key` before spawning.
+
+**P1.1-D3 — SSE session registered by `Mcp-Session-Id`, not IP/connection identity**
+- File: `crates/riversd/src/server/view_dispatch.rs`, `crates/riversd/src/mcp/subscriptions.rs`
+- Decision: The session registry key is the `Mcp-Session-Id` header value (a UUID string). Reconnecting clients with the same session ID attach to the same registry entry.
+- Rationale: Matches MCP spec §6 session identity semantics. Allows clients to reconnect the SSE stream after a network interruption without re-subscribing.
+- Resolution method: MCP spec review; session-id extracted at `view_dispatch.rs` before branching into SSE vs POST handlers.
+
+**P1.1-D4 — Slow-consumer notification dropped silently (WARN log only)**
+- File: `crates/riversd/src/mcp/subscriptions.rs`
+- Decision: If the subscriber's mpsc channel is full when `notify_changed` is called, the notification frame is dropped and a `WARN` is emitted. The subscription remains active.
+- Rationale: The alternative (block until channel drains) risks cascading backpressure to the poller task, delaying notifications for all other sessions. Dropped notifications are recoverable — the client can call `resources/read` again. The channel capacity of 64 events absorbs typical burst traffic.
+- Resolution method: Matches "drop + WARN on full channel" in the design spec.
+
+---
+
 ### RW2 — Broker & Transaction Contracts (2026-04-28)
 
 **RW2.1 — `semantics()` on `MessageBrokerDriver`, not `BrokerConsumer`**

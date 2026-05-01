@@ -174,6 +174,20 @@ thread_local! {
     /// `BrokerProducer` and run `publish` operations in-thread.
     pub(super) static TASK_DIRECT_BROKER_PRODUCERS:
         RefCell<HashMap<String, DirectBrokerProducer>> = RefCell::new(HashMap::new());
+
+    /// Elicitation request channel sender for the current task (P2.6).
+    ///
+    /// When `Some`, the `Rivers.__elicit` host callback posts an
+    /// `ElicitationRequest` here; the relay task spawned by
+    /// `dispatch_codecomponent_tool` reads it, sends the
+    /// `elicitation/create` SSE notification to the MCP client, and
+    /// registers the `oneshot::Sender` in `ElicitationRegistry`.
+    ///
+    /// `None` outside an MCP tool call — `Rivers.__elicit` throws
+    /// "elicitation not available" in that case.
+    pub(crate) static TASK_ELICITATION_TX:
+        RefCell<Option<tokio::sync::mpsc::UnboundedSender<crate::mcp::elicitation::ElicitationRequest>>> =
+        RefCell::new(None);
 }
 
 /// Active transaction state for the current task.
@@ -319,6 +333,11 @@ impl TaskLocals {
                 }
             }
         });
+        // P2.6: install the elicitation sender if one was registered for this trace_id.
+        // `take_elicitation_tx` removes the entry from the global map atomically so
+        // no two workers can claim the same sender.
+        let elicitation_tx = take_elicitation_tx(&ctx.trace_id);
+        TASK_ELICITATION_TX.with(|t| *t.borrow_mut() = elicitation_tx);
         Ok(TaskLocals)
     }
 }
@@ -376,7 +395,61 @@ impl Drop for TaskLocals {
         TASK_COMMIT_FAILED.with(|c| *c.borrow_mut() = None);
         TASK_DIRECT_DATASOURCES.with(|m| m.borrow_mut().clear());
         TASK_DIRECT_BROKER_PRODUCERS.with(|m| m.borrow_mut().clear());
+        // P2.6: drop the elicitation sender so the relay task's receiver sees EOF
+        // and terminates cleanly. Any pending elicitations in the registry were
+        // already resolved (or timed out) before the task completes.
+        TASK_ELICITATION_TX.with(|t| *t.borrow_mut() = None);
     }
+}
+
+// ── P2.6 global registry: trace_id → ElicitationRequest sender ──────────
+//
+// Because `TaskContext` lives in `rivers-runtime` (which we must not modify),
+// we cannot add the elicitation sender as a `TaskContext` field. Instead, we
+// use a process-level static map keyed by `trace_id`. The lifecycle is:
+//
+//   1. `dispatch_codecomponent_tool` (async, on the tokio thread) creates
+//      the channel and calls `register_elicitation_tx(trace_id, tx)`.
+//   2. `TaskLocals::set` (on the spawn_blocking thread) reads the sender
+//      via `take_elicitation_tx(trace_id)` and installs it in the thread-local.
+//   3. `TaskLocals::drop` clears the thread-local (the sender is dropped,
+//      which closes the relay channel cleanly).
+
+use std::collections::HashMap as ElicitHashMap;
+use std::sync::Mutex as ElicitMutex;
+use tokio::sync::mpsc::UnboundedSender as ElicitTx;
+use crate::mcp::elicitation::ElicitationRequest;
+
+static ELICITATION_GLOBAL: ElicitMutex<
+    Option<ElicitHashMap<String, ElicitTx<ElicitationRequest>>>
+> = ElicitMutex::new(None);
+
+fn elicitation_global_map() -> std::sync::MutexGuard<'static, Option<ElicitHashMap<String, ElicitTx<ElicitationRequest>>>> {
+    ELICITATION_GLOBAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Store an elicitation sender for a task, keyed by trace_id.
+///
+/// Called by `dispatch_codecomponent_tool` before dispatching the task to the pool.
+pub(crate) fn register_elicitation_tx(
+    trace_id: &str,
+    tx: ElicitTx<ElicitationRequest>,
+) {
+    let mut guard = elicitation_global_map();
+    if guard.is_none() {
+        *guard = Some(ElicitHashMap::new());
+    }
+    guard.as_mut().unwrap().insert(trace_id.to_string(), tx);
+}
+
+/// Move the elicitation sender for a task into the thread-local.
+///
+/// Called by `TaskLocals::set` to wire the sender into the V8 worker thread.
+/// Returns `None` when no elicitation channel was registered for this trace_id
+/// (i.e., the task was not dispatched via MCP).
+fn take_elicitation_tx(trace_id: &str) -> Option<ElicitTx<ElicitationRequest>> {
+    let mut guard = elicitation_global_map();
+    guard.as_mut().and_then(|m| m.remove(trace_id))
 }
 
 #[cfg(test)]

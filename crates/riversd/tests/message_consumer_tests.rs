@@ -50,6 +50,7 @@ fn consumer_view(topic: &str, handler: &str) -> ApiViewConfig {
         prompts: HashMap::new(),
         instructions: None,
         session: None,
+        federation: vec![],
     }
 }
 

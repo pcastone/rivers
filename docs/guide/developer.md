@@ -766,6 +766,34 @@ The `faker` attribute is driver-specific — it tells the faker driver how to ge
 
 ---
 
+## Bundle Validation
+
+Before deploying, validate your bundle with `riverpackage validate`:
+
+```bash
+# Validate bundle (layers 1-3, text output)
+riverpackage validate my-bundle/
+
+# Validate with JSON output (for CI/CD)
+riverpackage validate my-bundle/ --format json
+
+# Validate including Layer 4 engine checks
+riverpackage validate my-bundle/ --config /opt/rivers/config/riversd.toml
+```
+
+### Validation layers
+
+| Layer | What it checks |
+|---|---|
+| 1 — Structural TOML | Config files parse correctly; unknown keys are errors |
+| 2 — Resource Existence | All referenced handler modules, schemas, and assets exist |
+| 3 — Cross-References | DataView→datasource, view→DataView, all refs resolve |
+| 4 — Syntax | TS/JS compiles; handler entrypoints exported (requires engine dylibs) |
+
+`riversd` runs the same validation at deploy time — fix errors locally before deploying.
+
+---
+
 ## Handler Pipeline
 
 Views can declare pipeline stages that run before and after the main handler:

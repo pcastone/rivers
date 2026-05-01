@@ -237,6 +237,7 @@ async fn view_dispatch_handler(
     let trace_id = uuid::Uuid::new_v4().to_string();
 
     // Use pre-matched route data — no second RwLock acquire needed (AN11.1)
+    let view_id_for_audit = matched.view_id.clone();
     let mut config = matched.config;
     let app_entry_point = matched.app_entry_point;
     let path_params = matched.path_params;
@@ -341,7 +342,7 @@ async fn view_dispatch_handler(
             .instrument(span)
             .await
     };
-    let handler_duration_ms = handler_start.elapsed().as_millis();
+    let handler_duration_ms = handler_start.elapsed().as_millis() as u64;
     tracing::debug!(
         handler = %matched.view_id,
         duration_ms = handler_duration_ms,
@@ -349,6 +350,19 @@ async fn view_dispatch_handler(
         "handler complete"
     );
     drop(dv_guard);
+
+    // Emit audit event for this handler invocation (P2.8)
+    if let Some(ref bus) = ctx.audit_bus {
+        let status: u16 = if view_result.is_ok() { 200 } else { 500 };
+        let _ = bus.send(crate::audit::AuditEvent::HandlerInvoked {
+            app_id: manifest_app_id.clone(),
+            view: view_id_for_audit,
+            method: method.clone(),
+            path: path.clone(),
+            duration_ms: handler_duration_ms,
+            status,
+        });
+    }
 
     #[cfg(feature = "metrics")]
     {
@@ -517,6 +531,48 @@ async fn execute_mcp_view(
     request: axum::http::Request<axum::body::Body>,
     matched: MatchedRoute,
 ) -> axum::response::Response {
+    // P1.1.1.a — GET + Accept: text/event-stream → SSE notification stream
+    // A valid Mcp-Session-Id is required; the stream stays open until the client
+    // disconnects, at which point the session is detached from the registry.
+    if request.method() == axum::http::Method::GET
+        && request
+            .headers()
+            .get(axum::http::header::ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.contains("text/event-stream"))
+            .unwrap_or(false)
+    {
+        let session_id = request
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let Some(sid) = session_id else {
+            return axum::http::StatusCode::BAD_REQUEST.into_response();
+        };
+
+        let app_id = matched.app_id.clone();
+        let registry = ctx.subscription_registry.clone();
+        let rx = registry.attach_sse(&sid, &app_id).await;
+
+        use tokio_stream::{wrappers::ReceiverStream, StreamExt as _};
+        let stream = ReceiverStream::new(rx)
+            .map(|event| Ok::<_, std::convert::Infallible>(event));
+
+        // P1.1.1.b — 30-second keepalive comment frames so proxies don't close idle streams.
+        // Cleanup: when the SSE response body is dropped (client disconnect), the mpsc
+        // channel sender held by the registry will see TrySendError::Closed on the next
+        // notify_changed call. A periodic registry sweep (P1.1.3) removes dead sessions.
+        return axum::response::sse::Sse::new(stream)
+            .keep_alive(
+                axum::response::sse::KeepAlive::new()
+                    .interval(std::time::Duration::from_secs(30))
+                    .text(""),
+            )
+            .into_response();
+    }
+
     // GET /mcp/.../instructions — serve compiled instructions as text/markdown (spec MCP-15)
     if request.method() == axum::http::Method::GET {
         let tools = &matched.config.tools;
@@ -587,6 +643,7 @@ async fn execute_mcp_view(
     let tools = &matched.config.tools;
     let resources = &matched.config.resources;
     let prompts = &matched.config.prompts;
+    let federation = &matched.config.federation;
     let instructions = matched.config.instructions.as_deref();
     let app_id = &matched.app_id;
     let dv_namespace = &matched.app_entry_point;
@@ -646,7 +703,7 @@ async fn execute_mcp_view(
                         };
                         let resp = crate::mcp::dispatch::dispatch(
                             &ctx, &req, tools, resources, prompts, app_id, dv_namespace, app_dir, instructions,
-                            auth_context.as_ref(),
+                            auth_context.as_ref(), session_id.as_deref(), federation,
                         ).await;
                         responses.push(serde_json::to_value(&resp).unwrap_or_default());
                     }
@@ -694,7 +751,7 @@ async fn execute_mcp_view(
 
                 let resp = crate::mcp::dispatch::dispatch(
                     &ctx, &req, tools, resources, prompts, app_id, dv_namespace, app_dir, instructions,
-                    auth_context.as_ref(),
+                    auth_context.as_ref(), session_id.as_deref(), federation,
                 ).await;
 
                 // For initialize: create session (storing auth identity) and attach Mcp-Session-Id header

@@ -1297,20 +1297,27 @@ bundle/
 ### 19.4 Deployment Lifecycle
 
 ```
- 1. Deploy bundle.zip
- 2. Validate bundle manifest.toml
- 3. Per app: validate manifest.toml, resources.toml, app.toml
- 4. Per app: SchemaSyntaxChecker validates all schema files against driver
- 5. Per app: resolve resources (LockBox, datasource connections)
- 6. Per app: run init handler (CORS, health, seeding, lifecycle hooks)
- 7. Start app-services (parallel, respecting dependency graph)
- 8. Health check app-services
- 9. Start app-main
-10. Health check app-main
-11. Bundle RUNNING
+ 1. Deploy bundle.zip → PENDING state
+ 2. Gate 2 validation → VALIDATING state
+    a. Layer 1: Structural TOML — parse all manifest.toml, resources.toml, app.toml with deny_unknown_fields
+    b. Layer 2: Resource existence — all referenced files exist (modules, schemas, SPA assets, WASM)
+    c. Layer 3: Logical cross-references — datasource refs, DataView refs, service appIds, uniqueness, consistency
+    d. Layer 4: Syntax verification — V8 compile check (TS/JS), Wasmtime validation (WASM), schema JSON structure, entrypoint export verification
+    e. Live check: LockBox alias resolution for all lockbox:// URIs
+    f. Live check: registered driver matching
+    g. Live check: SchemaSyntaxChecker validates schema files against live driver
+    h. Live check: x-type matches registered driver
+    i. Any failure → FAILED state, structured error logged, deployment aborted
+ 3. Per app: resolve resources (LockBox, datasource connections) → RESOLVING state
+ 4. Per app: run init handler (CORS, health, seeding, lifecycle hooks)
+ 5. Start app-services (parallel, respecting dependency graph) → STARTING state
+ 6. Health check app-services
+ 7. Start app-main
+ 8. Health check app-main
+ 9. Bundle RUNNING
 ```
 
-Schema validation runs before resource resolution. No point connecting to Postgres if the schemas are invalid.
+Validation logic is implemented in `rivers_runtime` and shared with `riverpackage validate` (Gate 1). See `rivers-bundle-validation-spec.md` for the full error catalog and layer definitions.
 
 ### 19.5 Service Resolution
 

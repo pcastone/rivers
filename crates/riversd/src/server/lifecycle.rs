@@ -154,6 +154,12 @@ pub async fn run_server_no_ssl(
         ctx.admin_auth_config = Some(build_admin_auth_config_for_rbac(&config));
     }
 
+    // Initialize audit event bus if enabled (P2.8)
+    if config.audit.enabled {
+        ctx.audit_bus = Some(Arc::new(crate::audit::new_bus()));
+        tracing::info!("audit event bus enabled — stream at GET /admin/audit/stream");
+    }
+
     // Initialize runtime wiring (DataView engine, StorageEngine, gossip)
     crate::runtime::initialize_runtime(&ctx.pool, &ctx.config).await;
 
@@ -368,6 +374,12 @@ pub async fn run_server_with_listener_and_log(
         ctx.admin_auth_config = Some(build_admin_auth_config_for_rbac(&config));
     }
 
+    // Initialize audit event bus if enabled (P2.8)
+    if config.audit.enabled {
+        ctx.audit_bus = Some(Arc::new(crate::audit::new_bus()));
+        tracing::info!("audit event bus enabled — stream at GET /admin/audit/stream");
+    }
+
     // Step 17: Router is built per-connection in the TLS accept loop below.
 
     // Initialize runtime wiring (DataView engine, StorageEngine, gossip)
@@ -402,6 +414,14 @@ pub async fn run_server_with_listener_and_log(
                         )));
                     }
                     tracing::info!(node_id, "sentinel claimed");
+                }
+                // Warn about parsed-but-unenforced storage config fields (RW3.3.b)
+                let unimplemented = rivers_runtime::rivers_core::storage::unenforced_storage_config_fields(&config.storage_engine);
+                if !unimplemented.is_empty() {
+                    tracing::warn!(
+                        fields = ?unimplemented,
+                        "storage_engine config fields are set but not yet enforced at runtime"
+                    );
                 }
                 // Spawn background sweep task
                 let sweep_interval = config.storage_engine.sweep_interval_s;

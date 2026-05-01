@@ -196,6 +196,8 @@ async fn bench_2_faker_cached_vs_uncached() {
         put_parameters: vec![], delete_parameters: vec![], streaming: false,
         circuit_breaker_id: None, prepared: false, query_params: std::collections::HashMap::new(), max_rows: 1000,
         skip_introspect: false,
+        cursor_key: None,
+        source_views: vec![], compose_strategy: None, join_key: None, enrich_mode: "nest".into(),
     };
 
     // Uncached
@@ -293,6 +295,8 @@ async fn bench_3_sqlite_cached_vs_uncached() {
         put_parameters: vec![], delete_parameters: vec![], streaming: false,
         circuit_breaker_id: None, prepared: false, query_params: std::collections::HashMap::new(), max_rows: 1000,
         skip_introspect: false,
+        cursor_key: None,
+        source_views: vec![], compose_strategy: None, join_key: None, enrich_mode: "nest".into(),
     };
 
     // Uncached
@@ -504,6 +508,8 @@ async fn bench_5_postgres_cached_vs_uncached() {
         put_parameters: vec![], delete_parameters: vec![], streaming: false,
         circuit_breaker_id: None, prepared: false, query_params: std::collections::HashMap::new(), max_rows: 1000,
         skip_introspect: false,
+        cursor_key: None,
+        source_views: vec![], compose_strategy: None, join_key: None, enrich_mode: "nest".into(),
     };
 
     // Uncached

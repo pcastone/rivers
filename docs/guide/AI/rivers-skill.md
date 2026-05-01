@@ -482,8 +482,9 @@ riversd --log-level debug                # Override log level
 # Control
 riversctl start --config riversd.toml     # Start via helper
 riversctl doctor                           # Health check diagnostics
-riversctl validate my-bundle/             # Validate bundle (9 checks)
-riversctl validate --schema server        # Output JSON Schema
+riverpackage validate my-bundle/          # Validate bundle (4-layer pipeline)
+riverpackage validate my-bundle/ --format json  # JSON output for CI/CD
+riverpackage validate --config /opt/rivers/config/riversd.toml my-bundle/  # Include engine checks
 riversctl exec hash <input>               # Hash utility
 riversctl admin status                     # Query admin API
 riversctl admin deploy my-bundle/         # Deploy via admin API

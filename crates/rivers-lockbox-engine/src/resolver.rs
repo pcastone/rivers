@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use secrecy::SecretBox;
+
 use crate::crypto::decrypt_keystore;
 use crate::types::*;
 use crate::validation::validate_entry_name;
@@ -48,19 +50,19 @@ impl EntryMetadata {
 /// Resolved credential fetched on demand from disk.
 ///
 /// Values are decrypted per-access. The `value` field is wrapped in
-/// `zeroize::Zeroizing` so it is automatically zeroed on drop.
+/// `secrecy::Secret<String>` so it is zeroized on drop and requires an
+/// explicit `.expose_secret()` call to access — accidental logging is
+/// a compile error.
 ///
 /// `Debug` is manually implemented to redact the value; `Clone` is not
-/// implemented — cloning secret material requires an explicit call to
-/// `.clone_value()` to make the intent visible in code review.
+/// derived — secret material must not be duplicated silently.
 pub struct ResolvedEntry {
     /// Entry name.
     pub name: String,
     /// Decrypted secret value. Zeroized on drop.
     ///
-    /// Access the inner string with `.expose_secret()` (from the `zeroize`
-    /// crate's `Zeroizing` wrapper via `Deref`).
-    pub value: zeroize::Zeroizing<String>,
+    /// Call `.expose_secret()` to access the inner `&String`.
+    pub value: SecretBox<String>,
     /// Value type hint.
     pub entry_type: EntryType,
 }
@@ -178,8 +180,8 @@ impl LockBoxResolver {
 /// Fetch a secret value from the keystore on disk.
 ///
 /// Per SHAPE-5: values are decrypted per-access. The returned
-/// `ResolvedEntry.value` is wrapped in `Zeroizing<String>` and will be
-/// zeroed automatically on drop.
+/// `ResolvedEntry.value` is wrapped in `Secret<String>` and will be
+/// zeroed automatically on drop. Call `.expose_secret()` to access it.
 ///
 /// Lookup is by entry **name**, not by index, so rekey/rotation that
 /// reorders entries does not produce stale results.
@@ -206,7 +208,40 @@ pub fn fetch_secret_value(
 
     Ok(ResolvedEntry {
         name: metadata.name.clone(),
-        value: zeroize::Zeroizing::new(entry.value.clone()),
+        value: SecretBox::new(Box::new(entry.value.clone())),
         entry_type: metadata.entry_type,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use secrecy::{ExposeSecret, SecretBox};
+
+    use super::*;
+
+    #[test]
+    fn secret_box_string_debug_is_redacted() {
+        let secret: SecretBox<String> = SecretBox::new(Box::new("my-very-secret-password".to_string()));
+        let debug_output = format!("{:?}", secret);
+        assert!(!debug_output.contains("my-very-secret-password"), "secret must not appear in Debug output");
+        assert!(debug_output.contains("REDACTED"), "Debug output must contain REDACTED marker: {debug_output}");
+    }
+
+    #[test]
+    fn secret_box_string_value_accessible_only_via_expose_secret() {
+        let secret: SecretBox<String> = SecretBox::new(Box::new("sentinel-value".to_string()));
+        assert_eq!(secret.expose_secret().as_str(), "sentinel-value");
+    }
+
+    #[test]
+    fn resolved_entry_debug_redacts_value() {
+        let entry = ResolvedEntry {
+            name: "postgres/prod".to_string(),
+            value: SecretBox::new(Box::new("super-secret-pg-password".to_string())),
+            entry_type: EntryType::String,
+        };
+        let debug_output = format!("{:?}", entry);
+        assert!(!debug_output.contains("super-secret-pg-password"), "secret must not appear in Debug output");
+        assert!(debug_output.contains("postgres/prod"), "entry name must appear in Debug output");
+    }
 }

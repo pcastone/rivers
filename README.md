@@ -241,6 +241,9 @@ cargo deploy /opt/rivers --static
 # Scaffold a new app
 riverpackage init my-app --driver postgres
 
+# Validate bundle before deploying (4-layer pipeline)
+riverpackage validate my-bundle/
+
 # Deploy Rivers
 cargo deploy /opt/rivers
 

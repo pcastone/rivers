@@ -34,7 +34,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-version = "0.55.25+1720300426"
+version = "0.58.0+0046010526"
 license = "MIT"
 
 [workspace.dependencies]
@@ -51,6 +51,7 @@ toml = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 age = { version = "0.11", features = ["armor"] }
 zeroize = { version = "1", features = ["derive"] }
+secrecy = "0.10"
 libloading = "0.8"
 axum = { version = "0.8", features = ["ws"] }
 tower = { version = "0.5", features = ["timeout"] }

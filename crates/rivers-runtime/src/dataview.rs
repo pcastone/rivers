@@ -225,10 +225,45 @@ pub struct DataViewConfig {
     /// be wrapped in a LIMIT 0 subquery.
     #[serde(default)]
     pub skip_introspect: bool,
+
+    /// Column used for cursor-based pagination. When set, callers can pass
+    /// `after_cursor` as a query parameter instead of `offset`. The column
+    /// must be unique and sortable (typically `id` or a timestamp).
+    ///
+    /// The cursor value is appended as `AND {cursor_key} > $after_cursor`
+    /// to the query's WHERE clause at execution time. The column name comes
+    /// from trusted config (not user input) so interpolation is safe.
+    #[serde(default)]
+    pub cursor_key: Option<String>,
+
+    // ── Composability (P2.9) ─────────────────────────────────────────
+
+    /// Other DataView names whose results this DataView composes.
+    /// When non-empty, this DataView acts as a composite view.
+    /// Strategies: "union" (concatenate rows) or "enrich" (join by join_key).
+    #[serde(default)]
+    pub source_views: Vec<String>,
+
+    /// Composition strategy: "union" or "enrich". Required when source_views is non-empty.
+    #[serde(default)]
+    pub compose_strategy: Option<String>,
+
+    /// Column used to join secondary view rows into primary rows in "enrich" mode.
+    #[serde(default)]
+    pub join_key: Option<String>,
+
+    /// How to merge enriched rows: "nest" (secondary as nested object) or "flatten" (merge fields).
+    /// Default: "nest".
+    #[serde(default = "default_enrich_mode")]
+    pub enrich_mode: String,
 }
 
 fn default_max_rows() -> usize {
     1000
+}
+
+fn default_enrich_mode() -> String {
+    "nest".to_string()
 }
 
 impl DataViewConfig {
@@ -367,5 +402,88 @@ mod tests {
         "#;
         let cfg: DataViewConfig = toml::from_str(toml_str).unwrap();
         assert!(!cfg.prepared);
+    }
+
+    #[test]
+    fn dataview_config_parses_cursor_key() {
+        let toml_str = r#"
+            name = "contacts"
+            datasource = "ds"
+            cursor_key = "id"
+        "#;
+        let cfg: DataViewConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.cursor_key.as_deref(), Some("id"));
+    }
+
+    #[test]
+    fn dataview_config_cursor_key_defaults_none() {
+        let toml_str = r#"
+            name = "contacts"
+            datasource = "ds"
+        "#;
+        let cfg: DataViewConfig = toml::from_str(toml_str).unwrap();
+        assert!(cfg.cursor_key.is_none());
+    }
+
+    // ── Composability fields (P2.9) ───────────────────────────────
+
+    #[test]
+    fn dataview_config_source_views_parses() {
+        let toml_str = r#"
+            name = "combined"
+            datasource = "ds"
+            source_views = ["contacts", "orders"]
+            compose_strategy = "union"
+        "#;
+        let cfg: DataViewConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.source_views, vec!["contacts", "orders"]);
+        assert_eq!(cfg.compose_strategy.as_deref(), Some("union"));
+    }
+
+    #[test]
+    fn dataview_config_compose_strategy_parses() {
+        let toml_str = r#"
+            name = "enriched"
+            datasource = "ds"
+            source_views = ["orders", "items"]
+            compose_strategy = "enrich"
+            join_key = "order_id"
+        "#;
+        let cfg: DataViewConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.compose_strategy.as_deref(), Some("enrich"));
+        assert_eq!(cfg.join_key.as_deref(), Some("order_id"));
+    }
+
+    #[test]
+    fn dataview_config_enrich_mode_defaults_nest() {
+        let toml_str = r#"
+            name = "enriched"
+            datasource = "ds"
+        "#;
+        let cfg: DataViewConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.enrich_mode, "nest");
+    }
+
+    #[test]
+    fn dataview_config_enrich_mode_flatten_parses() {
+        let toml_str = r#"
+            name = "enriched"
+            datasource = "ds"
+            enrich_mode = "flatten"
+        "#;
+        let cfg: DataViewConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.enrich_mode, "flatten");
+    }
+
+    #[test]
+    fn dataview_config_source_views_defaults_empty() {
+        let toml_str = r#"
+            name = "contacts"
+            datasource = "ds"
+        "#;
+        let cfg: DataViewConfig = toml::from_str(toml_str).unwrap();
+        assert!(cfg.source_views.is_empty());
+        assert!(cfg.compose_strategy.is_none());
+        assert!(cfg.join_key.is_none());
     }
 }

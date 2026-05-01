@@ -169,21 +169,44 @@ rate_limit_per_minute = 300
 
 ## Bundle Validation
 
-`riversctl validate <bundle_path>` runs 9 checks against a bundle directory or archive.
+`riverpackage validate <bundle_dir> [--format text|json] [--config <path>]`
 
-`riversctl validate --schema server|app|bundle` outputs the corresponding JSON Schema.
+Bundle validation runs a four-layer pipeline. See `rivers-bundle-validation-spec.md` for the full specification, error catalog, and output format contract.
 
-### Validation Checks
+### Validation Layers
 
-1. View types — validates view type values are recognized
-2. Driver names — validates driver names match registered drivers
-3. Datasource refs — validates all datasource references resolve
-4. DataView refs — validates all DataView references resolve
-5. Invalidates targets — validates invalidation targets exist
-6. Duplicate names — detects duplicate DataView/View/datasource names
-7. Schema file existence — verifies all referenced schema files exist on disk
-8. Cross-app service refs — validates inter-app service references resolve within the bundle
-9. TOML parse error context — provides line/column context for TOML syntax errors
+| Layer | What it checks |
+|---|---|
+| 1 — Structural TOML | All TOML files parse correctly, have correct keys and types, all required fields present. Unknown keys are hard errors via `deny_unknown_fields`. Typo'd keys produce `did you mean?` suggestions. |
+| 2 — Resource Existence | Every file path referenced in config (handler modules, schema files, init handlers, SPA assets, WASM modules, libs) exists on disk. |
+| 3 — Logical Cross-References | DataView→datasource, view→DataView, view→resources, invalidates targets, service→appId, appId uniqueness, datasource name uniqueness, nopassword/lockbox consistency, x-type/driver consistency, view type constraints. |
+| 4 — Syntax Verification | Schema JSON structural check. TS/JS compile via V8 engine dylib with entrypoint export verification. WASM validation via Wasmtime engine dylib. Import path resolution. Requires engine dylibs — skipped with warning if unavailable. |
+
+### Output format
+
+`--format text` (default) — human-readable `[PASS]`/`[FAIL]`/`[WARN]`/`[SKIP]` per check.
+`--format json` — machine-readable structured output with error codes, file paths, table paths, and suggestions. Stable contract for agentic consumers.
+
+### Engine dylib discovery
+
+`riverpackage` reads engine dylib paths from `riversd.toml` (or path specified by `--config`). If the config or engine dylibs are not found, Layer 4 is skipped with a warning. Layers 1–3 always run.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | All checks passed (warnings may be present) |
+| 1 | One or more validation errors |
+| 2 | Bundle directory not found or unreadable |
+| 3 | Config file unreadable (only when `--config` explicitly specified) |
+
+### Schema output
+
+`riverpackage validate --schema server|app|bundle` outputs the corresponding JSON Schema.
+
+### Tool ownership
+
+`riversctl validate` has been removed. All bundle validation is performed by `riverpackage validate`. `riversctl doctor --lint` has been removed. `doctor` owns system health; `riverpackage` owns bundle correctness.
 
 ---
 

@@ -38,6 +38,10 @@ pub mod types;
 /// Shared schema validation engine for field types and constraints.
 pub mod validation;
 
+#[doc(hidden)]
+/// Shared broker contract test fixtures used by broker plugin live tests.
+pub mod broker_contract_fixtures;
+
 pub use defaults::{
     url_encode_path_segment, read_connect_timeout, read_request_timeout, read_max_rows,
     DEFAULT_CONNECT_TIMEOUT_SECS, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_MAX_ROWS,

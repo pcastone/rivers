@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use reqwest::Client;
+use tracing;
 
 use rivers_driver_sdk::{Connection, DriverError, Query, QueryResult};
 
@@ -15,6 +16,8 @@ pub struct InfluxConnection {
     pub(crate) base_url: String,
     pub(crate) org: String,
     pub(crate) token: String,
+    /// Maximum rows returned from a Flux query. Truncates with a WARN if exceeded.
+    pub(crate) max_rows: usize,
 }
 
 #[async_trait]
@@ -99,7 +102,11 @@ impl InfluxConnection {
             .await
             .map_err(|e| DriverError::Query(format!("influxdb response read failed: {e}")))?;
 
-        let rows = parse_csv_response(&body);
+        let mut rows = parse_csv_response(&body);
+        if rows.len() > self.max_rows {
+            rows.truncate(self.max_rows);
+            tracing::warn!(max_rows = self.max_rows, "influxdb: result set truncated to max_rows limit");
+        }
         let count = rows.len() as u64;
 
         Ok(QueryResult {

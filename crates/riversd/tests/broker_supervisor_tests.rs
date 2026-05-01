@@ -17,8 +17,8 @@ use async_trait::async_trait;
 use tokio::sync::{watch, Mutex};
 
 use rivers_runtime::rivers_driver_sdk::broker::{
-    BrokerConsumer, BrokerConsumerConfig, BrokerProducer, FailureMode, FailurePolicy,
-    InboundMessage, MessageBrokerDriver, MessageReceipt,
+    AckOutcome, BrokerConsumer, BrokerConsumerConfig, BrokerError, BrokerProducer, FailureMode,
+    FailurePolicy, InboundMessage, MessageBrokerDriver, MessageReceipt,
 };
 use rivers_runtime::rivers_driver_sdk::error::DriverError;
 use rivers_runtime::rivers_driver_sdk::ConnectionParams;
@@ -107,11 +107,11 @@ impl BrokerConsumer for IdleConsumer {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
-    async fn ack(&mut self, _r: &MessageReceipt) -> Result<(), DriverError> {
-        Ok(())
+    async fn ack(&mut self, _r: &MessageReceipt) -> Result<AckOutcome, BrokerError> {
+        Ok(AckOutcome::Acked)
     }
-    async fn nack(&mut self, _r: &MessageReceipt) -> Result<(), DriverError> {
-        Ok(())
+    async fn nack(&mut self, _r: &MessageReceipt) -> Result<AckOutcome, BrokerError> {
+        Ok(AckOutcome::Acked)
     }
     async fn close(&mut self) -> Result<(), DriverError> {
         *self.closed.lock().await = true;

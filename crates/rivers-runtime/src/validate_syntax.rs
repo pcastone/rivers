@@ -34,6 +34,58 @@ pub fn validate_syntax(
 
         // ── Schema JSON validation (C006-C009) ──────────────────────
         for (dv_name, dv) in &app.config.data.dataviews {
+            // W-DV-CURSOR-1: cursor_key set but no ORDER BY in query.
+            // Cursor pagination is non-deterministic without a sort order.
+            if dv.cursor_key.is_some() {
+                // Check all query variants for ORDER BY presence.
+                let queries: &[Option<&str>] = &[
+                    dv.query.as_deref(),
+                    dv.get_query.as_deref(),
+                    dv.post_query.as_deref(),
+                    dv.put_query.as_deref(),
+                    dv.delete_query.as_deref(),
+                ];
+                let any_query_has_order_by = queries
+                    .iter()
+                    .filter_map(|q| *q)
+                    .any(|q| q.to_uppercase().contains("ORDER BY"));
+                let any_query_exists = queries.iter().any(|q| q.is_some());
+
+                if any_query_exists && !any_query_has_order_by {
+                    let display = format!("{}/app.toml", app_name);
+                    let mut result = ValidationResult::warn(
+                        error_codes::W007,
+                        format!(
+                            "dataview '{}': cursor_key is set but query has no ORDER BY \
+                             clause — cursor pagination requires deterministic ordering",
+                            dv_name
+                        ),
+                    )
+                    .with_app(app_name)
+                    .with_table_path(&format!("data.dataviews.{}", dv_name))
+                    .with_field("cursor_key");
+                    result.file = Some(display);
+                    results.push(result);
+                }
+            }
+
+            // C-DV-COMPOSE-3: enrich strategy requires join_key (P2.9)
+            if dv.compose_strategy.as_deref() == Some("enrich") && dv.join_key.is_none() {
+                let display = format!("{}/app.toml", app_name);
+                let result = ValidationResult::fail(
+                    "C-DV-COMPOSE-3",
+                    &display,
+                    format!(
+                        "DataView '{}' uses compose_strategy 'enrich' but join_key is not set",
+                        dv_name
+                    ),
+                )
+                .with_app(app_name)
+                .with_table_path(&format!("data.dataviews.{}", dv_name))
+                .with_field("join_key");
+                results.push(result);
+            }
+
             // Look up the driver name so broker-specific checks can run (C009).
             let driver_name = app
                 .config
@@ -76,6 +128,59 @@ pub fn validate_syntax(
                     }
                 }
                 // Missing files are handled by Layer 2 (existence checks).
+            }
+        }
+
+        // ── MCP-VAL-FED-1: federation entry must have non-empty alias and url ──
+        for (view_name, view) in &app.config.api.views {
+            for (i, fed) in view.federation.iter().enumerate() {
+                let display = format!("{}/app.toml", app_name);
+                if fed.alias.is_empty() {
+                    results.push(
+                        ValidationResult::fail(
+                            "MCP-VAL-FED-1",
+                            &display,
+                            format!(
+                                "view '{}' federation[{}]: 'alias' must not be empty",
+                                view_name, i
+                            ),
+                        )
+                        .with_app(app_name)
+                        .with_table_path(&format!("api.views.{}.federation[{}]", view_name, i))
+                        .with_field("alias"),
+                    );
+                }
+                if fed.url.is_empty() {
+                    results.push(
+                        ValidationResult::fail(
+                            "MCP-VAL-FED-1",
+                            &display,
+                            format!(
+                                "view '{}' federation[{}]: 'url' must not be empty",
+                                view_name, i
+                            ),
+                        )
+                        .with_app(app_name)
+                        .with_table_path(&format!("api.views.{}.federation[{}]", view_name, i))
+                        .with_field("url"),
+                    );
+                }
+                // Validate alias matches [a-z0-9_]+ pattern
+                if !fed.alias.is_empty() && !fed.alias.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+                    results.push(
+                        ValidationResult::fail(
+                            "MCP-VAL-FED-1",
+                            &display,
+                            format!(
+                                "view '{}' federation[{}]: 'alias' must match [a-z0-9_]+, got '{}'",
+                                view_name, i, fed.alias
+                            ),
+                        )
+                        .with_app(app_name)
+                        .with_table_path(&format!("api.views.{}.federation[{}]", view_name, i))
+                        .with_field("alias"),
+                    );
+                }
             }
         }
 
@@ -820,6 +925,209 @@ import { foo } from "@org/pkg";
         assert!(
             results.is_empty() || results.iter().all(|r| r.status != crate::validate_result::ValidationStatus::Fail),
             "valid import should not produce errors: {:?}",
+            results
+        );
+    }
+
+    // ── C-DV-COMPOSE-3: enrich without join_key ─────────────────────
+
+    #[test]
+    fn c_dv_compose_3_enrich_without_join_key() {
+        use crate::bundle::{AppManifest, BundleManifest, ResourcesConfig};
+        use crate::loader::{LoadedApp, LoadedBundle};
+        use crate::validate_engine::EngineHandles;
+        use crate::bundle::{AppConfig, AppApiConfig, AppDataConfig};
+        use crate::dataview::DataViewConfig;
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        let dv = DataViewConfig {
+            name: "enriched".into(),
+            datasource: "ds".into(),
+            query: None,
+            parameters: vec![],
+            return_schema: None,
+            get_query: None,
+            post_query: None,
+            put_query: None,
+            delete_query: None,
+            get_schema: None,
+            post_schema: None,
+            put_schema: None,
+            delete_schema: None,
+            get_parameters: vec![],
+            post_parameters: vec![],
+            put_parameters: vec![],
+            delete_parameters: vec![],
+            streaming: false,
+            circuit_breaker_id: None,
+            prepared: false,
+            query_params: HashMap::new(),
+            caching: None,
+            invalidates: vec![],
+            validate_result: false,
+            strict_parameters: false,
+            max_rows: 1000,
+            skip_introspect: false,
+            cursor_key: None,
+            source_views: vec!["base".into(), "extra".into()],
+            compose_strategy: Some("enrich".into()),
+            join_key: None, // missing — should trigger C-DV-COMPOSE-3
+            enrich_mode: "nest".into(),
+        };
+
+        let mut dataviews = HashMap::new();
+        dataviews.insert("enriched".into(), dv);
+
+        let app = LoadedApp {
+            manifest: AppManifest {
+                app_name: "test-app".into(),
+                description: None,
+                version: None,
+                app_type: "app-service".into(),
+                app_id: "00000000-0000-0000-0000-000000000001".into(),
+                entry_point: None,
+                app_entry_point: None,
+                source: None,
+                spa: None,
+                init: None,
+            },
+            resources: ResourcesConfig {
+                datasources: vec![],
+                keystores: vec![],
+                services: vec![],
+            },
+            config: AppConfig {
+                data: AppDataConfig {
+                    datasources: HashMap::new(),
+                    dataviews,
+                    keystore: HashMap::new(),
+                },
+                api: AppApiConfig { views: HashMap::new() },
+                static_files: None,
+                base: Default::default(),
+            },
+            app_dir: PathBuf::from("/tmp/test-app"),
+        };
+
+        let bundle = LoadedBundle {
+            manifest: BundleManifest {
+                bundle_name: "test".into(),
+                bundle_version: "1.0.0".into(),
+                source: None,
+                apps: vec!["test-app".into()],
+            },
+            apps: vec![app],
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let results = validate_syntax(dir.path(), &bundle, &EngineHandles::none());
+
+        assert!(
+            results.iter().any(|r| {
+                r.error_code.as_deref() == Some("C-DV-COMPOSE-3")
+                    && r.status == crate::validate_result::ValidationStatus::Fail
+            }),
+            "enrich without join_key should emit C-DV-COMPOSE-3, got: {:?}",
+            results
+        );
+    }
+
+    #[test]
+    fn c_dv_compose_3_enrich_with_join_key_passes() {
+        use crate::bundle::{AppManifest, BundleManifest, ResourcesConfig};
+        use crate::loader::{LoadedApp, LoadedBundle};
+        use crate::validate_engine::EngineHandles;
+        use crate::bundle::{AppConfig, AppApiConfig, AppDataConfig};
+        use crate::dataview::DataViewConfig;
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        let dv = DataViewConfig {
+            name: "enriched".into(),
+            datasource: "ds".into(),
+            query: None,
+            parameters: vec![],
+            return_schema: None,
+            get_query: None,
+            post_query: None,
+            put_query: None,
+            delete_query: None,
+            get_schema: None,
+            post_schema: None,
+            put_schema: None,
+            delete_schema: None,
+            get_parameters: vec![],
+            post_parameters: vec![],
+            put_parameters: vec![],
+            delete_parameters: vec![],
+            streaming: false,
+            circuit_breaker_id: None,
+            prepared: false,
+            query_params: HashMap::new(),
+            caching: None,
+            invalidates: vec![],
+            validate_result: false,
+            strict_parameters: false,
+            max_rows: 1000,
+            skip_introspect: false,
+            cursor_key: None,
+            source_views: vec!["base".into(), "extra".into()],
+            compose_strategy: Some("enrich".into()),
+            join_key: Some("order_id".into()), // set — should NOT trigger C-DV-COMPOSE-3
+            enrich_mode: "nest".into(),
+        };
+
+        let mut dataviews = HashMap::new();
+        dataviews.insert("enriched".into(), dv);
+
+        let app = LoadedApp {
+            manifest: AppManifest {
+                app_name: "test-app".into(),
+                description: None,
+                version: None,
+                app_type: "app-service".into(),
+                app_id: "00000000-0000-0000-0000-000000000001".into(),
+                entry_point: None,
+                app_entry_point: None,
+                source: None,
+                spa: None,
+                init: None,
+            },
+            resources: ResourcesConfig {
+                datasources: vec![],
+                keystores: vec![],
+                services: vec![],
+            },
+            config: AppConfig {
+                data: AppDataConfig {
+                    datasources: HashMap::new(),
+                    dataviews,
+                    keystore: HashMap::new(),
+                },
+                api: AppApiConfig { views: HashMap::new() },
+                static_files: None,
+                base: Default::default(),
+            },
+            app_dir: PathBuf::from("/tmp/test-app"),
+        };
+
+        let bundle = LoadedBundle {
+            manifest: BundleManifest {
+                bundle_name: "test".into(),
+                bundle_version: "1.0.0".into(),
+                source: None,
+                apps: vec!["test-app".into()],
+            },
+            apps: vec![app],
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let results = validate_syntax(dir.path(), &bundle, &EngineHandles::none());
+
+        assert!(
+            !results.iter().any(|r| r.error_code.as_deref() == Some("C-DV-COMPOSE-3")),
+            "enrich with join_key should not emit C-DV-COMPOSE-3, got: {:?}",
             results
         );
     }

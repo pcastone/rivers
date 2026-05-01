@@ -71,7 +71,9 @@ const DATAVIEW_FIELDS: &[&str] = &[
     "get_query", "post_query", "put_query", "delete_query",
     "return_schema", "get_parameters", "post_parameters", "put_parameters",
     "delete_parameters", "streaming", "validate_result", "strict_parameters",
-    "circuitBreakerId", "prepared", "skip_introspect", "query_params",
+    "circuitBreakerId", "prepared", "skip_introspect", "query_params", "cursor_key",
+    // Composability (P2.9)
+    "source_views", "compose_strategy", "join_key", "enrich_mode",
 ];
 const DATAVIEW_REQUIRED: &[&str] = &["name", "datasource"];
 
@@ -100,7 +102,7 @@ const VIEW_FIELDS: &[&str] = &[
     "sse_trigger_events", "sse_event_buffer_size",
     "session_revalidation_interval_s", "polling", "event_handlers",
     "on_stream", "ws_hooks", "on_event",
-    "tools", "resources", "prompts", "instructions", "session",
+    "tools", "resources", "prompts", "instructions", "session", "federation",
 ];
 const VIEW_REQUIRED: &[&str] = &["path", "method", "view_type", "handler"];
 
@@ -115,6 +117,19 @@ const PARAM_MAPPING_FIELDS: &[&str] = &["query", "path", "body", "header"];
 
 /// `[static_files]` section.
 const STATIC_FILES_FIELDS: &[&str] = &["enabled", "root", "index_file", "spa_fallback"];
+
+/// MCP resource config in `[api.views.*.resources.*]`.
+const MCP_RESOURCE_FIELDS: &[&str] = &[
+    "dataview", "description", "mime_type", "uri_template",
+    "subscribable", "poll_interval_seconds",
+];
+const MCP_RESOURCE_REQUIRED: &[&str] = &["dataview"];
+
+/// MCP federation entry in `[[api.views.*.federation]]` or `[api.views.*.federation.*]`.
+const MCP_FEDERATION_FIELDS: &[&str] = &[
+    "alias", "url", "bearer_token", "tools_filter", "resources_filter", "timeout_ms",
+];
+const MCP_FEDERATION_REQUIRED: &[&str] = &["alias", "url"];
 
 // ── Public API ────────────────────────────────────────────────────
 
@@ -764,6 +779,104 @@ fn validate_view(
         if let Some(pm_table) = pm.as_table() {
             let pm_path = format!("{}.parameter_mapping", table_path);
             check_unknown_keys(pm_table, PARAM_MAPPING_FIELDS, file, &pm_path, results);
+        }
+    }
+
+    // Validate MCP federation array (if present — MCP view type only).
+    if let Some(fed_val) = table.get("federation") {
+        match fed_val {
+            toml::Value::Array(arr) => {
+                for (i, entry) in arr.iter().enumerate() {
+                    let fed_path = format!("{}.federation[{}]", table_path, i);
+                    if let Some(fed_table) = entry.as_table() {
+                        check_unknown_keys(fed_table, MCP_FEDERATION_FIELDS, file, &fed_path, results);
+                        check_required_fields(fed_table, MCP_FEDERATION_REQUIRED, file, &fed_path, results);
+                    } else {
+                        results.push(
+                            ValidationResult::fail(
+                                error_codes::S004,
+                                file,
+                                format!("{} must be a table", fed_path),
+                            )
+                            .with_table_path(&fed_path)
+                            .with_app(app_name),
+                        );
+                    }
+                }
+            }
+            toml::Value::Table(tbl) => {
+                // Allow inline table form: [api.views.*.federation.alias_name]
+                for (fed_name, fed_value) in tbl {
+                    let fed_path = format!("{}.federation.{}", table_path, fed_name);
+                    if let Some(fed_table) = fed_value.as_table() {
+                        check_unknown_keys(fed_table, MCP_FEDERATION_FIELDS, file, &fed_path, results);
+                        check_required_fields(fed_table, MCP_FEDERATION_REQUIRED, file, &fed_path, results);
+                    } else {
+                        results.push(
+                            ValidationResult::fail(
+                                error_codes::S004,
+                                file,
+                                format!("{} must be a table", fed_path),
+                            )
+                            .with_table_path(&fed_path)
+                            .with_app(app_name),
+                        );
+                    }
+                }
+            }
+            _ => {
+                results.push(
+                    ValidationResult::fail(
+                        error_codes::S004,
+                        file,
+                        format!("{}.federation must be an array or table", table_path),
+                    )
+                    .with_table_path(table_path)
+                    .with_field("federation")
+                    .with_app(app_name),
+                );
+            }
+        }
+    }
+
+    // Validate MCP resources sub-table (if present — MCP view type only).
+    // S-MCP-2: warn when a resource has subscribable = true but view method is not GET.
+    if let Some(resources_val) = table.get("resources") {
+        if let Some(resources_table) = resources_val.as_table() {
+            for (res_name, res_value) in resources_table {
+                let res_path = format!("{}.resources.{}", table_path, res_name);
+                if let Some(res_table) = res_value.as_table() {
+                    check_unknown_keys(res_table, MCP_RESOURCE_FIELDS, file, &res_path, results);
+                    check_required_fields(res_table, MCP_RESOURCE_REQUIRED, file, &res_path, results);
+
+                    // S-MCP-2: subscribable = true with a non-GET view method is likely wrong.
+                    let subscribable = res_table
+                        .get("subscribable")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if subscribable {
+                        let method = table
+                            .get("method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if !method.is_empty() && method.to_uppercase() != "GET" {
+                            results.push(
+                                ValidationResult::warn(
+                                    error_codes::W006,
+                                    format!(
+                                        "{}: subscribable = true but view method is '{}' — \
+                                         subscriptions require a GET-capable DataView; \
+                                         consider setting method = \"GET\" or subscribable = false",
+                                        res_path, method
+                                    ),
+                                )
+                                .with_table_path(&res_path)
+                                .with_app(app_name),
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 }

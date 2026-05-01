@@ -1,6 +1,5 @@
 //! Key management tests — generate, rotate, delete, metadata, versioning.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use rivers_keystore_engine::*;
 
 #[test]
@@ -16,8 +15,8 @@ fn generate_key_validates_type_and_material_length() {
     assert_eq!(key.current_version, 1);
     assert_eq!(key.versions.len(), 1);
 
-    // Verify key material is 32 bytes when decoded
-    let bytes = BASE64.decode(&key.versions[0].key_material).unwrap();
+    // Verify key material is 32 bytes via the key bytes accessor.
+    let bytes = ks.current_key_bytes("test-key").unwrap();
     assert_eq!(bytes.len(), 32);
 
     // Invalid type
@@ -251,5 +250,7 @@ fn get_key_version_for_existing() {
 
     let kv = ks.get_key_version("gkv-test", 1).unwrap();
     assert_eq!(kv.version, 1);
-    assert!(!kv.key_material.is_empty());
+    // Verify the version has non-empty material via the key bytes accessor.
+    let bytes = ks.versioned_key_bytes("gkv-test", 1).unwrap();
+    assert!(!bytes.is_empty());
 }

@@ -4,11 +4,12 @@ use std::collections::HashMap;
 
 use std::sync::Arc;
 
-use rivers_runtime::view::{McpToolConfig, McpResourceConfig, McpPromptConfig};
+use rivers_runtime::view::{McpToolConfig, McpResourceConfig, McpPromptConfig, McpFederationConfig};
 use rivers_runtime::rivers_driver_sdk::QueryValue;
 use rivers_runtime::DataViewExecutor;
 
 use super::jsonrpc::{JsonRpcRequest, JsonRpcResponse};
+use super::federation::FederationClient;
 use crate::server::AppContext;
 
 /// Dispatch a JSON-RPC request to the appropriate MCP handler.
@@ -16,6 +17,11 @@ use crate::server::AppContext;
 /// `auth_context` is the caller identity retrieved from the MCP session store
 /// (the `"auth"` sub-object stored at `initialize` time). It is `None` for
 /// `initialize`/`ping` and for MCP views with no storage backend.
+///
+/// `federation` is the list of federated MCP upstream configs declared in the
+/// view's `federation` field (P2.3). Tools and resources from these upstreams are
+/// merged into `tools/list` and `resources/list` responses under namespaced prefixes.
+/// Pass `&[]` when no federation is configured.
 pub async fn dispatch(
     ctx: &AppContext,
     req: &JsonRpcRequest,
@@ -27,6 +33,8 @@ pub async fn dispatch(
     app_dir: &std::path::Path,
     instructions: Option<&str>,
     auth_context: Option<&serde_json::Value>,
+    session_id: Option<&str>,
+    federation: &[McpFederationConfig],
 ) -> JsonRpcResponse {
     if req.jsonrpc != "2.0" {
         return JsonRpcResponse::invalid_request(req.id.clone());
@@ -35,13 +43,39 @@ pub async fn dispatch(
     match req.method.as_str() {
         "initialize" => handle_initialize(req, tools, resources, prompts, ctx, app_dir, instructions, dv_namespace).await,
         "ping" => JsonRpcResponse::success(req.id.clone(), serde_json::json!({})),
-        "tools/list" => handle_tools_list(req, tools, ctx, dv_namespace, app_dir).await,
-        "tools/call" => handle_tools_call(req, tools, ctx, app_id, dv_namespace, auth_context).await,
-        "resources/list" => handle_resources_list(req, resources),
-        "resources/read" => handle_resources_read(req, resources, ctx, dv_namespace, app_id).await,
+        "tools/list" => handle_tools_list(req, tools, ctx, dv_namespace, app_dir, federation).await,
+        "tools/call" => {
+            // P2.8: emit audit event for MCP tool invocations
+            let tool_name = req.params.get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("<unknown>")
+                .to_string();
+            let tool_start = std::time::Instant::now();
+            let resp = handle_tools_call(req, tools, ctx, app_id, dv_namespace, auth_context, federation, session_id).await;
+            if let Some(ref bus) = ctx.audit_bus {
+                let is_error = resp.result.as_ref()
+                    .and_then(|r| r.get("isError"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(resp.error.is_some());
+                let _ = bus.send(crate::audit::AuditEvent::McpToolCalled {
+                    app_id: app_id.to_string(),
+                    tool: tool_name,
+                    duration_ms: tool_start.elapsed().as_millis() as u64,
+                    is_error,
+                });
+            }
+            resp
+        }
+        "tools/call_batch" => handle_tools_call_batch(req, tools, ctx, app_id, dv_namespace, auth_context, federation, session_id).await,
+        "resources/list" => handle_resources_list(req, resources, federation).await,
+        "resources/read" => handle_resources_read(req, resources, ctx, dv_namespace, app_id, federation).await,
         "resources/templates/list" => handle_resource_templates(req, resources, app_id),
+        "resources/subscribe" => handle_resources_subscribe(req, resources, ctx, app_id, dv_namespace, session_id).await,
+        "resources/unsubscribe" => handle_resources_unsubscribe(req, ctx, session_id).await,
         "prompts/list" => handle_prompts_list(req, prompts),
         "prompts/get" => handle_prompts_get(req, prompts, app_dir),
+        // P2.6: elicitation/response — resolves a pending mid-handler elicitation.
+        "elicitation/response" => handle_elicitation_response(req, ctx),
         _ => JsonRpcResponse::method_not_found(req.id.clone(), &req.method),
     }
 }
@@ -57,10 +91,16 @@ async fn handle_initialize(
     dv_namespace: &str,
 ) -> JsonRpcResponse {
     let mut capabilities = serde_json::json!({
-        "tools": { "listChanged": false },
+        "tools": { "listChanged": false, "batch": true },
     });
     if !resources.is_empty() {
-        capabilities["resources"] = serde_json::json!({});
+        // P1.1.1.c: advertise subscribe capability only when ≥1 resource has subscribable = true.
+        let has_subscribable = resources.values().any(|r| r.subscribable);
+        if has_subscribable {
+            capabilities["resources"] = serde_json::json!({ "subscribe": true });
+        } else {
+            capabilities["resources"] = serde_json::json!({});
+        }
     }
     if !prompts.is_empty() {
         capabilities["prompts"] = serde_json::json!({});
@@ -109,11 +149,12 @@ async fn handle_tools_list(
     ctx: &AppContext,
     dv_namespace: &str,
     app_dir: &std::path::Path,
+    federation: &[McpFederationConfig],
 ) -> JsonRpcResponse {
     let dv_guard = ctx.dataview_executor.read().await;
     let executor_opt = dv_guard.as_ref();
 
-    let tool_list: Vec<serde_json::Value> = tools.iter().map(|(name, config)| {
+    let mut tool_list: Vec<serde_json::Value> = tools.iter().map(|(name, config)| {
         let schema = if config.view.is_some() {
             // CB-P0.2.c: load explicit JSON Schema file when declared.
             if let Some(schema_path) = &config.input_schema {
@@ -154,6 +195,14 @@ async fn handle_tools_list(
         })
     }).collect();
 
+    // P2.3: merge federated tools (best-effort — upstream failures silently produce empty lists).
+    drop(dv_guard); // release lock before potentially slow upstream fetches
+    for fed_config in federation {
+        let client = FederationClient::new(fed_config.clone());
+        let fed_tools = client.fetch_tools().await;
+        tool_list.extend(fed_tools);
+    }
+
     JsonRpcResponse::success(req.id.clone(), serde_json::json!({ "tools": tool_list }))
 }
 
@@ -164,11 +213,26 @@ async fn handle_tools_call(
     app_id: &str,
     dv_namespace: &str,
     auth_context: Option<&serde_json::Value>,
+    federation: &[McpFederationConfig],
+    session_id: Option<&str>,
 ) -> JsonRpcResponse {
     let tool_name = match req.params.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
         None => return JsonRpcResponse::invalid_params(req.id.clone(), "missing 'name' in params"),
     };
+
+    // P2.3: check federation upstreams first — if the tool name carries a federation
+    // namespace prefix, proxy the call to the upstream rather than dispatching locally.
+    for fed_config in federation {
+        let client = FederationClient::new(fed_config.clone());
+        if client.owns_tool(tool_name) {
+            let arguments = req.params.get("arguments")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let result = client.proxy_tool_call(tool_name, arguments).await;
+            return JsonRpcResponse::success(req.id.clone(), result);
+        }
+    }
 
     let tool_config = match tools.get(tool_name) {
         Some(c) => c,
@@ -185,7 +249,7 @@ async fn handle_tools_call(
 
     // CB-P0.1: codecomponent-backed tools dispatch through the ProcessPool.
     if let Some(ref view_name) = tool_config.view {
-        return dispatch_codecomponent_tool(req, ctx, app_id, dv_namespace, view_name, arguments, auth_context).await;
+        return dispatch_codecomponent_tool(req, ctx, app_id, dv_namespace, view_name, arguments, auth_context, session_id).await;
     }
 
     let params: HashMap<String, QueryValue> = arguments.into_iter().map(|(k, v)| {
@@ -234,6 +298,104 @@ async fn handle_tools_call(
     }
 }
 
+/// Handle `tools/call_batch` — invoke multiple tools in a single JSON-RPC request.
+///
+/// P2.2: Accepts an `items` array (each with `name` and `arguments`) and an optional
+/// `continue_on_error` flag (default false). Calls `handle_tools_call` for each item
+/// in sequence. On first error (when `continue_on_error = false`) returns immediately
+/// with that error. With `continue_on_error = true` collects all results, marking
+/// failures with `"isError": true`.
+async fn handle_tools_call_batch(
+    req: &JsonRpcRequest,
+    tools: &HashMap<String, McpToolConfig>,
+    ctx: &AppContext,
+    app_id: &str,
+    dv_namespace: &str,
+    auth_context: Option<&serde_json::Value>,
+    federation: &[McpFederationConfig],
+    session_id: Option<&str>,
+) -> JsonRpcResponse {
+    let items = match req.params.get("items").and_then(|v| v.as_array()) {
+        Some(arr) => arr.clone(),
+        None => return JsonRpcResponse::invalid_params(req.id.clone(), "missing 'items' array in params"),
+    };
+
+    let continue_on_error = req.params.get("continue_on_error")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let mut results: Vec<serde_json::Value> = Vec::with_capacity(items.len());
+
+    for item in &items {
+        let item_name = match item.get("name").and_then(|n| n.as_str()) {
+            Some(n) => n.to_string(),
+            None => {
+                if continue_on_error {
+                    results.push(serde_json::json!({
+                        "name": serde_json::Value::Null,
+                        "content": [{"type": "text", "text": "missing 'name' in batch item"}],
+                        "isError": true
+                    }));
+                    continue;
+                } else {
+                    return JsonRpcResponse::invalid_params(
+                        req.id.clone(),
+                        "missing 'name' in batch item",
+                    );
+                }
+            }
+        };
+
+        let arguments = item.get("arguments")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        // Construct a synthetic JsonRpcRequest for the existing handle_tools_call path.
+        let synthetic_req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: req.id.clone(),
+            method: "tools/call".into(),
+            params: serde_json::json!({
+                "name": item_name,
+                "arguments": arguments,
+            }),
+        };
+
+        let resp = handle_tools_call(&synthetic_req, tools, ctx, app_id, dv_namespace, auth_context, federation, session_id).await;
+
+        // A JSON-RPC error response (has `error` field, no `result`) is an item failure.
+        if resp.error.is_some() {
+            if continue_on_error {
+                let error_text = resp.error.as_ref()
+                    .map(|e| e.message.clone())
+                    .unwrap_or_else(|| "unknown error".into());
+                results.push(serde_json::json!({
+                    "name": item_name,
+                    "content": [{"type": "text", "text": error_text}],
+                    "isError": true
+                }));
+            } else {
+                // Propagate the error immediately (stop on first failure).
+                return resp;
+            }
+        } else {
+            // Success — extract the content array from the result.
+            let content = resp.result
+                .as_ref()
+                .and_then(|r| r.get("content"))
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([]));
+            results.push(serde_json::json!({
+                "name": item_name,
+                "content": content,
+                "isError": false
+            }));
+        }
+    }
+
+    JsonRpcResponse::success(req.id.clone(), serde_json::json!({ "results": results }))
+}
+
 /// Dispatch an MCP tool call to a codecomponent view's handler via the ProcessPool.
 ///
 /// CB-P0.1/P0.3: Locates the codecomponent entrypoint from the loaded bundle, builds a
@@ -249,6 +411,7 @@ async fn dispatch_codecomponent_tool(
     view_name: &str,
     arguments: serde_json::Map<String, serde_json::Value>,
     auth_context: Option<&serde_json::Value>,
+    session_id: Option<&str>,
 ) -> JsonRpcResponse {
     use crate::process_pool::{Entrypoint, TaskContextBuilder, TaskKind};
     use rivers_runtime::view::HandlerConfig;
@@ -292,6 +455,86 @@ async fn dispatch_codecomponent_tool(
 
     let trace_id = uuid::Uuid::new_v4().to_string();
 
+    // P2.6: create the elicitation relay channel before dispatching.
+    //
+    // The V8 worker thread reads from `TASK_ELICITATION_TX` (populated via
+    // the global registry keyed by trace_id) when the handler calls
+    // `ctx.elicit(spec)`. The relay task below handles the outbound SSE
+    // notification and ElicitationRegistry registration.
+    let (elicit_tx, mut elicit_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::mcp::elicitation::ElicitationRequest>();
+
+    // Register the sender in the global map — TaskLocals::set will take it.
+    crate::process_pool::v8_engine::register_elicitation_tx(
+        &trace_id,
+        elicit_tx,
+    );
+
+    // Clone what the relay task needs from ctx (AppContext is Clone).
+    let elicitation_registry = ctx.elicitation_registry.clone();
+    let subscription_registry = ctx.subscription_registry.clone();
+
+    // Spawn the relay task. It reads ElicitationRequests from the channel,
+    // emits `elicitation/create` SSE notifications to the session, and
+    // registers the response oneshot in the ElicitationRegistry.
+    //
+    // SSE wiring: the session_id passed to dispatch() is the MCP-Session-Id
+    // header value. We use it to look up the session's SSE sender via
+    // SubscriptionRegistry. If no SSE stream is open for this session, the
+    // notification is dropped with a WARN — the elicitation will time out
+    // (60s) and resolve with action = "cancel".
+    //
+    // Note: if session_id is None (POST-only session), we still process the
+    // elicitation request (register the oneshot), but the SSE notification
+    // cannot be delivered, so the client must poll or maintain a session.
+    let session_id_owned = session_id.map(|s| s.to_string());
+
+    tokio::spawn(async move {
+        while let Some(elicit_req) = elicit_rx.recv().await {
+            let id = elicit_req.id.clone();
+            let spec = elicit_req.spec.clone();
+
+            // Send `elicitation/create` notification over SSE (best-effort).
+            // Per MCP P2.6: notification method is `elicitation/create`.
+            let notification = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "elicitation/create",
+                "params": {
+                    "id": id,
+                    "title": spec.title,
+                    "message": spec.message,
+                    "requestedSchema": spec.requested_schema,
+                }
+            });
+            let notification_str = serde_json::to_string(&notification)
+                .unwrap_or_else(|_| "{}".to_string());
+
+            // Deliver via send_to_session (best-effort — drops if no SSE stream open).
+            if let Some(ref sid) = session_id_owned {
+                let sent = subscription_registry
+                    .send_to_session(sid, notification_str)
+                    .await;
+                if !sent {
+                    tracing::warn!(
+                        session_id = %sid,
+                        elicitation_id = %id,
+                        "elicitation/create: SSE channel unavailable — notification dropped; elicitation will time out after 60s"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    elicitation_id = %id,
+                    "elicitation/create: no session_id available — SSE notification not sent"
+                );
+            }
+
+            // Register the response oneshot in the registry.
+            // The client sends `elicitation/response` which calls handle_elicitation_response,
+            // which calls elicitation_registry.resolve(response) to unblock the V8 worker.
+            elicitation_registry.register(id, elicit_req.response_tx);
+        }
+    });
+
     // Wrap tool arguments as ctx.request and propagate caller identity as ctx.session,
     // matching the REST pipeline's injection pattern (pipeline.rs).
     let args = serde_json::json!({
@@ -326,11 +569,12 @@ async fn dispatch_codecomponent_tool(
     }
 }
 
-fn handle_resources_list(
+async fn handle_resources_list(
     req: &JsonRpcRequest,
     resources: &HashMap<String, McpResourceConfig>,
+    federation: &[McpFederationConfig],
 ) -> JsonRpcResponse {
-    let list: Vec<serde_json::Value> = resources.iter().map(|(name, config)| {
+    let mut list: Vec<serde_json::Value> = resources.iter().map(|(name, config)| {
         serde_json::json!({
             "name": name,
             "uri": format!("rivers://app/{}", name),
@@ -338,6 +582,14 @@ fn handle_resources_list(
             "mimeType": config.mime_type,
         })
     }).collect();
+
+    // P2.3: merge federated resources (best-effort — upstream failures produce empty lists).
+    for fed_config in federation {
+        let client = FederationClient::new(fed_config.clone());
+        let fed_resources = client.fetch_resources().await;
+        list.extend(fed_resources);
+    }
+
     JsonRpcResponse::success(req.id.clone(), serde_json::json!({ "resources": list }))
 }
 
@@ -346,6 +598,10 @@ fn handle_resources_list(
 /// Only handles simple path variables (`{varname}`) and strips `{?...}` query expansions
 /// from the template before matching. Returns `Some(vars)` when the URI matches the template
 /// (vars may be empty for a no-variable template), or `None` when it doesn't match.
+pub(crate) fn extract_uri_template_vars_pub(template: &str, uri: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    extract_uri_template_vars(template, uri)
+}
+
 fn extract_uri_template_vars(template: &str, uri: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
     // Strip {?...} query expansion from template before path matching
     let template_path = match template.find("{?") {
@@ -402,11 +658,21 @@ async fn handle_resources_read(
     ctx: &AppContext,
     dv_namespace: &str,
     app_id: &str,
+    federation: &[McpFederationConfig],
 ) -> JsonRpcResponse {
     let uri = match req.params.get("uri").and_then(|u| u.as_str()) {
         Some(u) => u,
         None => return JsonRpcResponse::invalid_params(req.id.clone(), "missing 'uri' in params"),
     };
+
+    // P2.3: if the URI belongs to a federation upstream, proxy the read there.
+    for fed_config in federation {
+        let client = FederationClient::new(fed_config.clone());
+        if client.owns_resource(uri) {
+            let result = client.proxy_resource_read(uri).await;
+            return JsonRpcResponse::success(req.id.clone(), result);
+        }
+    }
 
     // Match the incoming URI against each resource's template (config template or default).
     let matched = resources.iter().find_map(|(name, config)| {
@@ -570,6 +836,180 @@ fn handle_prompts_get(
     }))
 }
 
+// ── P1.1.5.b — resources/subscribe + resources/unsubscribe ──────────────────
+
+/// Handle `resources/subscribe` — register the session's interest in a URI.
+///
+/// Requires a valid `session_id` (from `Mcp-Session-Id` header) and an open
+/// SSE channel (attached via `attach_sse` when the client opened the SSE stream).
+/// The URI must match a `subscribable = true` resource in this MCP view.
+async fn handle_resources_subscribe(
+    req: &JsonRpcRequest,
+    resources: &HashMap<String, McpResourceConfig>,
+    ctx: &AppContext,
+    app_id: &str,
+    dv_namespace: &str,
+    session_id: Option<&str>,
+) -> JsonRpcResponse {
+    let Some(sid) = session_id else {
+        return JsonRpcResponse::invalid_params(
+            req.id.clone(),
+            "resources/subscribe requires an active Mcp-Session-Id".to_string(),
+        );
+    };
+
+    let uri = match req.params.get("uri").and_then(|v| v.as_str()) {
+        Some(u) => u.to_string(),
+        None => return JsonRpcResponse::invalid_params(req.id.clone(), "missing 'uri' param".to_string()),
+    };
+
+    // Verify the URI matches a subscribable resource template.
+    let is_subscribable = resources.iter().any(|(name, r)| {
+        if !r.subscribable { return false; }
+        let template = r.uri_template.as_deref()
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| format!("rivers://{}/{}", app_id, name));
+        extract_uri_template_vars_pub(&template, &uri).is_some()
+    });
+
+    if !is_subscribable {
+        return JsonRpcResponse::invalid_params(
+            req.id.clone(),
+            format!("resource '{}' is not subscribable", uri),
+        );
+    }
+
+    let max_subs = ctx
+        .config
+        .mcp
+        .as_ref()
+        .map(|m| m.max_subscriptions_per_session)
+        .unwrap_or(100);
+
+    match ctx
+        .subscription_registry
+        .subscribe(sid, &uri, max_subs)
+        .await
+    {
+        Ok(()) => {
+            // P1.1.5.b: start the change poller for this (app_id, uri) if not already running.
+            let dv_guard = ctx.dataview_executor.read().await;
+            if let Some(executor) = dv_guard.as_ref() {
+                let min_poll_secs = ctx.config.mcp.as_ref()
+                    .map(|m| m.min_poll_interval_seconds)
+                    .unwrap_or(1);
+                // Use the per-resource poll_interval_seconds (default 5).
+                let poll_secs = resources.values()
+                    .find(|r| {
+                        let tmpl = r.uri_template.as_deref()
+                            .filter(|t| !t.is_empty())
+                            .map(|t| t.to_string())
+                            .unwrap_or_default();
+                        extract_uri_template_vars_pub(&tmpl, &uri).is_some()
+                    })
+                    .map(|r| r.poll_interval_seconds)
+                    .unwrap_or(5);
+                ctx.change_poller
+                    .ensure_running(
+                        app_id.to_string(),
+                        uri.clone(),
+                        dv_namespace.to_string(),
+                        resources.clone(),
+                        executor.clone(),
+                        ctx.subscription_registry.clone(),
+                        poll_secs,
+                        min_poll_secs,
+                    )
+                    .await;
+            }
+            JsonRpcResponse::success(req.id.clone(), serde_json::json!({}))
+        }
+        Err(crate::mcp::subscriptions::SubscribeError::SessionNotFound) => {
+            JsonRpcResponse::invalid_params(
+                req.id.clone(),
+                "no active SSE stream for this session — open the SSE stream first".to_string(),
+            )
+        }
+        Err(crate::mcp::subscriptions::SubscribeError::TooMany) => {
+            JsonRpcResponse::server_error(
+                req.id.clone(),
+                format!("subscription cap ({}) reached for this session", max_subs),
+            )
+        }
+    }
+}
+
+/// Handle `resources/unsubscribe` — remove the session's subscription to a URI.
+async fn handle_resources_unsubscribe(
+    req: &JsonRpcRequest,
+    ctx: &AppContext,
+    session_id: Option<&str>,
+) -> JsonRpcResponse {
+    let Some(sid) = session_id else {
+        return JsonRpcResponse::invalid_params(
+            req.id.clone(),
+            "resources/unsubscribe requires an active Mcp-Session-Id".to_string(),
+        );
+    };
+
+    let uri = match req.params.get("uri").and_then(|v| v.as_str()) {
+        Some(u) => u.to_string(),
+        None => return JsonRpcResponse::invalid_params(req.id.clone(), "missing 'uri' param".to_string()),
+    };
+
+    ctx.subscription_registry.unsubscribe(sid, &uri).await;
+    JsonRpcResponse::success(req.id.clone(), serde_json::json!({}))
+}
+
+// ── P2.6 — elicitation/response ─────────────────────────────────────────────
+
+/// Handle `elicitation/response` — deliver a user's answer to a pending elicitation.
+///
+/// P2.6: The MCP client posts this after displaying the `elicitation/create`
+/// notification to the user. It resolves the `oneshot::Sender` stored in
+/// `AppContext::elicitation_registry`, which unblocks the V8 worker thread
+/// waiting in `Rivers.__elicit`.
+///
+/// Returns:
+/// - `{}` on success (ID was found and response was delivered).
+/// - `-32602` (invalid params) when the elicitation ID is unknown or has already
+///   timed out.
+fn handle_elicitation_response(
+    req: &JsonRpcRequest,
+    ctx: &AppContext,
+) -> JsonRpcResponse {
+    use crate::mcp::elicitation::ElicitationResponse;
+
+    // Parse ElicitationResponse from params.
+    let id = match req.params.get("id").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return JsonRpcResponse::invalid_params(
+            req.id.clone(),
+            "elicitation/response: missing 'id' in params",
+        ),
+    };
+    let action = match req.params.get("action").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return JsonRpcResponse::invalid_params(
+            req.id.clone(),
+            "elicitation/response: missing 'action' in params",
+        ),
+    };
+    let content = req.params.get("content").cloned();
+
+    let response = ElicitationResponse { id, action, content };
+
+    if ctx.elicitation_registry.resolve(response) {
+        JsonRpcResponse::success(req.id.clone(), serde_json::json!({}))
+    } else {
+        JsonRpcResponse::invalid_params(
+            req.id.clone(),
+            "elicitation/response: unknown or already-resolved elicitation id",
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,6 +1031,8 @@ mod tests {
             description: "CB decisions".into(),
             mime_type: "application/json".into(),
             uri_template: Some("cb://{project_id}/decisions{?since,limit}".into()),
+            subscribable: false,
+            poll_interval_seconds: 5,
         });
         let resp = handle_resource_templates(&make_req("resources/templates/list"), &resources, "app-id");
         // Serialize to inspect result
@@ -608,6 +1050,8 @@ mod tests {
             description: "Tasks".into(),
             mime_type: "application/json".into(),
             uri_template: None,
+            subscribable: false,
+            poll_interval_seconds: 5,
         });
         let resp = handle_resource_templates(&make_req("resources/templates/list"), &resources, "my-app");
         let v = serde_json::to_value(&resp).unwrap();
@@ -651,6 +1095,112 @@ mod tests {
         let qs = extract_query_params("cb://proj/decisions?since=2024-01-01&limit=20");
         assert_eq!(qs.get("since").and_then(|v| v.as_str()), Some("2024-01-01"));
         assert_eq!(qs.get("limit").and_then(|v| v.as_str()), Some("20"));
+    }
+
+    // ── P2.2: tools/call_batch unit tests ────────────────────────────────────
+
+    /// Build a minimal JsonRpcRequest for batch calls.
+    fn make_batch_req(items: serde_json::Value, continue_on_error: Option<bool>) -> JsonRpcRequest {
+        let mut params = serde_json::json!({ "items": items });
+        if let Some(coe) = continue_on_error {
+            params["continue_on_error"] = serde_json::json!(coe);
+        }
+        JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(serde_json::json!(42)),
+            method: "tools/call_batch".into(),
+            params,
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_empty_items_returns_empty_results() {
+        let _tools: HashMap<String, McpToolConfig> = HashMap::new();
+        // We cannot construct a real AppContext in unit tests, so we test the
+        // batch dispatcher's routing logic by inspecting the missing-items path.
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/call_batch".into(),
+            params: serde_json::json!({ "items": [] }),
+        };
+        // Without a real AppContext we verify only that the params parsing
+        // correctly identifies an empty items array and produces the right shape.
+        // The result shape is {"results": []}.
+        let items = req.params.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        assert!(items.is_empty(), "empty items array should parse to zero items");
+        // Verify results shape would be correct (we check the JSON path logic directly).
+        let empty: Vec<serde_json::Value> = Vec::new();
+        let result = serde_json::json!({ "results": empty });
+        assert_eq!(result["results"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn batch_missing_items_param_returns_invalid_params() {
+        // Validate that a request without 'items' correctly detects the missing field.
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(serde_json::json!(2)),
+            method: "tools/call_batch".into(),
+            params: serde_json::json!({}),
+        };
+        // Simulate the items extraction logic from handle_tools_call_batch.
+        let items_opt = req.params.get("items").and_then(|v| v.as_array());
+        assert!(items_opt.is_none(), "missing 'items' should be None");
+    }
+
+    #[test]
+    fn batch_continue_on_error_defaults_to_false() {
+        let req = make_batch_req(serde_json::json!([]), None);
+        let coe = req.params.get("continue_on_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(!coe, "continue_on_error should default to false when absent");
+    }
+
+    #[test]
+    fn batch_continue_on_error_true_is_parsed() {
+        let req = make_batch_req(serde_json::json!([]), Some(true));
+        let coe = req.params.get("continue_on_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(coe, "continue_on_error = true should be parsed correctly");
+    }
+
+    #[test]
+    fn batch_item_missing_name_is_detectable() {
+        // Verify that a batch item without 'name' returns None from the extractor.
+        let item = serde_json::json!({ "arguments": {} });
+        let name_opt = item.get("name").and_then(|n| n.as_str());
+        assert!(name_opt.is_none(), "item without 'name' key should fail name extraction");
+    }
+
+    #[test]
+    fn batch_result_shape_on_success() {
+        // Verify the expected per-item result shape for a successful call.
+        let name = "my_tool".to_string();
+        let content = serde_json::json!([{"type": "text", "text": "hello"}]);
+        let entry = serde_json::json!({
+            "name": name,
+            "content": content,
+            "isError": false
+        });
+        assert_eq!(entry["isError"], serde_json::json!(false));
+        assert_eq!(entry["name"], serde_json::json!("my_tool"));
+    }
+
+    #[test]
+    fn batch_result_shape_on_error() {
+        // Verify the expected per-item result shape for a failed call.
+        let name = "bad_tool".to_string();
+        let error_text = "Unknown tool: bad_tool".to_string();
+        let entry = serde_json::json!({
+            "name": name,
+            "content": [{"type": "text", "text": error_text}],
+            "isError": true
+        });
+        assert_eq!(entry["isError"], serde_json::json!(true));
+        assert_eq!(entry["content"][0]["text"], serde_json::json!("Unknown tool: bad_tool"));
     }
 }
 

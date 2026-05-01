@@ -901,8 +901,9 @@ Directory where Rivers searches for plugin dylibs (`librivers_plugin_*.dylib`).
 # Scaffold a new bundle (recommended starting point)
 riverpackage init {bundle-name}/
 
-# Validate bundle
-riversctl validate {bundle-path}/
+# Validate before deploying — runs the 4-layer pipeline (structural, existence,
+# cross-reference, syntax). Fix all errors locally before riversctl start or cargo deploy.
+riverpackage validate {bundle-path}/
 
 # Build SPA (if applicable)
 cd {app-main}/libraries && npm install && npm run build

@@ -1,14 +1,23 @@
 //! rivers-lockbox — standalone LockBox management CLI.
 //!
 //! Commands: init, add, list, show, alias, rotate, remove, rekey, validate
+//!
+//! Storage: a single Age-encrypted TOML keystore (`keystore.rkeystore`) managed
+//! via `rivers-lockbox-engine`. Replaces the previous per-entry `.age` file store.
 
 #![warn(missing_docs)]
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use age::secrecy::ExposeSecret;
+use chrono::Utc;
+use rivers_lockbox_engine::{
+    Keystore, KeystoreEntry,
+    decrypt_keystore, encrypt_keystore,
+    validate_entry_name,
+};
+use zeroize::Zeroizing;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -79,58 +88,60 @@ fn print_usage() {
     eprintln!("Commands:");
     eprintln!("  init              Create new lockbox with age keypair");
     eprintln!("  add <name>        Add a secret (prompts for value via hidden TTY input)");
-    eprintln!("  list              List all entry names");
+    eprintln!("  list              List all entry names and aliases");
     eprintln!("  show <name>       Decrypt and show a secret");
-    eprintln!("  alias <a> <target> Create an alias");
+    eprintln!("  alias <a> <target> Add an alias for an existing entry");
     eprintln!("  rotate <name>     Replace a secret value (prompts for value via hidden TTY input)");
-    eprintln!("  remove <name>     Remove a secret");
-    eprintln!("  rekey             Re-encrypt all secrets with new identity");
+    eprintln!("  remove <name>     Remove a secret entry and its aliases");
+    eprintln!("  rekey             Re-encrypt keystore with a new identity (transactional)");
     eprintln!("  validate          Verify keystore integrity");
     eprintln!();
     eprintln!("Environment: RIVERS_LOCKBOX_DIR (default: ./lockbox)");
 }
 
 fn read_secret_value(prompt: &str) -> Result<String, String> {
-    // Use rpassword for hidden TTY input — secret values must not appear on
-    // the command line (shell history) or echo to the terminal.
     rpassword::prompt_password(prompt)
         .map_err(|e| format!("failed to read secret: {e}"))
-}
-
-fn entries_dir(lockbox_dir: &str) -> PathBuf {
-    Path::new(lockbox_dir).join("entries")
 }
 
 fn identity_path(lockbox_dir: &str) -> PathBuf {
     Path::new(lockbox_dir).join("identity.key")
 }
 
-fn aliases_path(lockbox_dir: &str) -> PathBuf {
-    Path::new(lockbox_dir).join("aliases.json")
+fn keystore_path(lockbox_dir: &str) -> PathBuf {
+    Path::new(lockbox_dir).join("keystore.rkeystore")
 }
 
-fn load_identity(lockbox_dir: &str) -> Result<age::x25519::Identity, String> {
+fn load_identity_str(lockbox_dir: &str) -> Result<Zeroizing<String>, String> {
     let path = identity_path(lockbox_dir);
     let raw = fs::read_to_string(&path)
         .map_err(|e| format!("cannot read identity at {}: {e}", path.display()))?;
-    let key_str = zeroize::Zeroizing::new(raw.trim().to_string());
-    key_str.parse::<age::x25519::Identity>()
-        .map_err(|e| format!("invalid identity key: {e}"))
+    Ok(Zeroizing::new(raw.trim().to_string()))
 }
 
-fn load_recipient(lockbox_dir: &str) -> Result<age::x25519::Recipient, String> {
+fn load_identity(lockbox_dir: &str) -> Result<age::x25519::Identity, String> {
+    let id_str = load_identity_str(lockbox_dir)?;
+    id_str.parse::<age::x25519::Identity>()
+        .map_err(|_| "invalid identity key".to_string())
+}
+
+fn load_keystore(lockbox_dir: &str) -> Result<Keystore, String> {
+    let id_str = load_identity_str(lockbox_dir)?;
+    let ks_path = keystore_path(lockbox_dir);
+    decrypt_keystore(&ks_path, &id_str)
+        .map_err(|e| format!("cannot decrypt keystore: {e}"))
+}
+
+fn save_keystore_atomic(lockbox_dir: &str, keystore: &Keystore) -> Result<(), String> {
+    let ks_path = keystore_path(lockbox_dir);
+    let tmp_path = ks_path.with_extension("rkeystore.tmp");
     let identity = load_identity(lockbox_dir)?;
-    Ok(identity.to_public())
-}
-
-fn encrypt_value(recipient: &age::x25519::Recipient, value: &[u8]) -> Result<Vec<u8>, String> {
-    age::encrypt(recipient, value)
-        .map_err(|e| format!("encryption: {e}"))
-}
-
-fn decrypt_value(identity: &age::x25519::Identity, encrypted: &[u8]) -> Result<Vec<u8>, String> {
-    age::decrypt(identity, encrypted)
-        .map_err(|e| format!("decryption: {e}"))
+    let recipient_str = identity.to_public().to_string();
+    encrypt_keystore(&tmp_path, &recipient_str, keystore)
+        .map_err(|e| format!("encrypt keystore: {e}"))?;
+    fs::rename(&tmp_path, &ks_path)
+        .map_err(|e| format!("atomic rename failed: {e}"))?;
+    Ok(())
 }
 
 fn cmd_init(lockbox_dir: &str) -> Result<(), String> {
@@ -138,26 +149,28 @@ fn cmd_init(lockbox_dir: &str) -> Result<(), String> {
     if dir.exists() {
         return Err(format!("lockbox directory already exists: {}", dir.display()));
     }
-    fs::create_dir_all(entries_dir(lockbox_dir)).map_err(|e| format!("mkdir: {e}"))?;
+    fs::create_dir_all(dir).map_err(|e| format!("mkdir: {e}"))?;
 
     let identity = age::x25519::Identity::generate();
     let public_key = identity.to_public().to_string();
+    let recipient_str = public_key.clone();
 
     let id_path = identity_path(lockbox_dir);
     let secret_str = identity.to_string();
     fs::write(&id_path, secret_str.expose_secret().as_bytes())
         .map_err(|e| format!("write identity: {e}"))?;
 
-    // Set file permissions 600 on Unix
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&id_path, fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("chmod: {e}"))?;
+            .map_err(|e| format!("chmod identity: {e}"))?;
     }
 
-    // Empty aliases
-    fs::write(aliases_path(lockbox_dir), b"{}").map_err(|e| format!("write aliases: {e}"))?;
+    let empty_keystore = Keystore { version: 1, entries: vec![] };
+    let ks_path = keystore_path(lockbox_dir);
+    encrypt_keystore(&ks_path, &recipient_str, &empty_keystore)
+        .map_err(|e| format!("init keystore: {e}"))?;
 
     println!("Lockbox initialized at {}", dir.display());
     println!("Public key: {public_key}");
@@ -165,239 +178,170 @@ fn cmd_init(lockbox_dir: &str) -> Result<(), String> {
 }
 
 fn cmd_add(lockbox_dir: &str, name: &str, value: &str) -> Result<(), String> {
-    // Validate name using core library rules (rejects path traversal, special chars)
-    rivers_lockbox_engine::validate_entry_name(name)
-        .map_err(|e| e.to_string())?;
+    validate_entry_name(name).map_err(|e| e.to_string())?;
 
-    let entry_path = entries_dir(lockbox_dir).join(format!("{name}.age"));
-    if entry_path.exists() {
+    let mut keystore = load_keystore(lockbox_dir)?;
+
+    if keystore.entries.iter().any(|e| e.name == name) {
         return Err(format!("entry '{name}' already exists — use 'rotate' to update"));
     }
 
-    let recipient = load_recipient(lockbox_dir)?;
-    let encrypted = encrypt_value(&recipient, value.as_bytes())?;
-    fs::write(&entry_path, &encrypted).map_err(|e| format!("write entry: {e}"))?;
+    let now = Utc::now();
+    keystore.entries.push(KeystoreEntry {
+        name: name.to_string(),
+        value: value.to_string(),
+        entry_type: "string".to_string(),
+        aliases: vec![],
+        created: now,
+        updated: now,
+        driver: None,
+        username: None,
+        hosts: vec![],
+        database: None,
+    });
 
+    save_keystore_atomic(lockbox_dir, &keystore)?;
     println!("Added: {name}");
     Ok(())
 }
 
 fn cmd_list(lockbox_dir: &str) -> Result<(), String> {
-    let dir = entries_dir(lockbox_dir);
-    if !dir.exists() {
-        return Err("lockbox not initialized — run 'rivers-lockbox init'".into());
-    }
+    let keystore = load_keystore(lockbox_dir)?;
 
-    let mut entries: Vec<String> = fs::read_dir(&dir)
-        .map_err(|e| format!("read dir: {e}"))?
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            name.strip_suffix(".age").map(|n| n.to_string())
-        })
-        .collect();
-    entries.sort();
-
-    // Also list aliases (best-effort; absent file is silently skipped,
-    // but a corrupt file is reported so users know something is wrong).
-    let aliases_file = aliases_path(lockbox_dir);
-    let aliases: HashMap<String, String> = if aliases_file.exists() {
-        let raw = fs::read_to_string(&aliases_file)
-            .map_err(|e| format!("cannot read aliases file: {e}"))?;
-        serde_json::from_str(&raw)
-            .map_err(|e| format!("aliases file is corrupt: {e}"))?
-    } else {
-        HashMap::new()
-    };
-
-    for entry in &entries {
-        println!("{entry}");
-    }
-    if !aliases.is_empty() {
-        println!();
-        for (alias, target) in &aliases {
-            println!("{alias} → {target}");
+    for entry in &keystore.entries {
+        println!("{}", entry.name);
+        for alias in &entry.aliases {
+            println!("  alias: {alias} → {}", entry.name);
         }
+    }
+    if keystore.entries.is_empty() {
+        println!("(no entries)");
     }
     Ok(())
 }
 
 fn cmd_show(lockbox_dir: &str, name: &str) -> Result<(), String> {
-    // Check aliases first — fail loudly if aliases file is corrupt.
-    let aliases_file = aliases_path(lockbox_dir);
-    let aliases: HashMap<String, String> = if aliases_file.exists() {
-        let raw = fs::read_to_string(&aliases_file)
-            .map_err(|e| format!("cannot read aliases file: {e}"))?;
-        serde_json::from_str(&raw)
-            .map_err(|e| format!("aliases file is corrupt: {e}"))?
-    } else {
-        HashMap::new()
-    };
-    let resolved = aliases.get(name).map(|s| s.as_str()).unwrap_or(name);
+    let keystore = load_keystore(lockbox_dir)?;
 
-    let entry_path = entries_dir(lockbox_dir).join(format!("{resolved}.age"));
-    if !entry_path.exists() {
-        return Err(format!("entry '{name}' not found"));
-    }
+    let entry = keystore.entries.iter()
+        .find(|e| e.name == name || e.aliases.iter().any(|a| a == name))
+        .ok_or_else(|| format!("entry '{name}' not found"))?;
 
-    let identity = load_identity(lockbox_dir)?;
-    let encrypted = fs::read(&entry_path).map_err(|e| format!("read entry: {e}"))?;
-    let decrypted = zeroize::Zeroizing::new(decrypt_value(&identity, &encrypted)?);
-    let value = String::from_utf8(decrypted.to_vec()).map_err(|e| format!("UTF-8: {e}"))?;
-
-    println!("{value}");
+    println!("{}", entry.value);
     Ok(())
 }
 
 fn cmd_alias(lockbox_dir: &str, alias: &str, target: &str) -> Result<(), String> {
-    let target_path = entries_dir(lockbox_dir).join(format!("{target}.age"));
-    if !target_path.exists() {
-        return Err(format!("target entry '{target}' not found"));
+    validate_entry_name(alias).map_err(|e| e.to_string())?;
+
+    let mut keystore = load_keystore(lockbox_dir)?;
+
+    // Reject if alias name already exists as an entry name or alias elsewhere.
+    let alias_conflict = keystore.entries.iter().any(|e| {
+        e.name == alias || e.aliases.iter().any(|a| a == alias)
+    });
+    if alias_conflict {
+        return Err(format!("'{alias}' already exists as an entry or alias"));
     }
 
-    // Read aliases file — fail loudly if it exists but is unparseable rather
-    // than silently overwriting with an empty map (which would destroy aliases).
-    let aliases_file = aliases_path(lockbox_dir);
-    let mut aliases: HashMap<String, String> = if aliases_file.exists() {
-        let raw = fs::read_to_string(&aliases_file)
-            .map_err(|e| format!("cannot read aliases file: {e}"))?;
-        serde_json::from_str(&raw)
-            .map_err(|e| format!("aliases file is corrupt — refusing to overwrite: {e}"))?
-    } else {
-        HashMap::new()
-    };
+    let entry = keystore.entries.iter_mut()
+        .find(|e| e.name == target)
+        .ok_or_else(|| format!("target entry '{target}' not found"))?;
 
-    aliases.insert(alias.to_string(), target.to_string());
-    let json = serde_json::to_string_pretty(&aliases).map_err(|e| format!("json: {e}"))?;
-    fs::write(&aliases_file, json.as_bytes()).map_err(|e| format!("write: {e}"))?;
+    entry.aliases.push(alias.to_string());
+    entry.updated = Utc::now();
 
+    save_keystore_atomic(lockbox_dir, &keystore)?;
     println!("Alias: {alias} → {target}");
     Ok(())
 }
 
 fn cmd_rotate(lockbox_dir: &str, name: &str, new_value: &str) -> Result<(), String> {
-    let entry_path = entries_dir(lockbox_dir).join(format!("{name}.age"));
-    if !entry_path.exists() {
-        return Err(format!("entry '{name}' not found — use 'add' to create"));
-    }
+    let mut keystore = load_keystore(lockbox_dir)?;
 
-    let recipient = load_recipient(lockbox_dir)?;
-    let encrypted = encrypt_value(&recipient, new_value.as_bytes())?;
-    fs::write(&entry_path, &encrypted).map_err(|e| format!("write: {e}"))?;
+    let entry = keystore.entries.iter_mut()
+        .find(|e| e.name == name)
+        .ok_or_else(|| format!("entry '{name}' not found — use 'add' to create"))?;
 
+    entry.value = new_value.to_string();
+    entry.updated = Utc::now();
+
+    save_keystore_atomic(lockbox_dir, &keystore)?;
     println!("Rotated: {name}");
     Ok(())
 }
 
 fn cmd_remove(lockbox_dir: &str, name: &str) -> Result<(), String> {
-    let entry_path = entries_dir(lockbox_dir).join(format!("{name}.age"));
-    if !entry_path.exists() {
+    let mut keystore = load_keystore(lockbox_dir)?;
+
+    let before = keystore.entries.len();
+    keystore.entries.retain(|e| e.name != name);
+    if keystore.entries.len() == before {
         return Err(format!("entry '{name}' not found"));
     }
-    fs::remove_file(&entry_path).map_err(|e| format!("remove: {e}"))?;
 
-    // Also remove any aliases pointing to this entry.
-    // Fail loudly if the aliases file exists but is unparseable — do not
-    // silently overwrite with an empty map (which would destroy aliases).
-    let aliases_file = aliases_path(lockbox_dir);
-    if aliases_file.exists() {
-        let raw = fs::read_to_string(&aliases_file)
-            .map_err(|e| format!("cannot read aliases file: {e}"))?;
-        let mut aliases: HashMap<String, String> = serde_json::from_str(&raw)
-            .map_err(|e| format!("aliases file is corrupt — refusing to overwrite: {e}"))?;
-        aliases.retain(|_, v| v != name);
-        let json = serde_json::to_string_pretty(&aliases)
-            .map_err(|e| format!("failed to serialize aliases: {e}"))?;
-        fs::write(&aliases_file, json.as_bytes())
-            .map_err(|e| format!("failed to update aliases: {e}"))?;
-    }
-
+    save_keystore_atomic(lockbox_dir, &keystore)?;
     println!("Removed: {name}");
     Ok(())
 }
 
 fn cmd_rekey(lockbox_dir: &str) -> Result<(), String> {
-    let old_identity = load_identity(lockbox_dir)?;
+    // Transactional rekey via a staging directory:
+    //   1. Load current keystore
+    //   2. Generate new identity
+    //   3. Write staging/identity.key + staging/keystore.rkeystore with new key
+    //   4. Rename staging dir → lockbox dir (atomic swap)
+    let keystore = load_keystore(lockbox_dir)?;
+
     let new_identity = age::x25519::Identity::generate();
-    let new_recipient = new_identity.to_public();
+    let new_recipient_str = new_identity.to_public().to_string();
 
-    // 1. Read + decrypt + re-encrypt ALL entries into memory first
-    let dir = entries_dir(lockbox_dir);
-    let entries: Vec<_> = fs::read_dir(&dir)
-        .map_err(|e| format!("read dir: {e}"))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "age"))
-        .collect();
-
-    let mut staged: Vec<(PathBuf, Vec<u8>)> = Vec::with_capacity(entries.len());
-    for entry in &entries {
-        let encrypted = fs::read(entry.path()).map_err(|e| format!("read: {e}"))?;
-        let decrypted = zeroize::Zeroizing::new(decrypt_value(&old_identity, &encrypted)?);
-        let re_encrypted = encrypt_value(&new_recipient, &decrypted)?;
-        staged.push((entry.path(), re_encrypted));
+    let staging_dir = format!("{lockbox_dir}.staging");
+    if Path::new(&staging_dir).exists() {
+        fs::remove_dir_all(&staging_dir)
+            .map_err(|e| format!("cannot remove leftover staging dir: {e}"))?;
     }
+    fs::create_dir_all(&staging_dir).map_err(|e| format!("mkdir staging: {e}"))?;
 
-    // 2. Write new identity to a temp file, then rename into place (atomic on most filesystems)
-    let id_path = identity_path(lockbox_dir);
-    let tmp_id_path = id_path.with_extension("key.tmp");
+    let new_id_path = Path::new(&staging_dir).join("identity.key");
     let secret_str = new_identity.to_string();
-    fs::write(&tmp_id_path, secret_str.expose_secret().as_bytes())
-        .map_err(|e| format!("write temp identity: {e}"))?;
-
-    // 3. Rename temp identity file to real path
-    fs::rename(&tmp_id_path, &id_path)
-        .map_err(|e| format!("rename identity: {e}"))?;
-
-    // 4. Write all re-encrypted entry files
-    for (path, data) in &staged {
-        fs::write(path, data).map_err(|e| format!("write entry: {e}"))?;
-    }
-
-    // 5. chmod 0o600 on identity file with error propagation
+    fs::write(&new_id_path, secret_str.expose_secret().as_bytes())
+        .map_err(|e| format!("write staging identity: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&id_path, fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("chmod: {e}"))?;
+        fs::set_permissions(&new_id_path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("chmod staging identity: {e}"))?;
     }
 
-    println!("Rekeyed {} entries", entries.len());
-    println!("New public key: {}", new_recipient);
+    let new_ks_path = Path::new(&staging_dir).join("keystore.rkeystore");
+    encrypt_keystore(&new_ks_path, &new_recipient_str, &keystore)
+        .map_err(|e| format!("encrypt staging keystore: {e}"))?;
+
+    // Atomic swap: rename old → backup, staging → live, remove backup
+    let backup_dir = format!("{lockbox_dir}.old");
+    if Path::new(&backup_dir).exists() {
+        fs::remove_dir_all(&backup_dir)
+            .map_err(|e| format!("cannot remove old backup: {e}"))?;
+    }
+    fs::rename(lockbox_dir, &backup_dir)
+        .map_err(|e| format!("rename current → backup: {e}"))?;
+    fs::rename(&staging_dir, lockbox_dir)
+        .map_err(|e| format!("rename staging → live: {e}"))?;
+    let _ = fs::remove_dir_all(&backup_dir);
+
+    println!("Rekeyed {} entries", keystore.entries.len());
+    println!("New public key: {new_recipient_str}");
     Ok(())
 }
 
 fn cmd_validate(lockbox_dir: &str) -> Result<(), String> {
-    let identity = load_identity(lockbox_dir)?;
-    let dir = entries_dir(lockbox_dir);
-
-    if !dir.exists() {
-        return Err("lockbox not initialized".into());
-    }
-
-    let mut ok_count = 0;
-    let mut err_count = 0;
-
-    for entry in fs::read_dir(&dir).map_err(|e| format!("read dir: {e}"))? {
-        let entry = entry.map_err(|e| format!("entry: {e}"))?;
-        if entry.path().extension().map_or(true, |ext| ext != "age") {
-            continue;
+    match load_keystore(lockbox_dir) {
+        Ok(keystore) => {
+            println!("{} entries validated OK", keystore.entries.len());
+            Ok(())
         }
-        let name = entry.path().file_stem().unwrap().to_string_lossy().to_string();
-        let encrypted = fs::read(entry.path()).map_err(|e| format!("read {name}: {e}"))?;
-        match decrypt_value(&identity, &encrypted) {
-            Ok(_) => { ok_count += 1; }
-            Err(e) => {
-                eprintln!("FAIL: {name} — {e}");
-                err_count += 1;
-            }
-        }
-    }
-
-    println!("{ok_count} entries OK, {err_count} errors");
-    if err_count > 0 {
-        Err(format!("{err_count} entries failed validation"))
-    } else {
-        Ok(())
+        Err(e) => Err(format!("keystore validation failed: {e}")),
     }
 }
 
@@ -405,69 +349,118 @@ fn cmd_validate(lockbox_dir: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn temp_lockbox() -> tempfile::TempDir {
-        tempfile::tempdir().unwrap()
+    fn init_tmp() -> (tempfile::TempDir, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("lb");
+        let dir_str = dir.to_str().unwrap().to_string();
+        cmd_init(&dir_str).expect("init failed");
+        (tmp, dir_str)
     }
 
     #[test]
-    fn test_init_creates_directory() {
-        let tmp = temp_lockbox();
-        let dir = tmp.path().join("lb");
-        let result = cmd_init(dir.to_str().unwrap());
-        assert!(result.is_ok());
-        assert!(dir.join("identity.key").exists());
-        assert!(dir.join("entries").exists());
-        assert!(dir.join("aliases.json").exists());
+    fn init_creates_keystore_and_identity() {
+        let (_tmp, dir) = init_tmp();
+        assert!(Path::new(&dir).join("identity.key").exists());
+        assert!(Path::new(&dir).join("keystore.rkeystore").exists());
     }
 
     #[test]
-    fn test_init_fails_if_exists() {
-        let tmp = temp_lockbox();
-        let dir = tmp.path().join("lb");
-        cmd_init(dir.to_str().unwrap()).unwrap();
-        let result = cmd_init(dir.to_str().unwrap());
+    fn init_fails_if_dir_exists() {
+        let (_tmp, dir) = init_tmp();
+        let result = cmd_init(&dir);
         assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already exists"));
     }
 
     #[test]
-    fn test_add_and_show_roundtrip() {
-        let tmp = temp_lockbox();
-        let dir = tmp.path().join("lb");
-        cmd_init(dir.to_str().unwrap()).unwrap();
-        cmd_add(dir.to_str().unwrap(), "dbpassword", "secret123").unwrap();
-        // Show should succeed (actual output verification would need capture)
-        let result = cmd_show(dir.to_str().unwrap(), "dbpassword");
+    fn add_and_show_roundtrip() {
+        let (_tmp, dir) = init_tmp();
+        cmd_add(&dir, "dbpassword", "secret123").unwrap();
+        let result = cmd_show(&dir, "dbpassword");
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_add_duplicate_fails() {
-        let tmp = temp_lockbox();
-        let dir = tmp.path().join("lb");
-        cmd_init(dir.to_str().unwrap()).unwrap();
-        cmd_add(dir.to_str().unwrap(), "mykey", "val1").unwrap();
-        let result = cmd_add(dir.to_str().unwrap(), "mykey", "val2");
+    fn add_duplicate_fails() {
+        let (_tmp, dir) = init_tmp();
+        cmd_add(&dir, "mykey", "val1").unwrap();
+        let result = cmd_add(&dir, "mykey", "val2");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already exists"));
+    }
+
+    #[test]
+    fn remove_deletes_entry() {
+        let (_tmp, dir) = init_tmp();
+        cmd_add(&dir, "mykey", "val").unwrap();
+        cmd_remove(&dir, "mykey").unwrap();
+        let result = cmd_show(&dir, "mykey");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn remove_nonexistent_fails() {
+        let (_tmp, dir) = init_tmp();
+        let result = cmd_remove(&dir, "ghost");
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_remove_deletes_entry() {
-        let tmp = temp_lockbox();
-        let dir = tmp.path().join("lb");
-        cmd_init(dir.to_str().unwrap()).unwrap();
-        cmd_add(dir.to_str().unwrap(), "mykey", "val").unwrap();
-        cmd_remove(dir.to_str().unwrap(), "mykey").unwrap();
-        let result = cmd_show(dir.to_str().unwrap(), "mykey");
+    fn rotate_updates_value() {
+        let (_tmp, dir) = init_tmp();
+        cmd_add(&dir, "k", "old").unwrap();
+        cmd_rotate(&dir, "k", "new").unwrap();
+        // Verify via raw keystore inspection
+        let ks = load_keystore(&dir).unwrap();
+        assert_eq!(ks.entries[0].value, "new");
+    }
+
+    #[test]
+    fn alias_resolves_to_entry() {
+        let (_tmp, dir) = init_tmp();
+        cmd_add(&dir, "postgres/prod", "pg-secret").unwrap();
+        cmd_alias(&dir, "pg", "postgres/prod").unwrap();
+        let ks = load_keystore(&dir).unwrap();
+        assert!(ks.entries[0].aliases.contains(&"pg".to_string()));
+    }
+
+    #[test]
+    fn alias_duplicate_rejected() {
+        let (_tmp, dir) = init_tmp();
+        cmd_add(&dir, "postgres/prod", "pg-secret").unwrap();
+        cmd_alias(&dir, "pg", "postgres/prod").unwrap();
+        let result = cmd_alias(&dir, "pg", "postgres/prod");
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_validate_on_valid_keystore() {
-        let tmp = temp_lockbox();
-        let dir = tmp.path().join("lb");
-        cmd_init(dir.to_str().unwrap()).unwrap();
-        cmd_add(dir.to_str().unwrap(), "key1", "val1").unwrap();
-        let result = cmd_validate(dir.to_str().unwrap());
+    fn validate_on_valid_keystore() {
+        let (_tmp, dir) = init_tmp();
+        cmd_add(&dir, "key1", "val1").unwrap();
+        let result = cmd_validate(&dir);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn rekey_produces_new_identity_and_preserves_entries() {
+        let (_tmp, dir) = init_tmp();
+        cmd_add(&dir, "secret/key", "my-value").unwrap();
+        let old_id = fs::read_to_string(Path::new(&dir).join("identity.key")).unwrap();
+        cmd_rekey(&dir).unwrap();
+        let new_id = fs::read_to_string(Path::new(&dir).join("identity.key")).unwrap();
+        assert_ne!(old_id, new_id, "identity must change after rekey");
+        // Entries survive rekey
+        let ks = load_keystore(&dir).unwrap();
+        assert_eq!(ks.entries.len(), 1);
+        assert_eq!(ks.entries[0].name, "secret/key");
+        assert_eq!(ks.entries[0].value, "my-value");
+    }
+
+    #[test]
+    fn invalid_name_rejected() {
+        let (_tmp, dir) = init_tmp();
+        let result = cmd_add(&dir, "INVALID-UPPERCASE", "val");
+        assert!(result.is_err());
     }
 }

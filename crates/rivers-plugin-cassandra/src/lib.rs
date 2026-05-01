@@ -15,7 +15,7 @@ use tracing::debug;
 
 use rivers_driver_sdk::{
     ABI_VERSION, Connection, ConnectionParams, DatabaseDriver, DriverError, DriverRegistrar,
-    Query, QueryResult, QueryValue,
+    Query, QueryResult, QueryValue, read_max_rows,
 };
 
 // ── Driver ─────────────────────────────────────────────────────────────
@@ -53,7 +53,8 @@ impl DatabaseDriver for CassandraDriver {
 
         debug!(host = %params.host, port = %port, keyspace = %params.database, "cassandra: connected");
 
-        Ok(Box::new(CassandraConnection { session }))
+        let max_rows = read_max_rows(params);
+        Ok(Box::new(CassandraConnection { session, max_rows }))
     }
 
     fn supports_transactions(&self) -> bool { false }
@@ -71,6 +72,7 @@ impl DatabaseDriver for CassandraDriver {
 /// Active Cassandra connection wrapping a scylla session.
 pub struct CassandraConnection {
     session: Session,
+    max_rows: usize,
 }
 
 #[async_trait]
@@ -130,9 +132,16 @@ impl CassandraConnection {
             .collect();
 
         let raw_rows = result.rows_or_empty();
-        let mut rows = Vec::with_capacity(raw_rows.len());
+        let mut rows = Vec::with_capacity(raw_rows.len().min(self.max_rows));
 
         for row in raw_rows {
+            if rows.len() >= self.max_rows {
+                tracing::warn!(
+                    max_rows = self.max_rows,
+                    "cassandra: result set truncated to max_rows limit"
+                );
+                break;
+            }
             let mut map = HashMap::new();
             for (i, col_name) in col_specs.iter().enumerate() {
                 let val = row.columns.get(i).and_then(|c| c.as_ref());
@@ -159,7 +168,8 @@ impl CassandraConnection {
             .await
             .map_err(|e| DriverError::Query(format!("cassandra write: {e}")))?;
 
-        Ok(QueryResult { rows: Vec::new(), affected_rows: 1, last_insert_id: None, column_names: None })
+        // CQL does not return affected row counts for non-LWT writes; report 0 (unknown).
+        Ok(QueryResult { rows: Vec::new(), affected_rows: 0, last_insert_id: None, column_names: None })
     }
 }
 
@@ -322,5 +332,26 @@ mod tests {
             Ok(Ok(_)) => panic!("expected error"),
             _ => {} // timeout OK
         }
+    }
+
+    // ── RW4.2.b: max_rows default is 10_000 ─────────────────────────────
+    #[test]
+    fn max_rows_default_is_read_from_sdk() {
+        let params = ConnectionParams {
+            host: "h".into(), port: 9042, database: "".into(),
+            username: "".into(), password: "".into(), options: HashMap::new(),
+        };
+        assert_eq!(rivers_driver_sdk::read_max_rows(&params), 10_000);
+    }
+
+    #[test]
+    fn max_rows_from_option_overrides_default() {
+        let mut opts = HashMap::new();
+        opts.insert("max_rows".into(), "50".into());
+        let params = ConnectionParams {
+            host: "h".into(), port: 9042, database: "".into(),
+            username: "".into(), password: "".into(), options: opts,
+        };
+        assert_eq!(rivers_driver_sdk::read_max_rows(&params), 50);
     }
 }

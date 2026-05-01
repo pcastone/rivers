@@ -17,7 +17,10 @@ pub mod tls;
 pub mod telemetry;
 /// Unknown-key detection for riversd.toml at startup.
 pub mod validate_config;
+/// MCP server-level subscription limits.
+pub mod mcp;
 
+pub use mcp::McpConfig;
 pub use runtime::*;
 pub use security::*;
 pub use server::*;

@@ -16,6 +16,7 @@ tokio = { workspace = true }
 age = { workspace = true }
 zeroize = { workspace = true }
 rpassword = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

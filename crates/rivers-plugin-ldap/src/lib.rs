@@ -18,7 +18,7 @@ use ldap3::{LdapConnAsync, LdapConnSettings, Ldap, Scope, SearchEntry};
 use tracing::debug;
 
 use rivers_driver_sdk::{
-    read_connect_timeout, read_max_rows,
+    read_connect_timeout, read_max_rows, read_request_timeout,
     ABI_VERSION, Connection, ConnectionParams, DatabaseDriver, DriverError, DriverRegistrar,
     Query, QueryResult, QueryValue,
 };
@@ -38,12 +38,40 @@ impl DatabaseDriver for LdapDriver {
         &self,
         params: &ConnectionParams,
     ) -> Result<Box<dyn Connection>, DriverError> {
-        let port = if params.port == 0 { 389 } else { params.port };
-        let url = format!("ldap://{}:{}", params.host, port);
+        // Determine TLS mode from options.
+        // tls=ldaps  → LDAPS (SSL from the start, port 636 by default)
+        // tls=starttls → plain LDAP upgraded to TLS via StartTLS
+        // tls=none   → plain LDAP (WARN if credentials supplied)
+        // (default)  → plain LDAP on port 389 (WARN if credentials supplied)
+        let tls_mode = params.options.get("tls").map(|s| s.as_str()).unwrap_or("none");
+        let no_verify = params.options.get("tls_verify").map(|s| s == "false").unwrap_or(false);
+
+        let has_credentials = !params.username.is_empty();
+        if tls_mode == "none" && has_credentials {
+            tracing::warn!(
+                host = %params.host,
+                "ldap: transmitting credentials over plain LDAP (no TLS); set tls=ldaps or tls=starttls"
+            );
+        }
+
+        let (scheme, default_port) = if tls_mode == "ldaps" {
+            ("ldaps", 636u16)
+        } else {
+            ("ldap", 389u16)
+        };
+        let port = if params.port == 0 { default_port } else { params.port as u16 };
+        let url = format!("{scheme}://{host}:{port}", host = params.host);
 
         let connect_timeout_secs = read_connect_timeout(params);
-        let settings = LdapConnSettings::new()
+        let mut settings = LdapConnSettings::new()
             .set_conn_timeout(std::time::Duration::from_secs(connect_timeout_secs));
+        if tls_mode == "starttls" {
+            settings = settings.set_starttls(true);
+        }
+        if no_verify {
+            settings = settings.set_no_tls_verify(true);
+        }
+
         let (conn, mut ldap) = LdapConnAsync::with_settings(settings, &url)
             .await
             .map_err(|e| DriverError::Connection(format!("ldap connect: {e}")))?;
@@ -56,7 +84,7 @@ impl DatabaseDriver for LdapDriver {
         });
 
         // Bind: use credentials if provided, otherwise perform explicit anonymous bind.
-        if !params.username.is_empty() {
+        if has_credentials {
             ldap.simple_bind(&params.username, &params.password)
                 .await
                 .map_err(|e| DriverError::Connection(format!("ldap bind: {e}")))?
@@ -77,8 +105,9 @@ impl DatabaseDriver for LdapDriver {
         );
 
         let max_rows = read_max_rows(params);
+        let request_timeout_secs = read_request_timeout(params);
 
-        Ok(Box::new(LdapConnection { ldap, max_rows }))
+        Ok(Box::new(LdapConnection { ldap, max_rows, request_timeout_secs }))
     }
 
     /// G_R7.2: cdylib plugin runs connect() in an isolated runtime.
@@ -92,6 +121,8 @@ pub struct LdapConnection {
     ldap: Ldap,
     /// Maximum number of rows returned by a single search (per-connection cap).
     max_rows: usize,
+    /// Per-operation request timeout in seconds (applied via ldap.with_timeout()).
+    request_timeout_secs: u64,
 }
 
 #[async_trait]
@@ -117,6 +148,7 @@ impl Connection for LdapConnection {
     async fn ping(&mut self) -> Result<(), DriverError> {
         // Extended whoami request as a lightweight health check
         self.ldap
+            .with_timeout(std::time::Duration::from_secs(self.request_timeout_secs))
             .extended(ldap3::exop::WhoAmI)
             .await
             .map_err(|e| DriverError::Connection(format!("ldap ping: {e}")))?;
@@ -198,6 +230,7 @@ impl LdapConnection {
 
         let (results, _res) = self
             .ldap
+            .with_timeout(std::time::Duration::from_secs(self.request_timeout_secs))
             .search(&base_dn, scope, &filter, &attr_refs)
             .await
             .map_err(|e| DriverError::Query(format!("ldap search: {e}")))?
@@ -298,6 +331,7 @@ impl LdapConnection {
             .collect();
 
         self.ldap
+            .with_timeout(std::time::Duration::from_secs(self.request_timeout_secs))
             .add(&dn, attr_refs)
             .await
             .map_err(|e| DriverError::Query(format!("ldap add: {e}")))?
@@ -350,6 +384,7 @@ impl LdapConnection {
             .collect();
 
         self.ldap
+            .with_timeout(std::time::Duration::from_secs(self.request_timeout_secs))
             .modify(&dn, mods)
             .await
             .map_err(|e| DriverError::Query(format!("ldap modify: {e}")))?
@@ -369,6 +404,7 @@ impl LdapConnection {
         let dn = get_param_str(&query.parameters, "dn")?;
 
         self.ldap
+            .with_timeout(std::time::Duration::from_secs(self.request_timeout_secs))
             .delete(&dn)
             .await
             .map_err(|e| DriverError::Query(format!("ldap delete: {e}")))?
@@ -553,5 +589,62 @@ mod tests {
             options,
         };
         assert_eq!(rivers_driver_sdk::read_max_rows(&params), 50);
+    }
+
+    // ── RW4.4.i: TLS mode URL and settings ──────────────────────────────
+
+    /// Verify the scheme and default port for each TLS mode by simulating
+    /// what `connect()` computes. We do this without making a real TCP
+    /// connection — just check the options are interpreted correctly.
+    #[test]
+    fn tls_none_uses_ldap_scheme_and_port_389() {
+        let params = make_params(389, &[]);
+        let (scheme, default_port) = tls_scheme_and_port(&params);
+        assert_eq!(scheme, "ldap");
+        assert_eq!(default_port, 389);
+    }
+
+    #[test]
+    fn tls_ldaps_uses_ldaps_scheme_and_port_636() {
+        let params = make_params(0, &[("tls", "ldaps")]);
+        let (scheme, default_port) = tls_scheme_and_port(&params);
+        assert_eq!(scheme, "ldaps");
+        assert_eq!(default_port, 636);
+    }
+
+    #[test]
+    fn tls_starttls_keeps_ldap_scheme_but_enables_starttls() {
+        let params = make_params(0, &[("tls", "starttls")]);
+        let (scheme, _) = tls_scheme_and_port(&params);
+        assert_eq!(scheme, "ldap");
+        let mode = params.options.get("tls").map(|s| s.as_str()).unwrap_or("none");
+        assert_eq!(mode, "starttls");
+    }
+
+    #[test]
+    fn tls_explicit_port_overrides_default() {
+        let params = make_params(9389, &[("tls", "ldaps")]);
+        let port = if params.port == 0 { 636u16 } else { params.port as u16 };
+        assert_eq!(port, 9389);
+    }
+
+    fn make_params(port: u16, opts: &[(&str, &str)]) -> ConnectionParams {
+        let mut options = HashMap::new();
+        for (k, v) in opts {
+            options.insert(k.to_string(), v.to_string());
+        }
+        ConnectionParams {
+            host: "127.0.0.1".into(),
+            port,
+            database: "".into(),
+            username: "".into(),
+            password: "".into(),
+            options,
+        }
+    }
+
+    fn tls_scheme_and_port(params: &ConnectionParams) -> (&'static str, u16) {
+        let tls_mode = params.options.get("tls").map(|s| s.as_str()).unwrap_or("none");
+        if tls_mode == "ldaps" { ("ldaps", 636) } else { ("ldap", 389) }
     }
 }

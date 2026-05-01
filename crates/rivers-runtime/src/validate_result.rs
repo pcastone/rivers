@@ -604,6 +604,10 @@ pub mod error_codes {
     pub const W004: &str = "W004";
     /// skip_introspect = true on a DataView that has a GET query (likely misconfiguration).
     pub const W005: &str = "W005";
+    /// subscribable = true on an MCP resource whose bound DataView has no GET method.
+    pub const W006: &str = "W006";
+    /// cursor_key is set but the query has no ORDER BY clause (cursor pagination requires deterministic ordering).
+    pub const W007: &str = "W007";
 }
 
 // ── Tests ──────────────────────────────────────────────────────────

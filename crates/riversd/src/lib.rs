@@ -1,6 +1,12 @@
 #![warn(missing_docs)]
 //! Rivers daemon — HTTP server, routing, ProcessPool dispatch, engine loading.
 
+/// Framework audit event bus — P2.8.
+///
+/// Emits structured events for handler invocations, MCP tool calls, DataView
+/// reads, and auth resolutions. Enabled via `[audit] enabled = true` in
+/// `riversd.toml`. Exposed as SSE at `GET /admin/audit/stream`.
+pub mod audit;
 pub mod admin;
 pub mod admin_auth;
 pub mod admin_handlers;

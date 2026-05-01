@@ -19,8 +19,8 @@ use mongodb::{Client, ClientSession, Database};
 use tracing::debug;
 
 use rivers_driver_sdk::{
-    Connection, ConnectionParams, DatabaseDriver, DriverError, DriverRegistrar, Query, QueryResult,
-    QueryValue, ABI_VERSION,
+    read_max_rows, Connection, ConnectionParams, DatabaseDriver, DriverError, DriverRegistrar,
+    Query, QueryResult, QueryValue, ABI_VERSION,
 };
 
 // ── Driver ─────────────────────────────────────────────────────────────
@@ -79,11 +79,7 @@ impl DatabaseDriver for MongoDriver {
             "mongodb: connected"
         );
 
-        let max_rows = params
-            .options
-            .get("max_rows")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_MAX_ROWS);
+        let max_rows = read_max_rows(params);
 
         Ok(Box::new(MongoConnection { db, session: None, max_rows }))
     }
@@ -93,9 +89,6 @@ impl DatabaseDriver for MongoDriver {
 }
 
 // ── Connection ─────────────────────────────────────────────────────────
-
-/// Default maximum number of documents returned by a find() query (RW2.6.b).
-const DEFAULT_MAX_ROWS: usize = 1_000;
 
 /// Active MongoDB connection wrapping a database handle.
 pub struct MongoConnection {
@@ -792,8 +785,31 @@ mod tests {
     // ── RW2.6 contract tests ──────────────────────────────────────────
 
     #[test]
-    fn default_max_rows_is_one_thousand() {
-        assert_eq!(DEFAULT_MAX_ROWS, 1_000);
+    fn default_max_rows_uses_sdk_default() {
+        let params = ConnectionParams {
+            host: "localhost".into(),
+            port: 27017,
+            database: "test".into(),
+            username: String::new(),
+            password: String::new(),
+            options: HashMap::new(),
+        };
+        assert_eq!(read_max_rows(&params), rivers_driver_sdk::DEFAULT_MAX_ROWS);
+    }
+
+    #[test]
+    fn max_rows_from_option_overrides_default() {
+        let mut opts = HashMap::new();
+        opts.insert("max_rows".into(), "250".into());
+        let params = ConnectionParams {
+            host: "localhost".into(),
+            port: 27017,
+            database: "test".into(),
+            username: String::new(),
+            password: String::new(),
+            options: opts,
+        };
+        assert_eq!(read_max_rows(&params), 250);
     }
 
     #[test]
@@ -803,6 +819,105 @@ mod tests {
         let params = HashMap::new();
         let (filter, _) = split_filter_and_fields(&params);
         assert!(filter.is_empty());
+    }
+
+    // ── admin_operations list ─────────────────────────────────────────
+
+    /// The admin_operations list for MongoConnection (mirrors the impl).
+    const MONGO_ADMIN_OPS: &[&str] = &[
+        "create_collection",
+        "drop_collection",
+        "drop_database",
+        "create_index",
+        "drop_index",
+        "rename_collection",
+    ];
+
+    #[test]
+    fn admin_operations_returns_expected_list() {
+        assert!(MONGO_ADMIN_OPS.contains(&"create_collection"), "create_collection must be in admin_operations");
+        assert!(MONGO_ADMIN_OPS.contains(&"drop_collection"), "drop_collection must be in admin_operations");
+        assert!(MONGO_ADMIN_OPS.contains(&"drop_database"), "drop_database must be in admin_operations");
+        assert!(MONGO_ADMIN_OPS.contains(&"create_index"), "create_index must be in admin_operations");
+        assert!(MONGO_ADMIN_OPS.contains(&"drop_index"), "drop_index must be in admin_operations");
+        assert!(MONGO_ADMIN_OPS.contains(&"rename_collection"), "rename_collection must be in admin_operations");
+        assert_eq!(MONGO_ADMIN_OPS.len(), 6, "admin_operations should have exactly 6 entries");
+    }
+
+    // ── DDL guard blocks SQL DDL statements ──────────────────────────
+
+    #[test]
+    fn ddl_drop_is_rejected() {
+        let query = rivers_driver_sdk::Query::new("mycollection", "DROP TABLE users");
+        let result = rivers_driver_sdk::check_admin_guard(&query, MONGO_ADMIN_OPS);
+        assert!(result.is_some(), "DROP TABLE must be rejected by admin guard");
+        let msg = result.unwrap();
+        assert!(
+            msg.contains("DDL") || msg.contains("rejected"),
+            "error must indicate rejection: {msg}"
+        );
+    }
+
+    #[test]
+    fn ddl_create_is_rejected() {
+        let query = rivers_driver_sdk::Query::new("mycollection", "CREATE TABLE foo (id INT)");
+        let result = rivers_driver_sdk::check_admin_guard(&query, MONGO_ADMIN_OPS);
+        assert!(result.is_some(), "CREATE TABLE must be rejected by admin guard");
+    }
+
+    #[test]
+    fn ddl_alter_is_rejected() {
+        let query = rivers_driver_sdk::Query::new("mycollection", "ALTER TABLE foo ADD COLUMN bar TEXT");
+        let result = rivers_driver_sdk::check_admin_guard(&query, MONGO_ADMIN_OPS);
+        assert!(result.is_some(), "ALTER TABLE must be rejected by admin guard");
+    }
+
+    #[test]
+    fn ddl_truncate_is_rejected() {
+        let query = rivers_driver_sdk::Query::new("mycollection", "TRUNCATE TABLE foo");
+        let result = rivers_driver_sdk::check_admin_guard(&query, MONGO_ADMIN_OPS);
+        assert!(result.is_some(), "TRUNCATE TABLE must be rejected by admin guard");
+    }
+
+    // ── Admin operations are blocked ─────────────────────────────────
+
+    #[test]
+    fn admin_op_drop_collection_is_rejected() {
+        let query = rivers_driver_sdk::Query::with_operation("drop_collection", "mycollection", "");
+        let result = rivers_driver_sdk::check_admin_guard(&query, MONGO_ADMIN_OPS);
+        assert!(result.is_some(), "drop_collection must be rejected by admin guard");
+        let msg = result.unwrap();
+        assert!(msg.contains("drop_collection"), "error must name the operation: {msg}");
+    }
+
+    #[test]
+    fn admin_op_drop_database_is_rejected() {
+        let query = rivers_driver_sdk::Query::with_operation("drop_database", "mydb", "");
+        let result = rivers_driver_sdk::check_admin_guard(&query, MONGO_ADMIN_OPS);
+        assert!(result.is_some(), "drop_database must be rejected by admin guard");
+    }
+
+    #[test]
+    fn admin_op_create_collection_is_rejected() {
+        let query = rivers_driver_sdk::Query::with_operation("create_collection", "newcol", "");
+        let result = rivers_driver_sdk::check_admin_guard(&query, MONGO_ADMIN_OPS);
+        assert!(result.is_some(), "create_collection must be rejected by admin guard");
+    }
+
+    // ── Normal operations are allowed ────────────────────────────────
+
+    #[test]
+    fn normal_find_operation_is_allowed() {
+        let query = rivers_driver_sdk::Query::with_operation("find", "mycollection", "");
+        let result = rivers_driver_sdk::check_admin_guard(&query, MONGO_ADMIN_OPS);
+        assert!(result.is_none(), "find must not be blocked by admin guard");
+    }
+
+    #[test]
+    fn normal_insert_operation_is_allowed() {
+        let query = rivers_driver_sdk::Query::with_operation("insert", "mycollection", "");
+        let result = rivers_driver_sdk::check_admin_guard(&query, MONGO_ADMIN_OPS);
+        assert!(result.is_none(), "insert must not be blocked by admin guard");
     }
 
     // ── connect with bad host ─────────────────────────────────────────

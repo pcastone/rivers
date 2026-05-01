@@ -1,5 +1,185 @@
 # Changelog
 
+## 2026-04-30 — CB P2 Sprint: P2.2, P2.3, P2.4, P2.6, P2.7, P2.8, P2.9 (all CB QoL requests)
+
+All 7 open CB P2 feature requests implemented. 729 tests pass (230 rivers-runtime, 472 riversd, 27 riverpackage). Version bumped 0.55.27 → 0.58.0 (minor: 7 new capabilities).
+
+| Feature | Files | What | Spec ref |
+|---------|-------|------|----------|
+| P2.2 Batch MCP | `mcp/dispatch.rs` | `tools/call_batch` method; sequential fan-out with `continue_on_error`; `capabilities.tools.batch = true` in `initialize` | P2.2 |
+| P2.4 Migration tooling | `riverpackage/src/migrate.rs` (new), `main.rs` | `riverpackage migrate status/up/down`; `_rivers_migrations` tracking table; SQLite live, PG dry-run; `riverpackage init` scaffolds `migrations/` | P2.4 |
+| P2.7 Cursor pagination | `dataview.rs`, `validate_structural.rs`, `validate_syntax.rs`, `dataview_engine.rs`, `validate_result.rs` | `cursor_key: Option<String>` on DataViewConfig; `after_cursor` param injection; `next_cursor`/`has_more` in response; W007 warning on missing ORDER BY | P2.7 |
+| P2.8 Audit stream | `audit.rs` (new), `rivers-core-config`, `lifecycle.rs`, `view_dispatch.rs`, `mcp/dispatch.rs`, `admin_handlers.rs`, `router.rs` | `AuditEvent` broadcast bus; `[audit] enabled` config; 4 emit sites; `GET /admin/audit/stream` SSE endpoint | P2.8 |
+| P2.9 DataView composability | `dataview.rs`, `validate_structural.rs`, `validate_crossref.rs`, `validate_syntax.rs`, `dataview_engine.rs` | `source_views`, `compose_strategy`, `join_key`, `enrich_mode`; union + enrich execution; CV-DV-COMPOSE-1/2 cycle detection; C-DV-COMPOSE-3 validation | P2.9 |
+| P2.3 MCP federation | `view.rs`, `mcp/federation.rs` (new), `mcp/dispatch.rs`, `view_dispatch.rs`, `validate_structural.rs`, `validate_syntax.rs` | `McpFederationConfig`; `{alias}__` tool namespace; `{alias}://` resource namespace; proxy via reqwest; MCP-VAL-FED-1 | P2.3 |
+| P2.6 MCP elicitation | `mcp/elicitation.rs` (new), `mcp/session.rs`, `mcp/dispatch.rs`, `task_locals.rs`, `rivers_global.rs`, `context.rs`, `types/rivers.d.ts`, processpool spec | `ctx.elicit()` TS API; `Rivers.__elicit` V8 callback; 60s timeout; `elicitation/response` dispatch arm; SSE relay via `send_to_session`; spec §10.9 | P2.6 |
+| Version | `Cargo.toml` | `0.55.27+...` → `0.58.0+0046010526` | — |
+
+## 2026-04-30 — P2.3 Multi-Bundle MCP Federation
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `crates/rivers-runtime/src/view.rs` | Added `McpFederationConfig` struct (`alias`, `url`, `bearer_token`, `tools_filter`, `resources_filter`, `timeout_ms`). Added `default_federation_timeout_ms()` helper (5000ms). Added `federation: Vec<McpFederationConfig>` field to `ApiViewConfig` with `#[serde(default)]`. | P2.3 | Federation config lives on per-app `ApiViewConfig`, not server-level `McpConfig`. |
+| `crates/rivers-runtime/src/validate_structural.rs` | Added `"federation"` to `VIEW_FIELDS`. Added `MCP_FEDERATION_FIELDS` and `MCP_FEDERATION_REQUIRED` constants. Added federation validation block in `validate_view()` handling both array and table forms. | P2.3 | Validates required alias/url presence and rejects unknown keys. |
+| `crates/rivers-runtime/src/validate_syntax.rs` | Added MCP-VAL-FED-1 loop validating alias non-empty, url non-empty, alias matches `[a-z0-9_]+`. | P2.3 | Layer 4 syntax validation; error code MCP-VAL-FED-1. |
+| `crates/riversd/src/mcp/federation.rs` | New file. `FederationClient` with `new()`, `send()`, `fetch_tools()`, `fetch_resources()`, `proxy_tool_call()`, `proxy_resource_read()`, `owns_tool()`, `owns_resource()`. Tool namespace `{alias}__{name}`, resource namespace `{alias}://{uri}`. Upstream failures best-effort (return empty). 5 unit tests. | P2.3 | reqwest::Client with timeout; optional Bearer auth header. |
+| `crates/riversd/src/mcp/mod.rs` | Added `pub mod federation;`. | P2.3 | Standard module registration. |
+| `crates/riversd/src/mcp/dispatch.rs` | Added `federation: &[McpFederationConfig]` param to `dispatch()`. `handle_tools_list()`: appends federated tools (lock released before await). `handle_tools_call()`: federation proxy check before local lookup. `handle_resources_list()`: changed to async, appends federated resources. `handle_resources_read()`: federation proxy check before local lookup. Also fixed pre-existing `task_locals` private module access (P2.6). | P2.3 | Lock released before federation awaits to avoid holding locks during HTTP calls. |
+| `crates/riversd/src/process_pool/v8_engine/mod.rs` | Added `pub(crate) use task_locals::register_elicitation_tx;` re-export. | P2.6 fix | Fixes private module access from dispatch.rs. |
+| `crates/riversd/src/server/view_dispatch.rs` | Added `let federation = &matched.config.federation;` and threaded it to both `dispatch()` call sites. | P2.3 | Wires federation config from matched view into dispatch. |
+| All `ApiViewConfig` struct literals in tests/src | Added `federation: vec![]` to all struct literals in `bundle_diff.rs`, `view_engine/mod.rs`, test files, `validate_existence.rs`, `validate_crossref.rs`. | P2.3 | Required by new non-optional field with `#[serde(default)]` (serde default doesn't cover struct literals). |
+
+## 2026-04-30 — P2.6 MCP Elicitation Support
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `crates/riversd/src/mcp/elicitation.rs` | New file. `ElicitationSpec`, `ElicitationResponse`, `ElicitationRequest` types (all Serde). `ElicitationRegistry` with `new()`, `register(id, tx)`, `resolve(response)`, `cancel(id)`. 5 unit tests. | P2.6 | Registry keyed by UUID; oneshot channel delivers response to blocked V8 worker. |
+| `crates/riversd/src/mcp/mod.rs` | Added `pub mod elicitation;`. | P2.6 | Standard module registration. |
+| `crates/riversd/src/server/context.rs` | Added `pub elicitation_registry: Arc<ElicitationRegistry>` field and initialization in `AppContext::new`. | P2.6 | Matches `session_manager`, `subscription_registry` optional-Arc pattern. |
+| `crates/riversd/src/mcp/dispatch.rs` | Added `"elicitation/response"` dispatch arm → `handle_elicitation_response()`. Threaded `session_id: Option<&str>` through `dispatch()`, `handle_tools_call()`, `handle_tools_call_batch()`, `dispatch_codecomponent_tool()`. In `dispatch_codecomponent_tool`: create unbounded elicitation channel, register TX in global static, spawn relay task that sends `elicitation/create` SSE notification and registers oneshot in registry. | P2.6 | Relay task pattern decouples SSE delivery from V8 execution. |
+| `crates/riversd/src/mcp/subscriptions.rs` | Added `send_to_session(session_id, data) -> bool` method to `SubscriptionRegistry` for targeted SSE delivery. | P2.6 | Required for relay task to push `elicitation/create` to the right MCP session. |
+| `crates/riversd/src/process_pool/v8_engine/task_locals.rs` | Added `TASK_ELICITATION_TX` thread-local. Added process-level `ELICITATION_GLOBAL` static map. Added `register_elicitation_tx(trace_id, tx)` (pub crate) and `take_elicitation_tx(trace_id)`. Installed/cleared in `TaskLocals::set()` and `TaskLocals::drop`. | P2.6 | Global static bridges async dispatch site to sync V8 worker without modifying TaskContext in rivers-runtime. |
+| `crates/riversd/src/process_pool/v8_engine/mod.rs` | Re-exported `register_elicitation_tx` as `pub(crate)`. | P2.6 | Makes function accessible as `crate::process_pool::v8_engine::register_elicitation_tx`. |
+| `crates/riversd/src/process_pool/v8_engine/rivers_global.rs` | Installed `Rivers.__elicit` host callback in `inject_rivers_global()`. Added `rivers_elicit_callback()`: validates MCP context, parses spec, generates UUID, sends request on channel, blocks on oneshot with 60s timeout, returns JSON result string. | P2.6 | V8 callback is synchronous; blocking on tokio runtime via `rt.block_on()` on spawn_blocking worker. |
+| `crates/riversd/src/process_pool/v8_engine/context.rs` | Added `ctx.elicit()` JavaScript helper as a thenable shim that calls `Rivers.__elicit(specJson)` synchronously and wraps result in a Promise-compatible object so handlers can `await` it. | P2.6 | Thenable shim avoids V8 async machinery while maintaining `await`-compatible API. |
+| `types/rivers.d.ts` | Added `ElicitationSpec` interface, `ElicitationResult` interface, and `elicit(spec: ElicitationSpec): Promise<ElicitationResult>` method on `ViewContext`. Added JSDoc `@capability mcp` annotation and full behavioral documentation. | P2.6 | TypeScript ambient declarations updated to match new runtime surface. |
+| `docs/arch/rivers-processpool-runtime-spec-v2.md` | Added §10.9 "MCP Elicitation — ctx.elicit() (P2.6)" documenting the full protocol flow, Promise compatibility, timeout behavior, registry, and error cases. | P2.6 | Spec updated per CLAUDE.md Standard 8 (update docs when public API changes). |
+
+## 2026-04-30 — P2.8 Framework Audit Stream
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `crates/rivers-core-config/src/config/server.rs` | Added `AuditConfig` struct (`enabled: bool`, default false). Added `pub audit: AuditConfig` field to `ServerConfig` with `#[serde(default)]`. | P2.8 | Config opt-in; zero cost when disabled. |
+| `crates/riversd/src/audit.rs` | New file. `AuditEvent` enum (`HandlerInvoked`, `McpToolCalled`, `DataViewRead`, `AuthResolved`) with `#[serde(tag = "event", rename_all = "snake_case")]`. `AuditBus = broadcast::Sender<AuditEvent>`. `new_bus()` creates channel with capacity 512. Two unit tests. | P2.8 | `broadcast` channel: `let _` ignores no-subscriber case. Lagged receivers silently skip. |
+| `crates/riversd/src/server/context.rs` | Added `use crate::audit::AuditBus`. Added `pub audit_bus: Option<Arc<AuditBus>>` field. Initialized to `None` in `AppContext::new`. | P2.8 | Option pattern matches `session_manager`, `csrf_manager` etc. |
+| `crates/riversd/src/server/lifecycle.rs` | Wired `audit_bus` initialization in both `run_server_no_ssl` and `run_server_with_listener_and_log`. Reads `config.audit.enabled`; creates `Some(Arc::new(audit::new_bus()))` when true. | P2.8 | Wired in both lifecycle paths so no-ssl and TLS modes are covered. |
+| `crates/riversd/src/server/view_dispatch.rs` | Saved `matched.view_id` before destructuring. Changed `handler_duration_ms` cast to `u64`. Emits `AuditEvent::HandlerInvoked` after `view_result` with status 200/500. | P2.8 | Emit site is after all security pipeline steps so full duration is captured. |
+| `crates/riversd/src/mcp/dispatch.rs` | Wrapped `"tools/call"` arm to time the call and emit `AuditEvent::McpToolCalled`. Checks `resp.result["isError"]` and `resp.error.is_some()` for `is_error` field. | P2.8 | Emit in `dispatch()` call site avoids deep changes to `handle_tools_call`. |
+| `crates/riversd/src/admin_handlers.rs` | Added `admin_audit_stream_handler`: subscribes to `ctx.audit_bus`, returns SSE stream via `BroadcastStream`. 503 when audit disabled. `Lagged` errors silently filtered. 30s keepalive. | P2.8 | SSE pattern matches existing MCP SSE in `view_dispatch.rs`. |
+| `crates/riversd/src/server/router.rs` | Imported `admin_audit_stream_handler`. Registered `GET /admin/audit/stream` on admin router. | P2.8 | Admin router — same auth middleware as all other admin routes. |
+| `crates/riversd/src/lib.rs` | Added `pub mod audit;` with doc comment. | P2.8 | Module declaration required for visibility from admin_handlers. |
+
+## 2026-04-30 — P2.4 Bundle Migration Tooling
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `crates/riverpackage/src/migrate.rs` | New file. `MigrationRunner` struct with `discover()`, `status()`, `up()`, `down(n)`. Reads `migrations/*.sql` (numbered `001_name.sql`), sorts by numeric prefix. SQLite execution via `rusqlite` (bundled). PostgreSQL dry-run stub (prints what would execute). `_rivers_migrations` table with `id TEXT PRIMARY KEY, applied_at TEXT NOT NULL`. Each migration runs in its own transaction; on failure rolls back and stops. | P2.4 | Full SQLite implementation; PostgreSQL stub clearly noted. 8 new tests, all pass. |
+| `crates/riverpackage/src/main.rs` | Added `mod migrate;`, `migrate` match arm dispatching to `cmd_migrate()`. Added `cmd_migrate()` with `status`, `up`, `down [N]` sub-subcommands. Updated `cmd_init()` to scaffold `migrations/001_init.sql` and `001_init.down.sql` for non-faker drivers. Updated `print_usage()` to document migrate subcommand. | P2.4 | Matches manual-args CLI style used by all other subcommands (no clap). |
+| `crates/riverpackage/Cargo.toml` | Added `rusqlite = { workspace = true }` dependency. | P2.4 | rusqlite with bundled feature was already in workspace deps. |
+
+## 2026-04-30 — No-infra task batch #3: spec doc edits, review annotations, cross-crate consolidation
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `docs/arch/rivers-processpool-runtime-spec-v2.md` | Added §5.2 "ctx.datasource() — broker publish surface" subsection with OutboundMessage/PublishResult TypeScript interface, usage example, wiring reference. | BR6.1 | Documents ctx.datasource().publish() as first-class V8 surface backed by MessageBrokerDriver. |
+| `docs/arch/rivers-driver-spec.md` | Added §6.5 "Handler-accessible publish surface" under §6 MessageBrokerDriver Contract — notes ctx.datasource().publish() is reachable from TS handlers; cross-references processpool spec §5.2. | BR6.2 | MessageBrokerDriver spec now covers both the consumer bridge path and the handler publish path. |
+| `docs/review/rivers-wide-code-review-2026-04-27.md` | Added resolution banners to: rivers-lockbox-engine (RW1.4.b SecretBox), rivers-lockbox (RW1.4.h engine-backed CLI), rivers-core-config (RW3.3.b unenforced field warn), rivers-plugin-ldap (RW4.4.i TLS), rivers-plugin-cassandra/mongodb/couchdb/influxdb (RW4.2.b max_rows), riversctl (RW5.3.c golden tests), Bug Class 4 (unbounded reads partial). | RW-X.1 | Review doc reflects current resolution state. Commit SHAs pending final PR merge. |
+| `docs/review/cross-crate-consolidation.md` | New file. Fallback consolidation sourced from wide review. 8 cross-crate patterns (P1-P8), 9 SDK contract violations, 9 wiring gaps, severity distribution table (10 T1/40 T2 resolved; ~13 T1/~27 T2 remaining), 10-item priority remediation list. | RCC0-RCC2 | Cross-crate consolidation complete. |
+| `canary-bundle/CHANGELOG.md` | Added CG plan entry: CG1 (MessageConsumer identity fix), CG2 (broker topic fix), CG3 (non-blocking startup), CG4 (MySQL pool restore); expected delta +9 canary tests; deploy-gated items listed. | CG5.5 | Canary bundle CHANGELOG now reflects all shipped features through BR-2026-04-23. |
+| `Cargo.toml` | Version bumped 0.55.26 → 0.55.27 (code-fix batch). | — | CI version check will pass. |
+| `todo/tasks.md` | Marked done: 7.8, BR6.1/6.2, RW-X.1 (both), P1.1.X.1/X.2 duplicates, cargo test entries, VAL sprint 8 items, OPS-VALIDATE partial, RCC0.1-RCC2.3, CG5.5. 453 tasks done; 65 open (all infra-gated, Kafka-dependent, future design, or deferred). | — | Task list reflects current state. |
+
+## 2026-04-30 — No-infra task batch #2: schema validation tests, V8 bridge contracts, NULL/max_rows conformance
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `crates/rivers-driver-sdk/tests/schema_validation_tests.rs` | New file. 40 tests covering Feature 4.1–4.8: SchemaSyntaxError/ValidationError variants, HttpMethod parse, ValidationDirection display, SchemaDefinition serde, validate_fields chain, per-method direction, all Rivers primitive types (uuid/email/integer/float/boolean/json/string), constraint enforcement (min/max/enum/max_length), check_supported_attributes. | 6.3 / driver-schema-validation-spec | Closes Phase 6.3 gap. All pass. |
+| `crates/rivers-engine-v8/src/lib.rs` | Added 6 V8 bridge contract regression tests: BUG-008 (params forwarded / empty params bypass cache), BUG-009 (bare name uses prefetch / no double-prefix), BUG-021 (numeric TTL no crash / object TTL silently ignored). | Phase 3 | Documents current bridge contract for BUG-008/009/021. 22/22 pass. |
+| `crates/rivers-drivers-builtin/tests/conformance/null_handling.rs` | New file. 2 SQLite tests: NULL round-trip (NULL email survives INSERT→SELECT), non-NULL value survives round-trip. | Phase 2 | Closes NULL handling gap; cluster drivers guarded by RIVERS_TEST_CLUSTER. |
+| `crates/rivers-drivers-builtin/tests/conformance/max_rows.rs` | New file. 2 SQLite tests: LIMIT 5 truncation (≤5 rows returned), LIMIT 1 (exactly 1 row). | Phase 2 | Closes max_rows truncation gap. |
+| `crates/rivers-drivers-builtin/tests/conformance/mod.rs` | Added `make_insert_with_email_query` helper for NULL round-trip tests. | Phase 2 | Infrastructure for null_handling.rs. |
+| `crates/rivers-drivers-builtin/tests/conformance_tests.rs` | Registered `conformance_null_handling` and `conformance_max_rows` modules. | Phase 2 | 26/26 tests pass. |
+
+## 2026-04-30 — No-infra task batch: admin guard tests, row caps, test files
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `crates/rivers-plugin-mongodb/src/lib.rs` | Replace local `DEFAULT_MAX_ROWS` constant (1,000) with SDK `read_max_rows(params)` (default 10,000). Updated test to use SDK API. | RW4.2.b | Consistent SDK-driven cap across all 6 plugins. |
+| `crates/rivers-drivers-builtin/src/redis/single.rs` | Added 9 admin guard unit tests: DDL (DROP/CREATE/ALTER/TRUNCATE), admin ops (flushdb/flushall), normal ops pass-through. | Phase 2 | Closes admin guard test gap for Redis. |
+| `crates/rivers-plugin-mongodb/src/lib.rs` | Added 11 admin guard tests: DDL, plugin-specific ops (drop_collection/drop_database/create_collection), normal ops. | Phase 2 | Closes admin guard test gap for MongoDB. |
+| `crates/rivers-plugin-elasticsearch/src/lib.rs` | Added 6 admin guard tests: DDL blocked with empty admin_operations list, normal ops pass-through. | Phase 2 | Closes admin guard test gap for Elasticsearch. |
+| `crates/riversd/tests/pipeline_tests.rs` | New file. 6 tests covering SHAPE-12 sequential stage order, pre_process, post_process, on_error, handler stage isolation. | Phase 6.6 | Pipeline stage isolation coverage. |
+| `crates/riversd/tests/session_propagation_tests.rs` | New file. 6 tests covering X-Rivers-Claims encode/decode round-trip, Authorization header forwarding, null session, scope preservation, missing/malformed header handling. | Phase 6.7 | Cross-app session propagation coverage. |
+| `crates/rivers-driver-sdk/src/broker_contract_fixtures.rs` | New shared broker contract fixture module. | RW-CI.2 | Already logged in previous entry. |
+
+## 2026-04-30 — RW-CI.2: Shared broker contract fixtures
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `crates/rivers-driver-sdk/src/broker_contract_fixtures.rs` | New file. Exposes four shared broker contract fixture functions (`test_ack_returns_acked`, `test_nack_redelivery_or_unsupported`, `test_consumer_group_exclusive`, `test_multi_subscription`) plus `unreachable_params` helper. `#[doc(hidden)]` — test support only. | RW-CI.2 | Canonical fixtures in one place; broker plugins import instead of duplicating. |
+| `crates/rivers-driver-sdk/src/lib.rs` | Added `pub mod broker_contract_fixtures;` (doc-hidden). | RW-CI.2 | Module reachable from all crates that depend on rivers-driver-sdk. |
+| `crates/rivers-driver-sdk/tests/broker_contract.rs` | Refactored to import fixture functions from `rivers_driver_sdk::broker_contract_fixtures` instead of defining inline. Mock driver + tests unchanged. | RW-CI.2 | Single source of truth for contract fixtures. |
+| `crates/rivers-plugin-nats/tests/nats_live_test.rs` | Added 4 contract fixture tests (`nats_contract_ack_returns_acked`, `_nack_redelivery_or_unsupported`, `_consumer_group_exclusive`, `_multi_subscription`). | RW-CI.2 | Fixture calls skip gracefully when NATS unreachable. |
+| `crates/rivers-plugin-kafka/tests/kafka_live_test.rs` | Added 4 contract fixture tests. | RW-CI.2 | Fixture calls skip gracefully when Kafka unreachable. |
+| `crates/rivers-plugin-rabbitmq/tests/rabbitmq_live_test.rs` | Added 4 contract fixture tests. | RW-CI.2 | Fixture calls skip gracefully when RabbitMQ unreachable. |
+| `crates/rivers-plugin-redis-streams/tests/redis_streams_live_test.rs` | Added 4 contract fixture tests. | RW-CI.2 | Fixture calls skip gracefully when Redis unreachable. |
+
+## 2026-04-30 — RW1.4.h: rivers-lockbox CLI routes through rivers-lockbox-engine
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `crates/rivers-lockbox/src/main.rs` | Complete rewrite. Storage: single `keystore.rkeystore` (engine's `Keystore` TOML + Age encryption) replacing per-entry `.age` files. All writes atomic (temp+rename). `cmd_rekey` uses staging dir pattern. `validate_entry_name` called on all names. No `--value` argv — `rpassword` TTY only. 12 unit tests. | RW1.4.h | Engine-backed storage matches `riversd` bootstrap path. |
+| `crates/rivers-lockbox/Cargo.toml` | Added `chrono = { workspace = true }` for `KeystoreEntry.created`/`updated` timestamps. | RW1.4.h | Engine `KeystoreEntry` fields. |
+
+## 2026-04-30 — RW1.4.b, RW1.4.validate: SecretBox<String> for ResolvedEntry + validation
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `Cargo.toml` (workspace) | Added `secrecy = "0.10"` to workspace dependencies. | RW1.4.b | `secrecy 0.10.3` already in Cargo.lock via `age`; explicit dep to allow direct import. |
+| `crates/rivers-lockbox-engine/Cargo.toml` | Added `secrecy = { workspace = true }`. | RW1.4.b | New crate dep. |
+| `crates/riversd/Cargo.toml` | Added `secrecy = { workspace = true }`. | RW1.4.b | Needed for `ExposeSecret` trait in `bundle_loader/load.rs`. |
+| `crates/rivers-lockbox-engine/src/resolver.rs` | Changed `ResolvedEntry.value` from `Zeroizing<String>` to `SecretBox<String>`. Access now requires explicit `.expose_secret()`. Added 3 unit tests confirming redacted Debug and explicit-access-only contract. | RW1.4.b | Compile-time barrier against accidental logging. |
+| `crates/rivers-lockbox-engine/src/types.rs` | Removed `Clone` derive from `Keystore` and `KeystoreEntry`. Secret material must not be duplicated silently. | RW1.4.b | No callers clone these types outside tests. |
+| `crates/rivers-lockbox-engine/src/crypto.rs` | Wrapped `toml_str` in `Zeroizing::new()` immediately in `encrypt_keystore`; removed explicit `toml_str.zeroize()` call. Now all error paths (incl. `age::encrypt` failure) zeroize the plaintext. | RW1.4.b | Fixes "only on success" zeroization gap. |
+| `crates/riversd/src/bundle_loader/load.rs` | Updated two callsites to use `.expose_secret().clone()` instead of `(*resolved.value).clone()`. | RW1.4.b | Required by `SecretBox` API. |
+| `crates/riversd/src/process_pool/v8_engine/rivers_global.rs` | Added `use secrecy::ExposeSecret`; updated `resolved.value.as_str()` → `resolved.value.expose_secret().clone()`. | RW1.4.b | Crypto HMAC callback. |
+| `crates/rivers-lockbox-engine/tests/crypto_tests.rs` | Updated 5 `.value.as_str()` → `.value.expose_secret().as_str()` calls. `zeroize_after_use` test preserved (SecretBox implements Zeroize). | RW1.4.validate | Tests use explicit expose_secret(). |
+| `crates/rivers-core/tests/lockbox_e2e_test.rs` | Updated 2 callsites to `.value.expose_secret()`. | RW1.4.validate | E2E test. |
+
+## 2026-04-30 — RW5.3.c: riversctl golden tests — auth-failure-no-fallback
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `crates/riversctl/src/commands/admin.rs` | Added 5 golden tests: `http_401_auth_failure_is_http_variant_not_network`, `http_403_rbac_failure_is_http_variant_not_network`, `http_500_server_error_is_http_variant_not_network`, `network_connection_refused_is_network_variant`, `network_timeout_is_network_variant`. Fixed existing `sign_request_produces_timestamp_without_key` to use `unsafe { remove_var }`. | RW5.3.c, RW1.3.a | Validates that Http variant never triggers signal fallback; Network variant does. |
+| `crates/riversctl/src/commands/stop.rs` | Added 4 golden tests: `find_pid_file_returns_some_when_rivers_home_has_pid_file`, `read_pid_file_parses_pid_from_rivers_home`, `read_pid_file_returns_err_for_invalid_pid_content`, `read_pid_file_returns_err_when_no_pid_file_in_rivers_home`. Static `ENV_LOCK` mutex serializes env-var mutation tests. | RW5.3.c | Covers PID file discovery and parse error contracts. |
+
+## 2026-04-30 — RW3.1.b, RW3.3.b, RW4.2.b, RW4.4.i: Driver/config cleanup
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `crates/rivers-core/src/storage.rs` | RW3.3.b: Added `unenforced_storage_config_fields(config)` returning names of parsed-but-unimplemented fields (`retention_ms`, `max_events`, `cache.datasources`, `cache.dataviews`). 6 unit tests. | RW3.3.b | Warn-on-ignored-field approach; operator sees WARN at startup. |
+| `crates/riversd/src/server/lifecycle.rs` | RW3.3.b: Both storage-engine init paths emit `tracing::warn!` when unenforced config fields have non-default values. | RW3.3.b | Avoids silent config drift. |
+| `crates/rivers-core/src/lib.rs` | RW3.3.b: Re-exported `unenforced_storage_config_fields` from `rivers-core`. | RW3.3.b | Public API. |
+| `crates/rivers-plugin-cassandra/src/lib.rs` | RW4.2.b: Added `max_rows: usize` field (read via `read_max_rows(params)` at connect). `exec_query` truncates result set with `tracing::warn!` when exceeded. 2 unit tests. | RW4.2.b | Same pattern as ldap/mongodb. |
+| `crates/rivers-plugin-elasticsearch/src/lib.rs` | RW4.2.b: Added `max_rows` to `ElasticConnection`; `exec_search` truncates `hits` with WARN when exceeded. | RW4.2.b | Consistent with other plugins. |
+| `crates/rivers-plugin-couchdb/src/lib.rs` | RW4.2.b: Added `max_rows` to `CouchDBConnection`; `exec_find` and `exec_view` use `.take(max_rows+1)` + truncate+WARN pattern. | RW4.2.b | Over-fetch-by-one avoids materializing unbounded rows. |
+| `crates/rivers-plugin-influxdb/src/connection.rs` | RW4.2.b: Added `max_rows` to `InfluxConnection`; `exec_query` truncates CSV response rows with WARN. | RW4.2.b | Applied after `parse_csv_response`. |
+| `crates/rivers-plugin-influxdb/src/driver.rs` | RW4.2.b: Reads `max_rows` from `params` and passes to both `InfluxConnection` and `BatchingInfluxConnection.inner`. | RW4.2.b | Both code paths covered. |
+| `crates/rivers-plugin-ldap/src/lib.rs` | RW4.4.i: TLS support via `tls` option (`ldaps`, `starttls`, `none`). `ldaps` → `ldaps://` URL (port 636); `starttls` → `set_starttls(true)`; `tls_verify=false` → `set_no_tls_verify(true)`. WARN emitted when credentials present with `tls=none`. 4 unit tests. | RW4.4.i | `ldap3 tls-rustls` feature already in workspace deps. |
+
+## 2026-04-30 — P1.1: MCP Resource Subscriptions (SSE push notifications)
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `crates/riversd/src/mcp/subscriptions.rs` | NEW — `SubscriptionRegistry` with `attach_sse`, `detach`, `subscribe` (enforces `max_subscriptions_per_session`), `unsubscribe`, `notify_changed` (deduplicates by URI, drops slow consumers), `snapshot_subscriptions`. Backed by bounded `mpsc::channel(64)` per SSE session. | `2026-04-29-cb-p1-1-mcp-subscriptions-design.md` | New module; `Arc<SubscriptionRegistry>` placed on `AppContext`. |
+| `crates/riversd/src/mcp/poller.rs` | NEW — `ChangePoller` wraps a `Mutex<HashMap<(app_id, uri), JoinHandle>>`. `ensure_running` spawns one poller task per `(app_id, uri)` pair that executes the DataView, SHA-256-hashes serialized rows, sleeps `poll_interval_seconds` (floored to `min_poll_interval_seconds`), re-hashes on wake, calls `notify_changed` on diff. Poller self-exits when `snapshot_subscriptions` returns zero for its key. | `2026-04-29-cb-p1-1-mcp-subscriptions-design.md` | GC-by-polling avoids reference-counting complexity. |
+| `crates/riversd/src/mcp/dispatch.rs` | Added `resources/subscribe` and `resources/unsubscribe` arms. `handle_resources_subscribe` validates URI matches a `subscribable = true` resource (via URI-template matching), calls `registry.subscribe`, then calls `poller.ensure_running`. `handle_resources_unsubscribe` calls `registry.unsubscribe`. Exposed `extract_uri_template_vars_pub` wrapper for use by the subscribe handler. | `2026-04-29-cb-p1-1-mcp-subscriptions-design.md` | Validation path reuses existing URI-template matching. |
+| `crates/riversd/src/mcp/mod.rs` | Added `pub mod poller;` to expose the new module. | `2026-04-29-cb-p1-1-mcp-subscriptions-design.md` | Module registration. |
+| `crates/riversd/src/server/context.rs` | Added `pub change_poller: Arc<ChangePoller>` field; constructed via `Arc::new(ChangePoller::new())` in `AppContext::new`. | `2026-04-29-cb-p1-1-mcp-subscriptions-design.md` | Poller lifetime tied to AppContext. |
+| `crates/riversd/src/server/view_dispatch.rs` | SSE transport: `GET` + `Accept: text/event-stream` + valid `Mcp-Session-Id` branch builds `axum::response::sse::Sse`, registers via `attach_sse`, calls `detach` on disconnect. 30-second keepalive via `Sse::keep_alive`. | `2026-04-29-cb-p1-1-mcp-subscriptions-design.md` | Axum `ReceiverStream` mapped to `TryStream<Ok=Event, Error=Infallible>`. |
+| `crates/rivers-core-config/src/config/mcp.rs` | `McpConfig.min_poll_interval_seconds` and `McpConfig.max_subscriptions_per_session` fields already present; verified used by subscribe handler. | `2026-04-29-cb-p1-1-mcp-subscriptions-design.md` | Config fields pre-existed from Epic 4 structural validation work. |
+| `docs/guide/tutorials/tutorial-mcp.md` | Added "Resource Subscriptions (Live Updates)" section: `subscribable = true` config, read-then-subscribe pattern, ORDER BY determinism requirement, server-side `[mcp]` config, SSE stream curl examples. | `2026-04-29-cb-p1-1-mcp-subscriptions-design.md` | Documentation matches implementation. |
+
+## 2026-04-30 — RW4.4.a/b, RW4.3.b, RW4.4.d: Driver security fixes (CouchDB, Elasticsearch, InfluxDB)
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `crates/rivers-plugin-couchdb/src/lib.rs` | RW4.4.a: Replaced string-interpolation placeholder substitution in `exec_find` with structural JSON tree walk (`substitute_placeholders`). Parameters are substituted after parse, not before — prevents injection via values containing `"`, `\`, or bare tokens. | RW4.4.a | Added `substitute_placeholders` helper; statement is parsed first, then typed values are inserted into the tree. |
+| `crates/rivers-plugin-couchdb/src/lib.rs` | RW4.4.b: `exec_insert` now checks HTTP status before calling `.json()` on the response body. A 409 Conflict or other error status no longer silently succeeds. | RW4.4.b | Added `if !resp.status().is_success()` guard before body parse in insert path. |
+| `crates/rivers-plugin-couchdb/src/lib.rs` | RW4.3.b: `exec_get`, `exec_update`, `exec_delete`, and `exec_view` now URL-encode document IDs, design doc names, and view names via `url_encode_path_segment` from `rivers-driver-sdk`. | RW4.3.b | Import added; all raw path segment interpolations wrapped. |
+| `crates/rivers-plugin-elasticsearch/src/lib.rs` | RW4.3.b: `exec_update` and `exec_delete` now URL-encode the document `id` path segment. | RW4.3.b | Import `url_encode_path_segment` added; format strings updated. |
+| `crates/rivers-plugin-influxdb/src/batching.rs` | RW4.4.d: `BatchingInfluxConnection.buffer` changed from `Vec<String>` to `Vec<(String, String)>` (bucket, line). Cross-bucket writes now return an error immediately. `flush_buffer` carries the bucket into the write URL. | RW4.4.d | Reject-on-cross-bucket approach chosen (simpler than per-bucket sub-flushing). |
+
 ## 2026-04-30 — P1.7 G6: OTel spans verified in Jaeger on beta-01
 
 | File | What changed | Spec ref | Resolution |
