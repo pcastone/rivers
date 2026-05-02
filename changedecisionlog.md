@@ -4,6 +4,132 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 
 ---
 
+## 2026-04-30 — P2.3: Multi-Bundle MCP Federation
+
+### P2.3.1 — Federation config belongs on ApiViewConfig, not McpConfig
+**File:** `crates/rivers-runtime/src/view.rs`
+**Decided:** `McpFederationConfig` is added to `ApiViewConfig` (per-view TOML config) not to server-level `McpConfig` in `rivers-core-config`. Federation is scoped to individual MCP views — each MCP view declares its own upstream list. Server-level `McpConfig` controls server behavior, not per-app topology.
+**Spec ref:** P2.3
+**Resolution:** Confirmed by spec phrasing "bundle apps declare federated MCP upstreams" — the unit is the app/view, not the server.
+
+### P2.3.2 — Tool namespace uses double underscore, resource namespace uses URI scheme prefix
+**File:** `crates/riversd/src/mcp/federation.rs`
+**Decided:** Tools are namespaced `{alias}__{upstream_name}` (double underscore). Resources are namespaced `{alias}://{upstream_uri}`. `owns_tool()` and `owns_resource()` check for these prefixes. When proxying, the prefix is stripped before forwarding to the upstream.
+**Spec ref:** P2.3
+**Resolution:** Double underscore avoids collision with single-underscore convention in tool names. URI scheme prefix for resources is the only syntax that doesn't conflict with path-based URIs.
+
+### P2.3.3 — Lock released before federation HTTP awaits in handle_tools_list
+**File:** `crates/riversd/src/mcp/dispatch.rs`
+**Decided:** In `handle_tools_list()`, local tools are collected and the `dv_guard` lock is released before any federation `fetch_tools().await` calls. Holding a lock across async I/O would block other requests from accessing the DataView registry during potentially-slow upstream calls.
+**Spec ref:** P2.3
+**Resolution:** Standard Rust async practice: release locks before `.await` on I/O. Federation fetches are best-effort, so failures don't affect local tool availability.
+
+### P2.3.4 — handle_resources_list changed from sync fn to async fn
+**File:** `crates/riversd/src/mcp/dispatch.rs`
+**Decided:** `handle_resources_list()` was previously a sync function (local resources only). Adding federation requires `await` for HTTP calls. Changed to `async fn` and updated the single call site to `await`.
+**Spec ref:** P2.3
+**Resolution:** Minimal change — only the function signature and call site changed. No callers in test code were affected.
+
+### P2.3.5 — P2.6 task_locals private module access fixed as side effect
+**File:** `crates/riversd/src/process_pool/v8_engine/mod.rs`, `crates/riversd/src/mcp/dispatch.rs`
+**Decided:** Pre-existing P2.6 code called `crate::process_pool::v8_engine::task_locals::register_elicitation_tx()` but `task_locals` was a private module. Fixed by adding `pub(crate) use task_locals::register_elicitation_tx;` to `v8_engine/mod.rs` and updating the call site. This was not introduced by P2.3 but surfaced during compilation.
+**Spec ref:** P2.6 (fix)
+**Resolution:** Re-export pattern is correct for exposing a private module's function at the parent module level without making the full module public.
+
+## 2026-04-30 — P2.6: MCP Elicitation Support
+
+### P2.6.1 — Cannot add to TaskContext; use process-global static
+**File:** `crates/riversd/src/process_pool/v8_engine/task_locals.rs`
+**Decided:** `TaskContext` lives in `rivers-runtime` (must not be modified per constraints). To pass the elicitation channel from the async dispatch site to the blocking V8 worker thread, use a process-level `Mutex<HashMap<trace_id, UnboundedSender>>` (`ELICITATION_GLOBAL`). Dispatch registers the sender before `spawn_blocking`; `TaskLocals::set()` takes it out and installs it on the thread-local. `TaskLocals::drop()` clears the thread-local.
+**Spec ref:** P2.6
+**Resolution:** Mirrors the SHARED_KEYSTORE_RESOLVER pattern — global static for cross-thread handoff when TaskContext extension is not available.
+
+### P2.6.2 — Thenable shim for ctx.elicit() Promise compatibility
+**File:** `crates/riversd/src/process_pool/v8_engine/context.rs`
+**Decided:** `ctx.elicit()` must be awaitable in TypeScript handlers (`await ctx.elicit(...)`), but V8 execution is synchronous in the Rivers model (no event loop). Solution: the JS shim calls `Rivers.__elicit(specJson)` synchronously (which blocks the spawn_blocking thread via `rt.block_on()`), then wraps the synchronous result in a thenable object (has a `.then()` method). This satisfies `await` without actual async machinery.
+**Spec ref:** P2.6
+**Resolution:** Thenable shim is the minimal correct approach. True Promises would require V8 event loop integration which Rivers explicitly avoids.
+
+### P2.6.3 — Relay task for SSE delivery
+**File:** `crates/riversd/src/mcp/dispatch.rs`
+**Decided:** The V8 callback sends `ElicitationRequest` on an unbounded channel. A separate `tokio::spawn` relay task reads from the channel and sends the SSE notification. This decouples the V8 blocking path from SSE I/O — the channel send is non-blocking (`try_send` would fail; `unbounded` cannot block). The relay task also registers the response oneshot in `elicitation_registry`.
+**Spec ref:** P2.6
+**Resolution:** Relay task pattern matches the broker_dispatch.rs pattern (per constraint: follow broker_dispatch pattern).
+
+### P2.6.4 — 60-second timeout via tokio::time::timeout
+**File:** `crates/riversd/src/process_pool/v8_engine/rivers_global.rs`
+**Decided:** Block on `tokio::time::timeout(Duration::from_secs(60), rx.await)` inside `rt.block_on()`. On timeout, return `{action: "cancel", error: "elicitation timed out"}`. On channel drop (session closed), receiver returns `Err(RecvError)` which is treated the same as timeout.
+**Spec ref:** P2.6
+**Resolution:** Spec mandates 60s timeout and `{action: "cancel"}` on timeout. Channel drop on session close is treated as cancel (safe default).
+
+### P2.6.5 — send_to_session() on SubscriptionRegistry
+**File:** `crates/riversd/src/mcp/subscriptions.rs`
+**Decided:** `SubscriptionRegistry` had no method for sending to a single named session (only broadcast to all). Added `send_to_session(session_id, data) -> bool` that locks the session map and sends on the session's SSE channel if found. Returns `false` (and logs WARN) if session not found.
+**Spec ref:** P2.6
+**Resolution:** Targeted send is required since elicitations go to one client, not all. `false` return drives the WARN log at the relay task.
+
+---
+
+## 2026-04-30 — P2.4: Bundle Migration Tooling
+
+### P2.4.1 — DB backend: SQLite (rusqlite) vs. async postgres
+**File:** `crates/riverpackage/src/migrate.rs`
+**Decided:** Use `rusqlite` for SQLite execution (synchronous, already in workspace as bundled). For PostgreSQL datasources, implement a dry-run stub that prints SQL to stdout with a clear `NOTE:` banner. Wiring a full async tokio runtime for `tokio_postgres` in this synchronous CLI binary was out of scope and would bloat the binary.
+**Spec ref:** P2.4
+**Resolution:** SQLite runs live; postgres stub clearly documented with an upgrade path.
+
+### P2.4.2 — Migration file discovery: where to look
+**File:** `crates/riverpackage/src/migrate.rs`
+**Decided:** Search for `migrations/` in: (1) bundle root, (2) each app sub-directory listed in `manifest.toml`. This allows migrations to live at the app level (canonical) or bundle root (convenience). No recursive walk — only one level down.
+**Spec ref:** P2.4
+**Resolution:** `migrations_dir()` checks root then app sub-dirs in manifest order.
+
+### P2.4.3 — resources.toml lookup: same multi-path strategy
+**File:** `crates/riverpackage/src/migrate.rs`
+**Decided:** Mirror `migrations_dir()` strategy for `resources.toml` lookup: check bundle root then app sub-dirs. First matching postgres or sqlite datasource wins.
+**Spec ref:** P2.4
+**Resolution:** Consistent with bundle structure; faker-only bundles return a clear error.
+
+### P2.4.4 — CLI arg style: manual args (no clap)
+**File:** `crates/riverpackage/src/main.rs`
+**Decided:** `cmd_migrate()` uses the same manual `args: &[String]` parsing pattern as every other command in this binary. `bundle_dir_from()` is a nested `fn` (not a closure) to avoid lifetime issues with the borrowed `args` slice.
+**Spec ref:** P2.4
+**Resolution:** Consistent with existing code; no clap dependency added.
+
+### P2.4.5 — Timestamp: avoid chrono dependency in binary
+**File:** `crates/riverpackage/src/migrate.rs`
+**Decided:** Implement `now_utc_iso()` using `std::time::SystemTime` and a standalone `days_to_ymd()` Gregorian calendar algorithm. `chrono` is a workspace dep but pulling it into this crate for one timestamp was unnecessary weight.
+**Spec ref:** P2.4
+**Resolution:** `days_to_ymd()` implements the Henry Richards algorithm; tested with epoch and a known date (2026-04-30 = day 20573).
+
+---
+
+## 2026-04-30 — RW4.4.a/b, RW4.3.b, RW4.4.d: Driver security fixes
+
+### RW4.4.a — CouchDB Mango selector: structural substitution vs. string replace
+**File:** `crates/rivers-plugin-couchdb/src/lib.rs`
+**Decided:** Replace string-replacement placeholder filling (`sel_str.replace(...)`) with a post-parse tree walk (`substitute_placeholders`). The statement JSON is parsed first; placeholder strings (`$name`) are found in the typed tree and replaced with proper `serde_json::Value` nodes derived from `QueryValue`. No raw string content of parameter values ever touches the JSON source.
+**Spec ref:** RW4.4.a
+**Resolution:** Added `substitute_placeholders` recursive fn. Old branch that built strings before parsing is removed entirely.
+
+### RW4.4.b — CouchDB insert: HTTP status check before body parse
+**File:** `crates/rivers-plugin-couchdb/src/lib.rs`
+**Decided:** In `exec_insert`, capture `resp.status()` before consuming the body, return `DriverError::Query` if not success. Previously, a non-success response was silently treated as ok if the body happened to parse.
+**Spec ref:** RW4.4.b
+**Resolution:** Added `if !resp.status().is_success()` guard; error text includes the status code and response body.
+
+### RW4.3.b — URL-encoding path segments (CouchDB + Elasticsearch)
+**Files:** `crates/rivers-plugin-couchdb/src/lib.rs`, `crates/rivers-plugin-elasticsearch/src/lib.rs`
+**Decided:** Use existing `url_encode_path_segment` from `rivers-driver-sdk` (already imported by influxdb plugin). No new dependency needed — `percent-encoding` is in workspace deps and the SDK already re-exports the encoder. Applied to: CouchDB doc_id (get/update/delete), CouchDB design doc + view name (view), CouchDB `_rev` query param, Elasticsearch id (update/delete).
+**Spec ref:** RW4.3.b
+**Resolution:** Import `url_encode_path_segment` in each plugin, wrap all raw path segment interpolations.
+
+### RW4.4.d — InfluxDB batch write: bucket per line, reject cross-bucket
+**File:** `crates/rivers-plugin-influxdb/src/batching.rs`
+**Decided:** Change `buffer: Mutex<Vec<String>>` to `Mutex<Vec<(String, String)>>` (bucket, line). At write time, if the buffer already contains lines for a different bucket, return `DriverError::Query` immediately (reject-on-cross-bucket). `flush_buffer` reads the bucket from the first entry and includes it in the write URL. Two approaches considered: (a) reject cross-bucket (simpler, fails fast, no data mixing), (b) per-bucket sub-flushing (more complex). Chose (a).
+**Spec ref:** RW4.4.d
+**Resolution:** buffer type changed; pre-push bucket check added in `execute`; `flush_buffer` now builds URL with `&bucket=` segment.
+
 ## 2026-04-28 — RW5: Tooling honesty (cargo-deploy staging, riverpackage templates, pack, golden tests)
 
 ### RW5.1 — cargo-deploy atomicity
@@ -890,3 +1016,13 @@ The Cassandra synthetic affected-row count, storage policy enforcement gap, and 
 **Spec reference:** PR 96 CI fix; `tasks.md` CB-P0.1.
 
 **Resolution method:** Traced O_CLOEXEC behavior in Linux kernel execve path; confirmed double-exec pattern (shebang script → /bin/sh re-exec with fd path) requires fd survives both. For CB-P0.1, mirrored the WebSocket `dispatch_ws_lifecycle` pattern exactly. `task_enrichment::enrich` wires all shared capabilities in one call.
+
+## CB P1 Batch 2 — P1.5 + P1.7 (2026-04-29)
+
+| File | Decision | Spec ref | Resolution method |
+|------|----------|----------|-------------------|
+| `crates/riversd/Cargo.toml` | `opentelemetry-otlp = { default-features = false, features = ["http-proto", "reqwest-client", "trace"] }` — disabled grpc-tonic default feature to avoid tonic 0.12 → axum 0.7 dep conflict | P1.7 | Root cause: OTLP crate defaults include gRPC transport; disabling defaults removes tonic dep entirely for our HTTP-only use case |
+| `crates/riversd/src/server/view_dispatch.rs` | Handler span uses `.instrument()` not `.entered()` for async span | P1.7.e | `.entered()` returns a non-Send guard; holding it across `.await` makes the future non-Send, breaking axum's Handler trait bound |
+| `crates/rivers-runtime/src/dataview_engine.rs` | `span.clone()` passed to `.instrument()` while original `span` used for `span.record("duration_ms", ...)` after await | P1.7.f | tracing Span is ref-counted; clone refers to same span; record() on original updates span before it's dropped |
+| `todo/tasks.md` — P1.6 | P1.6 OTLP protobuf transcoder deferred. All `opentelemetry-proto` versions up to 0.26 require `gen-tonic-messages` which brings tonic 0.12 + axum 0.7. Cannot be resolved without either OTel stack upgrade (0.31+) or prost build.rs proto embed approach | P1.6 | Documented as blocked; P1.7 proceeds independently using HTTP/JSON OTLP only |
+| `crates/rivers-runtime/src/dataview.rs` | `skip_introspect` added with `#[serde(default)]` — false by default, no breaking change to existing DataView configs | P1.5 | serde default ensures all existing bundles continue to work; opt-in per-DataView |

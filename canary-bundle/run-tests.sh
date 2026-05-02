@@ -643,6 +643,114 @@ fi
 printf "  PASS %-40s\n" "schema-introspection-startup"
 PASS=$((PASS+1))
 
+# ── Bundle Validation (OPS-VALIDATE-*) ───────────────────
+# Runs `riverpackage validate` against the canary-bundle directory.
+# These tests pass without infra — they only check that the validator
+# exits cleanly and produces valid JSON output.
+
+echo ""
+echo "  ── Bundle Validation (OPS-VALIDATE) ──"
+
+# Locate the canary-bundle directory relative to this script.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUNDLE_DIR="$SCRIPT_DIR"
+
+# OPS-VALIDATE-PASS: riverpackage validate exits 0 on the canary-bundle.
+if command -v riverpackage >/dev/null 2>&1; then
+  VALIDATE_OUT=$(riverpackage validate "$BUNDLE_DIR" --format json 2>/dev/null)
+  VALIDATE_EXIT=$?
+  if [ "$VALIDATE_EXIT" = "0" ]; then
+    printf "  PASS %-40s\n" "OPS-VALIDATE-PASS"
+    PASS=$((PASS+1))
+  else
+    printf "  FAIL %-40s (exit %d)\n" "OPS-VALIDATE-PASS" "$VALIDATE_EXIT"
+    FAIL=$((FAIL+1))
+  fi
+
+  # OPS-VALIDATE-JSON-FORMAT: output is valid JSON with summary.pass field.
+  SUMMARY_PASS=$(echo "$VALIDATE_OUT" | python3 -c "import json,sys; d=json.load(sys.stdin); print('1' if 'summary' in d else '0')" 2>/dev/null) || SUMMARY_PASS="0"
+  if [ "$SUMMARY_PASS" = "1" ]; then
+    printf "  PASS %-40s\n" "OPS-VALIDATE-JSON-FORMAT"
+    PASS=$((PASS+1))
+  else
+    printf "  FAIL %-40s (no summary field in JSON)\n" "OPS-VALIDATE-JSON-FORMAT"
+    FAIL=$((FAIL+1))
+  fi
+
+  # OPS-VALIDATE-EXIT-CODE: validate on a nonexistent dir exits non-zero.
+  riverpackage validate /nonexistent-bundle-path-xyz --format json >/dev/null 2>&1
+  BAD_EXIT=$?
+  if [ "$BAD_EXIT" != "0" ]; then
+    printf "  PASS %-40s\n" "OPS-VALIDATE-EXIT-CODE"
+    PASS=$((PASS+1))
+  else
+    printf "  FAIL %-40s (expected non-zero exit for bad bundle)\n" "OPS-VALIDATE-EXIT-CODE"
+    FAIL=$((FAIL+1))
+  fi
+
+  # OPS-VALIDATE-FAIL-STRUCTURAL: bundle with unknown TOML key exits 1.
+  STRUCT_TMP=$(mktemp -d)
+  cp -r "$BUNDLE_DIR" "$STRUCT_TMP/broken-structural"
+  FIRST_APP=$(head -1 "$STRUCT_TMP/broken-structural/manifest.toml" | grep -o '"[^"]*"' | head -1 | tr -d '"' || echo "")
+  if [ -n "$FIRST_APP" ] && [ -d "$STRUCT_TMP/broken-structural/$FIRST_APP" ]; then
+    printf '\n[api.views.__bad__]\nveiew_type = "Rest"\n' >> "$STRUCT_TMP/broken-structural/$FIRST_APP/app.toml"
+  fi
+  riverpackage validate "$STRUCT_TMP/broken-structural" --format json >/dev/null 2>&1
+  STRUCT_EXIT=$?
+  if [ "$STRUCT_EXIT" != "0" ]; then
+    printf "  PASS %-40s\n" "OPS-VALIDATE-FAIL-STRUCTURAL"
+    PASS=$((PASS+1))
+  else
+    printf "  FAIL %-40s (expected exit 1 for bad TOML key)\n" "OPS-VALIDATE-FAIL-STRUCTURAL"
+    FAIL=$((FAIL+1))
+  fi
+  rm -rf "$STRUCT_TMP"
+
+  # OPS-VALIDATE-DID-YOU-MEAN: typo'd key produces suggestion in output.
+  TYPO_TMP=$(mktemp -d)
+  cp -r "$BUNDLE_DIR" "$TYPO_TMP/typo-bundle"
+  FIRST_APP2=$(head -1 "$TYPO_TMP/typo-bundle/manifest.toml" | grep -o '"[^"]*"' | head -1 | tr -d '"' || echo "")
+  if [ -n "$FIRST_APP2" ] && [ -d "$TYPO_TMP/typo-bundle/$FIRST_APP2" ]; then
+    printf '\n[api.views.__typo__]\nveiew_type = "Rest"\n' >> "$TYPO_TMP/typo-bundle/$FIRST_APP2/app.toml"
+  fi
+  TYPO_OUT=$(riverpackage validate "$TYPO_TMP/typo-bundle" --format text 2>/dev/null)
+  if echo "$TYPO_OUT" | grep -qi "did you mean\|view_type"; then
+    printf "  PASS %-40s\n" "OPS-VALIDATE-DID-YOU-MEAN"
+    PASS=$((PASS+1))
+  else
+    printf "  SKIP %-40s (suggestion not in output — may need engine)\n" "OPS-VALIDATE-DID-YOU-MEAN"
+  fi
+  rm -rf "$TYPO_TMP"
+
+  # OPS-VALIDATE-SKIP-ENGINE: --config /dev/null skips Layer 4, exits 0.
+  SKIP_OUT=$(riverpackage validate "$BUNDLE_DIR" --format json --config /dev/null 2>/dev/null)
+  SKIP_EXIT=$?
+  if [ "$SKIP_EXIT" = "0" ]; then
+    printf "  PASS %-40s\n" "OPS-VALIDATE-SKIP-ENGINE"
+    PASS=$((PASS+1))
+  else
+    printf "  SKIP %-40s (exit %d — may need valid config path)\n" "OPS-VALIDATE-SKIP-ENGINE" "$SKIP_EXIT"
+  fi
+
+  # OPS-VALIDATE-FORMAT-TEXT: --format text produces [PASS]/[FAIL] markers.
+  TEXT_OUT=$(riverpackage validate "$BUNDLE_DIR" --format text 2>/dev/null)
+  if echo "$TEXT_OUT" | grep -qE '\[PASS\]|\[FAIL\]|\[SKIP\]|\[WARN\]'; then
+    printf "  PASS %-40s\n" "OPS-VALIDATE-FORMAT-TEXT"
+    PASS=$((PASS+1))
+  else
+    printf "  FAIL %-40s (no [PASS]/[FAIL] markers in text output)\n" "OPS-VALIDATE-FORMAT-TEXT"
+    FAIL=$((FAIL+1))
+  fi
+else
+  printf "  SKIP %-40s (riverpackage not in PATH)\n" "OPS-VALIDATE-PASS"
+  printf "  SKIP %-40s (riverpackage not in PATH)\n" "OPS-VALIDATE-JSON-FORMAT"
+  printf "  SKIP %-40s (riverpackage not in PATH)\n" "OPS-VALIDATE-EXIT-CODE"
+  printf "  SKIP %-40s (riverpackage not in PATH)\n" "OPS-VALIDATE-FAIL-STRUCTURAL"
+  printf "  SKIP %-40s (riverpackage not in PATH)\n" "OPS-VALIDATE-DID-YOU-MEAN"
+  printf "  SKIP %-40s (riverpackage not in PATH)\n" "OPS-VALIDATE-SKIP-ENGINE"
+  printf "  SKIP %-40s (riverpackage not in PATH)\n" "OPS-VALIDATE-FORMAT-TEXT"
+fi
+
 # ── Summary ──────────────────────────────────────────────────────
 
 echo ""

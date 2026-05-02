@@ -633,6 +633,12 @@ async fn x4_dataview_executor_end_to_end() {
         validate_result: false,
         strict_parameters: false,
         max_rows: 1000,
+        skip_introspect: false,
+        cursor_key: None,
+        source_views: vec![],
+        compose_strategy: None,
+        join_key: None,
+        enrich_mode: "nest".to_string(),
     };
     registry.register(dv_config);
 
@@ -805,6 +811,12 @@ async fn au13_ctx_dataview_dynamic_with_executor() {
         streaming: false,
         query_params: HashMap::new(),
         max_rows: 1000,
+        skip_introspect: false,
+        cursor_key: None,
+        source_views: vec![],
+        compose_strategy: None,
+        join_key: None,
+        enrich_mode: "nest".to_string(),
     });
 
     let mut ds_params = HashMap::new();

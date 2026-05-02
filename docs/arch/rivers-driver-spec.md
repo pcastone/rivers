@@ -282,6 +282,14 @@ pub trait MessageBrokerDriver: Send + Sync {
 
 Broker drivers that also implement `DatabaseDriver` register under both registries. The `DatabaseDriver` interface for brokers exposes discrete, request-scoped operations (produce single message, fetch by offset, list topics). The `MessageBrokerDriver` interface is for the continuous consumer lifecycle managed by the bridge.
 
+### 6.5 Handler-accessible publish surface
+
+`ctx.datasource("<broker>").publish(msg)` in TypeScript handlers is a first-class surface backed by this contract. The V8 bridge (`broker_dispatch.rs`) lazily creates a `BrokerProducer` on first publish call, caches it for the task lifetime, and routes the call through `BrokerProducer::publish`. The producer is released when the task completes.
+
+This path is available for any datasource declared as a broker driver — Kafka, RabbitMQ, NATS, Redis Streams. The handler does not need to use `MessageConsumer` view semantics to publish; a standard REST or ApplicationInit handler can publish to a broker topic by declaring the broker datasource in its view config.
+
+See `rivers-processpool-runtime-spec-v2.md` §5.2 for the TypeScript interface definition and usage example.
+
 ---
 
 ## 7. Plugin System
@@ -299,6 +307,8 @@ type AbiVersionFn = unsafe extern "C" fn() -> u32;
 ```
 
 If the returned version does not match `ABI_VERSION` in the SDK, the plugin is rejected with `PluginLoadFailed` event. The library is not unloaded (to avoid UB), but none of its drivers are registered.
+
+The ABI version is bumped when the engine plugin trait surface changes. The addition of `_rivers_compile_check` (see §7.7) requires an ABI version bump. Engine dylibs built against the previous ABI version will fail the version check and their compile_check function will be unavailable — `riverpackage` will skip Layer 4 with a warning for the affected engine.
 
 ### 7.3 Registration call
 
@@ -354,6 +364,27 @@ async fn execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
     ))
 }
 ```
+
+### 7.7 Engine plugin `compile_check` export
+
+Engine dylibs (V8, Wasmtime) export a `compile_check` function used by `riverpackage validate` for build-time syntax verification. This is separate from the driver plugin ABI — engine plugins are a distinct plugin category.
+
+```rust
+#[no_mangle]
+pub extern "C" fn _rivers_compile_check(
+    source_ptr: *const u8,
+    source_len: usize,
+    filename_ptr: *const u8,
+    filename_len: usize,
+) -> *const c_char;
+
+#[no_mangle]
+pub extern "C" fn _rivers_free_string(ptr: *const c_char);
+```
+
+Returns a heap-allocated JSON string. Success: `{"ok": true, "exports": [...]}`. Error: `{"ok": false, "error": {"filename": "...", "line": N, "column": N, "message": "..."}}`. Caller frees via `_rivers_free_string`.
+
+See `rivers-bundle-validation-spec.md` §5 for full details.
 
 ---
 

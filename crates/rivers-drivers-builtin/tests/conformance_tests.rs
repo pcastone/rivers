@@ -24,3 +24,11 @@ mod conformance_h18_mysql_uint {
 mod conformance_h4_mysql_pool_key {
     include!("conformance/h4_mysql_pool_key.rs");
 }
+
+mod conformance_null_handling {
+    include!("conformance/null_handling.rs");
+}
+
+mod conformance_max_rows {
+    include!("conformance/max_rows.rs");
+}

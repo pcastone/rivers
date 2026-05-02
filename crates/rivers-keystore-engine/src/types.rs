@@ -160,10 +160,10 @@ pub struct KeyVersion {
     /// Base64-encoded AES-256 key material (32 bytes). Zeroized on drop.
     ///
     /// # Security
-    /// Prefer `AppKeystore::current_key_bytes()` or `versioned_key_bytes()`
-    /// over accessing this field directly. Those methods decode the base64 into
-    /// raw bytes with an explicit caller obligation to zeroize after use.
-    pub key_material: String,
+    /// Use `AppKeystore::current_key_bytes()` or `versioned_key_bytes()` rather
+    /// than accessing this field directly — those methods decode into raw bytes
+    /// with an explicit caller obligation to zeroize after use.
+    pub(crate) key_material: String,
     /// When this version was generated.
     pub created: DateTime<Utc>,
 }

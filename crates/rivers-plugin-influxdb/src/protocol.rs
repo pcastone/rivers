@@ -204,8 +204,8 @@ pub(crate) fn format_field_value(v: &serde_json::Value) -> String {
             }
         }
         serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::String(s) => format!("\"{}\"", s.replace('"', "\\\"")),
-        other => format!("\"{}\"", other.to_string().replace('"', "\\\"")),
+        serde_json::Value::String(s) => format!("\"{}\"", escape_field_string(s)),
+        other => format!("\"{}\"", escape_field_string(&other.to_string())),
     }
 }
 
@@ -220,12 +220,20 @@ pub(crate) fn format_query_value_as_field(v: &QueryValue) -> String {
         QueryValue::Integer(i) => format!("{i}i"),
         QueryValue::UInt(u) => format!("{u}u"),
         QueryValue::Float(f) => f.to_string(),
-        QueryValue::String(s) => format!("\"{}\"", s.replace('"', "\\\"")),
+        QueryValue::String(s) => format!("\"{}\"", escape_field_string(s)),
         QueryValue::Array(_) | QueryValue::Json(_) => {
             let json = serde_json::to_string(v).unwrap_or_default();
-            format!("\"{}\"", json.replace('"', "\\\""))
+            format!("\"{}\"", escape_field_string(&json))
         }
     }
+}
+
+/// Escape a string value for use in an InfluxDB line protocol field.
+///
+/// Per line-protocol spec: backslashes must be escaped before double-quotes
+/// so that `\` → `\\` and `"` → `\"`.
+pub(crate) fn escape_field_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[cfg(test)]
@@ -457,6 +465,20 @@ mod tests {
     }
 
     // ── RW4.5 — line protocol integration: special characters in keys/tags ─
+
+    #[test]
+    fn format_field_value_string_with_backslash_is_escaped() {
+        let val = serde_json::json!("path\\to\\file");
+        assert_eq!(format_field_value(&val), r#""path\\to\\file""#);
+    }
+
+    #[test]
+    fn format_query_value_as_field_string_with_backslash_is_escaped() {
+        assert_eq!(
+            format_query_value_as_field(&QueryValue::String("a\\b".into())),
+            r#""a\\b""#
+        );
+    }
 
     #[test]
     fn build_line_protocol_key_with_comma_is_escaped() {

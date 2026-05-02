@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use zeroize::Zeroize;
+use secrecy::ExposeSecret;
 
 use rivers_runtime::rivers_core::ServerConfig;
 use rivers_runtime::DataViewExecutor;
@@ -234,9 +234,8 @@ pub async fn load_and_wire_bundle(
             )))?;
 
             // The resolved value IS the Age identity string for the keystore.
-            // Clone the inner string from the Zeroizing wrapper; the wrapper's
-            // own zeroize-on-drop handles cleanup of both copies.
-            let master_key = zeroize::Zeroizing::new((*resolved.value).clone());
+            // Wrap in Zeroizing so both copies are cleared on drop.
+            let master_key = zeroize::Zeroizing::new(resolved.value.expose_secret().clone());
 
             // 4. Load and decrypt the keystore
             let keystore = rivers_keystore_engine::AppKeystore::load(&ks_path, &master_key)
@@ -397,8 +396,8 @@ pub async fn load_and_wire_bundle(
                         identity_str.trim(),
                     )
                     .map_err(|e| ServerError::Config(format!("lockbox fetch: {e}")))?;
-                    // Copy the secret value out; ResolvedEntry.value zeroizes on drop.
-                    params.password = (*resolved.value).clone();
+                    // Expose secret only at the point of use; Secret<String> zeroizes on drop.
+                    params.password = resolved.value.expose_secret().clone();
                     tracing::info!(datasource = %ds.name, "lockbox: credential loaded");
                 }
             }
@@ -661,6 +660,15 @@ pub async fn load_and_wire_bundle(
                 // Introspect each DataView on this datasource
                 for (dv_name, dv_config) in &app.config.data.dataviews {
                     if dv_config.datasource != *ds_name {
+                        continue;
+                    }
+
+                    if dv_config.skip_introspect {
+                        tracing::debug!(
+                            dataview = %dv_name,
+                            app = %entry_point,
+                            "schema introspection skipped (skip_introspect = true)"
+                        );
                         continue;
                     }
 

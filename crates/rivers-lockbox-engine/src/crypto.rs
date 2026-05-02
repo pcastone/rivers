@@ -2,8 +2,6 @@
 
 use std::path::Path;
 
-use zeroize::Zeroize;
-
 use crate::key_source::check_file_permissions;
 use crate::types::*;
 
@@ -38,9 +36,12 @@ pub fn decrypt_keystore(
         .parse::<age::x25519::Identity>()
         .map_err(|_| LockBoxError::DecryptionFailed)?;
 
-    // Decrypt using age simple API (handles armored and binary formats)
-    let mut decrypted =
-        age::decrypt(&identity, &encrypted).map_err(|_| LockBoxError::DecryptionFailed)?;
+    // Decrypt using age simple API (handles armored and binary formats).
+    // Wrapped in Zeroizing so the buffer is wiped on every exit path — including
+    // UTF-8 parse errors and TOML parse errors, not just the success path.
+    let decrypted = zeroize::Zeroizing::new(
+        age::decrypt(&identity, &encrypted).map_err(|_| LockBoxError::DecryptionFailed)?,
+    );
 
     // Parse TOML
     let toml_str = std::str::from_utf8(&decrypted).map_err(|_| LockBoxError::MalformedKeystore {
@@ -51,9 +52,6 @@ pub fn decrypt_keystore(
         toml::from_str(toml_str).map_err(|e| LockBoxError::MalformedKeystore {
             reason: e.to_string(),
         })?;
-
-    // Zeroize decrypted bytes
-    decrypted.zeroize();
 
     Ok(keystore)
 }
@@ -66,10 +64,12 @@ pub fn encrypt_keystore(
     recipient_str: &str,
     keystore: &Keystore,
 ) -> Result<(), LockBoxError> {
-    // Serialize to TOML
-    let mut toml_str = toml::to_string_pretty(keystore).map_err(|e| LockBoxError::MalformedKeystore {
-        reason: format!("serialization failed: {}", e),
-    })?;
+    // Serialize to TOML — wrap immediately so all error paths zeroize the plaintext.
+    let toml_str = zeroize::Zeroizing::new(
+        toml::to_string_pretty(keystore).map_err(|e| LockBoxError::MalformedKeystore {
+            reason: format!("serialization failed: {}", e),
+        })?,
+    );
 
     // Parse recipient
     let recipient: age::x25519::Recipient = recipient_str
@@ -78,14 +78,13 @@ pub fn encrypt_keystore(
             reason: "invalid recipient public key".to_string(),
         })?;
 
-    // Encrypt
+    // Encrypt — toml_str is zeroized on drop whether this succeeds or fails.
     let encrypted = age::encrypt(&recipient, toml_str.as_bytes())
         .map_err(|_| LockBoxError::MalformedKeystore {
             reason: "encryption failed".to_string(),
         })?;
 
-    // Zeroize plaintext
-    toml_str.zeroize();
+    // toml_str drops here (end of scope), zeroized automatically.
 
     // Write to disk
     std::fs::write(keystore_path, &encrypted)?;

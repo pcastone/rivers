@@ -472,6 +472,53 @@ pub async fn admin_bundle_handler(State(ctx): State<AppContext>) -> impl IntoRes
     Json(bundle_introspection_json(ctx.loaded_bundle.as_ref()))
 }
 
+// ── Audit Stream Endpoint ────────────────────────────────────────
+
+/// GET /admin/audit/stream — SSE stream of structured audit events.
+///
+/// Requires `[audit] enabled = true` in `riversd.toml`.
+/// Returns 503 when audit is disabled.
+///
+/// Each SSE frame carries a newline-delimited JSON audit event:
+/// ```text
+/// data: {"event":"handler_invoked","app_id":"...","view":"...","method":"GET","path":"/","duration_ms":5,"status":200}
+/// ```
+///
+/// On `RecvError::Lagged`, skipped events are silently dropped and the stream continues.
+/// The stream ends when the broadcast channel is closed (server shutdown).
+pub async fn admin_audit_stream_handler(State(ctx): State<AppContext>) -> axum::response::Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use tokio_stream::wrappers::BroadcastStream;
+    use tokio_stream::StreamExt as _;
+
+    let bus = match ctx.audit_bus.as_ref() {
+        Some(b) => b.clone(),
+        None => {
+            return axum::response::Response::builder()
+                .status(503)
+                .header("content-type", "text/plain")
+                .body(axum::body::Body::from("audit not enabled"))
+                .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty()));
+        }
+    };
+
+    let rx = bus.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        match result {
+            Ok(event) => {
+                let json = serde_json::to_string(&event).unwrap_or_default();
+                Some(Ok::<_, std::convert::Infallible>(Event::default().data(json)))
+            }
+            // Lagged — drop skipped events, continue streaming
+            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(_)) => None,
+        }
+    });
+
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(30)).text(""))
+        .into_response()
+}
+
 // ── Shutdown Endpoint ────────────────────────────────────────────
 
 /// POST /admin/shutdown

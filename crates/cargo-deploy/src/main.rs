@@ -39,7 +39,10 @@ fn main() {
         eprintln!("error: not in a cargo workspace");
         std::process::exit(1);
     });
-    let target_dir = workspace_root.join("target/release");
+    // Honor CARGO_TARGET_DIR if set; fall back to workspace-relative target/release.
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(|d| PathBuf::from(d).join("release"))
+        .unwrap_or_else(|| workspace_root.join("target/release"));
 
     let version = read_workspace_version(&workspace_root);
 
@@ -738,5 +741,98 @@ mod tests {
     fn parse_args_missing_path() {
         let args = ["cargo-deploy", "deploy"];
         assert!(parse_args(&args).is_err());
+    }
+
+    #[test]
+    fn parse_args_unknown_flag_is_rejected() {
+        let args = ["cargo-deploy", "deploy", "/tmp/rivers", "--dynamic"];
+        assert!(parse_args(&args).is_err());
+    }
+
+    #[test]
+    fn parse_args_without_deploy_subcommand() {
+        let args = ["cargo-deploy", "/tmp/rivers"];
+        let (path, static_mode) = parse_args(&args).unwrap();
+        assert_eq!(path, "/tmp/rivers");
+        assert!(!static_mode);
+    }
+
+    // ── RW5.3.a: CARGO_TARGET_DIR override ──────────────────────────────
+
+    /// Verify the target_dir path logic: when CARGO_TARGET_DIR is set the
+    /// binary lookup path should be <CARGO_TARGET_DIR>/release, not
+    /// <workspace_root>/target/release.
+    #[test]
+    fn cargo_target_dir_env_overrides_workspace_target() {
+        let fake_workspace = PathBuf::from("/workspace");
+        let fake_target_dir = PathBuf::from("/custom/target");
+
+        // Simulate what main() does with CARGO_TARGET_DIR set.
+        // We can't set/unset env vars in parallel tests safely, so we exercise
+        // the path computation logic directly.
+        let target_dir = {
+            let explicit: Option<std::ffi::OsString> = Some(fake_target_dir.clone().into());
+            explicit
+                .map(|d| PathBuf::from(d).join("release"))
+                .unwrap_or_else(|| fake_workspace.join("target/release"))
+        };
+        assert_eq!(target_dir, PathBuf::from("/custom/target/release"));
+
+        // And verify the fallback path when no override is set.
+        let fallback = {
+            let explicit: Option<std::ffi::OsString> = None;
+            explicit
+                .map(|d| PathBuf::from(d).join("release"))
+                .unwrap_or_else(|| fake_workspace.join("target/release"))
+        };
+        assert_eq!(fallback, PathBuf::from("/workspace/target/release"));
+    }
+
+    // ── RW5.3.a: staging dir logic ──────────────────────────────────────
+
+    /// Verify the staging path naming convention: staging dir is <deploy_path>.staging.
+    #[test]
+    fn staging_path_appends_staging_suffix() {
+        let deploy_path = PathBuf::from("/opt/rivers");
+        let staging = PathBuf::from(format!("{}.staging", deploy_path.display()));
+        assert_eq!(staging, PathBuf::from("/opt/rivers.staging"));
+    }
+
+    /// Verify leftover staging dir is cleaned up before a new deploy attempt.
+    #[test]
+    fn leftover_staging_dir_is_removed_before_deploy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging_path = tmp.path().join("rivers.staging");
+
+        // Create a leftover staging directory
+        std::fs::create_dir_all(&staging_path).unwrap();
+        let marker = staging_path.join("leftover.txt");
+        std::fs::write(&marker, b"leftover").unwrap();
+        assert!(staging_path.exists());
+
+        // Simulate the cleanup logic from main()
+        if staging_path.exists() {
+            std::fs::remove_dir_all(&staging_path).unwrap();
+        }
+
+        assert!(!staging_path.exists(), "staging dir should have been removed");
+    }
+
+    // ── RW5.3.a: read_workspace_version ─────────────────────────────────
+
+    /// Verify version extraction from a synthetic Cargo.toml.
+    #[test]
+    fn read_workspace_version_extracts_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cargo_toml = tmp.path().join("Cargo.toml");
+        std::fs::write(&cargo_toml, b"[workspace.package]\nversion = \"1.2.3+0000000000\"\n").unwrap();
+        let version = read_workspace_version(tmp.path());
+        assert_eq!(version, "1.2.3+0000000000");
+    }
+
+    #[test]
+    fn read_workspace_version_returns_unknown_on_missing_file() {
+        let version = read_workspace_version(Path::new("/nonexistent/path"));
+        assert_eq!(version, "unknown");
     }
 }

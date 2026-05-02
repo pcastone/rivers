@@ -892,4 +892,69 @@ Summary of shaping decisions that modified the specification corpus:
 
 ---
 
-*Extracted from 22 top-level specification documents. 20 shaping decisions (SHAPE-1 through SHAPE-20) applied. Security hardening: 14 of 17 audit findings resolved (v0.52.7). Known issue: parameter binding mismatch across SQL drivers (Issue #54).*
+## 23. Bundle Validation Layer (v0.54.0)
+
+**Spec:** `rivers-bundle-validation-spec.md`
+
+### 23.1 Four-Layer Pipeline
+
+**Gate 1:** `riverpackage validate` — offline, build-time, all four layers  
+**Gate 2:** `riversd` deploy-time — all four layers plus live infrastructure checks
+
+| Layer | Module | What it checks |
+|---|---|---|
+| 1 — Structural TOML | `validate_structural` | TOML parse, required fields, `deny_unknown_fields`, Levenshtein "did you mean?" suggestions |
+| 2 — Resource Existence | `validate_existence` | Handler modules, schema files, SPA assets, WASM modules, init handlers all exist on disk |
+| 3 — Logical Cross-References | `validate_crossref` | DataView→datasource, view→DataView, invalidates targets, service→appId, appId uniqueness, nopassword/lockbox consistency, x-type/driver consistency |
+| 4 — Syntax Verification | `validate_syntax` | TS/JS compile via V8 engine dylib; WASM validation via Wasmtime engine dylib; schema JSON structure; entrypoint export verification. Skipped with W003 warning if engine dylibs unavailable. |
+
+### 23.2 Error Catalog
+
+Error codes follow `<Layer><Sequence>` pattern:
+
+| Prefix | Layer | Example |
+|---|---|---|
+| `S0xx` | Structural TOML | `S002` — unknown key in TOML table |
+| `E0xx` | Resource Existence | `E001` — referenced file not found |
+| `X0xx` | Logical Cross-References | `X001` — DataView references undeclared datasource |
+| `C0xx` | Syntax Verification | `C001` — TS/JS syntax error; `C002` — entrypoint not exported |
+| `W0xx` | Warnings | `W003` — Layer 4 skipped (engine dylib unavailable) |
+| `L0xx` | Live Checks (Gate 2 only) | `L001` — LockBox alias not found |
+
+### 23.3 Output Formats
+
+- `--format text` (default): human-readable `[PASS]`/`[FAIL]`/`[WARN]`/`[SKIP]` per check
+- `--format json`: machine-readable structured output with error codes, file paths, table paths, and `did you mean?` suggestions. Stable contract for agentic consumers.
+
+### 23.4 Exit Codes
+
+| Code | Meaning |
+|---|---|
+| 0 | All checks passed (warnings may be present) |
+| 1 | One or more validation errors |
+| 2 | Bundle directory not found or unreadable |
+| 3 | Config file unreadable (only when `--config` explicitly specified) |
+
+### 23.5 Gate 2 Live Checks (Deploy-Time)
+
+In addition to Layers 1–4, `riversd` runs at deploy time:
+- LockBox alias resolution for all `lockbox://` URIs
+- Registered driver matching — every declared `driver` must be a registered driver in the running instance
+- `SchemaSyntaxChecker` — schema files validated against the actual driver's syntax checker
+- `x-type` must match the registered driver for each datasource
+- Required service `appId` must be in RUNNING state
+
+Any validation failure → app enters FAILED state. No views registered. No traffic routed.
+
+### 23.6 Implementation
+
+- `rivers_runtime::validate_structural()` — Layer 1  
+- `rivers_runtime::validate_existence()` — Layer 2  
+- `rivers_runtime::validate_crossref()` — Layer 3  
+- `rivers_runtime::validate_syntax()` — Layer 4  
+- `rivers_runtime::validate_bundle_live()` — all layers + Gate 2 live checks  
+- Both `riverpackage` and `riversd` link against `rivers_runtime` — shared implementation, zero drift
+
+---
+
+*Extracted from 23 top-level specification documents. 20 shaping decisions (SHAPE-1 through SHAPE-20) applied. Security hardening: 14 of 17 audit findings resolved (v0.52.7). Known issue: parameter binding mismatch across SQL drivers (Issue #54). Bundle validation layer added v0.54.0.*

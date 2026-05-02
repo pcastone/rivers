@@ -454,18 +454,19 @@ If `required = false` and the target `appId` is not in the bundle, the app start
 Each deployed app transitions through states managed by riversd:
 
 ```
-PENDING → RESOLVING → STARTING → RUNNING
-                │                   │
-                └─ FAILED           └─ STOPPING → STOPPED
+PENDING → VALIDATING → RESOLVING → STARTING → RUNNING
+                │           │                   │
+                └─ FAILED   └─ FAILED           └─ STOPPING → STOPPED
 ```
 
 | State | Description |
 |---|---|
 | `PENDING` | Bundle received, queued for deployment |
+| `VALIDATING` | riversd running full validation pipeline (Layers 1–4 plus live infrastructure checks) before resource resolution |
 | `RESOLVING` | riversd resolving resources — LockBox aliases, datasource objectIds, service endpoints |
 | `STARTING` | Resources resolved, app initializing — connection pools warming, ProcessPool loading libraries |
 | `RUNNING` | App is live and serving traffic |
-| `FAILED` | Resolution or startup failed. Error logged. App not serving. |
+| `FAILED` | Validation, resolution, or startup failed. Error logged. App not serving. |
 | `STOPPING` | Graceful drain in progress |
 | `STOPPED` | App stopped. Port released. Resources released. |
 
@@ -495,6 +496,22 @@ Zero-downtime by default. In-flight requests to the old version complete before 
 | `GET` | `/admin/deployments/{appDeployId}` | Get deployment detail — state, resources, objectIds |
 | `POST` | `/admin/deployments/{appDeployId}/stop` | Gracefully stop a running app |
 | `DELETE` | `/admin/deployments/{appDeployId}` | Remove a stopped app |
+
+### 8.5 Deploy-time validation
+
+When a bundle is received, `riversd` runs the full validation pipeline before entering RESOLVING state. This is Gate 2 of the two-gate validation architecture (see `rivers-bundle-validation-spec.md`).
+
+Gate 2 runs:
+- Layers 1–4 from `rivers_runtime` (same checks as `riverpackage validate`)
+- Live check: LockBox alias resolution for all `lockbox://` URIs in datasource configs
+- Live check: registered driver matching — every declared `driver` value must be a registered driver in the running `riversd` instance
+- Live check: `SchemaSyntaxChecker` — schema files validated against the actual driver's syntax checker
+- Live check: `x-type` must match the registered driver for each datasource
+- Live check: required service `appId` must be in RUNNING state
+
+Any validation failure causes the app to enter FAILED state. No views are registered. No traffic is routed. A structured error is logged with the validation error code, file path, and detail.
+
+Gate 2 does not trust Gate 1. A bundle that passed `riverpackage validate` is re-validated in full. Gate 1 exists for fast developer feedback. Gate 2 is the production hard-stop.
 
 ---
 
@@ -750,22 +767,26 @@ WASM files must be self-contained — they cannot import other WASM modules at r
 
 ## 14. Validation Rules
 
-Enforced at deploy time before any app enters STARTING state.
+Validation rules are enforced at two gates:
 
-| Rule | Error |
-|---|---|
-| `type` is not `app-main` or `app-service` | `invalid app type '{type}' in {appName}/manifest.json` |
-| `appId` missing or not a UUID | `appId is required and must be a UUID in {appName}/manifest.json` |
-| Two apps in bundle share `appId` | `duplicate appId '{id}' in {appA} and {appB}` |
-| ~~`entryPoint` port already bound~~ | ~~`port {port} is already bound by '{appName}'`~~ — **removed**, OS bind failure handles this <!-- SHAPE-19 amendment --> |
-| `required` datasource LockBox alias not found | `required resource '{name}' lockbox alias '{alias}' not found in keystore` |
-| `required` service `appId` not deployed | `required service '{name}' (appId: {id}) is not running` |
-| `spa` declared on `app-service` | `spa config is only valid on app-main` |
-| Module path not found in bundle | `module '{path}' not found in {appName}/libraries/` |
-| `resources` in view references undeclared resource | `resource '{name}' not declared in {appName}/resources.json` |
-| Bundle missing `manifest.json` at root | `bundle is missing root manifest.json` |
-| App directory missing `manifest.json` | `{appName}/ is missing manifest.json` |
-| App directory missing `resources.json` | `{appName}/ is missing resources.json` |
+- **Gate 1:** `riverpackage validate` — build-time, all four layers, offline
+- **Gate 2:** `riversd` deploy-time — all four layers plus live infrastructure checks
+
+The authoritative rule set, error codes, and error message templates are defined in `rivers-bundle-validation-spec.md` §11 (Error Catalog). The `rivers_runtime` crate implements all validation rules. Both gates link against it.
+
+### Rule categories
+
+| Layer | Error code prefix | Example |
+|---|---|---|
+| Structural TOML | `S0xx` | `S002` — unknown key in TOML table |
+| Resource Existence | `E0xx` | `E001` — referenced file not found |
+| Logical Cross-References | `X0xx` | `X001` — DataView references undeclared datasource |
+| Syntax Verification | `C0xx` | `C001` — TS/JS syntax error |
+| Live Checks (Gate 2 only) | `L0xx` | `L001` — LockBox alias not found |
+
+### Validation timing in deploy lifecycle
+
+Validation runs after bundle receipt (PENDING) and before resource resolution (RESOLVING). See §8.5.
 
 ---
 

@@ -18,9 +18,15 @@ use crate::protocol::{build_line_protocol, urlencoded};
 /// - flush_interval_ms has elapsed since last flush
 /// - A non-write operation is executed (query/ping)
 /// - The connection is dropped
+///
+/// RW4.4.d: Each buffered entry carries its target bucket. Cross-bucket
+/// batching is rejected — if a write arrives for a different bucket than
+/// the one already buffered, the connection returns an error. Callers
+/// that need to write to multiple buckets should use separate connections.
 pub(crate) struct BatchingInfluxConnection {
     pub(crate) inner: InfluxConnection,
-    pub(crate) buffer: Mutex<Vec<String>>,
+    /// Each entry is `(bucket, line_protocol_line)`.
+    pub(crate) buffer: Mutex<Vec<(String, String)>>,
     pub(crate) max_size: usize,
     pub(crate) flush_interval_ms: u64,
     pub(crate) last_flush: Mutex<std::time::Instant>,
@@ -28,24 +34,39 @@ pub(crate) struct BatchingInfluxConnection {
 
 impl BatchingInfluxConnection {
     /// Flush all buffered lines to InfluxDB in a single batch write.
+    ///
+    /// All lines in the buffer must target the same bucket (enforced at
+    /// write time). If somehow mixed buckets are present (shouldn't happen),
+    /// this returns an error rather than silently dropping data.
     async fn flush_buffer(&self) -> Result<(), DriverError> {
         let buf = self.buffer.lock().await;
         if buf.is_empty() {
             return Ok(());
         }
 
-        let batch = buf.join("\n");
+        // Verify all lines share the same bucket.
+        let bucket = buf[0].0.clone();
+        if buf.iter().any(|(b, _)| b != &bucket) {
+            return Err(DriverError::Query(
+                "influxdb: batch contains writes for multiple buckets — \
+                 use separate connections per bucket"
+                    .into(),
+            ));
+        }
+
+        let batch: String = buf.iter().map(|(_, line)| line.as_str()).collect::<Vec<_>>().join("\n");
         let count = buf.len();
         // Do NOT clear buf yet — only clear after confirmed HTTP success so we
         // don't lose buffered writes on a transient failure.
         drop(buf);
 
-        debug!(lines = count, "influxdb: flushing write batch");
+        debug!(lines = count, bucket = %bucket, "influxdb: flushing write batch");
 
         let url = format!(
-            "{}/api/v2/write?org={}",
+            "{}/api/v2/write?org={}&bucket={}",
             self.inner.base_url,
-            urlencoded(&self.inner.org)
+            urlencoded(&self.inner.org),
+            urlencoded(&bucket),
         );
         let resp = self
             .inner
@@ -85,10 +106,29 @@ impl Connection for BatchingInfluxConnection {
     async fn execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
         match query.operation.as_str() {
             "write" | "insert" => {
-                // Build line protocol and buffer it
+                let bucket = query.target.clone();
+
+                // RW4.4.d: Reject cross-bucket batching. If the buffer already
+                // contains lines for a different bucket, fail fast rather than
+                // silently mixing writes into the wrong batch URL.
+                {
+                    let buf = self.buffer.lock().await;
+                    if let Some((existing_bucket, _)) = buf.first() {
+                        if existing_bucket != &bucket {
+                            return Err(DriverError::Query(format!(
+                                "influxdb: cross-bucket batching is not allowed — \
+                                 buffer holds writes for '{}', got write for '{}'. \
+                                 Use separate connections per bucket.",
+                                existing_bucket, bucket
+                            )));
+                        }
+                    }
+                }
+
+                // Build line protocol and buffer it with its bucket.
                 let line = build_line_protocol(query)?;
                 let mut buf = self.buffer.lock().await;
-                buf.push(line);
+                buf.push((bucket, line));
                 let should_size_flush = buf.len() >= self.max_size;
                 drop(buf);
 

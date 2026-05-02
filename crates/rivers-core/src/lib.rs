@@ -56,7 +56,7 @@ pub use eventbus::{
 #[cfg(feature = "lockbox")]
 pub use lockbox::LockBoxResolver;
 pub use logging::LogHandler;
-pub use storage::{create_storage_engine, InMemoryStorageEngine, StorageEngine, StorageError};
+pub use storage::{create_storage_engine, unenforced_storage_config_fields, InMemoryStorageEngine, StorageEngine, StorageError};
 #[cfg(feature = "storage-backends")]
 pub use rivers_storage_backends::RedisStorageEngine;
 #[cfg(feature = "storage-backends")]

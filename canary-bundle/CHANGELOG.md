@@ -24,6 +24,27 @@
 **Spec reference:** rivers-canary-scenarios-spec.md §1-10
 **Resolution:** CS3 (Activity Feed) deferred — blocked on bugs/bugreport_2026-04-23.md. Rivers TS handlers have no MessageBrokerDriver publish surface; the two workaround paths (direct SQL insert / external kafkacat) were rejected as hollow. Fix requires a 1-2 day V8 bridge in crates/riversd/src/process_pool/v8_engine/ following the filesystem direct-dispatch pattern. CS3 ships in ~3-4 hours after that. Secondary deferrals: dedicated per-step SPA UI (CS5.2/5.3/5.4 — blocked on empty libraries/src/components/ Svelte tree); run-tests.sh step-summary pretty-print (CS6.3 — polish).
 
+## [Decision] — CG plan: Canary Green Again — 4 fixes, expected +9 tests (deploy-gated)
+
+**File:** `crates/riversd/src/message_consumer.rs`, `crates/riversd/src/bundle_loader/wire.rs`, `crates/riversd/src/broker_bridge.rs`, `crates/rivers-drivers-builtin/src/mysql.rs`
+
+**Description:** Four focused fixes targeting specific canary failure categories, landed 2026-04-24. Runtime verification (deploy + `run-tests.sh` pass) is pending.
+
+**CG1 — MessageConsumer app identity fix:** Added `entry_point: String` to `MessageConsumerConfig`; `dispatch_message_event` now calls `enrich(builder, &config.entry_point)` instead of `enrich(builder, "")`. Kafka consumer `ctx.store` writes land in the owning app's namespace instead of `app:default`. Directly unblocks 2 canary KAFKA-CONSUMER-STORE failures.
+
+**CG2 — Broker subscription topic from `on_event.topic`:** Wire.rs now reads `view_cfg.on_event.topic` for the subscription topic instead of the view ID. Consumer and per-destination publish now agree on the topic name.
+
+**CG3 — Non-blocking broker consumer startup:** `BrokerBridgeSpec` + `run_with_retry` supervisor with bounded exponential backoff (base=reconnect_ms, cap=30s, ±50% jitter). `tokio::spawn(run_with_retry(spec))` replaces the inline `create_consumer().await` that caused the startup hang when Kafka was unreachable. HTTP listener can bind even when every broker is unreachable.
+
+**CG4 — MySQL pool restored:** `crates/rivers-drivers-builtin/src/mysql.rs` — process-global `OnceLock<Mutex<HashMap<String, mysql_async::Pool>>>` pool cache; `connect()` reuses `pool.get_conn()` instead of paying a full per-call handshake. Unblocks 7 canary MySQL CRUD failures.
+
+**Expected canary delta (pending deploy verification):** +9 tests minimum (2 Kafka consumer-store, 7 MySQL CRUD). Startup should never hang on broker.
+
+**Spec reference:** `docs/canary_codereivew.md` CG plan; `docs/dreams/dream-2026-04-22.md`
+**Resolution:** All 4 code changes landed and pass 347/347 riversd lib + 200+ integration tests. Deploy-gated items (CG4.3, CG4.4, CG5.1–CG5.6) require `cargo deploy` + live canary run.
+
+---
+
 ## [Decision] — BR-2026-04-23: MessageBrokerDriver TS bridge (CS3 unblocked)
 **File:** crates/rivers-runtime/src/process_pool/types.rs, crates/riversd/src/process_pool/v8_engine/{broker_dispatch.rs (new), task_locals.rs, context.rs, rivers_global.rs, mod.rs}, crates/rivers-runtime/src/process_pool/bridge.rs, crates/rivers-runtime/src/validate_structural.rs, types/rivers.d.ts, canary-bundle/canary-streams/{resources.toml, manifest.toml, app.toml, libraries/handlers/{init.ts, scenario-activity-feed.ts, broker-publish-tests.ts, kafka-consumer.ts}}, canary-bundle/canary-main/libraries/spa/bundle.js, canary-bundle/run-tests.sh
 **Description:** Bridged MessageBrokerDriver::publish into V8. New `DatasourceToken::Broker { driver }` variant, `TASK_DIRECT_BROKER_PRODUCERS` per-task producer cache, `Rivers.__brokerPublish(name, msg)` V8 callback, and `ctx.datasource("<broker>").publish(msg)` proxy codegen. Four broker plugins (kafka/rabbitmq/nats/redis-streams) auto-detected by name. Re-enabled canary-streams kafka_consume MessageConsumer view (was commented out "no broker"). Shipped 4 atomic tests + CS3 Activity Feed scenario (11 steps). Fixed adjacent validator gap: `validate_structural` now exempts MessageConsumer views from path/method required-fields.

@@ -118,6 +118,10 @@ pub fn validate_crossref(bundle: &LoadedBundle) -> Vec<ValidationResult> {
         // QP: Parameter mapping validation
         check_parameter_mappings(app, &mut results);
 
+        // CV-DV-COMPOSE-1: source_views refs must exist in the same app
+        // CV-DV-COMPOSE-2: cycle detection in DataView composition graph
+        check_compose_refs(app, &dataview_names, &mut results);
+
         // ── MCP Validation (rivers-mcp-view-spec §12) ──────────────
         {
             let mcp_views: Vec<(&str, &crate::view::ApiViewConfig)> = app.config.api.views.iter()
@@ -1049,6 +1053,95 @@ fn check_parameter_mappings(app: &LoadedApp, results: &mut Vec<ValidationResult>
     }
 }
 
+/// CV-DV-COMPOSE-1: source_views refs must exist in the same app.
+/// CV-DV-COMPOSE-2: no cycles in the DataView composition graph.
+fn check_compose_refs(
+    app: &LoadedApp,
+    dataview_names: &HashSet<&str>,
+    results: &mut Vec<ValidationResult>,
+) {
+    let app_name = &app.manifest.app_name;
+
+    // Build dependency graph and check for unknown refs in one pass.
+    let mut graph: HashMap<String, Vec<String>> = HashMap::new();
+
+    for (dv_name, dv) in &app.config.data.dataviews {
+        if dv.source_views.is_empty() {
+            continue;
+        }
+
+        let mut deps: Vec<String> = Vec::new();
+
+        for src in &dv.source_views {
+            if dataview_names.contains(src.as_str()) {
+                deps.push(src.clone());
+            } else {
+                results.push(ValidationResult::fail(
+                    "CV-DV-COMPOSE-1",
+                    format!("{}/app.toml", app_name),
+                    format!(
+                        "DataView '{}' source_view '{}' not found in app",
+                        dv_name, src,
+                    ),
+                ).with_app(app_name));
+            }
+        }
+
+        graph.insert(dv_name.clone(), deps);
+    }
+
+    // CV-DV-COMPOSE-2: DFS cycle detection.
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut in_stack: HashSet<String> = HashSet::new();
+    let mut cycle_reported = false;
+
+    // Collect all DataView names that participate in composition.
+    let all_keys: Vec<String> = graph.keys().cloned().collect();
+    for key in &all_keys {
+        if !visited.contains(key) && !cycle_reported {
+            if has_compose_cycle(&graph, key, &mut visited, &mut in_stack) {
+                results.push(ValidationResult::fail(
+                    "CV-DV-COMPOSE-2",
+                    format!("{}/app.toml", app_name),
+                    format!(
+                        "DataView composition cycle detected involving '{}'",
+                        key,
+                    ),
+                ).with_app(app_name));
+                cycle_reported = true;
+            }
+        }
+    }
+}
+
+/// DFS cycle detection for the DataView composition graph.
+///
+/// Returns `true` if a cycle is found reachable from `start`.
+fn has_compose_cycle(
+    graph: &HashMap<String, Vec<String>>,
+    start: &str,
+    visited: &mut HashSet<String>,
+    in_stack: &mut HashSet<String>,
+) -> bool {
+    visited.insert(start.to_string());
+    in_stack.insert(start.to_string());
+
+    if let Some(deps) = graph.get(start) {
+        for dep in deps {
+            if !visited.contains(dep) {
+                if has_compose_cycle(graph, dep, visited, in_stack) {
+                    return true;
+                }
+            } else if in_stack.contains(dep) {
+                return true;
+            }
+        }
+    }
+
+    in_stack.remove(start);
+    false
+}
+
 /// Extract `{varname}` and `{?varname,...}` variable names from a URI template string.
 ///
 /// Handles RFC 6570 level 1 and query-string expansion:
@@ -1168,6 +1261,12 @@ mod tests {
             validate_result: false,
             strict_parameters: false,
             max_rows: 1000,
+            skip_introspect: false,
+            cursor_key: None,
+            source_views: vec![],
+            compose_strategy: None,
+            join_key: None,
+            enrich_mode: "nest".into(),
         }
     }
 
@@ -1207,6 +1306,7 @@ mod tests {
             prompts: HashMap::new(),
             instructions: None,
             session: None,
+            federation: vec![],
         }
     }
 
@@ -1249,6 +1349,7 @@ mod tests {
             prompts: HashMap::new(),
             instructions: None,
             session: None,
+            federation: vec![],
         }
     }
 
@@ -1286,6 +1387,7 @@ mod tests {
             prompts: HashMap::new(),
             instructions: None,
             session: None,
+            federation: vec![],
         }
     }
 
@@ -2591,6 +2693,8 @@ mod tests {
                 description: String::new(),
                 mime_type: "application/json".into(),
                 uri_template: None,
+                subscribable: false,
+                poll_interval_seconds: 5,
             }),
         );
 
@@ -2680,6 +2784,7 @@ mod tests {
             prompts: HashMap::new(),
             instructions: None,
             session: None,
+            federation: vec![],
         }
     }
 
@@ -2922,6 +3027,7 @@ mod tests {
             prompts: HashMap::new(),
             instructions: None,
             session: None,
+            federation: vec![],
         }
     }
 
@@ -2957,6 +3063,8 @@ mod tests {
                 description: String::new(),
                 mime_type: "application/json".into(),
                 uri_template: Some("cb://{project_id}/decisions{?since}".into()),
+                subscribable: false,
+                poll_interval_seconds: 5,
             }),
         );
 
@@ -2987,6 +3095,8 @@ mod tests {
                 description: String::new(),
                 mime_type: "application/json".into(),
                 uri_template: Some("cb://{project_id}/decisions".into()),
+                subscribable: false,
+                poll_interval_seconds: 5,
             }),
         );
 
@@ -3013,6 +3123,8 @@ mod tests {
                 description: String::new(),
                 mime_type: "application/json".into(),
                 uri_template: None,
+                subscribable: false,
+                poll_interval_seconds: 5,
             }),
         );
 
@@ -3026,5 +3138,132 @@ mod tests {
         let results = validate_crossref(&bundle);
 
         assert!(!has_fail(&results, "MCP-VAL-9"), "no uri_template must skip MCP-VAL-9 check");
+    }
+
+    // ── CV-DV-COMPOSE-1: source_view not found ─────────────────────
+
+    #[test]
+    fn cv_dv_compose_1_unknown_source_view() {
+        let mut datasources = HashMap::new();
+        datasources.insert("ds".into(), make_ds_config("ds", "faker"));
+
+        let mut composite = make_dv_config("composite", "ds");
+        composite.source_views = vec!["nonexistent_view".into()];
+        composite.compose_strategy = Some("union".into());
+
+        let mut dataviews = HashMap::new();
+        dataviews.insert("composite".into(), composite);
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("ds", "faker")],
+            vec![],
+            datasources,
+            dataviews,
+            HashMap::new(),
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(has_fail(&results, "CV-DV-COMPOSE-1"), "unknown source_view should emit CV-DV-COMPOSE-1");
+    }
+
+    #[test]
+    fn cv_dv_compose_1_valid_source_view_passes() {
+        let mut datasources = HashMap::new();
+        datasources.insert("ds".into(), make_ds_config("ds", "faker"));
+
+        let mut dataviews = HashMap::new();
+        dataviews.insert("contacts".into(), make_dv_config("contacts", "ds"));
+
+        let mut composite = make_dv_config("composite", "ds");
+        composite.source_views = vec!["contacts".into()];
+        composite.compose_strategy = Some("union".into());
+        dataviews.insert("composite".into(), composite);
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("ds", "faker")],
+            vec![],
+            datasources,
+            dataviews,
+            HashMap::new(),
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(!has_fail(&results, "CV-DV-COMPOSE-1"), "valid source_view should not emit CV-DV-COMPOSE-1");
+    }
+
+    // ── CV-DV-COMPOSE-2: cycle detection ───────────────────────────
+
+    #[test]
+    fn cv_dv_compose_2_cycle_detected() {
+        let mut datasources = HashMap::new();
+        datasources.insert("ds".into(), make_ds_config("ds", "faker"));
+
+        // A → B → A (cycle)
+        let mut dv_a = make_dv_config("view_a", "ds");
+        dv_a.source_views = vec!["view_b".into()];
+        dv_a.compose_strategy = Some("union".into());
+
+        let mut dv_b = make_dv_config("view_b", "ds");
+        dv_b.source_views = vec!["view_a".into()];
+        dv_b.compose_strategy = Some("union".into());
+
+        let mut dataviews = HashMap::new();
+        dataviews.insert("view_a".into(), dv_a);
+        dataviews.insert("view_b".into(), dv_b);
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("ds", "faker")],
+            vec![],
+            datasources,
+            dataviews,
+            HashMap::new(),
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(has_fail(&results, "CV-DV-COMPOSE-2"), "A→B→A cycle should emit CV-DV-COMPOSE-2");
+    }
+
+    #[test]
+    fn cv_dv_compose_2_no_cycle_passes() {
+        let mut datasources = HashMap::new();
+        datasources.insert("ds".into(), make_ds_config("ds", "faker"));
+
+        // A → B (no cycle)
+        let mut dv_a = make_dv_config("view_a", "ds");
+        dv_a.source_views = vec!["view_b".into()];
+        dv_a.compose_strategy = Some("union".into());
+
+        let dv_b = make_dv_config("view_b", "ds");
+
+        let mut dataviews = HashMap::new();
+        dataviews.insert("view_a".into(), dv_a);
+        dataviews.insert("view_b".into(), dv_b);
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("ds", "faker")],
+            vec![],
+            datasources,
+            dataviews,
+            HashMap::new(),
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(!has_fail(&results, "CV-DV-COMPOSE-2"), "A→B (no cycle) should not emit CV-DV-COMPOSE-2");
     }
 }

@@ -134,6 +134,32 @@ pub async fn setup_test_table(conn: &mut dyn Connection, driver: &str) -> Result
     Ok(())
 }
 
+/// Build an INSERT query that includes the email column (may be NULL).
+pub fn make_insert_with_email_query(
+    driver: &str,
+    params: &HashMap<String, QueryValue>,
+) -> Query {
+    let stmt = match driver {
+        "postgres" => "INSERT INTO canary_records (zname, age, email) VALUES ($zname, $age, $email) RETURNING *",
+        "mysql" | "sqlite" => "INSERT INTO canary_records (id, zname, age, email) VALUES ($id, $zname, $age, $email)",
+        _ => "",
+    };
+
+    let mut p = params.clone();
+    if driver == "mysql" || driver == "sqlite" {
+        if !p.contains_key("id") {
+            p.insert("id".into(), QueryValue::String(uuid::Uuid::new_v4().to_string()));
+        }
+    }
+
+    Query {
+        operation: "insert".into(),
+        target: "canary_records".into(),
+        parameters: p,
+        statement: stmt.into(),
+    }
+}
+
 /// Build an INSERT query for the canary_records table.
 pub fn make_insert_query(
     driver: &str,

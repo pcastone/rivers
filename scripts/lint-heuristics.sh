@@ -98,7 +98,10 @@ check_h4() {
     fi
 }
 
-check_h4 "crates/rivers-plugin-couchdb/src/lib.rs"          9
+# couchdb baseline: 9 production reads + 1 error-body .text() in insert
+# error path (mirrors existing find/get/update error handling — CouchDB
+# error JSON is small and the body is needed for diagnostics).
+check_h4 "crates/rivers-plugin-couchdb/src/lib.rs"          10
 check_h4 "crates/rivers-plugin-elasticsearch/src/lib.rs"    6
 check_h4 "crates/rivers-plugin-influxdb/src/connection.rs"  3
 check_h4 "crates/rivers-plugin-influxdb/src/batching.rs"    1
@@ -129,7 +132,11 @@ check_h5() {
 }
 
 check_h5 "crates/rivers-lockbox/src/main.rs"    8
-check_h5 "crates/cargo-deploy/src/main.rs"       4
+# cargo-deploy baseline: 4 production fs::write (deploy config + cert/key
+# files) + 2 test-only fs::write inside the inline #[cfg(test)] module
+# (staging-cleanup test writes a tempdir marker; read_workspace_version
+# test writes a synthetic Cargo.toml). Neither touches secrets.
+check_h5 "crates/cargo-deploy/src/main.rs"       6
 
 [[ $H5_FAIL -eq 0 ]] && pass H5
 

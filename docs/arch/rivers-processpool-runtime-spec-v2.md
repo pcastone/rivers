@@ -306,6 +306,36 @@ declare const Rivers: {
 };
 ```
 
+#### ctx.datasource() — broker publish surface
+
+`ctx.datasource(name)` is also the entry point for publishing to message broker datasources. When the named datasource is a broker (Kafka, RabbitMQ, NATS, Redis Streams), the returned object exposes a `publish` method:
+
+```typescript
+interface OutboundMessage {
+    destination: string;           // topic / queue / exchange / subject
+    payload: string | object;      // string → UTF-8 bytes; object → JSON-stringified
+    headers?: Record<string, string>;
+    key?: string;                  // partition key (Kafka) or routing key (AMQP)
+    reply_to?: string;
+}
+
+interface PublishResult {
+    id: string | null;             // message-id if broker returns one
+    metadata: string | null;       // broker-specific (partition:offset for Kafka)
+}
+
+// Usage inside a handler:
+const result = ctx.datasource("kafka").publish({
+    destination: "orders",
+    payload: { order_id: "abc" },
+    key: "user-42",
+});
+```
+
+The proxy is installed lazily: a `BrokerProducer` is created on first `publish()` call in the task and cached for the task's lifetime. Errors from the broker (connection failure, serialization error) are thrown as `TypeError`. The direct-datasource proxy for brokers is wired in `crates/riversd/src/process_pool/v8_engine/broker_dispatch.rs`.
+
+See `rivers-driver-spec.md` §6 (MessageBrokerDriver Contract) for the Rust trait that backs this surface.
+
 `console.log` is **not** available. All logging goes through `Rivers.log` which is structured, correlated with the request trace ID, and routes to the configured log output. This prevents log injection and ensures all handler output is visible in the standard observability stack.
 
 ### 5.3 TypeScript Compilation
@@ -327,6 +357,25 @@ After a task completes, the V8 worker unbinds the current context rather than de
 Streaming handlers (WebSocket, SSE) receive a long-lived context that persists for the duration of the stream. The context is unbound and zeroized when the stream terminates.
 
 This gives fast per-request turnover with occasional full recycling for long-lived workers.
+
+### 5.5 Compile Check (build-time validation)
+
+The V8 engine dylib exposes a `compile_check` method for build-time syntax verification. This is used by `riverpackage validate` (Gate 1) and `riversd` deploy-time validation (Gate 2) to catch TS/JS errors before request dispatch.
+
+The compile check:
+
+1. Transpiles TS → JS via embedded swc (same pipeline as §5.4 bundle load transpilation)
+2. Creates a throwaway V8 isolate
+3. Compiles the source as an ES module via `v8::Module::compile()`
+4. On success: instantiates minimally, calls `module.GetModuleNamespace()`, enumerates own properties to produce an export list
+5. On failure: extracts V8 `TryCatch` exception with file, line, column, and message
+6. Destroys the isolate — no state persists
+
+The compile check verifies that the declared handler `entrypoint` function exists in the export list. A handler declaring `entrypoint = "onCreateOrder"` against a module that exports `["default", "onCreateOrder"]` passes. A module that exports `["default", "onCreate"]` fails with error code `C002`.
+
+The compile check is read-only. No handler code is executed. No side effects. The check uses the same swc and V8 versions as the runtime — zero version skew risk.
+
+See `rivers-bundle-validation-spec.md` §5.2 for the full implementation contract.
 
 ---
 
@@ -378,6 +427,18 @@ The WASM module declares its imports in the standard WASM binary format:
 ### 6.3 Multi-Language WASM
 
 Any language with a WASM compilation target (Rust, C, C++, Go via TinyGo, AssemblyScript, Zig) can produce handlers for the WASM pool. The host function interface is the only contract. Language choice is a developer preference.
+
+### 6.4 Compile Check (build-time validation)
+
+The Wasmtime engine dylib exposes a `compile_check` method for build-time WASM validation:
+
+1. Validates WASM bytes via `wasmtime::Module::validate(&engine, bytes)` — checks magic bytes, section headers, type validation
+2. On success: parses export section, collects exported function names
+3. On failure: extracts Wasmtime error message
+
+Export verification works the same as V8 — the declared `entrypoint` must appear in the export list.
+
+See `rivers-bundle-validation-spec.md` §5.3 for the full implementation contract.
 
 ---
 
@@ -804,6 +865,70 @@ export async function* generate(
 ```
 
 If the upstream stream terminates with an error mid-iteration, the `AsyncIterable` throws on the next `for await`. The generator's try/catch handles it normally — Rivers emits a poison chunk automatically on unhandled throw.
+
+### 10.9 MCP Elicitation — `ctx.elicit()` (P2.6)
+
+`ctx.elicit(spec)` suspends the handler and requests structured user input from the MCP client. Only available when the handler is invoked via MCP (`tools/call`); calling from REST or WebSocket handlers throws a runtime `Error`.
+
+```typescript
+interface ElicitationSpec {
+    title: string;           // Short title for the input dialog / prompt
+    message: string;         // Human-readable description of what is being requested
+    requestedSchema: object; // JSON Schema describing the expected response shape
+}
+
+interface ElicitationResult {
+    action: "accept" | "decline" | "cancel";
+    content?: object; // User-supplied data, present only when action === "accept"
+}
+
+// Usage in a CodeComponent handler
+export async function handler(ctx: ViewContext): Promise<void> {
+    const result = await ctx.elicit({
+        title: "Confirm order",
+        message: "Please confirm the order details before proceeding.",
+        requestedSchema: {
+            type: "object",
+            properties: {
+                confirmed: { type: "boolean" },
+                notes:     { type: "string" }
+            },
+            required: ["confirmed"]
+        }
+    });
+
+    if (result.action !== "accept" || !result.content?.confirmed) {
+        ctx.resdata = { ok: false, reason: "user declined" };
+        return;
+    }
+
+    ctx.resdata = { ok: true };
+}
+```
+
+**Protocol flow:**
+
+1. The V8 host callback `Rivers.__elicit(specJson)` is invoked synchronously from the isolate.
+2. The callback places an `ElicitationRequest` (containing the spec and a `oneshot::Sender`) on an unbounded channel created before the task was dispatched.
+3. A relay task (running on the tokio runtime) picks up the request, sends an `elicitation/create` JSON-RPC notification to the MCP client over the session's SSE stream, and registers the `oneshot::Sender` in `AppContext::elicitation_registry` keyed by a UUID.
+4. The V8 worker blocks on the `oneshot::Receiver` (via `rt.block_on(tokio::time::timeout(60s, rx.await))`).
+5. When the MCP client sends `elicitation/response` (standard JSON-RPC over HTTP), `dispatch::handle_elicitation_response` resolves the registry entry, delivering the response to the waiting receiver.
+6. The V8 callback returns a JSON string `{action, content}` which the `ctx.elicit()` shim parses and returns to the handler.
+
+**`ctx.elicit()` is Promise-compatible** — it returns a thenable shim wrapping a synchronous result, so handlers can use `await ctx.elicit(...)` without V8 async machinery. The blocking is on the spawn_blocking worker thread, not the tokio thread pool.
+
+**Timeout:** If the MCP client does not respond within 60 seconds, the receiver resolves with `{ action: "cancel" }`. The handler should always check `result.action` before proceeding.
+
+**Registry:** `AppContext::elicitation_registry` (`Arc<ElicitationRegistry>`) holds all pending elicitations. The registry is process-global and shared across all MCP sessions. Entries are keyed by UUID and cleaned up on resolution or timeout.
+
+**Error cases:**
+
+| Condition | Outcome |
+|---|---|
+| Not an MCP invocation (`session_id` is `None`) | `Rivers.__elicit` throws `Error("elicit() is only available in MCP tool handlers")` |
+| `elicitation/response` with unknown ID | `resolve()` returns `false`; dispatch returns `{error: {code: -32602}}` |
+| SSE channel unavailable (session closed) | Notification is dropped; elicitation times out after 60s |
+| Nested `ctx.elicit()` call | Not blocked — each call is a new UUID and independent oneshot |
 
 ---
 

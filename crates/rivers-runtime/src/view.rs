@@ -135,6 +135,11 @@ pub struct ApiViewConfig {
     /// MCP session configuration.
     #[serde(default)]
     pub session: Option<McpSessionConfig>,
+
+    /// MCP federation upstreams — remote MCP servers whose tools/resources are merged
+    /// into this server's `tools/list` and `resources/list` under a namespaced prefix.
+    #[serde(default)]
+    pub federation: Vec<McpFederationConfig>,
 }
 
 /// Guard lifecycle hooks — all optional, all side-effects only.
@@ -424,9 +429,21 @@ pub struct McpResourceConfig {
     /// from the incoming URI at `resources/read` time and passed as DataView params.
     #[serde(default)]
     pub uri_template: Option<String>,
+
+    /// When true, this resource accepts `resources/subscribe` requests and
+    /// emits `notifications/resources/updated` when underlying data changes.
+    #[serde(default)]
+    pub subscribable: bool,
+
+    /// Polling interval in seconds for change detection. Default: 5.
+    /// Ignored when `subscribable = false`.
+    #[serde(default = "default_poll_interval_seconds")]
+    pub poll_interval_seconds: u64,
 }
 
 fn default_mime() -> String { "application/json".into() }
+
+fn default_poll_interval_seconds() -> u64 { 5 }
 
 /// MCP prompt declaration — markdown template with argument substitution.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
@@ -473,3 +490,33 @@ impl Default for McpSessionConfig {
 }
 
 fn default_mcp_ttl() -> u64 { 3600 }
+
+// ── MCP Federation Config Types ──────────────────────────────────
+
+/// A single federated MCP upstream declaration.
+///
+/// Declared in `app.toml` under `[api.views.*.federation.*]` or as an array.
+/// Each entry causes the local MCP server to fetch and namespace the upstream's
+/// tools/resources, routing calls back to the upstream transparently.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct McpFederationConfig {
+    /// Short alias used to namespace federated tools/resources (e.g. "cb_service").
+    /// Must match `[a-z0-9_]+`.
+    pub alias: String,
+    /// Base URL of the upstream MCP server (e.g. "http://localhost:9090/mcp/app-name").
+    pub url: String,
+    /// Bearer token for authenticating to the upstream. Optional.
+    #[serde(default)]
+    pub bearer_token: Option<String>,
+    /// If non-empty, only these tool names are imported. Empty = import all.
+    #[serde(default)]
+    pub tools_filter: Vec<String>,
+    /// If non-empty, only resources with URIs matching these prefixes are imported. Empty = all.
+    #[serde(default)]
+    pub resources_filter: Vec<String>,
+    /// Request timeout in milliseconds. Default: 5000.
+    #[serde(default = "default_federation_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_federation_timeout_ms() -> u64 { 5000 }

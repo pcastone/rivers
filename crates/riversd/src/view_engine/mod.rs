@@ -72,6 +72,7 @@ mod tests {
             prompts: HashMap::new(),
             instructions: None,
             session: None,
+            federation: vec![],
         }
     }
 

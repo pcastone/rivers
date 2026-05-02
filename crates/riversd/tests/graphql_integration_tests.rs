@@ -75,6 +75,12 @@ async fn schema_with_real_executor_resolves_query() {
         put_parameters: Vec::new(), delete_parameters: Vec::new(),
         streaming: false,
         max_rows: 1000,
+        skip_introspect: false,
+        cursor_key: None,
+        source_views: vec![],
+        compose_strategy: None,
+        join_key: None,
+        enrich_mode: "nest".to_string(),
     });
 
     // Connection params

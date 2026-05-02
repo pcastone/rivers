@@ -132,6 +132,34 @@ pub(super) fn inject_ctx_methods(
 
     // ctx.streamDataview, ctx.datasource via JS
     let js_methods = r#"
+        // P2.6: ctx.elicit(spec) -- MCP mid-handler user input request.
+        // Calls Rivers.__elicit(JSON.stringify(spec)) synchronously (the native
+        // callback blocks on the oneshot channel), then parses the JSON result.
+        // The return value is wrapped in a resolved Promise so handlers can
+        // `await` it without structural changes (V8 runs synchronously; there is
+        // no real async suspension here -- the blocking happens inside the native
+        // callback via rt.block_on).
+        //
+        // Only functional when called from an MCP tool handler. In REST/WebSocket
+        // contexts, Rivers.__elicit will throw an Error, which propagates out
+        // of the Promise.
+        ctx.elicit = function(spec) {
+            try {
+                var specJson = JSON.stringify(spec);
+                var resultJson = Rivers.__elicit(specJson);
+                var result = JSON.parse(resultJson);
+                return { then: function(resolve, reject) {
+                    try { resolve(result); } catch(e) { if (reject) reject(e); }
+                    return this;
+                }};
+            } catch(e) {
+                return { then: function(resolve, reject) {
+                    if (reject) { try { reject(e); } catch(re) {} }
+                    return this;
+                }};
+            }
+        };
+
         // V2.3: ctx.streamDataview(name) -- mock iterator over pre-fetched data
         ctx.streamDataview = function(name) {
             // Get data from pre-fetched ctx.data

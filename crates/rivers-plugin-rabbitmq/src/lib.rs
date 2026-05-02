@@ -16,7 +16,7 @@ use lapin::{
     BasicProperties, Channel, Connection as AmqpConnection, ConnectionProperties, Consumer,
 };
 use rivers_driver_sdk::{
-    url_encode_path_segment,
+    read_connect_timeout, url_encode_path_segment,
     AckOutcome, BrokerConsumer, BrokerConsumerConfig, BrokerError, BrokerMetadata, BrokerProducer,
     BrokerSemantics, ConnectionParams, DriverError, DriverRegistrar, InboundMessage,
     MessageBrokerDriver, MessageReceipt, OutboundMessage, PublishReceipt, ABI_VERSION,
@@ -181,9 +181,19 @@ async fn amqp_connect(params: &ConnectionParams) -> Result<AmqpConnection, Drive
         )
     };
 
-    AmqpConnection::connect(&url, ConnectionProperties::default())
-        .await
-        .map_err(|e| DriverError::Connection(format!("rabbitmq connect: {e}")))
+    let connect_timeout = std::time::Duration::from_secs(read_connect_timeout(params));
+    tokio::time::timeout(
+        connect_timeout,
+        AmqpConnection::connect(&url, ConnectionProperties::default()),
+    )
+    .await
+    .map_err(|_| {
+        DriverError::Connection(format!(
+            "rabbitmq connect timed out after {}s",
+            connect_timeout.as_secs()
+        ))
+    })?
+    .map_err(|e| DriverError::Connection(format!("rabbitmq connect: {e}")))
 }
 
 

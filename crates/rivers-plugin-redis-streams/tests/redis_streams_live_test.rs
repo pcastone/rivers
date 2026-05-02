@@ -12,6 +12,10 @@ use rivers_driver_sdk::{
     BrokerConsumerConfig, BrokerSubscription, ConnectionParams, MessageBrokerDriver,
     OutboundMessage,
 };
+use rivers_driver_sdk::broker_contract_fixtures::{
+    test_ack_returns_acked, test_consumer_group_exclusive,
+    test_multi_subscription, test_nack_redelivery_or_unsupported,
+};
 use rivers_plugin_redis_streams::RedisStreamsDriver;
 
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -215,6 +219,28 @@ async fn redis_streams_produce_consume_roundtrip() {
 
     // Cleanup: delete the stream using raw redis command
     cleanup_stream(&stream).await;
+}
+
+// ── Contract fixture tests ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn redis_streams_contract_ack_returns_acked() {
+    test_ack_returns_acked(&RedisStreamsDriver).await;
+}
+
+#[tokio::test]
+async fn redis_streams_contract_nack_redelivery_or_unsupported() {
+    test_nack_redelivery_or_unsupported(&RedisStreamsDriver).await;
+}
+
+#[tokio::test]
+async fn redis_streams_contract_consumer_group_exclusive() {
+    test_consumer_group_exclusive(&RedisStreamsDriver).await;
+}
+
+#[tokio::test]
+async fn redis_streams_contract_multi_subscription() {
+    test_multi_subscription(&RedisStreamsDriver).await;
 }
 
 /// Delete a Redis stream for cleanup (uses cluster connection).

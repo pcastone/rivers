@@ -13,13 +13,19 @@ pub mod server;
 pub mod storage;
 /// TLS, admin API, cluster, and session store configuration.
 pub mod tls;
+/// OTel span export configuration.
+pub mod telemetry;
 /// Unknown-key detection for riversd.toml at startup.
 pub mod validate_config;
+/// MCP server-level subscription limits.
+pub mod mcp;
 
+pub use mcp::McpConfig;
 pub use runtime::*;
 pub use security::*;
 pub use server::*;
 pub use storage::*;
+pub use telemetry::*;
 pub use tls::*;
 
 #[cfg(test)]

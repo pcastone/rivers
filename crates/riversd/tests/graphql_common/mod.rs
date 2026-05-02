@@ -48,5 +48,6 @@ pub fn default_view_config() -> ApiViewConfig {
         prompts: HashMap::new(),
         instructions: None,
         session: None,
+        federation: vec![],
     }
 }

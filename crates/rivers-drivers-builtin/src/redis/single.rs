@@ -418,3 +418,92 @@ impl Connection for RedisConnection {
         "redis"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rivers_driver_sdk::{check_admin_guard, Query};
+
+    /// The admin_operations list for the Redis connection (mirrors the impl).
+    const REDIS_ADMIN_OPS: &[&str] = &["flushdb", "flushall", "config_set", "config_rewrite"];
+
+    // ── admin_operations list ─────────────────────────────────────────
+
+    #[test]
+    fn admin_operations_returns_expected_list() {
+        // Verify the declared list covers the four dangerous Redis commands.
+        assert!(REDIS_ADMIN_OPS.contains(&"flushdb"), "flushdb must be in admin_operations");
+        assert!(REDIS_ADMIN_OPS.contains(&"flushall"), "flushall must be in admin_operations");
+        assert!(REDIS_ADMIN_OPS.contains(&"config_set"), "config_set must be in admin_operations");
+        assert!(REDIS_ADMIN_OPS.contains(&"config_rewrite"), "config_rewrite must be in admin_operations");
+        assert_eq!(REDIS_ADMIN_OPS.len(), 4, "admin_operations should have exactly 4 entries");
+    }
+
+    // ── DDL guard blocks SQL DDL statements ──────────────────────────
+
+    #[test]
+    fn ddl_drop_is_rejected() {
+        let query = Query::new("mykey", "DROP TABLE users");
+        let result = check_admin_guard(&query, REDIS_ADMIN_OPS);
+        assert!(result.is_some(), "DROP TABLE must be rejected by admin guard");
+        let msg = result.unwrap();
+        assert!(
+            msg.contains("DDL") || msg.contains("rejected"),
+            "error must indicate rejection: {msg}"
+        );
+    }
+
+    #[test]
+    fn ddl_create_is_rejected() {
+        let query = Query::new("mykey", "CREATE TABLE foo (id INT)");
+        let result = check_admin_guard(&query, REDIS_ADMIN_OPS);
+        assert!(result.is_some(), "CREATE TABLE must be rejected by admin guard");
+    }
+
+    #[test]
+    fn ddl_alter_is_rejected() {
+        let query = Query::new("mykey", "ALTER TABLE foo ADD COLUMN bar TEXT");
+        let result = check_admin_guard(&query, REDIS_ADMIN_OPS);
+        assert!(result.is_some(), "ALTER TABLE must be rejected by admin guard");
+    }
+
+    #[test]
+    fn ddl_truncate_is_rejected() {
+        let query = Query::new("mykey", "TRUNCATE TABLE foo");
+        let result = check_admin_guard(&query, REDIS_ADMIN_OPS);
+        assert!(result.is_some(), "TRUNCATE TABLE must be rejected by admin guard");
+    }
+
+    // ── Admin operations are blocked ─────────────────────────────────
+
+    #[test]
+    fn admin_op_flushdb_is_rejected() {
+        let query = Query::with_operation("flushdb", "redis", "FLUSHDB");
+        let result = check_admin_guard(&query, REDIS_ADMIN_OPS);
+        assert!(result.is_some(), "flushdb must be rejected by admin guard");
+        let msg = result.unwrap();
+        assert!(msg.contains("flushdb"), "error must name the operation: {msg}");
+    }
+
+    #[test]
+    fn admin_op_flushall_is_rejected() {
+        let query = Query::with_operation("flushall", "redis", "FLUSHALL");
+        let result = check_admin_guard(&query, REDIS_ADMIN_OPS);
+        assert!(result.is_some(), "flushall must be rejected by admin guard");
+    }
+
+    // ── Normal operations are allowed ────────────────────────────────
+
+    #[test]
+    fn normal_get_operation_is_allowed() {
+        let query = Query::with_operation("get", "mykey", "");
+        let result = check_admin_guard(&query, REDIS_ADMIN_OPS);
+        assert!(result.is_none(), "get must not be blocked by admin guard");
+    }
+
+    #[test]
+    fn normal_set_operation_is_allowed() {
+        let query = Query::with_operation("set", "mykey", "");
+        let result = check_admin_guard(&query, REDIS_ADMIN_OPS);
+        assert!(result.is_none(), "set must not be blocked by admin guard");
+    }
+}

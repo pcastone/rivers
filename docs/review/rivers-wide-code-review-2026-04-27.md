@@ -158,6 +158,8 @@ Fix direction:
 
 ### 4. Unbounded Reads And Result Materialization Repeat Across Drivers
 
+> **Partially resolved 2026-04-30 (RW4.2.b, cb-p1-batch2 pending PR)** — Row cap enforcement added to cassandra, mongodb (via SDK `read_max_rows`), couchdb, and influxdb (CSV). Elasticsearch already had cap from PR #96. All caps truncate with `tracing::warn!` and use `read_max_rows(params)` from SDK defaults (10,000). Streaming/pagination, RabbitMQ prefetch, and byte caps remain deferred.
+
 Affected crates:
 
 - `rivers-plugin-ldap`
@@ -278,12 +280,14 @@ Fix direction:
 
 ### `rivers-lockbox-engine`
 
+> **Partially resolved 2026-04-30 (RW1.4.b, cb-p1-batch2 pending PR)** — `ResolvedEntry.value` changed from `Zeroizing<String>` to `SecretBox<String>` (redacted `Debug`, no `Clone`, explicit `.expose_secret()` required). `Keystore` and `KeystoreEntry` `Clone` derives removed. `encrypt_keystore` wraps `toml_str` in `Zeroizing::new()` immediately (all error paths now zeroize). 3 new unit tests on redacted debug and explicit-access contract. Per-access fetch and permission recheck remain deferred.
+
 Detailed report exists at `docs/review/rivers-lockbox-engine.md`.
 
 Consolidated findings:
 
-- **T2:** Returned secrets are not automatically zeroized.
-- **T2:** Plaintext buffers skip zeroization on error paths.
+- **T2:** ~~Returned secrets are not automatically zeroized.~~ `SecretBox<String>` with `.expose_secret()` gate resolves this (RW1.4.b).
+- **T2:** ~~Plaintext buffers skip zeroization on error paths.~~ `Zeroizing::new(toml_str)` at encryption entry resolves this (RW1.4.b).
 - **T2:** Per-access fetch can return the wrong secret after rotation/reorder because metadata stores a stale entry index.
 - **T2:** Runtime secret reads do not recheck keystore permissions.
 
@@ -318,25 +322,27 @@ Fix direction:
 
 ### `rivers-lockbox`
 
+> **Partially resolved 2026-04-30 (RW1.4.h, cb-p1-batch2 pending PR)** — CLI completely rewritten to route through `rivers-lockbox-engine`. Storage now uses `keystore.rkeystore` (engine's `Keystore` TOML + Age encryption) replacing per-entry `.age` files. All writes atomic (temp+rename). `validate_entry_name` called on all names. No `--value` argv — `rpassword` TTY-only input. `cmd_rekey` uses staging dir pattern. 12 unit tests. Remaining: destructive-command confirmation, concurrent-save locking.
+
 **Summary:** 10 findings. CLI format and behavior diverge from the engine and expected operator safety.
 
 Findings:
 
-- **T1:** `rekey` can strand existing entries by replacing the identity before all entries are rewritten.
-- **T1:** Alias file read/parse failures are silently discarded and can overwrite aliases with `{}`.
-- **T2:** CLI writes a bespoke directory/per-entry store instead of the engine keystore format.
-- **T2:** `--value` puts secrets in argv, shell history, and process lists.
-- **T2:** Interactive secret input echoes to terminal.
+- **T1:** ~~`rekey` can strand existing entries.~~ Staging dir pattern in `cmd_rekey` resolves this (RW1.4.h).
+- **T1:** ~~Alias file read/parse failures silently overwrite with `{}`.~~ Engine-backed storage resolves alias mutation safety (RW1.4.h).
+- **T2:** ~~CLI writes a bespoke directory/per-entry store instead of engine keystore format.~~ Resolved: now uses `rivers-lockbox-engine` (RW1.4.h).
+- **T2:** ~~`--value` puts secrets in argv.~~ Resolved: `rpassword` TTY-only input (RW1.4.h).
+- **T2:** ~~Interactive secret input echoes to terminal.~~ Resolved: `rpassword` (RW1.4.h).
 - **T2:** Identity files are created before restrictive permissions are applied.
-- **T2:** Mutations rewrite live files in place.
-- **T2:** User names are used as paths without validation in several commands.
+- **T2:** ~~Mutations rewrite live files in place.~~ Atomic temp+rename everywhere (RW1.4.h).
+- **T2:** ~~User names used as paths without validation.~~ `validate_entry_name` on all names (RW1.4.h).
 - **T2:** Alias creation can overwrite existing names or aliases.
 - **T2:** Decrypted secrets are not zeroized after use.
 - **T3:** Destructive commands do not require confirmation.
 
 Fix direction:
 
-- Route CLI storage through `rivers-lockbox-engine`.
+- ~~Route CLI storage through `rivers-lockbox-engine`.~~ Done.
 - Remove argv secret input.
 - Use hidden TTY input.
 - Add atomic writes and validated names everywhere.
@@ -407,12 +413,14 @@ Fix direction:
 
 ### `rivers-core-config`
 
+> **Partially resolved 2026-04-30 (RW3.3.b, cb-p1-batch2 pending PR)** — `unenforced_storage_config_fields(config)` added (6 unit tests) returning names of parsed-but-unimplemented fields (`retention_ms`, `max_events`, `cache.datasources`, `cache.dataviews`). Both `riversd` storage-engine init paths emit `tracing::warn!` when these fields have non-default values. Unknown-key depth, cookie validation path, and field name typo remain deferred.
+
 Findings:
 
 - **T2:** Unknown-key validation stops after root and `[base]`; nested typos are silently accepted.
 - **T2:** Unknown-key allowlist uses `init_timeout_seconds`, but actual field is `init_timeout_s`.
 - **T2:** `SessionCookieConfig::validate()` is not bound to every config load path; hot reload can bypass `http_only` enforcement.
-- **T2:** Storage policy fields parse but are not enforced.
+- **T2:** ~~Storage policy fields parse but are not enforced.~~ Fields now warn at startup when non-default (RW3.3.b).
 
 Fix direction:
 
@@ -423,6 +431,8 @@ Fix direction:
 ### `riversctl`
 
 > **Partially resolved 2026-04-29 by PR #96 (RW1.3, commits `fab3e61`–`12b1510`)** — Stop fallback now gated on network unreachability only, not any HTTP error (T1); `kill()` return value checked, PID file removed only on confirmed exit (T1); `log set` request body corrected from `event` to `target` (T2); admin private key config key corrected from `admin_private_key_path` to `admin_key_path` (T2). Remaining findings (deploy lifecycle, timeout, TLS import permissions) are deferred.
+>
+> **Further resolved 2026-04-30 (RW5.3.c, cb-p1-batch2 pending PR)** — Golden tests added: 5 admin HTTP tests (401/403/500 = `Http` variant, not `Network`; connection-refused = `Network`); 4 stop-command tests (PID file discovery, parse, invalid content, missing). `ENV_LOCK` mutex serializes env-var mutation. Deploy lifecycle, request timeout, and TLS import permissions remain deferred.
 
 Findings:
 
@@ -480,11 +490,13 @@ Fix direction:
 ### `rivers-plugin-ldap`
 
 > **Partially resolved 2026-04-29 by PR #96 (RW4, commit `1bada09`)** — Shared `DEFAULT_TIMEOUT_MS` applied to LDAP connect/bind/search/modify operations (T2 timeout). Unbounded result set (T1), LDAPS/StartTLS (T2), and row caps remain deferred.
+>
+> **Further resolved 2026-04-30 (RW4.4.i, cb-p1-batch2 pending PR)** — TLS support added via `tls` option (`ldaps` → `ldaps://` URL port 636; `starttls` → `set_starttls(true)`; `tls_verify=false` → `set_no_tls_verify(true)`). WARN emitted when credentials present with `tls=none`. 4 unit tests. Unbounded result set and row caps remain deferred.
 
 Findings:
 
 - **T1:** LDAP search materializes unbounded result sets.
-- **T2:** Bind credentials are sent over plain LDAP only.
+- **T2:** ~~Bind credentials are sent over plain LDAP only.~~ LDAPS/StartTLS now supported (RW4.4.i).
 - **T2:** ~~LDAP network operations have no driver-level timeouts.~~
 
 Fix direction:
@@ -512,9 +524,11 @@ Fix direction:
 
 ### `rivers-plugin-cassandra`
 
+> **Partially resolved 2026-04-30 (RW4.2.b, cb-p1-batch2 pending PR)** — `max_rows: usize` field added (read via `read_max_rows(params)` at connect, default 10,000). `exec_query` truncates result set with `tracing::warn!` when exceeded. 2 unit tests. Paged execution remains deferred.
+
 Findings:
 
-- **T1:** Query path uses unpaged execution and materializes all rows.
+- **T1:** Query path uses unpaged execution and materializes all rows. Row cap truncates with WARN (RW4.2.b); true paged execution deferred.
 - **T2:** Write result reports `affected_rows: 1` for all writes, even though CQL write acknowledgement is not a row-count result.
 
 Fix direction:
@@ -524,10 +538,12 @@ Fix direction:
 
 ### `rivers-plugin-mongodb`
 
+> **Partially resolved 2026-04-30 (RW4.2.b, cb-p1-batch2 pending PR)** — `max_rows` now read via SDK `read_max_rows(params)` (was local `DEFAULT_MAX_ROWS = 1_000`); default is now 10,000, consistent with other plugins. 11 admin-guard unit tests added (DDL blocked, `drop_collection`/`drop_database`/`create_collection` blocked, normal ops pass). Transaction session attachment and broad update/delete defaults remain deferred.
+
 Findings:
 
 - **T1:** Transactions are exposed but CRUD methods do not attach the active `ClientSession`, so work executes outside the transaction.
-- **T2:** `find()` drains the cursor into an unbounded `Vec`.
+- **T2:** ~~`find()` drains the cursor into an unbounded `Vec`.~~ Row cap applied via `read_max_rows(params)` (RW4.2.b); cursor still fully drained before truncation, not streamed.
 - **T2:** Update/delete defaults are broad: update with no `_filter` uses `{}` and can update many documents.
 
 Fix direction:
@@ -559,11 +575,13 @@ Fix direction:
 
 ### `rivers-plugin-couchdb`
 
+> **Partially resolved 2026-04-30 (RW4.2.b, cb-p1-batch2 pending PR)** — `max_rows` added to `CouchDBConnection`; `exec_find` and `exec_view` use `.take(max_rows+1)` + truncate+WARN pattern. Selector JSON safety, URL encoding, and HTTP-status-before-parse remain deferred.
+
 Findings:
 
 - **T1:** Selector placeholder substitution is string-based and not JSON-safe. String parameters are spliced into JSON source without escaping; bare placeholders are unquoted, and quoted placeholders can still be broken by embedded quotes or backslashes.
 - **T2:** Document IDs, design doc names, view names, and revision query values are interpolated into URLs without segment encoding.
-- **T2:** `_find` and view responses are read and collected without driver-side size/row caps.
+- **T2:** ~~`_find` and view responses are read and collected without driver-side size/row caps.~~ Row cap truncates with WARN (RW4.2.b).
 - **T2:** `insert` parses the response body and returns success without checking HTTP status first.
 
 Fix direction:
@@ -576,6 +594,8 @@ Fix direction:
 ### `rivers-plugin-influxdb`
 
 > **Partially resolved 2026-04-29 by PR #96 (RW4, commit `1bada09`)** — Batching now clears buffer only after confirmed HTTP success (T1); line protocol escaping for measurement names, tag keys/values, field keys, and field strings (including backslash) applied per line protocol spec (T2); shared `DEFAULT_TIMEOUT_MS` applied as HTTP request timeout (T2). Batching URL bucket gap and response body size cap remain deferred.
+>
+> **Further resolved 2026-04-30 (RW4.2.b, cb-p1-batch2 pending PR)** — `max_rows` added to `InfluxConnection`; `exec_query` truncates CSV response rows with WARN when exceeded. Both `InfluxConnection` and `BatchingInfluxConnection.inner` receive `max_rows` from `params` at driver connect. Response body size cap remains deferred.
 
 Findings:
 

@@ -462,6 +462,85 @@ Bundle:     canary-bundle
 
 ## Summary
 
+## Resource Subscriptions (Live Updates)
+
+Rivers supports the MCP `resources/subscribe` extension, which lets clients receive push notifications when a resource changes.
+
+### Marking a Resource as Subscribable
+
+Add `subscribable = true` and an optional `poll_interval_seconds` to any resource:
+
+```toml
+[api.views.mcp.resources.contacts]
+dataview          = "list_contacts"
+description       = "All contacts"
+subscribable      = true
+poll_interval_seconds = 10
+```
+
+- `subscribable = true` tells Rivers to start a background poller for this resource when a client subscribes.
+- `poll_interval_seconds` (default: 5) controls how often the poller re-executes the DataView. The server enforces a floor via `[mcp] min_poll_interval_seconds` in `riversd.toml` (default: 1 second).
+
+### The read-then-subscribe pattern
+
+Clients receive **change notifications only**, not an initial data snapshot. The recommended pattern is:
+
+1. Call `resources/read` to get the current state.
+2. Call `resources/subscribe` to register for updates.
+3. When the SSE stream delivers a `notifications/resources/updated` event, call `resources/read` again to get the new data.
+
+This keeps the subscription channel thin (event only, no payload) and avoids large initial data transfers for rarely-changing resources.
+
+### ORDER BY requirement for subscribable DataViews
+
+The change poller detects changes by SHA-256 hashing the serialized rows. For this to work correctly, the DataView's query **must include a deterministic `ORDER BY` clause**. Without a stable order, row set hash changes may be triggered by ordering variation rather than data changes, resulting in spurious notifications.
+
+```toml
+# Good: deterministic order
+[data.dataviews.list_contacts]
+query = "SELECT id, name, email FROM contacts ORDER BY id"
+
+# Bad: non-deterministic order causes false-positive notifications
+[data.dataviews.list_contacts]
+query = "SELECT id, name, email FROM contacts"
+```
+
+### Server-side subscription configuration
+
+In `riversd.toml`:
+
+```toml
+[mcp]
+max_subscriptions_per_session = 100   # cap per SSE session (default: 100)
+min_poll_interval_seconds     = 1     # floor for poll_interval_seconds (default: 1)
+```
+
+### Opening the SSE stream
+
+The SSE stream is opened by sending `GET` to the MCP endpoint with `Accept: text/event-stream` and a valid `Mcp-Session-Id` header. Rivers returns a chunked SSE response. The stream stays open and Rivers sends keepalive comment frames every 30 seconds.
+
+```bash
+# In one terminal: open the SSE stream
+curl -N -H "Accept: text/event-stream" \
+  -H "Mcp-Session-Id: <session-id>" \
+  https://localhost:8080/my-app/mcp
+
+# In another terminal: subscribe to a resource
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -H "Mcp-Session-Id: <session-id>" \
+  -d '{"jsonrpc":"2.0","id":10,"method":"resources/subscribe","params":{"uri":"rivers://my-app/contacts"}}' \
+  https://localhost:8080/my-app/mcp
+```
+
+When the data changes, the SSE stream delivers:
+
+```
+data: {"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"rivers://my-app/contacts"}}
+```
+
+---
+
 This tutorial covered:
 
 1. **Adding MCP to your app** — Create an `[api.views.mcp]` view with POST method
@@ -471,5 +550,6 @@ This tutorial covered:
 5. **Adding prompts** — Create markdown templates for AI workflows
 6. **Session management** — Understand MCP session lifecycle and TTL
 7. **Validation** — Verify MCP configurations during bundle deployment
+8. **Resource subscriptions** — Live change notifications via SSE
 
 MCP makes your Rivers application discoverable and accessible to AI models, enabling powerful AI-assisted workflows without custom code.

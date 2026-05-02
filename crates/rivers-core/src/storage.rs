@@ -16,6 +16,28 @@ use crate::config::StorageEngineConfig;
 
 // ── Factory ─────────────────────────────────────────────────────────
 
+/// Returns the names of config fields that are parsed but not yet enforced at runtime.
+///
+/// Callers should emit a `tracing::warn!` when this returns a non-empty list, so
+/// operators learn that their config has no effect rather than silently ignoring it.
+pub fn unenforced_storage_config_fields(config: &StorageEngineConfig) -> Vec<&'static str> {
+    let defaults = StorageEngineConfig::default();
+    let mut out = Vec::new();
+    if config.retention_ms != defaults.retention_ms {
+        out.push("retention_ms");
+    }
+    if config.max_events != defaults.max_events {
+        out.push("max_events");
+    }
+    if !config.cache.datasources.is_empty() {
+        out.push("cache.datasources");
+    }
+    if !config.cache.dataviews.is_empty() {
+        out.push("cache.dataviews");
+    }
+    out
+}
+
 /// Create a storage engine from configuration.
 ///
 /// Supported backends: `memory`, `sqlite`, `redis`.
@@ -213,5 +235,67 @@ mod tests {
     fn reserved_prefix_list_includes_poll_and_raft() {
         assert!(is_reserved_namespace("poll:foo"), "core sees poll: as reserved");
         assert!(is_reserved_namespace("raft:foo"), "core sees raft: as reserved");
+    }
+
+    // ── RW3.3.b: unenforced storage config field detection ──────────────
+
+    #[test]
+    fn unenforced_fields_empty_for_defaults() {
+        let config = StorageEngineConfig::default();
+        assert!(unenforced_storage_config_fields(&config).is_empty());
+    }
+
+    #[test]
+    fn unenforced_fields_reports_nondefault_retention_ms() {
+        let mut config = StorageEngineConfig::default();
+        config.retention_ms = 3_600_000; // 1h vs default 24h
+        let fields = unenforced_storage_config_fields(&config);
+        assert!(fields.contains(&"retention_ms"), "expected retention_ms in {fields:?}");
+    }
+
+    #[test]
+    fn unenforced_fields_reports_nondefault_max_events() {
+        let mut config = StorageEngineConfig::default();
+        config.max_events = 500;
+        let fields = unenforced_storage_config_fields(&config);
+        assert!(fields.contains(&"max_events"), "expected max_events in {fields:?}");
+    }
+
+    #[test]
+    fn unenforced_fields_reports_nonempty_cache_datasources() {
+        use crate::config::DatasourceCacheConfig;
+        let mut config = StorageEngineConfig::default();
+        config.cache.datasources.insert("ds1".into(), DatasourceCacheConfig {
+            enabled: true,
+            ttl_seconds: 60,
+            invalidation_strategy: "dataview".into(),
+        });
+        let fields = unenforced_storage_config_fields(&config);
+        assert!(fields.contains(&"cache.datasources"), "expected cache.datasources in {fields:?}");
+    }
+
+    #[test]
+    fn unenforced_fields_reports_nonempty_cache_dataviews() {
+        use crate::config::DataViewCacheOverride;
+        let mut config = StorageEngineConfig::default();
+        config.cache.dataviews.insert("dv1".into(), DataViewCacheOverride { ttl_seconds: Some(30) });
+        let fields = unenforced_storage_config_fields(&config);
+        assert!(fields.contains(&"cache.dataviews"), "expected cache.dataviews in {fields:?}");
+    }
+
+    #[test]
+    fn unenforced_fields_reports_all_set_at_once() {
+        use crate::config::{DatasourceCacheConfig, DataViewCacheOverride};
+        let mut config = StorageEngineConfig::default();
+        config.retention_ms = 1_000;
+        config.max_events = 10;
+        config.cache.datasources.insert("ds1".into(), DatasourceCacheConfig {
+            enabled: true,
+            ttl_seconds: 60,
+            invalidation_strategy: "dataview".into(),
+        });
+        config.cache.dataviews.insert("dv1".into(), DataViewCacheOverride { ttl_seconds: Some(30) });
+        let fields = unenforced_storage_config_fields(&config);
+        assert_eq!(fields.len(), 4, "expected 4 unenforced fields, got {fields:?}");
     }
 }

@@ -233,6 +233,12 @@ pub(crate) fn build_sqlite_executor(
         validate_result: false,
         strict_parameters: false,
         max_rows: 1000,
+        skip_introspect: false,
+        cursor_key: None,
+        source_views: vec![],
+        compose_strategy: None,
+        join_key: None,
+        enrich_mode: "nest".to_string(),
     });
 
     // Connection params for the registered "sqlite_e2e" datasource.
@@ -316,6 +322,12 @@ pub(crate) fn build_postgres_executor(
         validate_result: false,
         strict_parameters: false,
         max_rows: 1000,
+        skip_introspect: false,
+        cursor_key: None,
+        source_views: vec![],
+        compose_strategy: None,
+        join_key: None,
+        enrich_mode: "nest".to_string(),
     });
 
     // Force the driver to "postgres" via the connection-params options

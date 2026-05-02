@@ -7,9 +7,13 @@ use rivers_runtime::rivers_core::ServerConfig;
 use rivers_runtime::rivers_core::EventBus;
 use rivers_runtime::DataViewExecutor;
 
+use crate::audit::AuditBus;
 use crate::deployment::DeploymentManager;
 use crate::health::UptimeTracker;
 use crate::hot_reload::HotReloadState;
+use crate::mcp::elicitation::ElicitationRegistry;
+use crate::mcp::subscriptions::SubscriptionRegistry;
+use crate::mcp::poller::ChangePoller;
 use crate::process_pool::ProcessPoolManager;
 use crate::shutdown::ShutdownCoordinator;
 use crate::sse::SseRouteManager;
@@ -161,6 +165,23 @@ pub struct AppContext {
     /// process readiness. Populated by the broker supervisor; surfaced via
     /// `/health/verbose`. See `broker_supervisor` and code review P0-4.
     pub broker_bridge_registry: crate::broker_supervisor::BrokerBridgeRegistry,
+    /// MCP subscription registry — per-session SSE channels and URI subscriptions.
+    /// Per `2026-04-29-cb-p1-1-mcp-subscriptions-design.md` §Layer 2.
+    pub subscription_registry: Arc<SubscriptionRegistry>,
+    /// MCP change poller — drives `notifications/resources/updated` pushes.
+    /// Per `2026-04-29-cb-p1-1-mcp-subscriptions-design.md` §Layer 3.
+    pub change_poller: Arc<ChangePoller>,
+    /// Audit event bus — `Some` when `[audit] enabled = true` in `riversd.toml`.
+    ///
+    /// Clone the sender to emit events; `subscribe()` to receive them.
+    /// `None` when audit is disabled — all emit sites skip silently.
+    pub audit_bus: Option<Arc<AuditBus>>,
+    /// MCP elicitation registry — tracks pending mid-handler user-input requests (P2.6).
+    ///
+    /// A single shared registry for all MCP sessions. Each pending elicitation
+    /// is keyed by a UUID; the V8 worker blocks on a `oneshot::Receiver` while
+    /// the MCP client sends back an `elicitation/response` message.
+    pub elicitation_registry: Arc<ElicitationRegistry>,
 }
 
 impl AppContext {
@@ -203,6 +224,10 @@ impl AppContext {
             failed_apps: Arc::new(std::sync::RwLock::new(HashMap::new())),
             circuit_breaker_registry: Arc::new(crate::circuit_breaker::BreakerRegistry::new()),
             broker_bridge_registry: crate::broker_supervisor::BrokerBridgeRegistry::new(),
+            subscription_registry: Arc::new(SubscriptionRegistry::new()),
+            change_poller: Arc::new(ChangePoller::new()),
+            audit_bus: None,
+            elicitation_registry: Arc::new(ElicitationRegistry::new()),
         }
     }
 }

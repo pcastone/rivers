@@ -10,8 +10,8 @@ use tokio::sync::{watch, Mutex};
 use rivers_runtime::rivers_core::event::Event;
 use rivers_runtime::rivers_core::eventbus::{events, EventBus, EventHandler, HandlerPriority};
 use rivers_runtime::rivers_driver_sdk::broker::{
-    BrokerConsumer, BrokerMetadata, BrokerProducer, FailureMode, FailurePolicy,
-    InboundMessage, MessageReceipt, OutboundMessage, PublishReceipt,
+    AckOutcome, BrokerConsumer, BrokerError, BrokerMetadata, BrokerProducer, FailureMode,
+    FailurePolicy, InboundMessage, MessageReceipt, OutboundMessage, PublishReceipt,
 };
 use rivers_runtime::rivers_driver_sdk::error::DriverError;
 
@@ -61,14 +61,14 @@ impl BrokerConsumer for MockConsumer {
         }
     }
 
-    async fn ack(&mut self, receipt: &MessageReceipt) -> Result<(), DriverError> {
+    async fn ack(&mut self, receipt: &MessageReceipt) -> Result<AckOutcome, BrokerError> {
         self.acked.lock().await.push(receipt.handle.clone());
-        Ok(())
+        Ok(AckOutcome::Acked)
     }
 
-    async fn nack(&mut self, receipt: &MessageReceipt) -> Result<(), DriverError> {
+    async fn nack(&mut self, receipt: &MessageReceipt) -> Result<AckOutcome, BrokerError> {
         self.nacked.lock().await.push(receipt.handle.clone());
-        Ok(())
+        Ok(AckOutcome::Acked)
     }
 
     async fn close(&mut self) -> Result<(), DriverError> {

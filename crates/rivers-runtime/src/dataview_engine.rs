@@ -245,6 +245,21 @@ pub struct DataViewResponse {
     pub cache_hit: bool,
     /// Distributed trace ID echoed from the request.
     pub trace_id: String,
+    /// Cursor value from the last row for cursor-based pagination (P2.7).
+    ///
+    /// Set when `cursor_key` is configured on the DataView and the result is
+    /// non-empty. Callers pass this value as `after_cursor` on the next request
+    /// to retrieve the next page. `None` when not using cursor pagination or
+    /// when the result is empty (indicating the last page).
+    pub next_cursor: Option<serde_json::Value>,
+    /// Whether there may be more rows after this page (P2.7).
+    ///
+    /// `true` when cursor pagination is active and the result is non-empty.
+    /// Callers should treat `false` or absence as the final page.
+    /// Note: this is a heuristic — it is `true` whenever `next_cursor` is set,
+    /// regardless of whether the datasource actually has more rows. A follow-up
+    /// request with an exhausted cursor will return an empty result set.
+    pub has_more: bool,
 }
 
 // ── DataView Request Builder ──────────────────────────────────────
@@ -631,6 +646,50 @@ pub fn build_response(
         execution_time_ms: start.elapsed().as_millis() as u64,
         cache_hit,
         trace_id,
+        next_cursor: None,
+        has_more: false,
+    }
+}
+
+/// Build a DataViewResponse with cursor pagination metadata (P2.7).
+///
+/// Extracts the last row's `cursor_key` value and sets `next_cursor` / `has_more`.
+pub fn build_response_with_cursor(
+    query_result: Arc<QueryResult>,
+    start: Instant,
+    cache_hit: bool,
+    trace_id: String,
+    cursor_key: &str,
+) -> DataViewResponse {
+    let next_cursor = query_result
+        .rows
+        .last()
+        .and_then(|row| row.get(cursor_key))
+        .map(query_value_to_json);
+    let has_more = next_cursor.is_some();
+    DataViewResponse {
+        query_result,
+        execution_time_ms: start.elapsed().as_millis() as u64,
+        cache_hit,
+        trace_id,
+        next_cursor,
+        has_more,
+    }
+}
+
+/// Convert a `QueryValue` to a `serde_json::Value` for cursor metadata.
+fn query_value_to_json(value: &QueryValue) -> serde_json::Value {
+    match value {
+        QueryValue::Null => serde_json::Value::Null,
+        QueryValue::Boolean(b) => serde_json::Value::Bool(*b),
+        QueryValue::Integer(i) => serde_json::json!(i),
+        QueryValue::UInt(u) => serde_json::json!(u),
+        QueryValue::Float(f) => serde_json::json!(f),
+        QueryValue::String(s) => serde_json::Value::String(s.clone()),
+        QueryValue::Array(arr) => serde_json::Value::Array(
+            arr.iter().map(query_value_to_json).collect(),
+        ),
+        QueryValue::Json(j) => j.clone(),
     }
 }
 
@@ -766,7 +825,25 @@ impl DataViewExecutor {
         trace_id: &str,
         txn_conn: Option<&mut Box<dyn rivers_driver_sdk::Connection>>,
     ) -> Result<DataViewResponse, DataViewError> {
-        self.execute_with_timeout(name, params, method, trace_id, txn_conn, None).await
+        let datasource = self.registry.get(name)
+            .map(|c| c.datasource.clone())
+            .unwrap_or_default();
+        let span = tracing::info_span!(
+            "dataview",
+            dataview = %name,
+            datasource = %datasource,
+            method = %method,
+            duration_ms = tracing::field::Empty,
+        );
+        let start = std::time::Instant::now();
+        let result = {
+            use tracing::Instrument;
+            self.execute_with_timeout(name, params, method, trace_id, txn_conn, None)
+                .instrument(span.clone())
+                .await
+        };
+        span.record("duration_ms", start.elapsed().as_millis());
+        result
     }
 
     /// Execute a named DataView with an explicit per-request timeout (D3 / P1-10).
@@ -802,6 +879,17 @@ impl DataViewExecutor {
                 name: name.to_string(),
             })?;
 
+        // 1a. Composite DataView short-circuit (P2.9).
+        //
+        // When source_views is non-empty, this DataView is a composite — it
+        // delegates to execute_composite instead of the normal
+        // datasource/query pipeline. Transaction path is not supported for
+        // composite views (composite execution fans out across multiple DataViews
+        // and cannot be threaded through a single connection).
+        if !config.source_views.is_empty() && txn_conn.is_none() {
+            return self.execute_composite(config, params, method, trace_id).await;
+        }
+
         // 2. Parameter validation (use HTTP method for per-method query/param resolution)
         let request = DataViewRequestBuilder::new(name)
             .method(method)
@@ -829,6 +917,24 @@ impl DataViewExecutor {
 
         // 4. Build query from config + validated params
         let mut query = build_query(config, &request.parameters, &request.method);
+
+        // 4a. Cursor-based pagination injection (P2.7).
+        //
+        // When the DataView declares a `cursor_key` and the caller supplies
+        // `after_cursor` as a parameter, append `AND {cursor_key} > $after_cursor`
+        // to the query statement. The column name is from trusted config (not user
+        // input), so interpolation is safe. The cursor value flows through normal
+        // QueryValue parameterization.
+        if let Some(ref cursor_col) = config.cursor_key {
+            if let Some(cursor_val) = request.parameters.get("after_cursor").cloned() {
+                // Append the cursor predicate to whatever WHERE clause exists.
+                // If the query has no WHERE clause, the driver may reject it —
+                // that is a config error surfaced at runtime, not silently swallowed.
+                let cursor_predicate = format!(" AND {} > $after_cursor", cursor_col);
+                query.statement.push_str(&cursor_predicate);
+                query.parameters.insert("after_cursor".to_string(), cursor_val);
+            }
+        }
 
         // 5. Resolve datasource → connection params
         let ds_params = self
@@ -1020,7 +1126,21 @@ impl DataViewExecutor {
         // Cache invalidation — invalidate listed DataViews on success
         self.run_cache_invalidation(name, &config.invalidates, trace_id).await;
 
-        Ok(build_response(Arc::new(query_result), start, false, trace_id.to_string()))
+        // P2.7: cursor pagination — attach next_cursor to the response when
+        // cursor_key is configured and the caller supplied an after_cursor.
+        let arc_result = Arc::new(query_result);
+        if let Some(ref cursor_col) = config.cursor_key {
+            if request.parameters.contains_key("after_cursor") {
+                return Ok(build_response_with_cursor(
+                    arc_result,
+                    start,
+                    false,
+                    trace_id.to_string(),
+                    cursor_col,
+                ));
+            }
+        }
+        Ok(build_response(arc_result, start, false, trace_id.to_string()))
     }
 
     /// Helper: factory.connect + execute, with the broker-produce fallback
@@ -1210,6 +1330,162 @@ impl DataViewExecutor {
         };
 
         Ok(build_response(Arc::new(query_result), start, false, trace_id.to_string()))
+    }
+
+    // ── Composite execution (P2.9) ────────────────────────────────────
+
+    /// Route to union or enrich execution based on compose_strategy.
+    async fn execute_composite(
+        &self,
+        config: &DataViewConfig,
+        params: HashMap<String, QueryValue>,
+        method: &str,
+        trace_id: &str,
+    ) -> Result<DataViewResponse, DataViewError> {
+        let strategy = config.compose_strategy.as_deref().unwrap_or("union");
+        match strategy {
+            "union" => self.execute_union(config, params, method, trace_id).await,
+            "enrich" => self.execute_enrich(config, params, method, trace_id).await,
+            other => Err(DataViewError::InvalidRequest {
+                reason: format!("unknown compose_strategy: {}", other),
+            }),
+        }
+    }
+
+    /// Execute union composition — concatenate rows from all source_views.
+    ///
+    /// Executes each source view with the same params and concatenates all rows.
+    /// Applies the composite DataView's own `max_rows` cap after union.
+    ///
+    /// Uses `Box::pin` when dispatching to source views to break the async
+    /// recursion cycle: execute → execute_with_timeout → execute_composite →
+    /// execute_union → execute (recursive). Boxing the inner future allows the
+    /// compiler to size the outer future without infinite regress.
+    async fn execute_union(
+        &self,
+        config: &DataViewConfig,
+        params: HashMap<String, QueryValue>,
+        method: &str,
+        trace_id: &str,
+    ) -> Result<DataViewResponse, DataViewError> {
+        let start = Instant::now();
+        let mut all_rows: Vec<HashMap<String, QueryValue>> = Vec::new();
+
+        for src_name in &config.source_views {
+            let resp = Box::pin(
+                self.execute_with_timeout(src_name, params.clone(), method, trace_id, None, None)
+            ).await?;
+            all_rows.extend(resp.query_result.rows.iter().cloned());
+        }
+
+        // Apply max_rows cap
+        if config.max_rows > 0 && all_rows.len() > config.max_rows {
+            all_rows.truncate(config.max_rows);
+        }
+
+        let row_count = all_rows.len() as u64;
+        let result = Arc::new(QueryResult {
+            rows: all_rows,
+            affected_rows: row_count,
+            last_insert_id: None,
+            column_names: None,
+        });
+
+        Ok(build_response(result, start, false, trace_id.to_string()))
+    }
+
+    /// Execute enrich composition — join secondary rows into primary by join_key.
+    ///
+    /// Executes source_views[0] as the primary. For each primary row, extracts
+    /// the join_key value and executes source_views[1] with that value added to
+    /// params. Merges secondary results into primary rows.
+    ///
+    /// - nest mode: `primary_row["<secondary_dv_name>"] = secondary_rows_array`
+    /// - flatten mode: merge all fields from first secondary row into primary row
+    ///
+    /// Caps enrichment at `read_max_rows` primary rows (N+1 guard).
+    async fn execute_enrich(
+        &self,
+        config: &DataViewConfig,
+        params: HashMap<String, QueryValue>,
+        method: &str,
+        trace_id: &str,
+    ) -> Result<DataViewResponse, DataViewError> {
+        let start = Instant::now();
+
+        let join_key = config.join_key.as_deref().ok_or_else(|| DataViewError::InvalidRequest {
+            reason: format!(
+                "DataView '{}' uses compose_strategy 'enrich' but join_key is not set",
+                config.name
+            ),
+        })?;
+
+        let primary_name = config.source_views.first().ok_or_else(|| DataViewError::InvalidRequest {
+            reason: format!("DataView '{}' has empty source_views", config.name),
+        })?;
+
+        // Execute primary view (box to break async recursion cycle)
+        let primary_resp = Box::pin(
+            self.execute_with_timeout(primary_name, params.clone(), method, trace_id, None, None)
+        ).await?;
+        let primary_rows = primary_resp.query_result.rows.clone();
+
+        // N+1 guard: cap enrichment at max_rows primary rows
+        let limit = if config.max_rows > 0 { config.max_rows } else { primary_rows.len() };
+        let primary_rows: Vec<_> = primary_rows.into_iter().take(limit).collect();
+
+        let secondary_name = config.source_views.get(1);
+        let is_nest = config.enrich_mode != "flatten";
+
+        let mut enriched_rows: Vec<HashMap<String, QueryValue>> = Vec::new();
+
+        for mut primary_row in primary_rows {
+            // Extract join_key value from primary row
+            let join_val = primary_row.get(join_key).cloned().unwrap_or(QueryValue::Null);
+
+            if let Some(secondary_name) = secondary_name {
+                // Execute secondary view with join_key param added (box to break async recursion cycle)
+                let mut secondary_params = params.clone();
+                secondary_params.insert(join_key.to_string(), join_val);
+                let secondary_resp = Box::pin(
+                    self.execute_with_timeout(secondary_name, secondary_params, method, trace_id, None, None)
+                ).await?;
+                let secondary_rows = secondary_resp.query_result.rows.clone();
+
+                if is_nest {
+                    // Nest mode: embed secondary rows as an array under the secondary DV name
+                    let nested = QueryValue::Json(serde_json::Value::Array(
+                        secondary_rows.iter().map(|row| {
+                            let obj: serde_json::Map<String, serde_json::Value> = row
+                                .iter()
+                                .map(|(k, v)| (k.clone(), query_value_to_json(v)))
+                                .collect();
+                            serde_json::Value::Object(obj)
+                        }).collect()
+                    ));
+                    primary_row.insert(secondary_name.clone(), nested);
+                } else {
+                    // Flatten mode: merge all fields from first secondary row into primary row
+                    if let Some(first_secondary) = secondary_rows.into_iter().next() {
+                        for (k, v) in first_secondary {
+                            primary_row.entry(k).or_insert(v);
+                        }
+                    }
+                }
+            }
+
+            enriched_rows.push(primary_row);
+        }
+
+        let row_count = enriched_rows.len() as u64;
+        let result = Arc::new(QueryResult {
+            rows: enriched_rows,
+            affected_rows: row_count,
+            last_insert_id: None,
+            column_names: None,
+        });
+
+        Ok(build_response(result, start, false, trace_id.to_string()))
     }
 
     /// Get a reference to the registry.
@@ -1487,6 +1763,98 @@ mod tests {
             }
             other => panic!("expected SchemaFileNotFound, got {:?}", other),
         }
+    }
+
+    // ── Cursor pagination tests (P2.7) ────────────────────────────
+
+    /// Verify `build_query` appends the cursor predicate when `cursor_key` is
+    /// set and the caller supplies `after_cursor`.
+    #[test]
+    fn cursor_injection_appends_predicate_and_param() {
+        use crate::dataview::DataViewConfig;
+
+        let toml_str = r#"
+            name = "contacts"
+            datasource = "ds"
+            query = "SELECT * FROM contacts WHERE active = true ORDER BY id"
+            cursor_key = "id"
+        "#;
+        let config: DataViewConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.cursor_key.as_deref(), Some("id"));
+
+        // Simulate what execute_with_timeout does after build_query:
+        // check that cursor_key + after_cursor appends the predicate.
+        let mut params = std::collections::HashMap::new();
+        params.insert("after_cursor".to_string(), QueryValue::Integer(42));
+
+        let mut query = build_query(&config, &params, "GET");
+        // Inject cursor predicate (mirrors execute_with_timeout §4a logic)
+        if let Some(ref cursor_col) = config.cursor_key {
+            if let Some(cursor_val) = params.get("after_cursor").cloned() {
+                let cursor_predicate = format!(" AND {} > $after_cursor", cursor_col);
+                query.statement.push_str(&cursor_predicate);
+                query.parameters.insert("after_cursor".to_string(), cursor_val);
+            }
+        }
+
+        assert!(
+            query.statement.contains("AND id > $after_cursor"),
+            "cursor predicate not appended: {}",
+            query.statement
+        );
+        assert!(
+            matches!(query.parameters.get("after_cursor"), Some(QueryValue::Integer(42))),
+            "after_cursor param not set correctly"
+        );
+    }
+
+    /// Verify that `build_response_with_cursor` extracts `next_cursor` from the
+    /// last row and sets `has_more = true` on a non-empty result.
+    #[test]
+    fn build_response_with_cursor_extracts_next_cursor() {
+        let mut row = std::collections::HashMap::new();
+        row.insert("id".to_string(), QueryValue::Integer(99));
+        row.insert("name".to_string(), QueryValue::String("Alice".into()));
+
+        let result = Arc::new(rivers_driver_sdk::types::QueryResult {
+            rows: vec![row],
+            affected_rows: 1,
+            last_insert_id: None,
+            column_names: None,
+        });
+
+        let start = std::time::Instant::now();
+        let resp = build_response_with_cursor(result, start, false, "t1".into(), "id");
+
+        assert_eq!(resp.next_cursor, Some(serde_json::json!(99)));
+        assert!(resp.has_more);
+    }
+
+    /// Verify that `build_response_with_cursor` returns `next_cursor = None` and
+    /// `has_more = false` when the result set is empty (last page).
+    #[test]
+    fn build_response_with_cursor_empty_result_no_next_cursor() {
+        let result = Arc::new(rivers_driver_sdk::types::QueryResult {
+            rows: vec![],
+            affected_rows: 0,
+            last_insert_id: None,
+            column_names: None,
+        });
+
+        let start = std::time::Instant::now();
+        let resp = build_response_with_cursor(result, start, false, "t1".into(), "id");
+
+        assert_eq!(resp.next_cursor, None);
+        assert!(!resp.has_more);
+    }
+
+    /// Verify that `query_value_to_json` converts values correctly.
+    #[test]
+    fn query_value_to_json_conversions() {
+        assert_eq!(query_value_to_json(&QueryValue::Integer(7)), serde_json::json!(7));
+        assert_eq!(query_value_to_json(&QueryValue::String("abc".into())), serde_json::json!("abc"));
+        assert_eq!(query_value_to_json(&QueryValue::Boolean(true)), serde_json::json!(true));
+        assert_eq!(query_value_to_json(&QueryValue::Null), serde_json::Value::Null);
     }
 }
 

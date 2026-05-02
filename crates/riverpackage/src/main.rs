@@ -1,7 +1,9 @@
 #![warn(missing_docs)]
 //! riverpackage — Rivers bundle validator and packager.
 //!
-//! Commands: init, validate, preflight, pack
+//! Commands: init, validate, preflight, pack, migrate
+
+mod migrate;
 
 use std::path::Path;
 use uuid::Uuid;
@@ -48,6 +50,7 @@ fn main() {
             let input_mode = if args.len() >= 6 && args[4] == "--input-mode" { &args[5] } else { "stdin" };
             cmd_import_exec(name, script_path, input_mode)
         }
+        "migrate" => cmd_migrate(&args[2..]),
         "help" | "--help" | "-h" => { print_usage(); Ok(()) }
         other => { eprintln!("Unknown command: {other}"); print_usage(); std::process::exit(1); }
     };
@@ -70,6 +73,10 @@ fn print_usage() {
     eprintln!("  preflight [dir]             Validate + check schema/parameter orphans");
     eprintln!("  pack [dir] [output]         Package bundle into a .tar.gz archive");
     eprintln!("  import-exec <name> <path>   Generate ExecDriver TOML config for a script");
+    eprintln!("  migrate <subcommand> [dir]  Database migration tooling");
+    eprintln!("    migrate status [dir]      Show applied/pending migrations");
+    eprintln!("    migrate up [dir]          Apply all pending migrations");
+    eprintln!("    migrate down [N] [dir]    Roll back last N applied migrations (default: 1)");
     eprintln!();
     eprintln!("Exit codes (validate):");
     eprintln!("  0  All checks passed");
@@ -144,6 +151,25 @@ fn cmd_init(bundle_arg: &str, driver: &str) -> Result<(), String> {
     let schema_json = build_schema_json(driver);
     write_file(&schemas_dir.join("item.schema.json"), &schema_json)?;
 
+    // --- migrations/ (non-faker drivers only) ---
+    let migrations_scaffolded = if driver != "faker" {
+        let mig_dir = app_dir.join("migrations");
+        std::fs::create_dir_all(&mig_dir)
+            .map_err(|e| format!("create directory '{}': {e}", mig_dir.display()))?;
+
+        let init_sql = format!(
+            "-- Migration: 001_init\n-- Created by: riverpackage init\n--\n-- Add your schema creation statements below.\n\n-- Example:\n-- CREATE TABLE IF NOT EXISTS items (\n--   id    INTEGER PRIMARY KEY,\n--   name  TEXT    NOT NULL,\n--   email TEXT    NOT NULL\n-- );\n"
+        );
+        write_file(&mig_dir.join("001_init.sql"), &init_sql)?;
+
+        let down_sql = "-- Rollback for 001_init\n-- DROP TABLE IF EXISTS items;\n";
+        write_file(&mig_dir.join("001_init.down.sql"), down_sql)?;
+
+        true
+    } else {
+        false
+    };
+
     // Success output
     println!("Bundle created: {}/", bundle_arg);
     println!("  {}/manifest.toml", bundle_arg);
@@ -151,12 +177,22 @@ fn cmd_init(bundle_arg: &str, driver: &str) -> Result<(), String> {
     println!("  {dir}/{name}/resources.toml", dir = bundle_arg, name = bundle_name);
     println!("  {dir}/{name}/app.toml", dir = bundle_arg, name = bundle_name);
     println!("  {dir}/{name}/schemas/item.schema.json", dir = bundle_arg, name = bundle_name);
+    if migrations_scaffolded {
+        println!("  {dir}/{name}/migrations/001_init.sql", dir = bundle_arg, name = bundle_name);
+        println!("  {dir}/{name}/migrations/001_init.down.sql", dir = bundle_arg, name = bundle_name);
+    }
     println!();
     println!("Next steps:");
     println!("  1. Edit {dir}/{name}/resources.toml with your datasource", dir = bundle_arg, name = bundle_name);
     println!("  2. Edit {dir}/{name}/schemas/ with your data model", dir = bundle_arg, name = bundle_name);
     println!("  3. Edit {dir}/{name}/app.toml with your DataViews and Views", dir = bundle_arg, name = bundle_name);
-    println!("  4. riverpackage validate {}/", bundle_arg);
+    if migrations_scaffolded {
+        println!("  4. Edit {dir}/{name}/migrations/001_init.sql with your schema", dir = bundle_arg, name = bundle_name);
+        println!("  5. riverpackage migrate up {}/", bundle_arg);
+        println!("  6. riverpackage validate {}/", bundle_arg);
+    } else {
+        println!("  4. riverpackage validate {}/", bundle_arg);
+    }
 
     Ok(())
 }
@@ -504,6 +540,61 @@ fn cmd_import_exec(name: &str, script_path: &str, input_mode: &str) -> Result<()
     Ok(())
 }
 
+/// Handle `riverpackage migrate <subcommand> [bundle_dir]`.
+///
+/// Subcommands:
+/// - `status [dir]`     — print applied/pending table
+/// - `up [dir]`         — apply all pending migrations
+/// - `down [N] [dir]`   — roll back last N migrations (default 1)
+fn cmd_migrate(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        eprintln!("Usage: riverpackage migrate <status|up|down> [N] [bundle_dir]");
+        std::process::exit(1);
+    }
+
+    let subcmd = args[0].as_str();
+
+    /// Extract an optional bundle_dir from remaining args.
+    ///
+    /// Returns the first arg that is not a bare integer, or `"."` as fallback.
+    fn bundle_dir_from(rest: &[String]) -> String {
+        rest.iter()
+            .find(|a| !a.chars().all(|c| c.is_ascii_digit()))
+            .cloned()
+            .unwrap_or_else(|| ".".to_string())
+    }
+
+    match subcmd {
+        "status" => {
+            let dir = bundle_dir_from(&args[1..]);
+            let runner = migrate::MigrationRunner::new(Path::new(&dir))?;
+            runner.status()
+        }
+        "up" => {
+            let dir = bundle_dir_from(&args[1..]);
+            let runner = migrate::MigrationRunner::new(Path::new(&dir))?;
+            runner.up()
+        }
+        "down" => {
+            // `down [N] [dir]` — N defaults to 1
+            let rest = &args[1..];
+            let n: usize = rest
+                .iter()
+                .find(|a| a.chars().all(|c| c.is_ascii_digit()))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1);
+            let dir = bundle_dir_from(rest);
+            let runner = migrate::MigrationRunner::new(Path::new(&dir))?;
+            runner.down(n)
+        }
+        other => {
+            eprintln!("Unknown migrate subcommand: '{other}'");
+            eprintln!("Usage: riverpackage migrate <status|up|down> [N] [bundle_dir]");
+            std::process::exit(1);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,6 +809,29 @@ mod tests {
         let result = cmd_pack(bundle_str, out.to_str().unwrap());
         assert!(result.is_ok(), "pack should succeed: {result:?}");
         assert!(out.exists(), ".tar.gz artifact should exist");
+    }
+
+    /// RW5.3.b: init → validate → pack round-trip golden test.
+    /// Asserts the produced archive is non-empty and is a valid gzip stream.
+    #[test]
+    fn init_validate_pack_round_trip_produces_valid_archive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_path = tmp.path().join("golden-rt");
+        let bundle_str = bundle_path.to_str().unwrap();
+
+        cmd_init(bundle_str, "faker").expect("init should succeed");
+
+        // Validate explicitly before pack
+        let report = run_validate(bundle_str).expect("run_validate should succeed");
+        assert!(!report.has_errors(), "init bundle should validate: {}", rivers_runtime::format_text(&report));
+
+        let out = tmp.path().join("golden.tar.gz");
+        cmd_pack(bundle_str, out.to_str().unwrap()).expect("pack should succeed");
+
+        // Verify the archive is a valid gzip stream (magic bytes 1f 8b)
+        let bytes = std::fs::read(&out).expect("archive should be readable");
+        assert!(bytes.len() > 100, "archive should be non-trivially sized");
+        assert_eq!(&bytes[..2], &[0x1f, 0x8b], "archive must start with gzip magic bytes");
     }
 
     #[test]

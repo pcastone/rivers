@@ -1,6 +1,8 @@
 //! `inject_rivers_global()` -- Rivers.log, Rivers.crypto, Rivers.keystore,
 //! Rivers.env, Rivers.db bindings and their callbacks.
 
+use secrecy::ExposeSecret;
+
 use super::super::types::*;
 use super::task_locals::*;
 use super::init::v8_str;
@@ -641,7 +643,7 @@ pub(super) fn inject_rivers_global(
                         let resolved = rivers_runtime::rivers_core::lockbox::fetch_secret_value(
                             metadata, &ctx.keystore_path, &ctx.identity_str,
                         ).map_err(|e| format!("lockbox fetch failed: {e}"))?;
-                        Ok(resolved.value.as_str().to_string())
+                        Ok(resolved.value.expose_secret().clone())
                     }
                     None => {
                         // No lockbox configured -- use as raw key (dev/test mode)
@@ -1021,6 +1023,16 @@ pub(super) fn inject_rivers_global(
     .ok_or_else(|| TaskError::Internal("failed to create __brokerPublish".into()))?;
     let broker_key = v8_str(scope, "__brokerPublish")?;
     rivers_obj.set(scope, broker_key.into(), broker_publish_fn.into());
+
+    // ── Rivers.__elicit -- MCP elicitation host callback (P2.6) ──────────
+    // Called by the `ctx.elicit(spec)` JS helper (installed below).
+    // Only functional when invoked from an MCP tool call (TASK_ELICITATION_TX
+    // is Some). Returns a JS object {action, content} synchronously via the
+    // async bridge (blocks on oneshot::Receiver with 60s timeout).
+    let elicit_fn = v8::Function::new(scope, rivers_elicit_callback)
+        .ok_or_else(|| TaskError::Internal("failed to create __elicit".into()))?;
+    let elicit_key = v8_str(scope, "__elicit")?;
+    rivers_obj.set(scope, elicit_key.into(), elicit_fn.into());
 
     // ── Rivers.db (imperative transaction API — spec §6 alternate form) ──
     // begin/commit/rollback/batch mirror the ctx.transaction() RAII form
@@ -1836,4 +1848,151 @@ fn db_execute_callback(
     mut rv: v8::ReturnValue,
 ) {
     db_query_or_execute(scope, args, &mut rv, DbCallKind::Execute);
+}
+
+// ── Rivers.__elicit (P2.6) ────────────────────────────────────────────────
+//
+// V8 host callback for `ctx.elicit(spec)`.
+//
+// The TypeScript-level `ctx.elicit(spec)` helper is a thin wrapper that calls
+// `Rivers.__elicit(JSON.stringify(spec))` synchronously and parses the JSON
+// string it returns back into a JS object (Promise-wrapped via a thin shim
+// so the handler can `await` it without structural changes to the V8 execution
+// model — the blocking is hidden inside this native callback).
+//
+// # Argument
+//   0: specJson (string) — JSON-serialised ElicitationSpec
+//      { title, message, requestedSchema }
+//
+// # Returns
+//   JSON string: { action: "accept" | "decline" | "cancel", content?: object }
+//   On timeout (60s): { action: "cancel", content: null, error: "elicitation timeout" }
+//
+// # Error conditions
+//   - Not in an MCP tool call (TASK_ELICITATION_TX is None): throws Error
+//   - Spec is not valid JSON: throws TypeError
+//   - Tokio runtime not available: throws Error (should never happen in practice)
+//
+// # SSE wiring (P2.6 / deferred)
+//   The relay task (spawned by dispatch_codecomponent_tool) reads the
+//   ElicitationRequest from the channel, emits an `elicitation/create`
+//   notification over the session's SSE channel (via SubscriptionRegistry),
+//   and registers the oneshot::Sender in ElicitationRegistry. When the client
+//   sends `elicitation/response`, handle_elicitation_response resolves the
+//   registry entry. The V8 worker unblocks here.
+//
+//   Note: if the current session's SSE channel is not open (client connected
+//   POST-only without opening the SSE stream), the `elicitation/create`
+//   notification will be dropped with a WARN. The elicitation will then time
+//   out after 60 seconds and resolve with action = "cancel".
+fn rivers_elicit_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use crate::mcp::elicitation::{ElicitationRequest, ElicitationSpec};
+    use super::task_locals::TASK_ELICITATION_TX;
+
+    // ── Validate: only available from MCP tool calls ──────────────────
+    let tx = TASK_ELICITATION_TX.with(|t| t.borrow().clone());
+    let tx = match tx {
+        Some(t) => t,
+        None => {
+            let msg = v8::String::new(
+                scope,
+                "ctx.elicit() is only available from MCP tool handlers (codecomponent view invoked via MCP)"
+            ).unwrap_or_else(|| v8::String::empty(scope));
+            let exc = v8::Exception::error(scope, msg);
+            scope.throw_exception(exc);
+            return;
+        }
+    };
+
+    // ── Parse spec from arg 0 ─────────────────────────────────────────
+    let spec_str = args.get(0).to_rust_string_lossy(scope);
+    let spec: ElicitationSpec = match serde_json::from_str(&spec_str) {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = v8::String::new(
+                scope,
+                &format!("ctx.elicit(): invalid spec JSON: {e}"),
+            ).unwrap_or_else(|| v8::String::empty(scope));
+            let exc = v8::Exception::type_error(scope, msg);
+            scope.throw_exception(exc);
+            return;
+        }
+    };
+
+    // ── Generate elicitation ID + create oneshot channel ──────────────
+    let id = uuid::Uuid::new_v4().to_string();
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    // ── Post request to relay task ────────────────────────────────────
+    let request = ElicitationRequest {
+        id: id.clone(),
+        spec,
+        response_tx,
+    };
+    if let Err(_) = tx.send(request) {
+        // Relay task has stopped (task was cancelled / SSE closed).
+        let result_json = serde_json::json!({
+            "action": "cancel",
+            "content": null,
+            "error": "elicitation relay unavailable"
+        }).to_string();
+        if let Some(v8_s) = v8::String::new(scope, &result_json) {
+            rv.set(v8_s.into());
+        }
+        return;
+    }
+
+    // ── Block on oneshot with 60s timeout ─────────────────────────────
+    //
+    // The V8 worker thread blocks here (via rt.block_on) while the relay task
+    // sends the `elicitation/create` notification to the MCP client and waits
+    // for `elicitation/response` to arrive. The 60s timeout matches the spec.
+    let rt = match get_rt_handle() {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = v8::String::new(scope, &format!("ctx.elicit(): {e}"))
+                .unwrap_or_else(|| v8::String::empty(scope));
+            let exc = v8::Exception::error(scope, msg);
+            scope.throw_exception(exc);
+            return;
+        }
+    };
+
+    const ELICITATION_TIMEOUT_SECS: u64 = 60;
+    let response_json = rt.block_on(async move {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(ELICITATION_TIMEOUT_SECS),
+            response_rx,
+        ).await {
+            Ok(Ok(resp)) => {
+                serde_json::json!({
+                    "action": resp.action,
+                    "content": resp.content,
+                }).to_string()
+            }
+            Ok(Err(_)) => {
+                // Sender dropped — relay task shut down or task was cancelled.
+                serde_json::json!({
+                    "action": "cancel",
+                    "content": null,
+                    "error": "elicitation cancelled"
+                }).to_string()
+            }
+            Err(_elapsed) => {
+                serde_json::json!({
+                    "action": "cancel",
+                    "content": null,
+                    "error": "elicitation timeout"
+                }).to_string()
+            }
+        }
+    });
+
+    if let Some(v8_s) = v8::String::new(scope, &response_json) {
+        rv.set(v8_s.into());
+    }
 }

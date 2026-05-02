@@ -12,7 +12,6 @@
 //! - ping -> GET /
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -21,10 +20,15 @@ use serde::Deserialize;
 use tracing::debug;
 
 use rivers_driver_sdk::{
-    read_connect_timeout, read_request_timeout,
-    Connection, ConnectionParams, DatabaseDriver, DriverError, DriverRegistrar, Query, QueryResult,
-    QueryValue, ABI_VERSION,
+    read_connect_timeout, read_max_rows, read_request_timeout, url_encode_path_segment,
+    Connection, ConnectionParams, DatabaseDriver, DriverError, Query, QueryResult,
+    QueryValue,
 };
+
+#[cfg(feature = "plugin-exports")]
+use rivers_driver_sdk::{DriverRegistrar, ABI_VERSION};
+#[cfg(feature = "plugin-exports")]
+use std::sync::Arc;
 
 // ── Driver ─────────────────────────────────────────────────────────────
 
@@ -54,9 +58,12 @@ impl DatabaseDriver for ElasticsearchDriver {
             .build()
             .map_err(|e| DriverError::Connection(format!("elasticsearch client build failed: {e}")))?;
 
-        // Verify connectivity with GET /
-        let resp = client
-            .get(&base_url)
+        // Verify connectivity with GET / using credentials if provided.
+        let mut ping = client.get(&base_url);
+        if !params.username.is_empty() {
+            ping = ping.basic_auth(&params.username, Some(&params.password));
+        }
+        let resp = ping
             .send()
             .await
             .map_err(|e| DriverError::Connection(format!("elasticsearch ping failed: {e}")))?;
@@ -73,11 +80,16 @@ impl DatabaseDriver for ElasticsearchDriver {
             "elasticsearch: connected"
         );
 
+        let default_index = params.options.get("default_index").cloned();
+        let max_rows = read_max_rows(params);
+
         Ok(Box::new(ElasticConnection {
             client,
             base_url,
             username: params.username.clone(),
             password: params.password.clone(),
+            default_index,
+            max_rows,
         }))
     }
 
@@ -94,6 +106,11 @@ pub struct ElasticConnection {
     base_url: String,
     username: String,
     password: String,
+    /// Default index name from datasource options (`default_index`).
+    /// Used by `resolve_index` as a fallback when the query target is empty.
+    default_index: Option<String>,
+    /// Maximum number of rows to return from a search. Truncates with a WARN if exceeded.
+    max_rows: usize,
 }
 
 impl ElasticConnection {
@@ -111,6 +128,8 @@ impl ElasticConnection {
             base_url: "http://127.0.0.1:1".into(),
             username: "".into(),
             password: "".into(),
+            default_index: None,
+            max_rows: rivers_driver_sdk::DEFAULT_MAX_ROWS,
         }
     }
 
@@ -128,7 +147,9 @@ impl ElasticConnection {
 #[async_trait]
 impl Connection for ElasticConnection {
     fn admin_operations(&self) -> &[&str] {
-        &["create_index", "delete_index", "put_mapping", "update_settings"]
+        // Elasticsearch index management is not implemented in this driver.
+        // DDL must be performed directly via the Elasticsearch REST API.
+        &[]
     }
 
     async fn execute(&mut self, query: &Query) -> Result<QueryResult, DriverError> {
@@ -211,19 +232,26 @@ struct IndexResponse {
 
 impl ElasticConnection {
     /// Resolve the index name: try parsing "index" from the JSON statement first,
-    /// fall back to query.target. This handles namespaced targets like "nosql:canary-es".
+    /// then fall through to query.target, and finally to the configured `default_index`.
     fn resolve_index(&self, query: &Query) -> String {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&query.statement) {
             if let Some(idx) = json.get("index").and_then(|v| v.as_str()) {
                 return idx.to_string();
             }
         }
-        // Fall back to target, stripping namespace prefix if present
-        if let Some((_ns, name)) = query.target.split_once(':') {
+        // Strip namespace prefix if present (e.g. "nosql:canary-es" → "canary-es").
+        let target = if let Some((_ns, name)) = query.target.split_once(':') {
             name.to_string()
         } else {
             query.target.clone()
+        };
+        // Use default_index from datasource options when target is empty.
+        if target.is_empty() {
+            if let Some(ref idx) = self.default_index {
+                return idx.clone();
+            }
         }
+        target
     }
 
     /// POST /{index}/_search with body from statement JSON or parameters.
@@ -268,6 +296,13 @@ impl ElasticConnection {
         let mut rows = Vec::new();
         if let Some(hits) = search.hits {
             for hit in hits.hits {
+                if rows.len() >= self.max_rows {
+                    tracing::warn!(
+                        max_rows = self.max_rows,
+                        "elasticsearch: result set truncated to max_rows limit"
+                    );
+                    break;
+                }
                 let mut row = HashMap::new();
                 row.insert(
                     "_id".to_string(),
@@ -329,7 +364,9 @@ impl ElasticConnection {
     /// POST /{target}/_update/{id} with body from parameters.
     async fn exec_update(&self, query: &Query) -> Result<QueryResult, DriverError> {
         let id = extract_id(&query.parameters)?;
-        let path = format!("/{}/_update/{}", self.resolve_index(query), id);
+        // RW4.3.b: URL-encode the document ID so IDs containing `/`, `?`, or
+        // other reserved characters don't alter the URL structure.
+        let path = format!("/{}/_update/{}", self.resolve_index(query), url_encode_path_segment(&id));
 
         // Build the update body: fields other than "id" go into "doc".
         let fields: HashMap<String, QueryValue> = query
@@ -367,7 +404,8 @@ impl ElasticConnection {
     /// DELETE /{target}/_doc/{id}
     async fn exec_delete(&self, query: &Query) -> Result<QueryResult, DriverError> {
         let id = extract_id(&query.parameters)?;
-        let path = format!("/{}/_doc/{}", self.resolve_index(query), id);
+        // RW4.3.b: URL-encode the document ID.
+        let path = format!("/{}/_doc/{}", self.resolve_index(query), url_encode_path_segment(&id));
 
         let resp = self
             .request(reqwest::Method::DELETE, &path)
@@ -506,7 +544,32 @@ mod tests {
 
     #[test]
     fn abi_version_matches() {
-        assert_eq!(ABI_VERSION, 1);
+        assert_eq!(rivers_driver_sdk::ABI_VERSION, 1);
+    }
+
+    // ── resolve_index tests ───────────────────────────────────────────
+
+    #[test]
+    fn resolve_index_uses_default_index_when_target_empty() {
+        let mut conn = ElasticConnection::test_instance();
+        conn.default_index = Some("my-default".into());
+        let query = Query::with_operation("search", "", "");
+        assert_eq!(conn.resolve_index(&query), "my-default");
+    }
+
+    #[test]
+    fn resolve_index_prefers_target_over_default_index() {
+        let mut conn = ElasticConnection::test_instance();
+        conn.default_index = Some("my-default".into());
+        let query = Query::with_operation("search", "explicit-index", "");
+        assert_eq!(conn.resolve_index(&query), "explicit-index");
+    }
+
+    #[test]
+    fn resolve_index_strips_namespace_prefix() {
+        let conn = ElasticConnection::test_instance();
+        let query = Query::with_operation("search", "nosql:canary-es", "");
+        assert_eq!(conn.resolve_index(&query), "canary-es");
     }
 
     // ── json_to_query_value tests ─────────────────────────────────────
@@ -654,6 +717,71 @@ mod tests {
             Err(other) => panic!("expected DriverError::Connection, got: {other:?}"),
             Ok(_) => panic!("expected connection error, but got Ok"),
         }
+    }
+
+    // ── admin_operations ─────────────────────────────────────────────
+
+    #[test]
+    fn admin_operations_is_empty() {
+        let conn = ElasticConnection::test_instance();
+        assert!(conn.admin_operations().is_empty(), "elasticsearch advertises no DDL operations");
+    }
+
+    // ── DDL guard blocks SQL DDL even with empty admin_operations ────
+
+    #[test]
+    fn ddl_drop_is_rejected() {
+        let conn = ElasticConnection::test_instance();
+        let query = Query::new("my_index", "DROP TABLE users");
+        let result = rivers_driver_sdk::check_admin_guard(&query, conn.admin_operations());
+        assert!(result.is_some(), "DROP TABLE must be rejected by admin guard even with empty admin_operations");
+        let msg = result.unwrap();
+        assert!(
+            msg.contains("DDL") || msg.contains("rejected"),
+            "error must indicate rejection: {msg}"
+        );
+    }
+
+    #[test]
+    fn ddl_create_is_rejected() {
+        let conn = ElasticConnection::test_instance();
+        let query = Query::new("my_index", "CREATE TABLE foo (id INT)");
+        let result = rivers_driver_sdk::check_admin_guard(&query, conn.admin_operations());
+        assert!(result.is_some(), "CREATE TABLE must be rejected by admin guard");
+    }
+
+    #[test]
+    fn ddl_alter_is_rejected() {
+        let conn = ElasticConnection::test_instance();
+        let query = Query::new("my_index", "ALTER TABLE foo ADD COLUMN bar TEXT");
+        let result = rivers_driver_sdk::check_admin_guard(&query, conn.admin_operations());
+        assert!(result.is_some(), "ALTER TABLE must be rejected by admin guard");
+    }
+
+    #[test]
+    fn ddl_truncate_is_rejected() {
+        let conn = ElasticConnection::test_instance();
+        let query = Query::new("my_index", "TRUNCATE TABLE foo");
+        let result = rivers_driver_sdk::check_admin_guard(&query, conn.admin_operations());
+        assert!(result.is_some(), "TRUNCATE TABLE must be rejected by admin guard");
+    }
+
+    // ── Normal operations pass the guard ────────────────────────────
+
+    #[test]
+    fn normal_search_operation_is_allowed() {
+        let conn = ElasticConnection::test_instance();
+        let query = Query::with_operation("search", "my_index", "");
+        let result = rivers_driver_sdk::check_admin_guard(&query, conn.admin_operations());
+        assert!(result.is_none(), "search must not be blocked by admin guard");
+    }
+
+    #[test]
+    fn normal_index_operation_is_allowed() {
+        let conn = ElasticConnection::test_instance();
+        let query = Query::with_operation("index", "my_index", "");
+        let result = rivers_driver_sdk::check_admin_guard(&query, conn.admin_operations());
+        assert!(result.is_none(), "index must not be blocked by admin guard");
     }
 
     // ── ddl_execute returns Unsupported ───────────────────────────────

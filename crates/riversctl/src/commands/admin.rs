@@ -477,7 +477,7 @@ mod tests {
     #[cfg(feature = "admin-api")]
     #[test]
     fn sign_request_produces_timestamp_without_key() {
-        std::env::remove_var("RIVERS_ADMIN_KEY");
+        unsafe { std::env::remove_var("RIVERS_ADMIN_KEY"); }
         let headers = sign_request("GET", "/admin/status", "body", None).unwrap();
         assert!(headers.contains_key("X-Rivers-Timestamp"));
         assert!(!headers.contains_key("X-Rivers-Signature"));
@@ -537,5 +537,56 @@ mod tests {
         assert!(!net_err.to_string().starts_with("HTTP"));
         // An HttpError with 401 content should preserve it
         assert!(http_err.to_string().contains("401"));
+    }
+
+    /// Auth failure (401) must not trigger signal fallback — cross-ref RW1.3.a.
+    #[cfg(feature = "admin-api")]
+    #[test]
+    fn http_401_auth_failure_is_http_variant_not_network() {
+        let auth_err = AdminError::Http("HTTP 401: Unauthorized".into());
+        // Must be Http — not Network — so cmd_stop returns Err, never falls back to signal.
+        assert!(matches!(auth_err, AdminError::Http(_)));
+        assert!(!matches!(auth_err, AdminError::Network(_)));
+        assert!(auth_err.to_string().contains("401"));
+    }
+
+    /// RBAC failure (403) must not trigger signal fallback — cross-ref RW1.3.a.
+    #[cfg(feature = "admin-api")]
+    #[test]
+    fn http_403_rbac_failure_is_http_variant_not_network() {
+        let rbac_err = AdminError::Http("HTTP 403: Forbidden".into());
+        assert!(matches!(rbac_err, AdminError::Http(_)));
+        assert!(!matches!(rbac_err, AdminError::Network(_)));
+        assert!(rbac_err.to_string().contains("403"));
+    }
+
+    /// Network failure (connection refused) IS the only kind that should signal fallback.
+    #[cfg(feature = "admin-api")]
+    #[test]
+    fn network_connection_refused_is_network_variant() {
+        let net_err = AdminError::Network("connection refused: port 9090".into());
+        assert!(matches!(net_err, AdminError::Network(_)));
+        assert!(!matches!(net_err, AdminError::Http(_)));
+        assert!(net_err.to_string().contains("connection refused"));
+    }
+
+    /// Timeout also counts as a network-level failure and should trigger fallback.
+    #[cfg(feature = "admin-api")]
+    #[test]
+    fn network_timeout_is_network_variant() {
+        let timeout_err = AdminError::Network("connection timed out".into());
+        assert!(matches!(timeout_err, AdminError::Network(_)));
+        assert!(!matches!(timeout_err, AdminError::Http(_)));
+    }
+
+    /// admin_get/admin_post classify connect/timeout errors as Network and all others as Http.
+    /// This test verifies that a 5xx server error is Http (no fallback), not Network.
+    #[cfg(feature = "admin-api")]
+    #[test]
+    fn http_500_server_error_is_http_variant_not_network() {
+        let server_err = AdminError::Http("HTTP 500: Internal Server Error".into());
+        assert!(matches!(server_err, AdminError::Http(_)));
+        assert!(!matches!(server_err, AdminError::Network(_)));
+        assert!(server_err.to_string().contains("500"));
     }
 }

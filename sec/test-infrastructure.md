@@ -39,8 +39,9 @@
 | 192.168.2.226 | Cassandra 3 | Ring `rivers` | 9042 | — |
 | 192.168.2.227 | LDAP | Single node | 389 | admin: `cn=admin,dc=rivers,dc=test` / `rivers_test` |
 | 192.168.2.240 | Neo4j | Single node (community) | 7687 (Bolt), 7474 (HTTP) | `neo4j` / `rivers_test` / db: `neo4j` |
+| 192.168.2.161 (localhost) | Jaeger all-in-one | Single node on beta-01 | 4318 OTLP HTTP, 16686 query API | — |
 
-**28 containers, 9 clusters + 2 standalone**
+**29 containers, 9 clusters + 3 standalone**
 
 ---
 

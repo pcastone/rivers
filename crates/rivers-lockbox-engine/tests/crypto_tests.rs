@@ -183,21 +183,21 @@ fn fetch_secret_value_round_trip() {
     let meta = resolver.resolve("first").unwrap();
     let resolved = fetch_secret_value(meta, &path, identity_str.trim()).unwrap();
     assert_eq!(resolved.name, "first");
-    assert_eq!(resolved.value.as_str(), "value-one");
+    assert_eq!(resolved.value.expose_secret().as_str(), "value-one");
     assert_eq!(resolved.entry_type, EntryType::String);
 
     // Fetch second entry by alias
     let meta = resolver.resolve("alias-second").unwrap();
     let resolved = fetch_secret_value(meta, &path, identity_str.trim()).unwrap();
     assert_eq!(resolved.name, "second");
-    assert_eq!(resolved.value.as_str(), "value-two");
+    assert_eq!(resolved.value.expose_secret().as_str(), "value-two");
     assert_eq!(resolved.entry_type, EntryType::Base64Url);
 
     // Fetch third entry by name
     let meta = resolver.resolve("third").unwrap();
     let resolved = fetch_secret_value(meta, &path, identity_str.trim()).unwrap();
     assert_eq!(resolved.name, "third");
-    assert_eq!(resolved.value.as_str(), "value-three");
+    assert_eq!(resolved.value.expose_secret().as_str(), "value-three");
     assert_eq!(resolved.entry_type, EntryType::Pem);
 }
 
@@ -218,9 +218,9 @@ fn fetch_secret_value_zeroize_after_use() {
     let meta = resolver.resolve("api-key").unwrap();
     let mut resolved = fetch_secret_value(meta, &path, identity_str.trim()).unwrap();
 
-    assert_eq!(resolved.value.as_str(), "super-secret");
+    assert_eq!(resolved.value.expose_secret().as_str(), "super-secret");
     resolved.value.zeroize();
-    assert_eq!(resolved.value.as_str(), "");
+    assert_eq!(resolved.value.expose_secret().as_str(), "");
     assert_eq!(resolved.name, "api-key");
 }
 
@@ -432,7 +432,7 @@ fn fetch_secret_value_with_alias() {
     let meta = resolver.resolve("pg-prod").unwrap();
     let resolved = fetch_secret_value(meta, &path, identity_str.trim()).unwrap();
     assert_eq!(resolved.name, "postgres/prod");
-    assert_eq!(resolved.value.as_str(), "pg://secret-password");
+    assert_eq!(resolved.value.expose_secret().as_str(), "pg://secret-password");
     assert_eq!(resolved.entry_type, EntryType::String);
 }
 

@@ -112,6 +112,18 @@ async fn async_main(
         tracing_subscriber::reload::Layer::new(initial_filter);
     let filter_handle = std::sync::Arc::new(filter_handle);
 
+    // Initialize OTel before creating the subscriber layer.
+    // init_otel calls set_tracer_provider synchronously; the global::tracer()
+    // call immediately after picks up the OTLP-backed provider.
+    if let Some(ref tel) = config.telemetry {
+        riversd::telemetry::init_otel(tel);
+    }
+    // Always use .with_tracer(global::tracer()) so the layer type is uniform.
+    // If init_otel was called, this tracer is backed by the OTLP exporter.
+    // If not, it's backed by the global no-op provider.
+    let otel_layer = tracing_opentelemetry::layer()
+        .with_tracer(opentelemetry::global::tracer("riversd"));
+
     // Optional file appender alongside stdout
     let use_json = config.base.logging.format == "json";
 
@@ -132,12 +144,14 @@ async fn async_main(
         if use_json {
             tracing_subscriber::registry()
                 .with(reloadable_filter)
+                .with(otel_layer)
                 .with(tracing_subscriber::fmt::layer().json().with_writer(std::io::stdout))
                 .with(tracing_subscriber::fmt::layer().json().with_writer(non_blocking))
                 .init();
         } else {
             tracing_subscriber::registry()
                 .with(reloadable_filter)
+                .with(otel_layer)
                 .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
                 .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
                 .init();
@@ -150,11 +164,13 @@ async fn async_main(
         if use_json {
             tracing_subscriber::registry()
                 .with(reloadable_filter)
+                .with(otel_layer)
                 .with(tracing_subscriber::fmt::layer().json())
                 .init();
         } else {
             tracing_subscriber::registry()
                 .with(reloadable_filter)
+                .with(otel_layer)
                 .with(tracing_subscriber::fmt::layer())
                 .init();
         }

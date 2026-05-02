@@ -458,4 +458,162 @@ mod tests {
 
         unsafe { rivers_engine_sdk::free_json_buffer(out_ptr, out_len) };
     }
+
+    // ── Phase 3 — V8 Bridge Contract Tests ──────────────────────────────────
+
+    /// Regression: BUG-008 — ctx.dataview() silently dropped the params argument.
+    /// The V8 bridge extracted the first arg (name) but never read the second arg.
+    /// Verify the params object is forwarded into the JSON payload sent to the
+    /// host callback. (No host callback registered — bridge throws; params are in the
+    /// throw path, so we verify they reach the error message path by checking the
+    /// error is about the name, not a null params crash.)
+    #[test]
+    fn regression_bug008_dataview_params_forwarded() {
+        let ctx = make_ctx(
+            r#"function handler(ctx) {
+                var threw = false;
+                var errMsg = "";
+                try {
+                    ctx.dataview("users", { id: 42, limit: 10 });
+                } catch(e) {
+                    threw = true;
+                    errMsg = String(e);
+                }
+                // Without params, prefetch would return null.
+                // With params, prefetch is bypassed and host is called.
+                // No host callback = throws — but the throw must reference
+                // the dataview name, not a JS crash on params handling.
+                return { threw: threw, has_name: errMsg.indexOf("users") >= 0 };
+            }"#,
+            "handler",
+        );
+        let result = execute_js(ctx).unwrap();
+        assert_eq!(result.value["threw"], true, "expected throw when no host callback");
+        assert_eq!(
+            result.value["has_name"], true,
+            "error should reference dataview name 'users'; BUG-008: params arg crash?"
+        );
+    }
+
+    /// Regression: BUG-008 — params forwarding does not crash on empty object.
+    #[test]
+    fn regression_bug008_dataview_empty_params_bypasses_cache() {
+        let mut ctx = make_ctx(
+            r#"function handler(ctx) {
+                // Pre-fetched data is present — but params arg should bypass it
+                var bypassed_threw = false;
+                try {
+                    ctx.dataview("items", {});
+                } catch(e) {
+                    bypassed_threw = true;
+                }
+                var prefetched = ctx.dataview("items");
+                return { bypassed_threw: bypassed_threw, prefetched_ok: prefetched !== undefined && prefetched !== null };
+            }"#,
+            "handler",
+        );
+        ctx.prefetched_data.insert("items".to_string(), serde_json::json!([{"id": 1}]));
+        let result = execute_js(ctx).unwrap();
+        // Empty params object = dynamic call = bypasses prefetch = throws (no host)
+        assert_eq!(result.value["bypassed_threw"], true);
+        // Bare call (no params) = uses prefetch
+        assert_eq!(result.value["prefetched_ok"], true);
+    }
+
+    /// BUG-009: ctx.dataview() namespace resolution contract.
+    ///
+    /// The TASK_DV_NAMESPACE thread-local has not yet been implemented.
+    /// This test documents the **current** behavior (no prefixing) so that
+    /// when the fix lands it becomes a regression guard.
+    ///
+    /// Current contract: bare name is passed through unchanged.
+    /// Target contract (post-fix): bare name gets entry-point namespace prepended.
+    #[test]
+    fn dataview_bare_name_uses_prefetched_data() {
+        let mut ctx = make_ctx(
+            r#"function handler(ctx) {
+                var result = ctx.dataview("list_records");
+                return { found: result !== null && result !== undefined };
+            }"#,
+            "handler",
+        );
+        // Prefetch keyed by bare name (current behavior — no namespace prepended)
+        ctx.prefetched_data
+            .insert("list_records".to_string(), serde_json::json!([{"id": 1}]));
+        let result = execute_js(ctx).unwrap();
+        assert_eq!(
+            result.value["found"], true,
+            "prefetched data keyed by bare name must be accessible via ctx.dataview"
+        );
+    }
+
+    /// BUG-009: already-namespaced name must not be double-prefixed.
+    /// When a handler passes a name that already contains ':', the bridge
+    /// must not prepend a second namespace.
+    #[test]
+    fn dataview_namespaced_name_not_double_prefixed() {
+        let mut ctx = make_ctx(
+            r#"function handler(ctx) {
+                var result = ctx.dataview("handlers:list_records");
+                return { found: result !== null && result !== undefined };
+            }"#,
+            "handler",
+        );
+        ctx.prefetched_data
+            .insert("handlers:list_records".to_string(), serde_json::json!([{"id": 1}]));
+        let result = execute_js(ctx).unwrap();
+        assert_eq!(
+            result.value["found"], true,
+            "namespaced name must look up prefetch directly — no double prefixing"
+        );
+    }
+
+    /// Regression: BUG-021 — Store TTL API.
+    /// The bridge's store.set() accepts key + value only.
+    /// A numeric third argument must not crash the bridge.
+    #[test]
+    fn regression_bug021_store_set_numeric_ttl_does_not_crash() {
+        let ctx = make_ctx(
+            r#"function handler(ctx) {
+                ctx.store.set("ttl-key", "value", 60000);
+                var val = ctx.store.get("ttl-key");
+                return { stored: val };
+            }"#,
+            "handler",
+        );
+        let result = execute_js(ctx).unwrap();
+        // Bridge ignores the TTL arg (not yet implemented) but must not crash.
+        // The value is stored (TTL arg is silently ignored).
+        assert_eq!(
+            result.value["stored"], "value",
+            "store.set with numeric TTL must not crash the bridge"
+        );
+    }
+
+    /// BUG-021: Object TTL is silently ignored (not a crash, not an error).
+    /// This documents current behavior: the third arg is ignored regardless of type.
+    #[test]
+    fn store_set_object_ttl_is_silently_ignored() {
+        let ctx = make_ctx(
+            r#"function handler(ctx) {
+                var threw = false;
+                try {
+                    ctx.store.set("obj-ttl-key", "val", {ttl: 60});
+                } catch(e) {
+                    threw = true;
+                }
+                var val = ctx.store.get("obj-ttl-key");
+                return { threw: threw, stored: val };
+            }"#,
+            "handler",
+        );
+        let result = execute_js(ctx).unwrap();
+        // Current behavior: object TTL arg is ignored (no TTL enforcement yet).
+        // Value is stored. No crash.
+        assert_eq!(result.value["threw"], false, "object TTL must not throw");
+        assert_eq!(
+            result.value["stored"], "val",
+            "value must be stored even when TTL is an object"
+        );
+    }
 }

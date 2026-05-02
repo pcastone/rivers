@@ -95,8 +95,9 @@ pub use rivers_core_config::LockBoxConfig;
 /// Per spec S2.2.
 ///
 /// `Debug` is not derived — entry values are secret material.
+/// `Clone` is not derived — secret material must not be duplicated silently.
 /// The manual `Debug` impl redacts entries and shows only version + count.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Keystore {
     /// Schema version (currently 1).
     #[serde(default = "default_version")]
@@ -136,8 +137,9 @@ pub(crate) fn default_version() -> u32 {
 
 /// A single secret entry in the keystore.
 ///
-/// Per spec S3.1.
-#[derive(Clone, Serialize, Deserialize)]
+/// Per spec S3.1. `Clone` is not derived — secret material must not be
+/// duplicated silently.
+#[derive(Serialize, Deserialize)]
 pub struct KeystoreEntry {
     /// Registry key for this entry within the keystore. Must be unique.
     /// Used in `lockbox://` URIs to reference secrets from datasource configs.

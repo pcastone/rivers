@@ -8,6 +8,7 @@ use serde::Deserialize;
 use crate::event::LogLevel;
 use crate::lockbox_config::LockBoxConfig;
 
+use super::mcp::McpConfig;
 use super::security::SecurityConfig;
 use super::storage::StorageEngineConfig;
 use super::tls::{AdminApiConfig, ClusterConfig, TlsConfig};
@@ -82,9 +83,37 @@ pub struct ServerConfig {
     #[serde(default)]
     pub metrics: Option<MetricsConfig>,
 
+    /// OTel span export via OTLP HTTP.
+    #[serde(default)]
+    pub telemetry: Option<super::telemetry::TelemetryConfig>,
+
     /// Per-environment config overrides (keyed by environment name).
     #[serde(default)]
     pub environment_overrides: std::collections::HashMap<String, EnvironmentOverride>,
+
+    /// MCP subscription limits (max per session, min poll interval).
+    /// When absent, defaults apply.
+    #[serde(default)]
+    pub mcp: Option<McpConfig>,
+
+    /// Audit event stream configuration.
+    ///
+    /// When `enabled = true`, framework events (handler invocations, MCP tool
+    /// calls, DataView reads, auth resolutions) are emitted on a broadcast
+    /// channel and exposed at `GET /admin/audit/stream`.
+    #[serde(default)]
+    pub audit: AuditConfig,
+}
+
+// ── [audit] ──────────────────────────────────────────────────────────
+
+/// `[audit]` section — framework audit event stream.
+#[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
+pub struct AuditConfig {
+    /// Enable the audit event bus and `GET /admin/audit/stream` endpoint.
+    /// Default: `false`.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 // ── [base] ──────────────────────────────────────────────────────────
