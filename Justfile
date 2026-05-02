@@ -152,12 +152,13 @@ _assemble-dynamic:
 # ── Deploy (via cargo deploy) ────────────────────────────────────
 
 # Deploy static dist to a target directory (single binary, all drivers compiled in)
+# Always builds cargo-deploy from workspace source to avoid drift from a stale `cargo install` binary.
 deploy path:
-    cargo deploy {{path}} --static
+    cargo run --release -p cargo-deploy -- {{path}} --static
 
 # Deploy dynamic dist (thin binary + engine dylibs, static drivers)
 deploy-dynamic path:
-    cargo deploy {{path}}
+    cargo run --release -p cargo-deploy -- {{path}}
 
 # ── Distribution ─────────────────────────────────────────────────
 
