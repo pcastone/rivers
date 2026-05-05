@@ -198,7 +198,7 @@ pub async fn execute_on_error_handlers(
             .trace_id(ctx.trace_id.clone());
         let builder = crate::task_enrichment::enrich(
             builder,
-            &ctx.app_id,
+            &ctx.dv_namespace,
             rivers_runtime::process_pool::TaskKind::ValidationHook,
         );
         let task_ctx = match builder.build() {

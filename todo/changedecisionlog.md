@@ -6,6 +6,26 @@ readers.
 
 ---
 
+### Canary Sprint — 2026-05-05
+
+**KAFKA-D1 — Separate datasource for `canary.events` vs `kafka_consume` topic**
+- File: `canary-bundle/canary-streams/app.toml`, `resources.toml`
+- Decision: Added `canary-kafka-events` as a separate Kafka datasource (same broker, `database = "canary.events"`) with its own `canary_events_consumer` MessageConsumer view, instead of reusing the `canary-kafka` datasource.
+- Rationale: `resolve_topic()` in `rivers-plugin-kafka` only uses `subscriptions.first()`. A single datasource with multiple MessageConsumer views would still only subscribe to the first topic (`kafka_consume`). A separate datasource is the simplest way to get a dedicated consumer for `canary.events`.
+- Resolution: `canary-kafka-events` datasource in app.toml/resources.toml. `canary_events_consumer` MessageConsumer routes to `onMessage` handler (same handler, handles both topics).
+
+**KAFKA-D2 — `OffsetOutOfRange` recovery resets to earliest, not latest**
+- File: `crates/rivers-plugin-kafka/src/lib.rs`
+- Decision: On `OffsetOutOfRange`, call `get_offset(OffsetAt::Earliest)` and reset the consumer's offset to `earliest - 1`, then retry from `earliest`.
+- Rationale: Using earliest preserves message delivery guarantees (at-least-once). Using latest would skip messages already published since the last successful offset. For canary testing scenarios that publish and immediately wait to consume, earliest is the correct choice.
+- Resolution: Pattern-match on `RskafkaError::ServerError { protocol_error: ProtocolError::OffsetOutOfRange }` in `receive()`.
+
+**CTX-D1 — `ctx.app_id` should expose entry-point slug, not manifest UUID**
+- Files: `pipeline.rs`, `validation.rs`, `view_dispatch.rs`
+- Decision: All `enrich()` calls now pass `&ctx.dv_namespace` (the entry-point slug, e.g., "handlers") instead of `&ctx.app_id` (the manifest UUID, e.g., "aaaaaaaa-bbbb-...").
+- Rationale: JS handlers and keystore lookup both expect the human-readable slug. The UUID is for internal circuit breaker / datasource scoping. Spec says `ctx.app_id` should be the entry point slug.
+- Resolution: Changed all 4 enrich() sites in pipeline.rs and 1 in validation.rs and 1 in view_dispatch.rs.
+
 ### P2.8 — Framework Audit Stream (2026-04-30)
 
 **P2.8-D1 — Emit status 200/500 rather than actual HTTP status**
@@ -226,3 +246,21 @@ SerializedDirectDatasource>` field at that point. Flagged as a latent follow-up.
 - **Rationale:** 64-bit fingerprint is far more than sufficient to distinguish a small number of credential sets in a process-local cache. Raw password excluded from key for security.
 - **Alternative:** full password hash — rejected, overkill and slightly larger key string with no practical benefit for this use case
 - **Resolution method:** code review finding, H4 from rivers-wide review 2026-04-27
+
+---
+
+### TXN-TQ8 — tx_query_callback must use DataView's default query field
+
+**File:** `crates/riversd/src/process_pool/v8_engine/rivers_global.rs`, `crates/rivers-runtime/src/dataview.rs`
+**Spec reference:** TXN spec §6 TQ-8
+**Decision:** `tx_query_callback` was passing `"POST"` as the HTTP method to `executor.execute()`. Per TQ-8, `tx.query()` must use the DataView's default `query` field regardless of HTTP context. Added `"DEFAULT"` case to `DataViewConfig::query_for_method()` that returns `self.query.as_deref()` only. Updated `tx_query_callback` to pass `"DEFAULT"` instead of `"POST"`.
+**Resolution method:** Bug discovered while writing TXN-D.6 V8 integration tests — `tx.query("insert_item", ...)` failed with "unknown operation" when DataView only had `query` (not `post_query`) set.
+
+---
+
+### TXN-TF3-RUNTIME — transaction=true on non-transactional driver must silently skip
+
+**File:** `crates/rivers-runtime/src/dataview_engine.rs`
+**Spec reference:** TXN spec §3 TF-3; tutorial note
+**Decision:** Runtime did not honor TF-3 — if `begin_transaction()` returned `DriverError::Unsupported`, the DataView would fail with "BEGIN failed: unsupported". The tutorial explicitly says "silently ignored (with a validation warning W008)". Fixed: `use_txn_wrapper` is set to false when `begin_transaction()` returns `Unsupported`, allowing the query to run without a transaction wrapper.
+**Resolution method:** Spec + tutorial review during TXN-B.5 test writing.

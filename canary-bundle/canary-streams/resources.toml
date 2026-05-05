@@ -5,6 +5,16 @@ x-type     = "kafka"
 lockbox    = "kafka/test"
 required   = true
 
+# CS3 — dedicated Kafka datasource for canary.events topic (activity-feed scenario).
+# Separate from canary-kafka (kafka_consume topic) to avoid cross-polluting test
+# verdicts. Same broker, different topic binding.
+[[datasources]]
+name       = "canary-kafka-events"
+driver     = "kafka"
+x-type     = "kafka"
+lockbox    = "kafka/test"
+required   = false
+
 [[datasources]]
 name       = "canary-redis"
 driver     = "redis"

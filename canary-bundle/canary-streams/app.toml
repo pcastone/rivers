@@ -16,6 +16,17 @@ port       = 9092
 database   = "kafka_consume"
 nopassword = true
 
+# CS3 — dedicated Kafka connection for the canary.events topic.
+# Separate datasource so the consumer subscribes to the right topic
+# without interfering with the kafka_consume test-verdict topic.
+[data.datasources.canary-kafka-events]
+name       = "canary-kafka-events"
+driver     = "kafka"
+host       = "192.168.2.203"
+port       = 9092
+database   = "canary.events"
+nopassword = true
+
 [data.datasources.canary-redis]
 name       = "canary-redis"
 driver     = "redis"
@@ -284,6 +295,24 @@ resources  = ["canary-kafka"]
 # Topic must match the broker bridge's subscription (view-id derived).
 [api.views.kafka_consume.on_event]
 topic   = "kafka_consume"
+handler = "onMessage"
+
+# CS3 — Activity Feed consumer: subscribes to canary.events, persists to events_db.
+# Separate datasource (canary-kafka-events) so this consumer fetches from the
+# canary.events topic without interfering with the kafka_consume test verdicts.
+[api.views.canary_events_consumer]
+view_type = "MessageConsumer"
+auth      = "none"
+
+[api.views.canary_events_consumer.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/kafka-consumer.ts"
+entrypoint = "onMessage"
+resources  = ["canary-kafka-events"]
+
+[api.views.canary_events_consumer.on_event]
+topic   = "canary.events"
 handler = "onMessage"
 
 [api.views.kafka_verify]

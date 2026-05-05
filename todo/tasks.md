@@ -981,7 +981,7 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 - [x] **CB-B2.X.1** — `just bump-patch` run: 0.55.22 → 0.55.23. Done.
 - [x] **CB-B2.X.2** — `changelog.md` and `changedecisionlog.md` updated with P1.5/P1.7 entries including P1.6 blocker rationale. Done.
-- [ ] **CB-B2.X.3** — Confirm canary remains green (135/135) after the batch lands. (Requires live canary run — P1.5.d and P1.7.g also require infra.)
+- [x] **CB-B2.X.3** — Done 2026-05-05: canary at 144/148 pass on beta-01 (0 fail, 4 expected PROXY 503 — static build lacks http driver).
 
 # CB P1.1 — MCP Resource Subscriptions / Push Notifications
 
@@ -1045,30 +1045,30 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ### CS3 — Scenario B: Activity Feed (canary-streams)
 
-- [ ] **CS3.1** Table schema: `events(id, actor, target_user, event_type, payload, published_at, consumed_at)`. Stored by consumer per AF-2 / AF-7.
-- [ ] **CS3.2** Init DDL for events table (AF-9). Idempotent.
-- [ ] **CS3.3** DataView definitions:
-    - [ ] **CS3.3.1** `events_insert` — called from the consumer handler (not REST)
-    - [ ] **CS3.3.2** `events_for_user` — SELECT with `target_user=?`, pagination (limit + offset), date range `published_at >= ?` / `<= ?` (AF-4)
-    - [ ] **CS3.3.3** `events_count_by_user` — COUNT for test asserts
-    - [ ] **CS3.3.4** `events_delete_cleanup` — for CS3.9
-- [ ] **CS3.4** MessageConsumer view registration — Kafka topic via `canary-kafka` LockBox alias (AF-8). Consumer entrypoint = `events-consumer.ts::consumeEvent` which parses the Kafka payload and calls `ctx.dataview("events_insert", ...)`.
-- [ ] **CS3.5** REST history endpoint `/canary/scenarios/stream/activity-feed` — POST, auth=session, dispatches to `scenario-activity-feed.ts`. Implementation reads `target_user = ctx.session.sub` (AF-3 scoping).
-- [ ] **CS3.6** Handler file `scenario-activity-feed.ts` — 11 steps per §6.
-- [ ] **CS3.7** Step implementation:
-    - [ ] **CS3.7.1** Step 1: Publish event for Bob ("Alice commented on your post"). Assert Kafka produce OK.
-    - [ ] **CS3.7.2** Step 2: Poll-wait for consumer (§10 exponential backoff 100/200/400/800/1600/3200 ms, 5s total cap). Assert history shows the event.
-    - [ ] **CS3.7.3** Step 3: Bob REST history. Assert `count==1`, content matches.
-    - [ ] **CS3.7.4** Step 4: Publish 3 more Bob events in rapid succession. Assert all 3 produce calls OK.
-    - [ ] **CS3.7.5** Step 5: Wait + Bob history. Assert `count==4`, publish order preserved (AF-5).
-    - [ ] **CS3.7.6** Step 6: Bob history with date range (before last 3). Assert `count==1` (first event).
-    - [ ] **CS3.7.7** Step 7: Carol history. Assert `count==0`.
-    - [ ] **CS3.7.8** Step 8: Publish event for Carol. Assert Kafka OK.
-    - [ ] **CS3.7.9** Step 9: Carol history (after poll-wait). Assert `count==1`, only Carol's.
-    - [ ] **CS3.7.10** Step 10: Bob history. Assert `count==4` unchanged — scoping (AF-3).
-    - [ ] **CS3.7.11** Step 11: Bob pagination (limit=2 offset=0, then limit=2 offset=2). Assert 2 pages × 2 events, all 4 distinct, no duplicates (AF-4).
-- [ ] **CS3.8** Cleanup — `DELETE FROM events WHERE target_user IN ('alice','bob','carol')`. Best-effort (§10).
-- [ ] **CS3.9** run-tests.sh: `test_ep "scen-stream-activity-feed" POST "$BASE/canary/scenarios/stream/activity-feed" '{}'` behind `KAFKA_AVAIL` (add a Kafka-ping gate if one doesn't exist yet).
+- [x] **CS3.1** Done 2026-05-04 — `events(id, actor, target_user, event_type, payload, published_at, consumed_at)` schema defined in `canary-streams/app.toml` comments and DDL. AF-2/AF-7.
+- [x] **CS3.2** Done 2026-05-04 — `canary-streams/libraries/handlers/init.ts` creates `events` table with `CREATE TABLE IF NOT EXISTS`. AF-9.
+- [x] **CS3.3** Done 2026-05-04 — DataViews in `canary-streams/app.toml`:
+    - [x] **CS3.3.1** `events_insert` — INSERT with all 7 AF-6 fields, `skip_introspect = true`.
+    - [x] **CS3.3.2** `events_for_user` — SELECT with `target_user`, `since`/`until` date range, `limit`/`offset` pagination, ORDER BY published_at ASC. AF-3/AF-4/AF-5.
+    - [x] **CS3.3.3** `events_cleanup` — DELETE by `id_prefix LIKE` for scenario tagging cleanup.
+    - [x] **CS3.3.4** `events_cleanup_user` — DELETE by `target_user` for pre/post cleanup.
+- [x] **CS3.4** Done 2026-05-04 — `canary-streams/libraries/handlers/kafka-consumer.ts` parses Kafka envelope and calls `ctx.dataview("events_insert", ...)`. MessageConsumer view wired to `canary-kafka` LockBox alias in app.toml.
+- [x] **CS3.5** Done 2026-05-04 — `[api.views.scenario_activity_feed]` in `canary-streams/app.toml` at path `/canary/scenarios/stream/activity-feed`, POST, auth=session.
+- [x] **CS3.6** Done 2026-05-04 — `canary-streams/libraries/handlers/scenario-activity-feed.ts` — 11-step handler complete with AF-compliance annotations.
+- [x] **CS3.7** Done 2026-05-04 — All 11 steps implemented in `scenario-activity-feed.ts`:
+    - [x] **CS3.7.1** Step 1: publish-bob-event-1 via `kafka.publish()`.
+    - [x] **CS3.7.2** Step 2: consumer-catches-up — poll-wait with exponential backoff 100→1600ms, 5s cap.
+    - [x] **CS3.7.3** Step 3: bob-history-one — REST history count==1.
+    - [x] **CS3.7.4** Step 4: publish-bob-events-2-3-4 — 3 rapid publishes.
+    - [x] **CS3.7.5** Step 5: bob-history-four — wait + count==4, published_at ASC order check.
+    - [x] **CS3.7.6** Step 6: bob-history-date-range — `until` boundary filter, at_least_one && less_than_four.
+    - [x] **CS3.7.7** Step 7: carol-history-empty — count==0.
+    - [x] **CS3.7.8** Step 8: publish-carol-event — Carol mention.
+    - [x] **CS3.7.9** Step 9: carol-history-one — poll-wait + count==1, target_user==carol.
+    - [x] **CS3.7.10** Step 10: bob-history-still-four — AF-3 scoping, Bob count unchanged.
+    - [x] **CS3.7.11** Step 11: bob-pagination — limit=2/offset=0 + limit=2/offset=2, no duplicates.
+- [x] **CS3.8** Done 2026-05-04 — cleanup-before (events_cleanup_user for bob+carol) and cleanup-after (same) in `scenario-activity-feed.ts`. Best-effort with catch.
+- [x] **CS3.9** Done 2026-05-04 — `run-tests.sh` line 478: `test_ep "scen-stream-activity-feed" POST "$BASE/streams/canary/scenarios/stream/activity-feed" '{}'` behind `KAFKA_AVAIL` gate (line 477).
 
 ### CS5 — Dashboard (deferred)
 
@@ -1082,7 +1082,7 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ### CS7 — End-to-end verification (pending deploy)
 
-- [ ] **CS7.1 (PENDING DEPLOY)** Full-infra run: `./run-tests.sh` — expects SQLite Messaging + Doc Pipeline + 3 probes PASS unconditionally; PG/MySQL Messaging PASS on live infra. Requires `cargo deploy` + `riversctl start`.
+- [x] **CS7.1 (PENDING DEPLOY)** Done 2026-05-05: full-infra run on beta-01: 144/148 pass. SQLite Messaging PASS, Doc Pipeline PASS, 3 probes PASS, PG/MySQL Messaging PASS, Kafka PASS, STREAM-ACTIVITY-FEED PASS. 4 PROXY 503 = expected (static build).
 - [ ] **CS7.2 (PENDING DEPLOY)** No-infra run: SQLite Messaging + Doc Pipeline + probes PASS; PG/MySQL Messaging SKIP cleanly via PG_AVAIL/MYSQL_AVAIL gates.
 - [ ] **CS7.3 (PENDING DEPLOY)** Deliberate-failure probe — edit one step's assertion, verify `failed_at_step=N`, SV-7 subsequent steps execute, SV-8 dependent steps show skipped.
 - [ ] **CS7.4 (PENDING DEPLOY)** Dashboard smoke — canary-main loaded in browser shows SCENARIOS profile section with per-scenario pass/fail + expandable flat-assertion detail.
@@ -1093,7 +1093,7 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ### BR3 — Driver-side integration verification (pending deploy)
 
-- [ ] **BR3.1 (PENDING DEPLOY)** Kafka end-to-end: `ctx.datasource("kafka").publish(...)` from canary + kafkacat consumer verify.
+- [x] **BR3.1 (PENDING DEPLOY)** Done 2026-05-05: Kafka end-to-end verified on beta-01. STREAM-KAFKA-VERIFY + SCENARIO-STREAM-ACTIVITY-FEED both PASS.
 - [ ] **BR3.2 (PENDING DEPLOY)** RabbitMQ — `key` field → AMQP routing-key.
 - [ ] **BR3.3 (PENDING DEPLOY)** NATS — publish to subject + subscriber verify.
 - [ ] **BR3.4 (PENDING DEPLOY)** Redis Streams — XADD publish + XREAD verify.
@@ -1109,7 +1109,7 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 
 ### BR7 — Verification (pending deploy)
 
-- [ ] **BR7.3 (PENDING DEPLOY)** `cargo deploy /tmp/rivers-br` — deploy with the new runtime.
+- [x] **BR7.3 (PENDING DEPLOY)** Done 2026-05-05: deployed to beta-01 via RPM (rivers-0.59.4). Canary passes.
 - [ ] **BR7.4 (PENDING DEPLOY)** `canary-bundle/run-tests.sh` against the deployed instance — existing atomic count unchanged; new STREAM atomic tests PASS; new `scen-stream-activity-feed` PASS (Kafka reachable).
 
 ---
@@ -1156,7 +1156,25 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 - [x] `cargo test -p rivers-drivers-builtin` — 26/26 pass (SQLite conformance; cluster tests guarded by RIVERS_TEST_CLUSTER=1). Done 2026-04-30.
 - [x] `cargo test -p riversd` — 453/453 pass. Done 2026-04-30.
 - [ ] `RIVERS_TEST_CLUSTER=1 cargo test -p rivers-drivers-builtin` — full cluster tests (when available)
-- [ ] All 33 bug-sourced tests mapped in coverage table
+- [x] All bug-sourced tests mapped in coverage table — Done 2026-05-04. Audit found 22 tests covering 13 bugs (original estimate of 33 was incorrect). Coverage:
+
+| Bug | File | Test(s) |
+|-----|------|---------|
+| BUG-001 | `rivers-drivers-builtin/tests/conformance/ddl_guard.rs` | 3 tests: DDL whitelist enforcement (DROP/CREATE/ALTER blocked) |
+| BUG-002 | `riversd/tests/v8_bridge_tests.rs` | `infinite_loop_is_terminated_by_watchdog` |
+| BUG-003 | `riversd/tests/v8_bridge_tests.rs` | `code_generation_from_string_is_blocked` |
+| BUG-004 | `rivers-drivers-builtin/tests/conformance/param_binding.rs` | 3 tests: `$param` binding uniformity across SQLite/PG/MySQL |
+| BUG-005 | `riversd/tests/boot_parity_tests.rs` | `no_ssl_lifecycle_parity`, + 1 more |
+| BUG-006 | `riversd/tests/v8_bridge_tests.rs` | `massive_allocation_does_not_crash` |
+| BUG-008 | `rivers-engine-v8/src/lib.rs` | `regression_bug008_dataview_params_forwarded`, `regression_bug008_dataview_empty_params_bypasses_cache` |
+| BUG-009 | `rivers-engine-v8/src/lib.rs` | `dataview_bare_name_uses_prefetched_data`, `dataview_namespaced_name_not_double_prefixed` |
+| BUG-010 | `riversd/tests/v8_bridge_tests.rs` | `ctx_app_id_is_uuid_not_slug` |
+| BUG-011 | `riversd/tests/v8_bridge_tests.rs` | `ctx_node_id_is_not_empty` |
+| BUG-012 | `riversd/tests/v8_bridge_tests.rs` | `ctx_request_query_field_name` |
+| BUG-013 | `riversd/tests/boot_parity_tests.rs` | `module_paths_resolved_to_absolute`, + 1 more |
+| BUG-021 | `rivers-engine-v8/src/lib.rs` | `regression_bug021_store_set_numeric_ttl_does_not_crash`, `store_set_object_ttl_is_silently_ignored` |
+
+Total: 22 tests, 13 bugs. BUG-007/014-020 either addressed in fix code without dedicated tests or tracked in bug files only.
 
 ---
 
@@ -1373,14 +1391,14 @@ Two T2 items the gap audit could not resolve from grep alone — verify before c
 - [x] Rename `OPS-DOCTOR-LINT-*` → `OPS-VALIDATE-*` (per VAL-7) — old commands removed from riversctl.
 - [x] Add OPS-VALIDATE-PASS, OPS-VALIDATE-JSON-FORMAT, OPS-VALIDATE-EXIT-CODE tests in canary run-tests.sh (no-infra tests).
 - [x] Add OPS-VALIDATE no-infra tests (FAIL-STRUCTURAL, DID-YOU-MEAN, SKIP-ENGINE, FORMAT-TEXT) — Done 2026-04-30. 4 new tests in canary-bundle/run-tests.sh using temp bundle copies with injected errors.
-- [ ] Add OPS-VALIDATE-EXISTENCE-FAIL, OPS-VALIDATE-CROSSREF-FAIL (fixture bad bundles, no infra needed — future sprint).
+- [x] Add OPS-VALIDATE-FAIL-EXISTENCE, OPS-VALIDATE-FAIL-CROSSREF (fixture bad bundles, no infra needed) — Done 2026-05-04. Added to `canary-bundle/run-tests.sh`: FAIL-EXISTENCE injects a view with missing handler file (E001), FAIL-CROSSREF injects a DataView with unknown datasource (X001). Both use mktemp + cp -r pattern. Fleet spec updated 116→118.
 - [ ] Add OPS-VALIDATE-SYNTAX-FAIL (requires engine dylibs), OPS-VALIDATE-GATE2-LIVE (requires running riversd) — blocked on deploy.
 - [x] Update canary-fleet-spec test counts (107 → 116) — Done 2026-04-30.
 
 ### Sprint 8.2 — Tutorial + guide updates
 - [x] Create `docs/guide/tutorials/tutorial-bundle-validation.md`
 - [x] Update `docs/guide/cli.md` — `riverpackage validate` already documented; `riversctl validate` removed.
-- [ ] Update `docs/guide/installation.md` — validation in deploy workflow
+- [x] Update `docs/guide/installation.md` — validation in deploy workflow. Done 2026-05-04 — added "Validate before deploying" callout in the deploy section pointing to `riverpackage validate` and the Bundle validation section.
 - [x] Update `docs/guide/developer.md` — validation in app development workflow. Done 2026-04-30.
 - [x] Update `docs/guide/AI/rivers-skill.md` — new validation commands. Done 2026-04-30.
 - [x] Update `docs/guide/AI/rivers-app-development.md` — validation step. Done 2026-04-30.
@@ -1790,4 +1808,100 @@ Allow DataViews to declare `source_views` referencing other DataViews by name. T
 ### P2.9-D — Spec
 
 - [x] **P2.9.15** — Update `docs/arch/rivers-data-layer-spec.md`: add `source_views`, `compose_strategy`, `join_key`, `enrich_mode` to DataView config reference. Document union + enrich semantics, cycle detection, N+1 guard.
+
+---
+
+## TXN — Transaction & Multi-Query Spec Implementation
+
+> **Source:** `docs/arch/rivers-transaction-multi-query-spec.md` (2026-05-04)
+> **Goal:** Land single-statement enforcement for DataViews, the DataView `transaction = true` wrapper, and the synchronous `Rivers.db.tx` handler API (begin/query/peek/commit/rollback) with auto-rollback.
+>
+> **Confirmed from source:**
+> - `DatabaseDriver::supports_transactions()` already exists on the trait (`crates/rivers-driver-sdk/src/traits.rs:574`); postgres/mysql/sqlite return `true`, redis/cassandra/neo4j-disabled return `false`.
+> - V8 already has `Rivers.db.begin/commit/rollback/batch` host callbacks and `Rivers.db.query/Rivers.db.execute` (Bug 2 work) routing through `db_query_or_execute_core` in `crates/riversd/src/process_pool/v8_engine/rivers_global.rs`.
+> - No `Rivers.db.tx` namespace today — must be added alongside (not replacing) the existing imperative `Rivers.db.begin` form.
+> - Validation pipeline crates: `validate_structural.rs`, `validate_syntax.rs` in `crates/rivers-runtime`. Gate 2 runs the same validators on bundle load via `riversd`.
+> - DataView config struct lives in `crates/rivers-runtime/src/dataview.rs`.
+>
+> **Inferred / to verify before execution:**
+> - Whether `DataViewConfig` already has a `transaction: bool` field, and whether the engine honors it (TF-1..TF-4). If absent, TXN-B.1 adds it; if present-but-unwired, TXN-B.2 wires the BEGIN/COMMIT envelope.
+> - Whether `MongoDriver` currently advertises `supports_transactions()` correctly for the §10.3 matrix.
+> - How the V8 host bridges sync calls today (`block_on` vs `Handle::block_on`) — must reuse the same pattern for `tx.*` to keep the V8 isolate single-threaded contract.
+
+**Phasing:** A (validator/single-statement) → B (DataView `transaction = true`) → C (transaction state + host) → D (V8 binding) → E (peek + auto-rollback) → F (driver matrix + cross-DS) → G (docs/tutorials/version bump) → H (gap analysis).
+
+### TXN-A — Single-statement enforcement (§2)
+
+- [x] **TXN-A.1** Done 2026-05-04 — read both files; identified DataView query field loop in `validate_syntax.rs`.
+- [x] **TXN-A.2** Done 2026-05-04 — implemented `has_multiple_statements(sql)` in `validate_syntax.rs`: SQL-aware scanner tracking `''` escapes, `--` line comments, `/* */` block comments.
+- [x] **TXN-A.3** Done 2026-05-04 — applied to all 5 query fields (query/get_query/post_query/put_query/delete_query) with SS-4 message format and C010 error code.
+- [x] **TXN-A.4** Done 2026-05-04 — Gate 2 handled via `validate_pipeline.rs::validate_bundle_full` which calls `validate_syntax()` at Layer 4 on bundle load.
+- [x] **TXN-A.5** Done 2026-05-04 — 9 unit tests in `validate_syntax.rs` + `ss_c010_emitted_in_validate_syntax` integration test.
+- [x] **TXN-A.6** Done 2026-05-04 — covered by `ss_c010_emitted_in_validate_syntax` in `validate_syntax.rs` which constructs a bundle config inline and asserts C010 is emitted by `validate_syntax()`.
+
+### TXN-B — DataView `transaction = true` wrapper (§3)
+
+- [x] **TXN-B.1** Done 2026-05-04 — `pub transaction: bool` added to `DataViewConfig`; `"transaction"` added to `DATAVIEW_FIELDS` allowlist.
+- [x] **TXN-B.2** Done 2026-05-04 — BEGIN/COMMIT wrapper in `dataview_engine.rs` pool path when `config.transaction = true` and `txn_conn` is None.
+- [x] **TXN-B.3** Done 2026-05-04 — TF-2: when `txn_conn` is Some (handler tx path), `use_txn_wrapper` is false; DataView's `transaction` flag is bypassed.
+- [x] **TXN-B.4** Done 2026-05-04 — W008 warning at Gate 1 in `validate_syntax.rs` via `NON_TRANSACTIONAL` static list per §10.3. Runtime silently skips wrapper when `begin_transaction()` returns `Unsupported` (TF-3 runtime fix 2026-05-04).
+- [x] **TXN-B.5** Done 2026-05-04 — 3 tests in `crates/riversd/tests/txn_wrapper_tests.rs`: (a) success commits, (b) query failure rolls back, (c) non-transactional driver skips wrapper. TF-2 (inside handler tx) covered by TXN-D.6 tests (tx.query suppresses DataView transaction flag).
+
+### TXN-C — Transaction state + host primitives (§4–6)
+
+- [x] **TXN-C.1** Done 2026-05-04 — `TxHandleState { map, datasource, results }` in `task_locals.rs`; `TASK_TX_HANDLE` thread-local.
+- [x] **TXN-C.2** Done 2026-05-04 — `tx_begin_callback` in `rivers_global.rs`: TX-4 nested check, TASK_DS_CONFIGS lookup, `factory.connect() → begin_transaction()`, stores in TASK_TX_HANDLE.
+- [x] **TXN-C.3** Done 2026-05-04 — `tx_query_callback`: CD-1 datasource check, take/execute/return connection, TQ-5 result accumulation, TQ-6 auto-rollback on error, TQ-8 "DEFAULT" method for `query` field.
+- [x] **TXN-C.4** Done 2026-05-04 — `tx_commit_callback`: `txn_map.commit()`, serializes results HashMap to JSON.
+- [x] **TXN-C.5** Done 2026-05-04 — `tx_rollback_callback`: `txn_map.rollback()`, clears TASK_TX_HANDLE.
+- [x] **TXN-C.6** Done 2026-05-04 — `tx_peek_callback`: reads `TASK_TX_HANDLE.results` only, throws PK-2 error on miss.
+- [x] **TXN-C.7** Done 2026-05-04 — auto-rollback in `TaskLocals::drop`: takes TASK_TX_HANDLE state and calls `map.rollback()`. Connection returned via TransactionMap on commit/rollback.
+- [x] **TXN-C.8** Done 2026-05-04 — behavioral contracts verified by TXN-D.6 V8 integration tests (begin/query/commit/rollback/peek/accumulation/auto-rollback). Rust-only unit test without V8 would require extracting state management; the V8 integration tests provide complete coverage.
+
+### TXN-D — V8 `Rivers.db.tx` binding (§11)
+
+- [x] **TXN-D.1** Done 2026-05-04 — `Rivers.db.tx` sub-object added in `inject_rivers_global`; coexists with existing `Rivers.db.begin/commit/rollback/batch/query/execute`.
+- [x] **TXN-D.2** Done 2026-05-04 — `tx.begin()` returns a V8 object with 4 method properties; state lives in `TASK_TX_HANDLE` Rust thread-local (V8-2 compliant).
+- [x] **TXN-D.3** Done 2026-05-04 — `tx.query(name, params)` (sync void), `tx.peek(name)` (sync array), `tx.commit()` (sync map), `tx.rollback()` (sync void) all wired.
+- [x] **TXN-D.4** Done 2026-05-04 — all callbacks use `rt.block_on()` pattern from `RT_HANDLE` thread-local (V8-1 compliant).
+- [x] **TXN-D.5** Done 2026-05-04 — V8-3 covered: `TaskLocals::drop` runs auto-rollback on ANY exit path including timeout. The task timeout fires isolate termination which unwinds `TaskLocals`, triggering the drop guard.
+- [x] **TXN-D.6** Done 2026-05-04 — 8 integration tests in `crates/riversd/tests/v8_tx_tests.rs`: (a) begin/query/commit persists write, (b) begin/query/rollback discards, (c) nested begin throws, (e) peek before query throws, (f) peek accumulates+idempotent, (g/e) auto-rollback on exit without commit, auto-rollback on throw, (F.3) cross-datasource rejected.
+
+### TXN-E — Auto-rollback + error surface (§8)
+
+- [x] **TXN-E.1** Done 2026-05-04 — auto-rollback + WARN in `TaskLocals::drop` when `TASK_TX_HANDLE` is Some (state not yet committed/rolled back).
+- [x] **TXN-E.2** Done 2026-05-04 — ERROR log + connection discarded when auto-rollback fails (in `TaskLocals::drop` error branch).
+- [x] **TXN-E.3** Done 2026-05-04 — handler return value path is unchanged; auto-rollback fires in drop guard after the return value has already been propagated.
+- [x] **TXN-E.4** Done 2026-05-04 — (a) `tx_auto_rollback_on_handler_exit_without_commit` + (b) `tx_auto_rollback_on_handler_throw` in `v8_tx_tests.rs`. Both verify DB row count = 0 after auto-rollback. (c) ROLLBACK driver failure is a rare infrastructure failure path covered by ERROR log in drop guard; skipped as it requires a mock driver that fails specifically on rollback.
+
+### TXN-F — Driver matrix + cross-datasource (§10, §13)
+
+- [x] **TXN-F.1** Done 2026-05-04 — audited §10.3 matrix. MongoDB gap fixed: added `supports_transactions() -> true` to `rivers-plugin-mongodb`. All others verified as correct.
+- [x] **TXN-F.2** Done 2026-05-04 — MongoDB `Connection` implementation already had begin/commit/rollback via ClientSession. `supports_transactions() = true` added to driver.
+- [x] **TXN-F.3** Done 2026-05-04 — `tx_query_cross_datasource_rejected` test in `v8_tx_tests.rs`: opens tx on `txdb_a`, calls DataView belonging to `txdb_b`, asserts throw (CD-1).
+
+### TXN-G — Docs, tutorials, version bump
+
+- [x] **TXN-G.1** Done 2026-05-04 — `## CHANGELOG` section appended to `docs/arch/rivers-transaction-multi-query-spec.md`.
+- [x] **TXN-G.2** Done 2026-05-04 — §13 appended to `docs/arch/rivers-data-layer-spec.md` cross-linking single-statement rule, `transaction = true`, `Rivers.db.tx`, and driver matrix.
+- [x] **TXN-G.3** Done 2026-05-04 — `docs/guide/tutorials/tutorial-transactions.md` written with all 4 patterns.
+- [x] **TXN-G.4** Done 2026-05-04 — `docs/guide/AI/rivers-skill.md` and `docs/guide/AI/rivers-cookbook-opus.md` updated with `Rivers.db.tx` API and recipes.
+- [x] **TXN-G.5** Done 2026-05-04 — `changedecisionlog.md` + `changelog.md` updated with TXN entries for all phases including TQ-8 fix and TF-3 runtime fix.
+- [x] **TXN-G.6** Done 2026-05-04 — workspace version bumped `0.58.0 → 0.59.0+0002050526` (`just bump-minor`).
+
+### TXN-H — Gap analysis (Standard 9)
+
+- [x] **TXN-H.1** Done 2026-05-04 — gap analysis complete. All constraint IDs mapped:
+  - SS-1..SS-6: `has_multiple_statements` scanner, C010 at Gate 1+2, 9 unit tests.
+  - TF-1..TF-4: `transaction` field, BEGIN/COMMIT wrapper, TF-2 suppression, W008+runtime skip, `txn_wrapper_tests.rs`.
+  - TX-1..TX-4: `tx_begin_callback`, `TransactionMap`, nested TX-4 check (tested).
+  - TQ-1..TQ-8: `tx_query_callback`, "DEFAULT" method fix (TQ-8, 2026-05-04), full test suite.
+  - CM-1..CM-4: `take_connection`/`return_connection`, `TaskLocals::drop` discard, pool timeout.
+  - RM-1..RM-4: Vec accumulation, `tx_peek_accumulates_and_is_idempotent` test.
+  - PK-1..PK-5: `tx_peek_callback`, `tx_peek_before_query_throws` + `tx_peek_accumulates_and_is_idempotent`.
+  - AR-1..AR-5: `TaskLocals::drop`, WARN log, ERROR log, `tx_auto_rollback_*` tests.
+  - V8-1..V8-4: `block_on`, TASK_TX_HANDLE, drop guard timeout path, no task-kind gating.
+  - DT-1..DT-3: non-transactional driver throws on `tx.begin()`, MongoDB `supports_transactions()`.
+  - MQ-1..MQ-4: doc constraints + C010 enforcement.
+  - CD-1..CD-3: datasource mismatch check in `tx_query_callback`, `tx_query_cross_datasource_rejected` test.
 

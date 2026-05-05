@@ -678,8 +678,7 @@ if command -v riverpackage >/dev/null 2>&1; then
   fi
 
   # OPS-VALIDATE-EXIT-CODE: validate on a nonexistent dir exits non-zero.
-  riverpackage validate /nonexistent-bundle-path-xyz --format json >/dev/null 2>&1
-  BAD_EXIT=$?
+  BAD_EXIT=0; riverpackage validate /nonexistent-bundle-path-xyz --format json >/dev/null 2>&1 || BAD_EXIT=$?
   if [ "$BAD_EXIT" != "0" ]; then
     printf "  PASS %-40s\n" "OPS-VALIDATE-EXIT-CODE"
     PASS=$((PASS+1))
@@ -691,12 +690,11 @@ if command -v riverpackage >/dev/null 2>&1; then
   # OPS-VALIDATE-FAIL-STRUCTURAL: bundle with unknown TOML key exits 1.
   STRUCT_TMP=$(mktemp -d)
   cp -r "$BUNDLE_DIR" "$STRUCT_TMP/broken-structural"
-  FIRST_APP=$(head -1 "$STRUCT_TMP/broken-structural/manifest.toml" | grep -o '"[^"]*"' | head -1 | tr -d '"' || echo "")
+  FIRST_APP=$(grep -A5 '^apps' "$STRUCT_TMP/broken-structural/manifest.toml" | grep '"' | head -1 | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
   if [ -n "$FIRST_APP" ] && [ -d "$STRUCT_TMP/broken-structural/$FIRST_APP" ]; then
     printf '\n[api.views.__bad__]\nveiew_type = "Rest"\n' >> "$STRUCT_TMP/broken-structural/$FIRST_APP/app.toml"
   fi
-  riverpackage validate "$STRUCT_TMP/broken-structural" --format json >/dev/null 2>&1
-  STRUCT_EXIT=$?
+  STRUCT_EXIT=0; riverpackage validate "$STRUCT_TMP/broken-structural" --format json >/dev/null 2>&1 || STRUCT_EXIT=$?
   if [ "$STRUCT_EXIT" != "0" ]; then
     printf "  PASS %-40s\n" "OPS-VALIDATE-FAIL-STRUCTURAL"
     PASS=$((PASS+1))
@@ -709,11 +707,11 @@ if command -v riverpackage >/dev/null 2>&1; then
   # OPS-VALIDATE-DID-YOU-MEAN: typo'd key produces suggestion in output.
   TYPO_TMP=$(mktemp -d)
   cp -r "$BUNDLE_DIR" "$TYPO_TMP/typo-bundle"
-  FIRST_APP2=$(head -1 "$TYPO_TMP/typo-bundle/manifest.toml" | grep -o '"[^"]*"' | head -1 | tr -d '"' || echo "")
+  FIRST_APP2=$(grep -A5 '^apps' "$TYPO_TMP/typo-bundle/manifest.toml" | grep '"' | head -1 | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
   if [ -n "$FIRST_APP2" ] && [ -d "$TYPO_TMP/typo-bundle/$FIRST_APP2" ]; then
     printf '\n[api.views.__typo__]\nveiew_type = "Rest"\n' >> "$TYPO_TMP/typo-bundle/$FIRST_APP2/app.toml"
   fi
-  TYPO_OUT=$(riverpackage validate "$TYPO_TMP/typo-bundle" --format text 2>/dev/null)
+  TYPO_OUT=$(riverpackage validate "$TYPO_TMP/typo-bundle" --format text 2>/dev/null) || true
   if echo "$TYPO_OUT" | grep -qi "did you mean\|view_type"; then
     printf "  PASS %-40s\n" "OPS-VALIDATE-DID-YOU-MEAN"
     PASS=$((PASS+1))
@@ -733,7 +731,7 @@ if command -v riverpackage >/dev/null 2>&1; then
   fi
 
   # OPS-VALIDATE-FORMAT-TEXT: --format text produces [PASS]/[FAIL] markers.
-  TEXT_OUT=$(riverpackage validate "$BUNDLE_DIR" --format text 2>/dev/null)
+  TEXT_OUT=$(riverpackage validate "$BUNDLE_DIR" --format text 2>/dev/null) || true
   if echo "$TEXT_OUT" | grep -qE '\[PASS\]|\[FAIL\]|\[SKIP\]|\[WARN\]'; then
     printf "  PASS %-40s\n" "OPS-VALIDATE-FORMAT-TEXT"
     PASS=$((PASS+1))
@@ -741,6 +739,44 @@ if command -v riverpackage >/dev/null 2>&1; then
     printf "  FAIL %-40s (no [PASS]/[FAIL] markers in text output)\n" "OPS-VALIDATE-FORMAT-TEXT"
     FAIL=$((FAIL+1))
   fi
+
+  # OPS-VALIDATE-FAIL-EXISTENCE: bundle with a handler module pointing to a
+  # non-existent file triggers E001 and exits 1.
+  EXIST_TMP=$(mktemp -d)
+  cp -r "$BUNDLE_DIR" "$EXIST_TMP/broken-existence"
+  EXIST_APP=$(grep -A5 '^apps' "$EXIST_TMP/broken-existence/manifest.toml" | grep '"' | head -1 | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+  if [ -n "$EXIST_APP" ] && [ -d "$EXIST_TMP/broken-existence/$EXIST_APP" ]; then
+    printf '\n[api.views.__exist_test__]\nview_type = "Rest"\nmethod = "GET"\npath = "/canary/_exist_test"\n[api.views.__exist_test__.handler]\nentrypoint = "handleExistTest"\nmodule = "libraries/handlers/__nonexistent_handler__.ts"\n' \
+      >> "$EXIST_TMP/broken-existence/$EXIST_APP/app.toml"
+  fi
+  EXIST_EXIT=0; riverpackage validate "$EXIST_TMP/broken-existence" --format json >/dev/null 2>&1 || EXIST_EXIT=$?
+  if [ "$EXIST_EXIT" != "0" ]; then
+    printf "  PASS %-40s\n" "OPS-VALIDATE-FAIL-EXISTENCE"
+    PASS=$((PASS+1))
+  else
+    printf "  FAIL %-40s (expected exit 1 for missing handler module)\n" "OPS-VALIDATE-FAIL-EXISTENCE"
+    FAIL=$((FAIL+1))
+  fi
+  rm -rf "$EXIST_TMP"
+
+  # OPS-VALIDATE-FAIL-CROSSREF: bundle with a DataView referencing a
+  # non-existent datasource triggers X001 and exits 1.
+  XREF_TMP=$(mktemp -d)
+  cp -r "$BUNDLE_DIR" "$XREF_TMP/broken-crossref"
+  XREF_APP=$(grep -A5 '^apps' "$XREF_TMP/broken-crossref/manifest.toml" | grep '"' | head -1 | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+  if [ -n "$XREF_APP" ] && [ -d "$XREF_TMP/broken-crossref/$XREF_APP" ]; then
+    printf '\n[data.dataviews.__xref_test__]\nname = "__xref_test__"\ndatasource = "__nonexistent_ds__"\nquery = "SELECT 1"\n' \
+      >> "$XREF_TMP/broken-crossref/$XREF_APP/app.toml"
+  fi
+  XREF_EXIT=0; riverpackage validate "$XREF_TMP/broken-crossref" --format json >/dev/null 2>&1 || XREF_EXIT=$?
+  if [ "$XREF_EXIT" != "0" ]; then
+    printf "  PASS %-40s\n" "OPS-VALIDATE-FAIL-CROSSREF"
+    PASS=$((PASS+1))
+  else
+    printf "  FAIL %-40s (expected exit 1 for missing datasource ref)\n" "OPS-VALIDATE-FAIL-CROSSREF"
+    FAIL=$((FAIL+1))
+  fi
+  rm -rf "$XREF_TMP"
 else
   printf "  SKIP %-40s (riverpackage not in PATH)\n" "OPS-VALIDATE-PASS"
   printf "  SKIP %-40s (riverpackage not in PATH)\n" "OPS-VALIDATE-JSON-FORMAT"
@@ -749,6 +785,8 @@ else
   printf "  SKIP %-40s (riverpackage not in PATH)\n" "OPS-VALIDATE-DID-YOU-MEAN"
   printf "  SKIP %-40s (riverpackage not in PATH)\n" "OPS-VALIDATE-SKIP-ENGINE"
   printf "  SKIP %-40s (riverpackage not in PATH)\n" "OPS-VALIDATE-FORMAT-TEXT"
+  printf "  SKIP %-40s (riverpackage not in PATH)\n" "OPS-VALIDATE-FAIL-EXISTENCE"
+  printf "  SKIP %-40s (riverpackage not in PATH)\n" "OPS-VALIDATE-FAIL-CROSSREF"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────
