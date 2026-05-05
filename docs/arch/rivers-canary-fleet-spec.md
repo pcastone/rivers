@@ -3486,8 +3486,8 @@ cargo test --test canary_fleet -- --test-threads=1
 | NOSQL | 9 | 2 | 11 |
 | RUNTIME | 19 | 9 | 28 |
 | STREAM | 7 | 2 | 9 |
-| OPS | 20 | 13 | 33 |
+| OPS | 20 | 15 | 35 |
 | PROXY | 4 | 0 | 4 |
-| **Total** | **84** | **32** | **116** |
+| **Total** | **84** | **34** | **118** |
 
-116 test endpoints across 7 profiles, 12 datasource drivers, 5 view types, exercising 21+ spec documents. Covers all v0.54.0 features: per-app logging (AppLogRouter), config discovery, riversctl stop/status/PID, doctor --fix, Prometheus metrics, TLS cert renewal, SQLite path fallback, riverpackage init/validate, engine loader naming, and the four-layer bundle validation pipeline. Covers bundle validation pipeline: four-layer structural/existence/cross-reference/syntax checking, engine dylib graceful degradation, JSON and text output formats, and typo suggestion (Levenshtein). Every silent bug from the v0.50–v0.52.7 dream doc would have been caught by at least one canary endpoint.
+118 test endpoints across 7 profiles, 12 datasource drivers, 5 view types, exercising 21+ spec documents. Covers all v0.54.0 features: per-app logging (AppLogRouter), config discovery, riversctl stop/status/PID, doctor --fix, Prometheus metrics, TLS cert renewal, SQLite path fallback, riverpackage init/validate, engine loader naming, and the four-layer bundle validation pipeline. Covers bundle validation pipeline: four-layer structural/existence/cross-reference/syntax checking, engine dylib graceful degradation, JSON and text output formats, and typo suggestion (Levenshtein). Every silent bug from the v0.50–v0.52.7 dream doc would have been caught by at least one canary endpoint.

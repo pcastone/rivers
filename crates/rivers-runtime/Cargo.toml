@@ -41,3 +41,8 @@ libloading = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+rusqlite = { workspace = true }
+
+[[test]]
+name = "cache_bench"
+required-features = ["drivers"]

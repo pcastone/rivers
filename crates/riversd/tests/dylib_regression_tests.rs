@@ -306,6 +306,7 @@ fn dataview_namespace_suffix_resolution() {
         compose_strategy: None,
         join_key: None,
         enrich_mode: "nest".to_string(),
+            transaction: false,
     });
 
     let factory = Arc::new(DriverFactory::new());

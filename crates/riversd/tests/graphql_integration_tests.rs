@@ -81,6 +81,7 @@ async fn schema_with_real_executor_resolves_query() {
         compose_strategy: None,
         join_key: None,
         enrich_mode: "nest".to_string(),
+            transaction: false,
     });
 
     // Connection params

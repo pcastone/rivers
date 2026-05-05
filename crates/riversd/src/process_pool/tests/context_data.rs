@@ -639,6 +639,7 @@ async fn x4_dataview_executor_end_to_end() {
         compose_strategy: None,
         join_key: None,
         enrich_mode: "nest".to_string(),
+            transaction: false,
     };
     registry.register(dv_config);
 
@@ -817,6 +818,7 @@ async fn au13_ctx_dataview_dynamic_with_executor() {
         compose_strategy: None,
         join_key: None,
         enrich_mode: "nest".to_string(),
+            transaction: false,
     });
 
     let mut ds_params = HashMap::new();

@@ -34,6 +34,10 @@ impl DatabaseDriver for MongoDriver {
         "mongodb"
     }
 
+    fn supports_transactions(&self) -> bool {
+        true // Multi-document transactions supported in MongoDB 4.0+ (spec §10.3)
+    }
+
     async fn connect(
         &self,
         params: &ConnectionParams,

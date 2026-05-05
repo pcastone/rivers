@@ -1074,6 +1074,17 @@ pub(super) fn inject_rivers_global(
     let db_execute_key = v8_str(scope, "execute")?;
     db_obj.set(scope, db_execute_key.into(), db_execute_fn.into());
 
+    // ── Rivers.db.tx (TXN spec §4 — new namespaced API) ──────────────
+    // tx = Rivers.db.tx.begin(ds)  →  { query, peek, commit, rollback }
+    // Coexists with the existing imperative Rivers.db.begin/commit/rollback.
+    let db_tx_obj = v8::Object::new(scope);
+    let db_tx_begin_fn = v8::Function::new(scope, tx_begin_callback)
+        .ok_or_else(|| TaskError::Internal("failed to create Rivers.db.tx.begin".into()))?;
+    let db_tx_begin_key = v8_str(scope, "begin")?;
+    db_tx_obj.set(scope, db_tx_begin_key.into(), db_tx_begin_fn.into());
+    let db_tx_key = v8_str(scope, "tx")?;
+    db_obj.set(scope, db_tx_key.into(), db_tx_obj.into());
+
     let db_key = v8_str(scope, "db")?;
     rivers_obj.set(scope, db_key.into(), db_obj.into());
 
@@ -1311,6 +1322,383 @@ fn db_rollback_callback(
             error = %e,
             "Rivers.db.rollback: rollback failed"
         );
+    }
+}
+
+// ── Rivers.db.tx callbacks (TXN spec §4–8) ───────────────────────────────
+//
+// The tx API is a namespaced object: `const tx = Rivers.db.tx.begin(ds)`.
+// All four methods (query/peek/commit/rollback) are properties on the returned
+// `tx` handle object. State lives in TASK_TX_HANDLE thread-local so V8 holds
+// no pointers into Rust memory (V8-2).
+
+/// `Rivers.db.tx.begin(datasource)` — begin a new Rivers.db.tx transaction.
+///
+/// Returns a JS object with `query`, `peek`, `commit`, `rollback` methods.
+/// The actual transaction state lives in `TASK_TX_HANDLE`.
+fn tx_begin_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use rivers_runtime::rivers_driver_sdk::DriverError;
+    use std::sync::Arc;
+
+    let ds_name = args.get(0).to_rust_string_lossy(scope);
+    if ds_name.is_empty() {
+        db_throw(scope, "TransactionError: datasource name required for Rivers.db.tx.begin");
+        return;
+    }
+
+    // TX-4: reject nested transactions
+    let already_active = TASK_TX_HANDLE.with(|t| t.borrow().is_some());
+    if already_active {
+        db_throw(scope, "TransactionError: nested transactions not supported");
+        return;
+    }
+
+    let resolved = TASK_DS_CONFIGS.with(|c| c.borrow().get(&ds_name).cloned());
+    let resolved = match resolved {
+        Some(r) => r,
+        None => {
+            db_throw(scope, &format!("CapabilityError: datasource '{}' not declared in resources", ds_name));
+            return;
+        }
+    };
+
+    let factory = TASK_DRIVER_FACTORY.with(|f| f.borrow().clone());
+    let factory = match factory {
+        Some(f) => f,
+        None => {
+            db_throw(scope, "TransactionError: driver factory not available");
+            return;
+        }
+    };
+
+    let rt = match get_rt_handle() {
+        Ok(r) => r,
+        Err(e) => {
+            db_throw(scope, &format!("TransactionError: {e}"));
+            return;
+        }
+    };
+
+    // Connect and BEGIN
+    let txn_map = Arc::new(crate::transaction::TransactionMap::new());
+    let txn_map_ref = txn_map.clone();
+    let ds_for_begin = ds_name.clone();
+    let begin_outcome: Result<(), DriverError> = rt.block_on(async move {
+        let conn = factory.connect(&resolved.driver_name, &resolved.params).await?;
+        txn_map_ref.begin(&ds_for_begin, conn).await
+    });
+
+    match begin_outcome {
+        Ok(()) => {
+            TASK_TX_HANDLE.with(|t| {
+                *t.borrow_mut() = Some(TxHandleState {
+                    map: txn_map,
+                    datasource: ds_name.clone(),
+                    results: std::collections::HashMap::new(),
+                });
+            });
+        }
+        Err(e) => {
+            let msg = match &e {
+                DriverError::Unsupported(_) => {
+                    format!("TransactionError: driver '{}' does not support transactions", ds_name)
+                }
+                _ => format!("DriverError::Transaction: BEGIN failed: {e}"),
+            };
+            db_throw(scope, &msg);
+            return;
+        }
+    }
+
+    // Build and return the handle object { query, peek, commit, rollback }
+    let handle = v8::Object::new(scope);
+
+    macro_rules! set_fn {
+        ($name:expr, $cb:ident) => {{
+            if let Some(f) = v8::Function::new(scope, $cb) {
+                if let Some(k) = v8::String::new(scope, $name) {
+                    handle.set(scope, k.into(), f.into());
+                }
+            }
+        }};
+    }
+
+    set_fn!("query",    tx_query_callback);
+    set_fn!("peek",     tx_peek_callback);
+    set_fn!("commit",   tx_commit_callback);
+    set_fn!("rollback", tx_rollback_callback);
+
+    rv.set(handle.into());
+}
+
+/// `tx.query(dataview_name, params)` — execute a DataView on the transaction connection.
+///
+/// Synchronous, void return. Result is stored in TASK_TX_HANDLE.results (TQ-5).
+fn tx_query_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    use rivers_runtime::rivers_driver_sdk::types::QueryValue;
+
+    let dv_name = args.get(0).to_rust_string_lossy(scope);
+    if dv_name.is_empty() {
+        db_throw(scope, "TransactionError: DataView name required for tx.query");
+        return;
+    }
+
+    // Parse params object from arg[1]
+    let params_val = args.get(1);
+    let params: std::collections::HashMap<String, QueryValue> = if params_val.is_object() || params_val.is_null_or_undefined() {
+        if let Some(json_str) = v8::json::stringify(scope, params_val) {
+            let s = json_str.to_rust_string_lossy(scope);
+            match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s) {
+                Ok(map) => map.into_iter()
+                    .map(|(k, v)| (k, super::datasource::json_to_query_value(v)))
+                    .collect(),
+                Err(_) => std::collections::HashMap::new(),
+            }
+        } else {
+            std::collections::HashMap::new()
+        }
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    // Check active tx
+    let (txn_map, tx_ds) = match TASK_TX_HANDLE.with(|t| {
+        t.borrow().as_ref().map(|s| (s.map.clone(), s.datasource.clone()))
+    }) {
+        Some(pair) => pair,
+        None => {
+            db_throw(scope, "TransactionError: no active transaction — call Rivers.db.tx.begin() first");
+            return;
+        }
+    };
+
+    let executor = TASK_DV_EXECUTOR.with(|e| e.borrow().clone());
+    let executor = match executor {
+        Some(e) => e,
+        None => {
+            db_throw(scope, "TransactionError: DataViewExecutor not available");
+            return;
+        }
+    };
+
+    let namespaced = TASK_DV_NAMESPACE.with(|n| {
+        n.borrow().as_ref()
+            .filter(|ns| !ns.is_empty() && !dv_name.contains(':'))
+            .map(|ns| format!("{ns}:{dv_name}"))
+            .unwrap_or_else(|| dv_name.clone())
+    });
+
+    let trace_id = TASK_TRACE_ID.with(|t| t.borrow().clone()).unwrap_or_default();
+
+    let rt = match get_rt_handle() {
+        Ok(r) => r,
+        Err(e) => {
+            db_throw(scope, &format!("TransactionError: {e}"));
+            return;
+        }
+    };
+
+    // TQ-2/CD-1: validate datasource match BEFORE executing
+    let exec_result = rt.block_on(async {
+        // Look up the DataView's declared datasource from the executor registry.
+        let dv_datasource = executor.datasource_for(&namespaced);
+        if let Some(dv_ds) = dv_datasource {
+            if dv_ds != tx_ds {
+                return Err(format!(
+                    "TransactionError: DataView '{}' uses datasource '{}' but transaction is on '{}'",
+                    dv_name, dv_ds, tx_ds
+                ));
+            }
+        }
+
+        // Execute on the transaction's held connection (TQ-1)
+        if let Some(mut conn) = txn_map.take_connection(&tx_ds).await {
+            // TQ-8: always use the default `query` field, regardless of HTTP method.
+            let res = executor.execute(&namespaced, params, "DEFAULT", &trace_id, Some(&mut conn)).await;
+            txn_map.return_connection(&tx_ds, conn).await;
+            match res {
+                Ok(response) => Ok(response.query_result),
+                Err(e) => Err(format!("DriverError::Query: {e}")),
+            }
+        } else {
+            Err(format!("TransactionError: connection for '{}' unavailable (already committed/rolled back?)", tx_ds))
+        }
+    });
+
+    match exec_result {
+        Ok(qr) => {
+            // TQ-5: accumulate result — append to the Vec for this DataView name
+            TASK_TX_HANDLE.with(|t| {
+                if let Some(state) = t.borrow_mut().as_mut() {
+                    state.results
+                        .entry(dv_name.clone())
+                        .or_insert_with(Vec::new)
+                        .push((*qr).clone());
+                }
+            });
+        }
+        Err(msg) => {
+            // TQ-6: auto-rollback before propagating the exception
+            let should_rollback = !msg.starts_with("TransactionError: DataView");
+            if should_rollback {
+                if let Some(state) = TASK_TX_HANDLE.with(|t| t.borrow_mut().take()) {
+                    let ds = state.datasource.clone();
+                    let _ = rt.block_on(state.map.rollback(&ds));
+                    tracing::warn!(
+                        target: "rivers.handler",
+                        datasource = %ds,
+                        dataview = %dv_name,
+                        "tx.query driver error — auto-rollback fired"
+                    );
+                }
+            }
+            db_throw(scope, &msg);
+        }
+    }
+}
+
+/// `tx.peek(dataview_name)` — return accumulated results without hitting the wire.
+fn tx_peek_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let dv_name = args.get(0).to_rust_string_lossy(scope);
+    if dv_name.is_empty() {
+        db_throw(scope, "TransactionError: DataView name required for tx.peek");
+        return;
+    }
+
+    let results = TASK_TX_HANDLE.with(|t| {
+        t.borrow().as_ref()
+            .and_then(|s| s.results.get(&dv_name).cloned())
+    });
+
+    match results {
+        None => {
+            db_throw(scope, &format!("TransactionError: no results for '{dv_name}'"));
+        }
+        Some(vec) => {
+            // Serialize to V8 array of QueryResult objects
+            let json_val: Vec<serde_json::Value> = vec.iter().map(|qr| {
+                serde_json::json!({
+                    "rows": qr.rows,
+                    "affected_rows": qr.affected_rows,
+                    "last_insert_id": qr.last_insert_id,
+                })
+            }).collect();
+            let json_str = serde_json::to_string(&json_val).unwrap_or_else(|_| "[]".into());
+            if let Some(v8s) = v8::String::new(scope, &json_str) {
+                if let Some(parsed) = v8::json::parse(scope, v8s.into()) {
+                    rv.set(parsed);
+                }
+            }
+        }
+    }
+}
+
+/// `tx.commit()` — commit the transaction and return all accumulated results.
+fn tx_commit_callback(
+    scope: &mut v8::HandleScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state = TASK_TX_HANDLE.with(|t| t.borrow_mut().take());
+    let state = match state {
+        Some(s) => s,
+        None => {
+            db_throw(scope, "TransactionError: no active transaction to commit");
+            return;
+        }
+    };
+
+    let rt = match get_rt_handle() {
+        Ok(r) => r,
+        Err(e) => {
+            // Restore state so caller can rollback
+            TASK_TX_HANDLE.with(|t| *t.borrow_mut() = Some(state));
+            db_throw(scope, &format!("TransactionError: {e}"));
+            return;
+        }
+    };
+
+    let ds = state.datasource.clone();
+    let results = state.results;
+    let commit_res = rt.block_on(state.map.commit(&ds));
+
+    match commit_res {
+        Ok(_conn) => {
+            // _conn is the committed connection — it's dropped here, returning to pool.
+            // RM-1..RM-3: return HashMap<name, Array<QueryResult>> as JSON object
+            let mut map = serde_json::Map::new();
+            for (name, qrs) in results {
+                let arr: Vec<serde_json::Value> = qrs.iter().map(|qr| {
+                    serde_json::json!({
+                        "rows": qr.rows,
+                        "affected_rows": qr.affected_rows,
+                        "last_insert_id": qr.last_insert_id,
+                    })
+                }).collect();
+                map.insert(name, serde_json::Value::Array(arr));
+            }
+            let json_str = serde_json::to_string(&map).unwrap_or_else(|_| "{}".into());
+            if let Some(v8s) = v8::String::new(scope, &json_str) {
+                if let Some(parsed) = v8::json::parse(scope, v8s.into()) {
+                    rv.set(parsed);
+                }
+            }
+        }
+        Err(e) => {
+            let driver_msg = format!("{e}");
+            // RM-4: auto-rollback fires on commit failure (already consumed)
+            tracing::warn!(
+                target: "rivers.handler",
+                datasource = %ds,
+                error = %driver_msg,
+                "tx.commit failed — connection released"
+            );
+            TASK_COMMIT_FAILED.with(|c| {
+                *c.borrow_mut() = Some((ds.clone(), driver_msg.clone()));
+            });
+            db_throw(scope, &format!("DriverError::Transaction: COMMIT failed on '{}': {}", ds, driver_msg));
+        }
+    }
+}
+
+/// `tx.rollback()` — rollback the active transaction, void return.
+fn tx_rollback_callback(
+    scope: &mut v8::HandleScope,
+    _args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let state = TASK_TX_HANDLE.with(|t| t.borrow_mut().take());
+    let state = match state {
+        Some(s) => s,
+        None => return, // idempotent — no-op if no active tx
+    };
+
+    let rt = match get_rt_handle() {
+        Ok(r) => r,
+        Err(_) => return, // best-effort
+    };
+
+    let ds = state.datasource.clone();
+    if let Err(e) = rt.block_on(state.map.rollback(&ds)) {
+        tracing::warn!(
+            target: "rivers.handler",
+            datasource = %ds,
+            error = %e,
+            "tx.rollback failed — connection discarded"
+        );
+        db_throw(scope, &format!("DriverError::Transaction: ROLLBACK failed on '{}': {e}", ds));
     }
 }
 

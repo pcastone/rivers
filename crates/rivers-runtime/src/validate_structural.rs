@@ -74,6 +74,8 @@ const DATAVIEW_FIELDS: &[&str] = &[
     "circuitBreakerId", "prepared", "skip_introspect", "query_params", "cursor_key",
     // Composability (P2.9)
     "source_views", "compose_strategy", "join_key", "enrich_mode",
+    // Transaction (TXN spec §3)
+    "transaction",
 ];
 const DATAVIEW_REQUIRED: &[&str] = &["name", "datasource"];
 

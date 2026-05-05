@@ -2,6 +2,18 @@
 
 **Rivers v0.54.1**
 
+> **Cookbook Reference:** All Rivers patterns, templates, and anti-patterns are defined in the Rivers Cookbook (`rivers-cookbook-sonnet.md` for Sonnet, `rivers-cookbook-opus.md` for Opus). This document provides the detailed specification. The cookbook provides copy-paste recipes. **Use the cookbook first** for building; use this spec for understanding the architecture.
+
+> **Key architectural changes (post v0.54.1):**
+> - **ONE statement per query field.** Multi-statement SQL is a validation error. Use handler transactions for multi-query operations.
+> - **Handlers call DataViews by name** via `Rivers.view.query(name, params)`. SQL lives in TOML, not handler code.
+> - **Transactions are sync:** `Rivers.db.tx.begin()` / `tx.query()` / `tx.commit()`. Results returned as `HashMap<string, Array<QueryResult>>` on commit.
+> - **`tx.peek(name)`** for inspecting intermediate results mid-transaction (not final until commit).
+> - **`view_type = "Mcp"`** uses CamelCase, NOT all-caps `"MCP"`.
+> - **`destructive = false`** must be explicit on non-destructive MCP tools — default is `true`.
+> - **`method = "POST"`** required for write MCP tools.
+> - **`RETURNING *`** causes driver errors on SQLite — use follow-up read DataView instead.
+
 ## Getting Started (v0.54.1)
 
 The recommended way to create a new bundle is `riverpackage init`:
@@ -822,6 +834,35 @@ function handler(ctx) {
 | `ctx.app_id` | String | Application ID |
 | `ctx.node_id` | String | Node identifier |
 | `ctx.env` | String | Runtime environment |
+
+### Rivers.view — DataView Dispatch (Preferred)
+
+```typescript
+// Call a declared DataView by name — preferred over ctx.dataview() and Rivers.db.query()
+const result = await Rivers.view.query("get_order", { order_id: "abc-123" });
+// result = { rows: [...], affected_rows: 0, last_insert_id: null }
+```
+
+### Rivers.db.tx — Sync Transaction API
+
+```typescript
+const tx = Rivers.db.tx.begin("datasource_name");    // sync — checks out connection, sends BEGIN
+
+tx.query("dataview_name", { params });                // sync — executes, returns void
+tx.query("another_dv", { params });
+
+const pending = tx.peek("dataview_name");             // Array<QueryResult> — NOT final until commit
+// pending[0].affected_rows, pending[0].rows
+
+const results = tx.commit();                          // sync — sends COMMIT, returns HashMap
+// results["dataview_name"][0].rows                   // every value is Array — use [0]
+// results["another_dv"][0].affected_rows
+
+tx.rollback();                                        // explicit rollback for early exit
+// Auto-rollback on handler exit without commit — logged at WARN
+```
+
+**Rules:** All DataViews in a transaction MUST use the same datasource. Same name called N times produces `results["name"][0]`, `results["name"][1]`, etc. See `RECIPE:ATOMIC-MULTI-WRITE` and `RECIPE:CONDITIONAL-WRITE` in the cookbook.
 
 ### Supported Languages
 

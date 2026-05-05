@@ -239,6 +239,7 @@ pub(crate) fn build_sqlite_executor(
         compose_strategy: None,
         join_key: None,
         enrich_mode: "nest".to_string(),
+            transaction: false,
     });
 
     // Connection params for the registered "sqlite_e2e" datasource.
@@ -328,6 +329,7 @@ pub(crate) fn build_postgres_executor(
         compose_strategy: None,
         join_key: None,
         enrich_mode: "nest".to_string(),
+            transaction: false,
     });
 
     // Force the driver to "postgres" via the connection-params options

@@ -1,8 +1,23 @@
 # Rivers V1 Administration — Operations Spec
 
-**Rivers v0.54.0**
+**Rivers v0.53.0**
 
-> **v0.54.0 operator notes:** cdylib driver plugins are disabled — all drivers are compiled into `riversd`. The `[plugins] dir` config is deprecated. Apps with unresolvable drivers are isolated and return 503 without crashing the bundle. Bundle validation now runs a 4-layer pipeline, both in `riverpackage validate` and at `riversd` startup. Prometheus metrics are now actually emitting data.
+> **Cookbook Reference:** Server configuration patterns (storage engine, connection pools, rate limiting, CORS, logging, tracing, environment overrides, hot reload) are defined in the Rivers Cookbook (`rivers-cookbook-sonnet.md` / `rivers-cookbook-opus.md`) under the "Infrastructure & Server Config" section. This document provides the full operations reference. The cookbook provides copy-paste recipes.
+
+> **Key recipes for operations:**
+> - `RECIPE:STORAGE-ENGINE` — memory/sqlite/redis backend selection
+> - `RECIPE:CONNECTION-POOL` — pool sizing and circuit breaker config
+> - `RECIPE:RATE-LIMITING` — per-app and per-view rate limits
+> - `RECIPE:CORS-CONFIG` — cross-origin setup
+> - `RECIPE:LOGGING-CONFIG` — level and format
+> - `RECIPE:TRACING-CONFIG` — OpenTelemetry/OTLP setup
+> - `RECIPE:ENVIRONMENT-OVERRIDES` — prod/staging/dev config
+> - `RECIPE:HOT-RELOAD` — dev mode auto-reload
+> - `RECIPE:DDL-WHITELIST` — init handler DDL permissions
+> - `RECIPE:LOCKBOX-CREDENTIALS` — credential management
+> - `RECIPE:BUNDLE-VALIDATION` — pre-deployment validation
+> - `RECIPE:GRACEFUL-SHUTDOWN` — drain behavior
+> - `RECIPE:ERROR-RESPONSE-FORMAT` — standard error envelope
 
 ## Environment
 
@@ -13,9 +28,11 @@ Single-node Rivers V1 deployment. No clustering. RPS not applicable for app oper
 ## Starting Rivers
 
 ```bash
-riversd --config {app}/app.toml
-riversd --version                    # Print version and exit
-riversd --no-ssl --port 8080         # Plain HTTP (development only)
+riversd --config riversd.toml           # Start with config
+riversd --version                       # Print version
+riversd -V                              # Short form
+riversd --no-ssl --port 8080            # Plain HTTP (dev only)
+riversd --log-level debug               # Override log level
 ```
 
 ### Startup Order
@@ -114,8 +131,8 @@ exclude_paths = [".env", "config.toml"]
 [security]
 rate_limit_per_minute   = 120
 rate_limit_burst_size   = 60
-rate_limit_strategy     = "ip"           # ip | custom_header
-rate_limit_custom_header = "X-Api-Key"   # required if strategy = custom_header
+rate_limit_strategy     = "ip"           # ip | header | session
+rate_limit_custom_header = "X-Api-Key"   # required if strategy = header
 ```
 
 ### CORS
@@ -133,13 +150,13 @@ cors_allow_credentials = false
 
 ```toml
 [storage_engine]
-backend = "sqlite"               # memory | sqlite | redis
-path = "/var/data/rivers.db"     # sqlite path
-url = "redis://localhost:6379"   # redis URL
-retention_ms = 172800000         # 2 days
+backend = "memory"             # memory | sqlite | redis
+path = "/var/data/rivers.db"   # sqlite path
+url = "redis://localhost:6379" # redis URL
+retention_ms = 86400000        # 24 hours (default)
 ```
 
-Required for sessions, CSRF, DataView L2 cache, polling state persistence. InMemory for development, SQLite for single-node, Redis for multi-node.
+Required for sessions, CSRF, DataView L2 cache, polling state persistence. InMemory for development, Sled for single-node, Redis for multi-node.
 
 ### GraphQL Configuration
 
@@ -169,31 +186,23 @@ rate_limit_per_minute = 300
 
 ---
 
-## Bundle Validation (v0.54.0)
+## Bundle Validation
 
-Bundle validation is now performed by `riverpackage validate` using a 4-layer pipeline. `riversd` runs the same pipeline automatically at startup — invalid bundles are rejected before drivers are initialized.
+`riversctl validate <bundle_path>` runs 9 checks against a bundle directory or archive.
 
-```bash
-riverpackage validate <bundle_path>
-riverpackage validate <bundle_path> --format json
-riverpackage validate <bundle_path> --config /opt/rivers/config/riversd.toml
-```
+`riversctl validate --schema server|app|bundle` outputs the corresponding JSON Schema.
 
-### Pipeline layers
+### Validation Checks
 
-1. **Structural** — TOML parse of bundle `manifest.toml`, per-app `manifest.toml`, `resources.toml`, `app.toml`. Reports line/column context for syntax errors.
-2. **Existence** — all referenced files (schemas, handler modules, libraries, SPA assets) exist on disk.
-3. **Cross-reference** — DataViews resolve to declared datasources, views resolve to DataViews, `invalidates` targets exist, cross-app service references resolve within the bundle, view types are recognized, driver names match the static driver registry, no duplicate names, no orphan schema files.
-4. **Syntax** — JSON schemas parse, TS/JS handler modules compile via an embedded V8 instance (requires `--config` so the engine can be located in dynamic builds).
-
-### Startup integration
-
-`riversd` runs the 4-layer pipeline on the configured `bundle_path` before loading drivers, opening the router, or binding the listener. A validation failure prints per-layer diagnostics and exits with non-zero status.
-
-### Output formats
-
-- `--format text` (default) — human-readable per-layer output.
-- `--format json` — machine-readable; each layer reports `{ "layer": "...", "passed": bool, "errors": [...] }`.
+1. View types — validates view type values are recognized
+2. Driver names — validates driver names match registered drivers
+3. Datasource refs — validates all datasource references resolve
+4. DataView refs — validates all DataView references resolve
+5. Invalidates targets — validates invalidation targets exist
+6. Duplicate names — detects duplicate DataView/View/datasource names
+7. Schema file existence — verifies all referenced schema files exist on disk
+8. Cross-app service refs — validates inter-app service references resolve within the bundle
+9. TOML parse error context — provides line/column context for TOML syntax errors
 
 ---
 
@@ -209,6 +218,28 @@ local_file_path = "/var/log/rivers/riversd.log"   # optional
 ```
 
 Defaults: `level = "info"`, `format = "json"`, `local_file_path = null`.
+
+### Per-App Logging (v0.53.0)
+
+```toml
+[base.logging]
+level           = "info"
+format          = "json"
+local_file_path = "log/riversd.log"
+app_log_dir     = "log/apps"
+```
+
+When `app_log_dir` is set, each app's handler logs (`Rivers.log.*`) are written to a separate file:
+
+```
+log/
+├── riversd.log                  # Server-level logs
+└── apps/
+    ├── orders-service.log       # Per-app handler logs
+    └── app-main.log
+```
+
+This makes it straightforward to tail logs for a single app without filtering the main server log.
 
 ### Log Levels
 
@@ -269,6 +300,26 @@ event_type = "DatasourceCircuitOpened"
 
 ---
 
+## Metrics Endpoint (v0.53.0)
+
+### Configuration
+
+```toml
+[metrics]
+enabled  = true
+endpoint = "/metrics"
+```
+
+### Usage
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+Returns Prometheus-compatible metrics including request counts, latency histograms, active connections, datasource pool utilization, and circuit breaker state.
+
+---
+
 ## Health Endpoints
 
 ### Basic Health
@@ -308,7 +359,7 @@ MUST: Verbose health may require AuthZ if admin ACL is set.
 [base.admin_api]
 enabled     = true
 host        = "127.0.0.1"
-port        = 9443
+port        = 9090
 public_key  = "/etc/rivers/admin/admin.pub"
 private_key = "/etc/rivers/admin/admin.key"
 ```
@@ -481,13 +532,7 @@ test_query         = "SELECT 1"
 
 ## Hot Reload (Dev Mode Only)
 
-Development mode only. Disabled in production.
-
-```toml
-[hot_reload]
-enabled    = true
-watch_path = "./app.toml"
-```
+Development mode only. Rivers watches for changes to bundle config files and reloads automatically.
 
 ### What Hot Reload Does
 
@@ -504,60 +549,16 @@ watch_path = "./app.toml"
 - Restart HTTP server
 - Rebind sockets
 - Re-initialize connection pools
-- Reload drivers (all drivers are statically linked in v0.54.0)
+- Reload plugins
 - Re-resolve LockBox credentials
 
 MUST: Pool changes require full restart.
 
 ---
 
-## Prometheus Metrics (v0.54.0)
+## Tracing
 
-Enable the built-in Prometheus exporter:
-
-```toml
-[metrics]
-enabled = true
-port    = 9091       # default
-```
-
-Scrape endpoint: `http://localhost:9091/metrics`.
-
-| Metric | Type | Labels |
-|--------|------|--------|
-| `rivers_http_requests_total` | counter | `method`, `status` |
-| `rivers_http_request_duration_ms` | histogram | `method` |
-| `rivers_active_connections` | gauge | — |
-| `rivers_engine_executions_total` | counter | `engine` (`v8` \| `dataview` \| `none`), `success` |
-| `rivers_engine_execution_duration_ms` | histogram | `engine` |
-| `rivers_loaded_apps` | gauge | — |
-
-Metrics are behind the `metrics` cargo feature, enabled by default in deployed builds. In v0.54.0 the metrics are now actually emitted — previously the feature scaffolding was present but no data flowed.
-
----
-
-## OpenTelemetry Tracing
-
-### Configuration
-
-```toml
-[performance.tracing]
-enabled       = true
-provider      = "otlp"                        # otlp | jaeger | datadog
-endpoint      = "http://otel-collector:4317"
-service_name  = "riversd"
-sampling_rate = 0.1                           # 10% sampling in production
-```
-
-### Span Hierarchy
-
-```
-http.request  (root span)
-    └─ view.dispatch
-            ├─ dataview.execute
-            │       └─ driver.execute
-            └─ codecomponent.execute
-```
+Rivers uses `tracing` crate spans internally for request lifecycle tracking. Trace IDs are generated per-request and included in all log output and error responses. External tracing export (OTLP, Jaeger) is not yet implemented.
 
 ---
 
@@ -647,44 +648,116 @@ X-RateLimit-Reset: 1710342060
 Resolution:
 1. Increase `rate_limit_per_minute` in config
 2. Implement client-side backoff
-3. Use `rate_limit_strategy = "custom_header"` for API keys
+3. Use `rate_limit_strategy = "header"` for API keys
 
-### Missing Driver / App Load Failures (v0.54.0)
+### Plugin Load Failures
 
-As of v0.54.0 cdylib driver plugins are disabled and all drivers are compiled into `riversd`. If an app declares a datasource with a driver that cannot be resolved, the app is isolated rather than aborting the whole bundle.
-
-Check the per-app log (`log/apps/<app>.log`) for:
-
-```
-WARN  rivers::app: AppLoadFailed
-  app             = "canary-nosql"
-  missing_drivers = ["mongodb", "elasticsearch"]
-  resources       = ["mongo_primary", "search_cluster"]
-```
-
-Requests to endpoints in the failed app return:
-
-```json
-{"code": 503, "message": "app 'canary-nosql' is unavailable — missing driver(s): mongodb, elasticsearch"}
-```
-
-Resolution:
-1. Check `log/apps/<app>.log` for `AppLoadFailed` details.
-2. If your `riversd.toml` still has `[plugins] dir = "..."`, remove it — the config key is deprecated in v0.54.0 and has no effect.
-3. Verify the driver name in `resources.toml` matches the static driver registry.
-4. Other apps in the same bundle continue serving traffic normally.
-
-### Legacy: Plugin Load Failures
-
-Prior to v0.54.0, dynamic plugin loading could fail with ABI version mismatches:
-
+Check logs for:
 ```
 ERROR rivers::plugin: PluginLoadFailed
   path   = "/var/rivers/plugins/neo4j.so"
   reason = "ABI version mismatch: expected 3, got 2"
 ```
 
-This path is no longer reachable in v0.54.0 — there are no cdylib plugins. Plugin ABI v2 (synchronous C-ABI) is planned to re-enable dynamic loading. See `docs/arch/rivers-plugin-abi-v2-spec.md`.
+Resolution:
+1. Rebuild plugin against current Rivers SDK
+2. Verify plugin file permissions
+3. Check plugin path in config
+
+---
+
+## Build Modes
+
+### Static Build (Default)
+
+```bash
+cargo build --release    # or: just build
+```
+
+Produces a single monolithic `riversd` binary (~80MB) with all engines and plugins statically linked via rlib.
+
+### Dynamic Build
+
+```bash
+just build-dynamic
+```
+
+Produces thin binaries + shared libraries:
+- `riversd` (~5-10MB)
+- `lib/librivers_engine_v8.dylib` (correct filename pattern — not `librivers_v8.dylib`)
+- `lib/librivers_engine_wasm.dylib` (correct filename pattern — not `librivers_wasm.dylib`)
+- `plugins/librivers_plugin_*.dylib` (10 plugins)
+
+### Deployment
+
+`cargo deploy` is the recommended deployment method (v0.53.0):
+
+```bash
+cargo deploy <path>              # Dynamic mode (recommended)
+cargo deploy <path> --static     # Static mode (single fat binary)
+```
+
+Both modes generate a self-signed TLS certificate at `<path>/config/tls/` so riversd can start immediately.
+
+### cargo deploy Workflow
+
+1. Builds all crates in the appropriate mode (static or dynamic)
+2. Copies binaries and dylibs to the target path
+3. Generates TLS certificates if not present
+4. Writes `run/riversd.pid` location for `riversctl stop/status`
+5. Validates the deployment structure
+
+---
+
+## rivers-keystore CLI
+
+Manage per-application AES-256-GCM encryption keys.
+
+```bash
+rivers-keystore init <path>                  # Create new keystore
+rivers-keystore generate <path> <key-name>   # Generate a new key
+rivers-keystore list <path>                   # List all keys
+rivers-keystore info <path> <key-name>        # Show key metadata
+rivers-keystore delete <path> <key-name>      # Delete a key
+rivers-keystore rotate <path> <key-name>      # Rotate a key
+```
+
+Master key is sourced from LockBox. Key bytes stay in Rust memory — never exposed to JavaScript/WASM handlers.
+
+---
+
+## riverpackage CLI
+
+```bash
+riverpackage validate <bundle-path>    # Validate bundle structure
+riverpackage preflight <bundle-path>   # Pre-deployment checks
+riverpackage pack <bundle-path>        # Package bundle for deployment
+riverpackage import-exec <path>        # Import exec driver scripts
+```
+
+---
+
+## riversctl CLI
+
+```bash
+riversctl start --config riversd.toml       # Start riversd
+riversctl stop                               # Graceful shutdown via PID file (v0.53.0)
+riversctl status                             # Check if riversd is running (v0.53.0)
+riversctl doctor                             # Health check diagnostics
+riversctl doctor --fix                       # Auto-fix common issues (v0.53.0)
+riversctl doctor --lint                      # Lint config without fixing (v0.53.0)
+riversctl tls renew                          # Renew TLS certificates (v0.53.0)
+riversctl validate <bundle-path>             # Validate bundle (9 checks)
+riversctl validate --schema server|app|bundle  # Output JSON Schema
+riversctl exec hash <input>                  # Hash utility
+riversctl exec verify <input> <hash>         # Verify hash
+riversctl admin status                       # Query admin API
+riversctl admin deploy <bundle>              # Deploy via admin API
+```
+
+### PID File
+
+Rivers writes its PID to `run/riversd.pid` on startup. The `riversctl stop` and `riversctl status` commands use this file to locate the running process. The PID file is removed on clean shutdown.
 
 ---
 
@@ -717,7 +790,7 @@ journalctl -u riversd | jq 'select(.trace_id == "a1b2c3d4...")'
 
 ```bash
 curl --cert client.crt --key client.key \
-  https://localhost:9443/admin/datasources
+  https://localhost:9090/admin/datasources
 ```
 
 ### Deploy Bundle
@@ -726,7 +799,7 @@ curl --cert client.crt --key client.key \
 curl --cert client.crt --key client.key \
   -X POST \
   -F "bundle=@bundle.zip" \
-  https://localhost:9443/admin/deploy
+  https://localhost:9090/admin/deploy
 ```
 
 ### Restart Service

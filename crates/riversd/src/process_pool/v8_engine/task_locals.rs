@@ -198,6 +198,26 @@ pub(super) struct TaskTransactionState {
     pub(super) datasource: String,
 }
 
+/// Active `Rivers.db.tx` transaction state (TXN spec §4–6).
+///
+/// Holds the connection (via TransactionMap), the datasource name, and the
+/// accumulated results keyed by DataView name. Multiple calls to the same
+/// DataView append to the Vec — ordering is preserved (RM-2).
+pub(crate) struct TxHandleState {
+    /// The TransactionMap that holds the checked-out connection.
+    pub(crate) map: Arc<crate::transaction::TransactionMap>,
+    /// Datasource this transaction is scoped to (CD-1).
+    pub(crate) datasource: String,
+    /// Accumulated results from `tx.query()` calls: name → ordered Vec.
+    pub(crate) results: HashMap<String, Vec<rivers_runtime::rivers_driver_sdk::QueryResult>>,
+}
+
+thread_local! {
+    /// Active `Rivers.db.tx` transaction handle for the current V8 task.
+    /// Set by `tx_begin_callback`, cleared by commit/rollback/auto-rollback.
+    pub(crate) static TASK_TX_HANDLE: RefCell<Option<TxHandleState>> = RefCell::new(None);
+}
+
 /// Get the current tokio runtime handle from the thread-local.
 pub(super) fn get_rt_handle() -> Result<tokio::runtime::Handle, TaskError> {
     RT_HANDLE.with(|h| h.borrow().clone())
@@ -353,6 +373,37 @@ impl Drop for TaskLocals {
                 rt.block_on(state.map.auto_rollback_all());
             }
         }
+        // AR-1/AR-2 (TXN spec §8): auto-rollback any Rivers.db.tx transaction
+        // the handler left open (no commit or rollback called).
+        if let Some(state) = TASK_TX_HANDLE.with(|t| t.borrow_mut().take()) {
+            if let Some(rt) = RT_HANDLE.with(|h| h.borrow().clone()) {
+                let ds = state.datasource.clone();
+                let outcome = rt.block_on(state.map.rollback(&ds));
+                // Collect trace_id for the log message (best-effort).
+                let trace_id = TASK_TRACE_ID.with(|t| {
+                    t.borrow().clone().unwrap_or_else(|| "<unknown>".into())
+                });
+                match outcome {
+                    Ok(()) => {
+                        tracing::warn!(
+                            target: "rivers.handler",
+                            datasource = %ds,
+                            trace_id = %trace_id,
+                            "transaction auto-rolled back: handler exited without commit or rollback"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            target: "rivers.handler",
+                            datasource = %ds,
+                            trace_id = %trace_id,
+                            error = %e,
+                            "transaction auto-rollback FAILED — connection discarded"
+                        );
+                    }
+                }
+            }
+        }
         // BR-2026-04-23: close any broker producers opened this task.
         // Must run BEFORE RT_HANDLE is cleared because producer.close()
         // is async. Best-effort — log on error, don't block drop.
@@ -391,8 +442,9 @@ impl Drop for TaskLocals {
         TASK_KIND.with(|k| *k.borrow_mut() = None);
         TASK_MODULE_REGISTRY.with(|r| r.borrow_mut().clear());
         TASK_MODULE_NAMESPACE.with(|n| *n.borrow_mut() = None);
-        // TASK_TRANSACTION was drained above, before RT_HANDLE was cleared.
+        // TASK_TRANSACTION and TASK_TX_HANDLE were drained above, before RT_HANDLE was cleared.
         TASK_COMMIT_FAILED.with(|c| *c.borrow_mut() = None);
+        TASK_TX_HANDLE.with(|t| *t.borrow_mut() = None);
         TASK_DIRECT_DATASOURCES.with(|m| m.borrow_mut().clear());
         TASK_DIRECT_BROKER_PRODUCERS.with(|m| m.borrow_mut().clear());
         // P2.6: drop the elicitation sender so the relay task's receiver sees EOF
