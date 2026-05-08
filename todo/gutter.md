@@ -1,18 +1,25 @@
 # Moved to tasks.md — 2026-04-30
 
-## 2026-05-08 — Datasource wiring: WebSocket + SSE dispatch parity
+## 2026-05-08 — Polling change-detect callback datasource wiring
 
-CB-P1.13 fixed `wire_datasources` for the MCP `view=` dispatch path. The
-same gap exists in two more sites:
+Plan G (PR pending) closed the WS/SSE datasource-wiring gap.
+`crates/riversd/src/polling/runner.rs::dispatch_change_detect` has an
+analogous `enrich(builder, app_id, ...)` call but already passes a
+slug-equivalent value (extracted via
+`task_enrichment::app_id_from_qualified_name`). The remaining concern
+is wiring per-app datasources via `task_enrichment::wire_datasources`
+so the change-detect callback could call `Rivers.db.execute(...)` if a
+bundle author's diff logic needs DB access. Currently a low-priority
+follow-up — the change-detect handler is a small diff callback not
+expected to need DB. Track for if/when reported.
 
-- `crates/riversd/src/websocket.rs:497` and `:546`
-- `crates/riversd/src/sse.rs:424`
+## 2026-05-08 — Pre-existing test failure on `main`
 
-Both call `task_enrichment::enrich` only — they don't call
-`task_enrichment::wire_datasources`, so `Rivers.db.execute('<ds>', ...)`
-in a WS or SSE handler will throw `CapabilityError`. Symptoms haven't
-been reported, likely because most WS/SSE handlers lean on
-`ctx.dataview(...)` rather than direct DB calls. Fix is mechanical: drop
-in the `wire_datasources` call before `enrich` at each site, mirror REST
-ordering. Track separately so the P1.13 PR stays narrow and CB can pin
-to a specific version when their MCP `view=` flows go green.
+`crates/riversd/tests/view_engine_tests.rs::slow_observer_does_not_extend_request_latency`
+fails on bare `main` (verified by stashing Plan G work and
+reproducing). Root cause: the test passes empty `dv_namespace` to
+`ViewContext::new`, which trips the dispatcher's empty-app_id check
+after the canary sprint's RT-CTX-APP-ID fix changed the
+source-of-truth for what gets passed to `enrich`. Fix is to update
+the test fixture to pass a non-empty `dv_namespace`. Small,
+self-contained.

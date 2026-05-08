@@ -454,6 +454,19 @@ Rivers re-validates the session against StorageEngine at the configured interval
 
 `session_revalidation_interval_s = 0` is the default — session is validated at connect time only.
 
+### 6.9 Datasource capability propagation (CB-P1.13)
+
+WebSocket codecomponent handlers (`on_stream`, `on_connect`,
+`on_message`, `on_disconnect`) receive the same per-app datasource set
+as REST and MCP handlers — calls to `Rivers.db.execute('<datasource>',
+...)` resolve against the app's datasource declarations identically.
+The dispatch path snapshots `ctx.dataview_executor` once per message
+and threads it through `task_enrichment::wire_datasources` before the
+handler runs.
+
+The handler also sees `ctx.app_id` as the entry-point slug (e.g.
+`cb-service`), not the manifest UUID. Same convention as REST and MCP.
+
 ---
 
 ## 7. Server-Sent Events Views
@@ -492,6 +505,17 @@ Same model as WebSocket (§6.8). Declare `session_revalidation_interval_s` to re
 view_type                       = "ServerSentEvents"
 session_revalidation_interval_s = 600   # re-check every 10 minutes
 ```
+
+### 7.5 Datasource capability propagation (CB-P1.13)
+
+SSE codecomponent handlers receive the same per-app datasource set as
+REST and MCP handlers — same convention as WebSocket §6.9. The
+push-loop dispatch path passes the executor + entry-point slug into
+`task_enrichment::wire_datasources` before each handler tick fires, so
+`Rivers.db.execute('<datasource>', ...)` resolves identically to a
+REST handler in the same app.
+
+`ctx.app_id` is the entry-point slug (matches REST/WS/MCP).
 
 ---
 

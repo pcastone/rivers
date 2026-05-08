@@ -275,7 +275,11 @@ pub(super) async fn execute_ws_view(
     let view_id = matched.view_id.clone();
     let trace_id = uuid::Uuid::new_v4().to_string();
     let config = matched.config.clone();
-    let app_id = matched.app_id.clone();
+    // Plan G: pass entry-point slug to the WS dispatch helpers (matches
+    // the RT-CTX-APP-ID parity fix REST + MCP got). `matched.app_id` is
+    // the manifest UUID — kept around if any audit/log line needs it,
+    // but not the value to thread into TaskContext.
+    let dv_namespace = matched.app_entry_point.clone();
 
     // Extract WebSocketUpgrade from the request parts (before body consumption)
     let (mut parts, _body) = request.into_parts();
@@ -297,7 +301,7 @@ pub(super) async fn execute_ws_view(
     let ctx_clone = ctx.clone();
     ws_upgrade
         .on_upgrade(move |socket| {
-            handle_ws_connection(ctx_clone, socket, view_id, config, ws_mode, trace_id, app_id)
+            handle_ws_connection(ctx_clone, socket, view_id, config, ws_mode, trace_id, dv_namespace)
         })
         .into_response()
 }
@@ -313,7 +317,7 @@ async fn handle_ws_connection(
     config: rivers_runtime::view::ApiViewConfig,
     ws_mode: crate::websocket::WebSocketMode,
     trace_id: String,
-    app_id: String,
+    dv_namespace: String,
 ) {
     use axum::extract::ws::Message;
     use crate::websocket::{
@@ -341,6 +345,10 @@ async fn handle_ws_connection(
     // Dispatch on_connect lifecycle hook
     if let Some(ref hooks) = config.ws_hooks {
         if let Some(ref on_connect) = hooks.on_connect {
+            // Plan G: snapshot executor before dispatching so codecomponent
+            // hooks see the per-app datasource set + correct slug.
+            let exec_guard = ctx.dataview_executor.read().await;
+            let executor = exec_guard.as_deref();
             match dispatch_ws_lifecycle(
                 &ctx.pool,
                 &on_connect.module,
@@ -349,7 +357,8 @@ async fn handle_ws_connection(
                 None,
                 None,
                 &trace_id,
-                &app_id,
+                &dv_namespace,
+                executor,
             )
             .await
             {
@@ -439,6 +448,8 @@ async fn handle_ws_connection(
                         if let Some(ref hook) = on_message_hook {
                             let message_val: serde_json::Value =
                                 serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text.to_string()));
+                            let exec_guard = ctx.dataview_executor.read().await;
+                            let executor = exec_guard.as_deref();
                             match dispatch_ws_lifecycle(
                                 &ctx.pool,
                                 &hook.module,
@@ -447,7 +458,8 @@ async fn handle_ws_connection(
                                 Some(&message_val),
                                 None,
                                 &trace_id,
-                                &app_id,
+                                &dv_namespace,
+                                executor,
                             ).await {
                                 Ok(reply) if !reply.is_null() => {
                                     let reply_str = serde_json::to_string(&reply).unwrap_or_default();
@@ -466,13 +478,16 @@ async fn handle_ws_connection(
                         if let Some(ref ep) = on_stream_ep {
                             let message_val: serde_json::Value =
                                 serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text.to_string()));
+                            let exec_guard = ctx.dataview_executor.read().await;
+                            let executor = exec_guard.as_deref();
                             match execute_ws_on_stream(
                                 &ctx.pool,
                                 ep,
                                 &message_val,
                                 &conn_id,
                                 &trace_id,
-                                &app_id,
+                                &dv_namespace,
+                                executor,
                             )
                             .await
                             {
@@ -532,6 +547,8 @@ async fn handle_ws_connection(
     // Dispatch on_disconnect lifecycle hook
     if let Some(ref hooks) = config.ws_hooks {
         if let Some(ref on_disconnect) = hooks.on_disconnect {
+            let exec_guard = ctx.dataview_executor.read().await;
+            let executor = exec_guard.as_deref();
             match dispatch_ws_lifecycle(
                 &ctx.pool,
                 &on_disconnect.module,
@@ -540,7 +557,8 @@ async fn handle_ws_connection(
                 None,
                 None,
                 &trace_id,
-                &app_id,
+                &dv_namespace,
+                executor,
             )
             .await
             {

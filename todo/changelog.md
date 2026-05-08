@@ -1,5 +1,42 @@
 # Changelog
 
+## 2026-05-08 — Plan G: WS + SSE datasource-wiring + slug parity
+
+Closes the gutter item filed by PR #100 (CB-P1.13). WebSocket and SSE
+codecomponent handlers now thread `wire_datasources` + the entry-point
+slug through to `task_enrichment::enrich` — same pattern REST and MCP
+adopted earlier. `Rivers.db.execute('<datasource>', ...)` from a WS or
+SSE handler will now resolve identically to a REST handler, and JS
+handlers see `ctx.app_id` as the slug (not the manifest UUID).
+
+| File | Change | Spec ref | Notes |
+|------|--------|----------|-------|
+| `crates/riversd/src/websocket.rs` | `execute_ws_on_stream`, `dispatch_ws_lifecycle` take `dv_namespace` + `Option<&DataViewExecutor>`. Wire-then-enrich in slug order. Internal tests updated. | CB-P1.13 follow-up | Mirrors PR #100. |
+| `crates/riversd/src/sse.rs` | `run_sse_push_loop` same shape. | CB-P1.13 follow-up | |
+| `crates/riversd/src/server/streaming.rs` | `execute_ws_view` clones `matched.app_entry_point` (slug) instead of `matched.app_id` (UUID). `handle_ws_connection` snapshots `ctx.dataview_executor` per dispatched hook and passes it through. Four call sites updated. | CB-P1.13 follow-up | Per-message read-lock acquire — same cost shape REST has per request. |
+| `docs/arch/rivers-view-layer-spec.md` §6.9 + §7.5 | New sections documenting the contract. | CB-P1.13 follow-up | |
+| `todo/gutter.md` | WS/SSE entry removed. | | |
+| `Cargo.toml` (workspace) | Build-stamp-only bump (sprint-end policy). | CLAUDE.md versioning | |
+
+**Tests:** 485/485 riversd lib (no regression).
+
+**Pre-existing test failure noted:**
+`view_engine_tests::slow_observer_does_not_extend_request_latency`
+fails on bare `main` independently of this PR — confirmed by stashing
+this work and reproducing the failure. Root cause is a test fixture
+that passes empty `dv_namespace` to `ViewContext::new`, tripping the
+dispatcher's empty-app_id check after the canary sprint's
+RT-CTX-APP-ID fix. Out of scope here; tracked for a separate fix.
+
+**Follow-up:** `polling/runner.rs::dispatch_change_detect` has the
+same enrich call shape but already passes a slug-equivalent value
+(via `task_enrichment::app_id_from_qualified_name`). Adding
+`wire_datasources` there is a separate concern — the change-detect
+handler is a small diff callback that doesn't typically need DB
+access. Tracked in gutter for if/when reported.
+
+---
+
 ## 2026-05-08 — CB-P0.2 (full): convention-based `input_schema` discovery
 
 Codecomponent-backed MCP tools that don't declare an explicit

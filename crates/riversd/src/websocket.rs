@@ -483,7 +483,8 @@ pub async fn execute_ws_on_stream(
     message: &serde_json::Value,
     connection_id: &ConnectionId,
     trace_id: &str,
-    app_id: &str,
+    dv_namespace: &str,
+    executor: Option<&rivers_runtime::DataViewExecutor>,
 ) -> Result<Option<serde_json::Value>, TaskError> {
     let args = serde_json::json!({
         "message": message,
@@ -494,9 +495,14 @@ pub async fn execute_ws_on_stream(
         .entrypoint(entrypoint.clone())
         .args(args)
         .trace_id(trace_id.to_string());
+    // CB-P1.13 follow-up (Plan G): wire per-app datasources before enrich,
+    // mirroring the REST + MCP paths so codecomponent handlers reached via
+    // WebSocket can call `Rivers.db.execute(...)`. RT-CTX-APP-ID parity:
+    // pass `dv_namespace` (entry-point slug) to enrich, not the manifest UUID.
+    let builder = crate::task_enrichment::wire_datasources(builder, executor, dv_namespace);
     let builder = crate::task_enrichment::enrich(
         builder,
-        app_id,
+        dv_namespace,
         rivers_runtime::process_pool::TaskKind::Rest,
     );
     let ctx = builder.build()?;
@@ -522,7 +528,8 @@ pub async fn dispatch_ws_lifecycle(
     message: Option<&serde_json::Value>,
     session: Option<&serde_json::Value>,
     trace_id: &str,
-    app_id: &str,
+    dv_namespace: &str,
+    executor: Option<&rivers_runtime::DataViewExecutor>,
 ) -> Result<serde_json::Value, TaskError> {
     let entrypoint = Entrypoint {
         module: hook_module.to_string(),
@@ -543,9 +550,11 @@ pub async fn dispatch_ws_lifecycle(
         .entrypoint(entrypoint)
         .args(args)
         .trace_id(trace_id.to_string());
+    // CB-P1.13 follow-up (Plan G): wire datasources + use slug for enrich.
+    let builder = crate::task_enrichment::wire_datasources(builder, executor, dv_namespace);
     let builder = crate::task_enrichment::enrich(
         builder,
-        app_id,
+        dv_namespace,
         rivers_runtime::process_pool::TaskKind::Rest,
     );
     let task_ctx = builder.build()?;
@@ -686,7 +695,7 @@ mod tests {
         let conn_id = ConnectionId("conn-1".to_string());
 
         let result =
-            execute_ws_on_stream(&pool, &entrypoint, &message, &conn_id, "trace-1", "test-app").await;
+            execute_ws_on_stream(&pool, &entrypoint, &message, &conn_id, "trace-1", "test-app", None).await;
         // Should fail with EngineUnavailable
         assert!(result.is_err());
     }
@@ -705,6 +714,7 @@ mod tests {
             Some(&serde_json::json!({"user_id": "u-1"})),
             "trace-ws-1",
             "test-app",
+            None,
         )
         .await;
         // Engine unavailable — expected in stub mode
@@ -724,6 +734,7 @@ mod tests {
             None,
             "trace-ws-2",
             "test-app",
+            None,
         )
         .await;
         assert!(result.is_err());
@@ -741,6 +752,7 @@ mod tests {
             None,
             "trace-ws-3",
             "test-app",
+            None,
         )
         .await;
         assert!(result.is_err());
