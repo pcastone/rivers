@@ -522,6 +522,31 @@ Coercion failure returns JSON-RPC error `-32602` (Invalid params).
 | MCP-24 | Missing required parameters MUST be rejected with `-32602`. |
 | MCP-25 | Default values from parameter declarations apply when an optional argument is absent. |
 
+### 10.4 Codecomponent Handler Args (CB-P1.9)
+
+When a tool dispatches via `view = "..."` (codecomponent backend, §13.2), the
+handler's args object has the following shape:
+
+```json
+{
+  "request": { /* tool arguments — same as MCP tools/call `arguments` */ },
+  "session": { /* resolved caller identity, or null if no auth */ },
+  "path_params": { /* matched URL path variables, possibly empty */ }
+}
+```
+
+`path_params` mirrors REST's `MatchedRoute.path_params` exactly: keys are
+the segment names declared in the route template (e.g. mounting an MCP
+view at `/mcp/builder/{projectId}` puts the matched value under
+`path_params.projectId`). Non-templated routes pass an empty object —
+never `null` — so a handler that reads `args.path_params.foo` is uniformly
+safe.
+
+This enables defense-in-depth checks like `path.projectId ===
+auth.projectId` at the handler level, and lets MCP routes carry a
+project segment for log/dashboard clarity without losing handler-side
+enforcement.
+
 ---
 
 ## 11. Error Handling

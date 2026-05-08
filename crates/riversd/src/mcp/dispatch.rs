@@ -35,6 +35,7 @@ pub async fn dispatch(
     auth_context: Option<&serde_json::Value>,
     session_id: Option<&str>,
     federation: &[McpFederationConfig],
+    path_params: &HashMap<String, String>,
 ) -> JsonRpcResponse {
     if req.jsonrpc != "2.0" {
         return JsonRpcResponse::invalid_request(req.id.clone());
@@ -51,7 +52,7 @@ pub async fn dispatch(
                 .unwrap_or("<unknown>")
                 .to_string();
             let tool_start = std::time::Instant::now();
-            let resp = handle_tools_call(req, tools, ctx, app_id, dv_namespace, auth_context, federation, session_id).await;
+            let resp = handle_tools_call(req, tools, ctx, app_id, dv_namespace, auth_context, federation, session_id, path_params).await;
             if let Some(ref bus) = ctx.audit_bus {
                 let is_error = resp.result.as_ref()
                     .and_then(|r| r.get("isError"))
@@ -66,7 +67,7 @@ pub async fn dispatch(
             }
             resp
         }
-        "tools/call_batch" => handle_tools_call_batch(req, tools, ctx, app_id, dv_namespace, auth_context, federation, session_id).await,
+        "tools/call_batch" => handle_tools_call_batch(req, tools, ctx, app_id, dv_namespace, auth_context, federation, session_id, path_params).await,
         "resources/list" => handle_resources_list(req, resources, federation).await,
         "resources/read" => handle_resources_read(req, resources, ctx, dv_namespace, app_id, federation).await,
         "resources/templates/list" => handle_resource_templates(req, resources, app_id),
@@ -215,6 +216,7 @@ async fn handle_tools_call(
     auth_context: Option<&serde_json::Value>,
     federation: &[McpFederationConfig],
     session_id: Option<&str>,
+    path_params: &HashMap<String, String>,
 ) -> JsonRpcResponse {
     let tool_name = match req.params.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
@@ -249,7 +251,7 @@ async fn handle_tools_call(
 
     // CB-P0.1: codecomponent-backed tools dispatch through the ProcessPool.
     if let Some(ref view_name) = tool_config.view {
-        return dispatch_codecomponent_tool(req, ctx, app_id, dv_namespace, view_name, arguments, auth_context, session_id).await;
+        return dispatch_codecomponent_tool(req, ctx, app_id, dv_namespace, view_name, arguments, auth_context, session_id, path_params).await;
     }
 
     let params: HashMap<String, QueryValue> = arguments.into_iter().map(|(k, v)| {
@@ -314,6 +316,7 @@ async fn handle_tools_call_batch(
     auth_context: Option<&serde_json::Value>,
     federation: &[McpFederationConfig],
     session_id: Option<&str>,
+    path_params: &HashMap<String, String>,
 ) -> JsonRpcResponse {
     let items = match req.params.get("items").and_then(|v| v.as_array()) {
         Some(arr) => arr.clone(),
@@ -361,7 +364,7 @@ async fn handle_tools_call_batch(
             }),
         };
 
-        let resp = handle_tools_call(&synthetic_req, tools, ctx, app_id, dv_namespace, auth_context, federation, session_id).await;
+        let resp = handle_tools_call(&synthetic_req, tools, ctx, app_id, dv_namespace, auth_context, federation, session_id, path_params).await;
 
         // A JSON-RPC error response (has `error` field, no `result`) is an item failure.
         if resp.error.is_some() {
@@ -403,6 +406,28 @@ async fn handle_tools_call_batch(
 /// `ctx.session`, and dispatches it through the default process pool. The handler
 /// receives its full capabilities (storage, driver_factory, dataview_executor, lockbox,
 /// keystore) via task_enrichment::enrich — identical to REST, WebSocket, and SSE handlers.
+/// Build the codecomponent handler's args object: tool arguments under
+/// `request`, resolved caller identity under `session`, and matched URL
+/// path variables under `path_params`. Pure function so the wire-format
+/// is unit-testable without spinning up V8.
+///
+/// `path_params` follows the same shape REST uses (`MatchedRoute.path_params`
+/// in `crates/riversd/src/server/view_dispatch.rs`) — keys are the segment
+/// names declared in the route template (e.g. `{projectId}` → key
+/// `projectId`). Empty for non-templated MCP routes; handlers ignoring the
+/// field continue to work unchanged. (CB-P1.9.)
+fn build_codecomponent_args(
+    arguments: serde_json::Map<String, serde_json::Value>,
+    auth_context: Option<&serde_json::Value>,
+    path_params: &HashMap<String, String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "request": serde_json::Value::Object(arguments),
+        "session": auth_context,
+        "path_params": path_params,
+    })
+}
+
 async fn dispatch_codecomponent_tool(
     req: &JsonRpcRequest,
     ctx: &AppContext,
@@ -412,6 +437,7 @@ async fn dispatch_codecomponent_tool(
     arguments: serde_json::Map<String, serde_json::Value>,
     auth_context: Option<&serde_json::Value>,
     session_id: Option<&str>,
+    path_params: &HashMap<String, String>,
 ) -> JsonRpcResponse {
     use crate::process_pool::{Entrypoint, TaskContextBuilder, TaskKind};
     use rivers_runtime::view::HandlerConfig;
@@ -535,12 +561,9 @@ async fn dispatch_codecomponent_tool(
         }
     });
 
-    // Wrap tool arguments as ctx.request and propagate caller identity as ctx.session,
-    // matching the REST pipeline's injection pattern (pipeline.rs).
-    let args = serde_json::json!({
-        "request": serde_json::Value::Object(arguments),
-        "session": auth_context,
-    });
+    // CB-P1.9: build the args object (request + session + path_params) via a
+    // small helper so the shape is unit-testable without spinning up V8.
+    let args = build_codecomponent_args(arguments, auth_context, path_params);
 
     let builder = TaskContextBuilder::new()
         .entrypoint(entrypoint)
@@ -1220,6 +1243,44 @@ mod tests {
         });
         assert_eq!(entry["isError"], serde_json::json!(true));
         assert_eq!(entry["content"][0]["text"], serde_json::json!("Unknown tool: bad_tool"));
+    }
+
+    /// CB-P1.9: when the route template includes path variables, the matched
+    /// values must reach the codecomponent handler under `path_params` —
+    /// parity with the REST dispatch contract (`MatchedRoute.path_params`).
+    #[test]
+    fn build_codecomponent_args_threads_path_params() {
+        let mut arguments = serde_json::Map::new();
+        arguments.insert("query".into(), serde_json::json!("hello"));
+
+        let auth = serde_json::json!({"projectId": "P001", "role": "builder"});
+
+        let mut path_params = HashMap::new();
+        path_params.insert("projectId".into(), "P001".into());
+        path_params.insert("orgId".into(), "acme".into());
+
+        let args = build_codecomponent_args(arguments, Some(&auth), &path_params);
+
+        assert_eq!(args["request"]["query"], serde_json::json!("hello"));
+        assert_eq!(args["session"]["projectId"], serde_json::json!("P001"));
+        assert_eq!(args["session"]["role"], serde_json::json!("builder"));
+        assert_eq!(args["path_params"]["projectId"], serde_json::json!("P001"));
+        assert_eq!(args["path_params"]["orgId"], serde_json::json!("acme"));
+    }
+
+    /// CB-P1.9: non-templated MCP routes pass an empty `path_params` map.
+    /// Handlers that ignore the field continue to work; consumers that read
+    /// it see `{}` rather than `null` so `args.path_params.foo` is uniformly
+    /// safe to look up.
+    #[test]
+    fn build_codecomponent_args_empty_path_params_is_object_not_null() {
+        let arguments = serde_json::Map::new();
+        let path_params: HashMap<String, String> = HashMap::new();
+        let args = build_codecomponent_args(arguments, None, &path_params);
+        assert!(args["path_params"].is_object(),
+            "expected empty object for path_params, got {:?}", args["path_params"]);
+        assert_eq!(args["path_params"].as_object().map(|m| m.len()), Some(0));
+        assert!(args["session"].is_null(), "session should be null when no auth");
     }
 }
 
