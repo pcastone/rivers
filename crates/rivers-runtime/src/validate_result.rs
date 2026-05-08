@@ -614,6 +614,10 @@ pub mod error_codes {
     pub const W007: &str = "W007";
     /// transaction=true on a DataView backed by a driver that does not support transactions.
     pub const W008: &str = "W008";
+    /// `guard_view` target has `auth = "session"` — sessions don't exist when the guard runs.
+    pub const W009: &str = "W009";
+    /// View has both `guard = true` (server-wide auth gate) and `guard_view = "..."` (per-view gate).
+    pub const W010: &str = "W010";
 }
 
 // ── Tests ──────────────────────────────────────────────────────────

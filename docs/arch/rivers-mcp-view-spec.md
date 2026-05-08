@@ -750,10 +750,22 @@ guard_view = "advisor_guard"
 failures map to HTTP status codes so MCP clients can apply standard
 re-auth flows without parsing the body.
 
-**Cross-reference:** `[api.views.X.guard_view]` is currently honoured
-only on MCP views. Other view types accept the field in TOML but ignore
-it at runtime; treat that as a behaviour gap to close in a follow-up,
-not a feature.
+**Cross-reference:** `[api.views.X.guard_view]` is honoured uniformly
+on every view type that flows through `view_dispatch_handler` — REST,
+streaming REST, MCP, WebSocket, SSE. The framework runs a single
+preflight at the top-level dispatcher (after rate limiting, before the
+view-type switch). See `rivers-view-layer-spec.md` §11 for the
+cross-cutting contract.
+
+**Validator footguns** (caught at `riverpackage validate`):
+
+| Code | Severity | What it catches |
+|---|---|---|
+| `X014` | error | `guard_view` references a missing view |
+| `X014` | error | `guard_view` target is not a codecomponent (DataView / `none` handlers can't return the `{ allow }` envelope) |
+| `X014` | error | `guard_view` target itself declares a `guard_view` (chains forbidden in v1: catches self-reference, mutual recursion, deep chains in one rule) |
+| `W009` | warning | `guard_view` target has `auth = "session"` — sessions don't exist when the guard runs |
+| `W010` | warning | View has both `guard = true` (server-wide gate) and `guard_view = "..."` (per-view gate) |
 
 ---
 

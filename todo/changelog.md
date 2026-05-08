@@ -1,5 +1,56 @@
 # Changelog
 
+## 2026-05-08 — Plan H: `guard_view` honoured uniformly across all view types
+
+Closes the long-standing footgun where `guard_view` was a first-class
+field on every `ApiViewConfig` but only honoured at runtime on
+`view_type = "Mcp"`. Now wired uniformly across REST, streaming REST,
+MCP, WebSocket, and SSE via a single intercept in
+`view_dispatch_handler` between rate-limiting and the view-type switch.
+
+**Multi-tenant use case** drove the rebuild: per-route guard views
+let each tenant's bearer-token / API-key auth land on a distinct
+codecomponent, with tenant-scoped identity claims projected into
+`ctx.session` for downstream handlers.
+
+| File | Change | Spec ref | Notes |
+|------|--------|----------|-------|
+| `crates/riversd/src/security_pipeline.rs` | New `run_named_guard_preflight` helper (relocated from `view_dispatch.rs`, generalised). | CB-P1.10 Plan H | Module home for cross-cutting auth concerns. |
+| `crates/riversd/src/server/view_dispatch.rs` | Single-point intercept added; MCP-specific preflight removed (no double-fire); old MCP-only helper deleted. | CB-P1.10 Plan H | One insertion covers all five view types. |
+| `crates/rivers-runtime/src/validate_crossref.rs` | X014 extended to forbid chains; W009 + W010 warnings added; 6 new tests. | CB-P1.10 Plan H | Footgun matrix (8 scenarios) fully covered by validator. |
+| `crates/rivers-runtime/src/validate_result.rs` | New W009 and W010 codes. | | |
+| `docs/arch/rivers-mcp-view-spec.md` §13.5 | "MCP-only" caveat struck; validator-coverage table added. | | |
+| `docs/arch/rivers-view-layer-spec.md` §14 | New cross-cutting "Named Guards" section. | | |
+| `docs/arch/rivers-auth-session-spec.md` §11.5 | "REST follow-up" caveat dropped. | | |
+| `Cargo.toml` (workspace) | Build-stamp-only bump (sprint-end policy). | CLAUDE.md versioning | |
+
+**Validator footgun coverage** (the "no footgun" requirement):
+
+| Footgun | Code | Severity |
+|---|---|---|
+| `guard_view` references missing view | X014 | error |
+| Target is not codecomponent | X014 | error |
+| **Self-reference** (V → V) | X014 (chain rule) | error |
+| **Mutual recursion** (A ↔ B) | X014 (chain rule) | error |
+| **Deep chain** (A → B → C) | X014 (chain rule) | error |
+| Target has `auth = "session"` | W009 | warning |
+| View has both `guard = true` and `guard_view` | W010 | warning |
+| Silent skip on non-MCP view types | obsolete | (now wired) |
+
+**Tests:** `cargo test -p rivers-runtime --lib` 252/252 (was 246; +6).
+`cargo test -p riversd --lib` 485/485 (no regression).
+
+**Why chains are forbidden in v1:** one-rule check covers
+self-reference, mutual recursion, and deep chains. If real chained-auth
+demand surfaces, lift in a follow-up.
+
+**Why no per-view-type runtime test:** the relocated helper preserves
+call shape; existing MCP guard test path validates the contract; the
+validator covers config correctness; per-transport runtime tests await
+broader test-infrastructure work.
+
+---
+
 ## 2026-05-08 — Plan G: WS + SSE datasource-wiring + slug parity
 
 Closes the gutter item filed by PR #100 (CB-P1.13). WebSocket and SSE

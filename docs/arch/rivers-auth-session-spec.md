@@ -911,15 +911,19 @@ shape.
 
 **Operational notes:**
 
-- The guard codecomponent runs synchronously before JSON-RPC dispatch
-  on MCP views (and before REST handler dispatch once `guard_view` is
-  honoured by other view types — tracked follow-up). Keep the handler
-  fast — it is on the hot path.
+- The guard codecomponent runs synchronously in
+  `view_dispatch_handler` before any view-type dispatch — applies
+  uniformly to REST, streaming REST, MCP, WebSocket, and SSE. Runs
+  after rate limiting and before the existing session pipeline. Keep
+  the handler fast — it is on the hot path.
 - The framework rejects with HTTP 401 + trace ID on `allow: false` or
   any dispatcher error. Auth fails closed.
-- Per `rivers-mcp-view-spec.md` §13.5, the body is *not* yet parsed
-  when the guard runs. The guard cannot inspect tool arguments —
-  design for authentication-shape decisions only.
+- Per `rivers-view-layer-spec.md` §14, the body is *not* yet parsed
+  when the guard runs. The guard cannot inspect tool arguments or
+  request bodies — design for authentication-shape decisions only.
+- Validator footguns (caught at `riverpackage validate`): chains are
+  forbidden in v1 (`X014`); guard target with `auth = "session"`
+  warns (`W009`); double auth-gate config warns (`W010`).
 
 ---
 
