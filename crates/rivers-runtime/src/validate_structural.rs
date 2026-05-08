@@ -105,7 +105,7 @@ const VIEW_FIELDS: &[&str] = &[
     "session_revalidation_interval_s", "polling", "event_handlers",
     "on_stream", "ws_hooks", "on_event",
     "tools", "resources", "prompts", "instructions", "session", "federation",
-    "response_headers",
+    "response_headers", "guard_view",
 ];
 const VIEW_REQUIRED: &[&str] = &["path", "method", "view_type", "handler"];
 

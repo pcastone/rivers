@@ -50,5 +50,6 @@ pub fn default_view_config() -> ApiViewConfig {
         session: None,
         federation: vec![],
         response_headers: None,
+            guard_view: None,
     }
 }

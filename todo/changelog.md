@@ -1,5 +1,45 @@
 # Changelog
 
+## 2026-05-08 — CB-P1.10: per-view named guards (`guard_view`)
+
+Closes the long-standing gap between `rivers-mcp-view-spec.md` (which
+documented `guard = "name"`) and the runtime (which accepted only
+`guard = bool`). `guard_view: Option<String>` is now a new field on
+`ApiViewConfig`. When set on an MCP view, the named view's
+codecomponent runs as a pre-flight before JSON-RPC dispatch — same
+handler contract (`{ allow: bool }`) as the server-wide guard. `allow:
+true` proceeds; anything else rejects with HTTP 401 (per MCP-27, auth
+failures map to HTTP, not JSON-RPC error envelopes).
+
+| File | Change | Spec ref | Notes |
+|------|--------|----------|-------|
+| `crates/rivers-runtime/src/view.rs` | New `guard_view: Option<String>` on `ApiViewConfig`. | CB-P1.10 | Optional, `#[serde(default)]`. |
+| `crates/rivers-runtime/src/validate_structural.rs` | `guard_view` added to `VIEW_FIELDS` allowlist. | CB-P1.10 | |
+| `crates/rivers-runtime/src/validate_crossref.rs` | New X014 cross-ref: named guard must reference a codecomponent-handler view in the same app. 3 unit tests. | CB-P1.10 | Includes a did-you-mean suggestion via `validate_format::suggest_key`. |
+| `crates/rivers-runtime/src/validate_result.rs` | New error code `X014`. | CB-P1.10 | |
+| `crates/riversd/src/server/view_dispatch.rs` | `execute_mcp_view` runs `run_mcp_named_guard_preflight` before body extraction. Reuses existing `crate::guard::execute_guard_handler` for identical handler contract. | CB-P1.10 | MCP-only in this PR; other view types accept the field but ignore at runtime. |
+| `docs/arch/rivers-mcp-view-spec.md` | MCP-5 wording + §13.5 + 5 example blocks aligned to `guard_view = "name"`. | CB-P1.10 | Spec/runtime are now consistent. |
+| `Cargo.toml` (workspace) | Patch bump. | CLAUDE.md versioning | |
+
+**Tests:** `cargo test -p rivers-runtime --lib` 246/246 (was 243; +3 X014).
+`cargo test -p riversd --lib` 480/480 (no regression). The runtime
+preflight is exercised by the new validation tests for the config-shape
+guarantee; an end-to-end test would require a full V8 bundle harness
+and is deferred — the helper composes existing tested primitives
+(`execute_guard_handler` covered by `crates/riversd/src/process_pool/tests/basic_execution.rs::execute_guard_handler_returns_claims`).
+
+**Mechanical follow-on:** `guard_view: None` added to every
+`ApiViewConfig` literal (test fixtures, bundle loader, bundle diff,
+view-engine make-helper).
+
+**Subsumes CB-P1.12 as documentation:** With named guards, the
+sanctioned answer for `auth = "bearer"` is a small codecomponent that
+hashes `Authorization: Bearer <token>` against `api_keys` and returns
+matching claims. Plan E in `docs/superpowers/plans/2026-05-08-cb-mcp-followups.md`
+captures the doc-only close.
+
+---
+
 ## 2026-05-08 — CB-P1.11: per-view static `response_headers`
 
 Closes the gap CB filed 2026-05-08: `[api.views.*.response_headers]`
