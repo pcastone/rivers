@@ -406,7 +406,7 @@ async fn handle_tools_call_batch(
 async fn dispatch_codecomponent_tool(
     req: &JsonRpcRequest,
     ctx: &AppContext,
-    app_id: &str,
+    _app_id: &str,
     dv_namespace: &str,
     view_name: &str,
     arguments: serde_json::Map<String, serde_json::Value>,
@@ -546,7 +546,26 @@ async fn dispatch_codecomponent_tool(
         .entrypoint(entrypoint)
         .args(args)
         .trace_id(trace_id.clone());
-    let builder = crate::task_enrichment::enrich(builder, app_id, TaskKind::Rest);
+    // CB-P1.13: wire per-app datasource tokens/configs so codecomponent
+    // handlers reached via MCP `view = "..."` dispatch can call
+    // `Rivers.db.execute(...)` against their declared datasources — same
+    // capability shape as the REST primary-handler path.
+    let executor = ctx.dataview_executor.read().await;
+    let builder = crate::task_enrichment::wire_datasources(
+        builder,
+        executor.as_deref(),
+        dv_namespace,
+    );
+    drop(executor);
+    // RT-CTX-APP-ID parity: pass the entry-point slug (`dv_namespace`) to
+    // `enrich`, not the manifest UUID (`app_id`). Mirrors the 2026-05-05
+    // canary-sprint correction applied to REST + validation paths in
+    // `view_engine/pipeline.rs` and `view_engine/validation.rs`. The slug
+    // is what `keystore_resolver.get_for_entry_point(...)` keys on and what
+    // JS handlers see as `ctx.app_id`. The MCP path was missed in that
+    // sprint because no canary scenario exercised an MCP-dispatched handler
+    // calling `ctx.keystore`.
+    let builder = crate::task_enrichment::enrich(builder, dv_namespace, TaskKind::Rest);
     let task_ctx = match builder.build() {
         Ok(c) => c,
         Err(e) => return JsonRpcResponse::server_error(

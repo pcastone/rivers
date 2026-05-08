@@ -1211,7 +1211,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-deploy"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "rcgen",
  "rivers-core-config",
@@ -5640,7 +5640,7 @@ dependencies = [
 
 [[package]]
 name = "riverpackage"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "rivers-core-config",
  "rivers-driver-sdk",
@@ -5656,7 +5656,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-core"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "age",
  "async-trait",
@@ -5689,7 +5689,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-core-config"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5704,7 +5704,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-driver-sdk"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5719,7 +5719,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-drivers-builtin"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "async-memcached",
  "async-trait",
@@ -5745,7 +5745,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-engine-sdk"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "serde",
  "serde_json",
@@ -5753,7 +5753,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-engine-v8"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "base64 0.22.1",
  "bcrypt",
@@ -5772,7 +5772,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-engine-wasm"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "rivers-engine-sdk",
  "serde_json",
@@ -5782,7 +5782,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-keystore"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "age",
  "clap",
@@ -5792,7 +5792,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-keystore-engine"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "aes-gcm",
  "age",
@@ -5809,7 +5809,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-lockbox"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "age",
  "chrono",
@@ -5824,7 +5824,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-lockbox-engine"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "age",
  "chrono",
@@ -5839,7 +5839,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-cassandra"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "age",
  "async-trait",
@@ -5855,7 +5855,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-couchdb"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "age",
  "async-trait",
@@ -5872,7 +5872,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-elasticsearch"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "age",
  "async-trait",
@@ -5886,7 +5886,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-exec"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "async-trait",
  "hex",
@@ -5903,7 +5903,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-influxdb"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "age",
  "async-trait",
@@ -5920,7 +5920,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-kafka"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "age",
  "async-trait",
@@ -5933,7 +5933,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-ldap"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "age",
  "async-trait",
@@ -5946,7 +5946,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-mongodb"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "age",
  "async-trait",
@@ -5960,7 +5960,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-nats"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "age",
  "async-nats",
@@ -5975,7 +5975,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-neo4j"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "age",
  "async-trait",
@@ -5990,7 +5990,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-rabbitmq"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "age",
  "async-trait",
@@ -6004,7 +6004,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-plugin-redis-streams"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "age",
  "async-trait",
@@ -6021,7 +6021,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-runtime"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "async-trait",
  "hex",
@@ -6045,7 +6045,7 @@ dependencies = [
 
 [[package]]
 name = "rivers-storage-backends"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "async-trait",
  "redis",
@@ -6057,7 +6057,7 @@ dependencies = [
 
 [[package]]
 name = "riversctl"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -6075,7 +6075,7 @@ dependencies = [
 
 [[package]]
 name = "riversd"
-version = "0.59.4+0243050526"
+version = "0.60.3+1500080526"
 dependencies = [
  "async-graphql",
  "async-graphql-axum",

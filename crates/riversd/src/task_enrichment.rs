@@ -72,6 +72,65 @@ pub fn app_id_from_qualified_name(name: &str) -> &str {
     name.split_once(':').map(|(app_id, _)| app_id).unwrap_or("")
 }
 
+/// Wire per-app datasource tokens and configs onto a TaskContextBuilder.
+///
+/// Mirrors the REST primary-handler datasource-wiring loop
+/// (`view_engine/pipeline.rs`) so non-REST dispatch paths (MCP, and
+/// eventually WebSocket/SSE) get the same view of the app's datasources.
+///
+/// Without this, `TASK_DS_CONFIGS` is empty for the dispatched handler and
+/// every `Rivers.db.execute(...)` call throws `CapabilityError: datasource
+/// '<name>' not declared in view config`.
+///
+/// `executor` may be `None` — in that case the function is a no-op (no
+/// datasources to wire). `dv_namespace` is the entry-point slug used to
+/// scope `executor.datasource_params()` to a single app.
+///
+/// CB-P1.13.
+pub fn wire_datasources(
+    mut builder: TaskContextBuilder,
+    executor: Option<&DataViewExecutor>,
+    dv_namespace: &str,
+) -> TaskContextBuilder {
+    let Some(exec) = executor else {
+        return builder;
+    };
+    let ns_prefix = format!("{dv_namespace}:");
+    for (key, params) in exec.datasource_params().iter() {
+        let Some(ds_name) = key.strip_prefix(&ns_prefix) else {
+            continue;
+        };
+        let driver = params.options.get("driver").map(|s| s.as_str()).unwrap_or("");
+        if driver == "filesystem" {
+            let token = rivers_runtime::process_pool::DatasourceToken::direct(
+                "filesystem",
+                std::path::PathBuf::from(&params.database),
+            );
+            builder = builder.datasource(ds_name.to_string(), token);
+        } else if rivers_runtime::process_pool::BROKER_DRIVER_NAMES.contains(&driver) {
+            // BR-2026-04-23: broker datasources get a Broker token + full
+            // ConnectionParams copy so the worker can lazy-build a BrokerProducer.
+            let token = rivers_runtime::process_pool::DatasourceToken::broker(driver);
+            builder = builder.datasource(ds_name.to_string(), token.clone());
+            let resolved = rivers_runtime::process_pool::ResolvedDatasource {
+                driver_name: driver.to_string(),
+                params: params.clone(),
+            };
+            builder = builder.datasource_config(ds_name.to_string(), resolved);
+        } else if !driver.is_empty() {
+            // SQL / NoSQL / other regular drivers: wire into datasource_configs
+            // so ctx.transaction() and Rivers.db.begin() can open a connection
+            // by name. No token needed; DriverFactory routes by driver name.
+            let resolved = rivers_runtime::process_pool::ResolvedDatasource {
+                driver_name: driver.to_string(),
+                params: params.clone(),
+            };
+            builder = builder.datasource_config(ds_name.to_string(), resolved);
+        }
+    }
+    builder
+}
+
 /// Enrich a TaskContextBuilder with all capabilities available from shared state.
 ///
 /// New capabilities wired here automatically become available to every dispatch site.
@@ -253,5 +312,94 @@ mod tests {
     fn app_id_from_qualified_name_handles_namespaced_ids() {
         assert_eq!(app_id_from_qualified_name("orders:create"), "orders");
         assert_eq!(app_id_from_qualified_name("plain-view"), "");
+    }
+
+    /// CB-P1.13: helper must wire app-scoped datasources (regular SQL/NoSQL
+    /// drivers populate `datasource_configs`; filesystem populates a direct
+    /// `DatasourceToken`). Datasources for other apps must be ignored.
+    #[tokio::test]
+    async fn wire_datasources_populates_per_app_configs() {
+        use std::collections::HashMap;
+        use rivers_runtime::rivers_driver_sdk::ConnectionParams;
+
+        let registry = DataViewRegistry::new();
+        let factory = Arc::new(DriverFactory::new());
+        let cache = Arc::new(NoopDataViewCache);
+
+        let mut params: HashMap<String, ConnectionParams> = HashMap::new();
+        let mut sql_opts = HashMap::new();
+        sql_opts.insert("driver".to_string(), "sqlite".to_string());
+        params.insert(
+            "myapp:cb_db".to_string(),
+            ConnectionParams {
+                host: "localhost".into(),
+                port: 0,
+                database: "/tmp/cb.db".into(),
+                username: String::new(),
+                password: String::new(),
+                options: sql_opts,
+            },
+        );
+        // Other-app datasource must NOT leak.
+        let mut other_opts = HashMap::new();
+        other_opts.insert("driver".to_string(), "sqlite".to_string());
+        params.insert(
+            "otherapp:other_db".to_string(),
+            ConnectionParams {
+                host: "localhost".into(),
+                port: 0,
+                database: "/tmp/other.db".into(),
+                username: String::new(),
+                password: String::new(),
+                options: other_opts,
+            },
+        );
+
+        let executor = Arc::new(DataViewExecutor::new(
+            registry,
+            factory,
+            Arc::new(params),
+            cache,
+        ));
+
+        let builder = TaskContextBuilder::new()
+            .entrypoint(Entrypoint {
+                module: "handlers/h.js".into(),
+                function: "handle".into(),
+                language: "javascript".into(),
+            })
+            .args(serde_json::json!({}))
+            .trace_id("wire-test".into())
+            .app_id("myapp".into());
+        let builder = wire_datasources(builder, Some(executor.as_ref()), "myapp");
+        let task = builder.build().expect("task ctx builds");
+
+        assert!(task.datasource_configs.contains_key("cb_db"),
+            "expected cb_db in scope; got keys {:?}", task.datasource_configs.keys().collect::<Vec<_>>());
+        assert!(!task.datasource_configs.contains_key("other_db"),
+            "other-app datasource leaked into this task");
+        assert_eq!(
+            task.datasource_configs["cb_db"].driver_name, "sqlite",
+            "driver name preserved",
+        );
+    }
+
+    /// CB-P1.13: when no executor is supplied (e.g. early bootstrap or a
+    /// dispatch path without DataView wiring), helper must be a no-op and
+    /// must not panic.
+    #[test]
+    fn wire_datasources_is_noop_without_executor() {
+        let builder = TaskContextBuilder::new()
+            .entrypoint(Entrypoint {
+                module: "handlers/h.js".into(),
+                function: "handle".into(),
+                language: "javascript".into(),
+            })
+            .args(serde_json::json!({}))
+            .trace_id("noop".into())
+            .app_id("myapp".into());
+        let builder = wire_datasources(builder, None, "myapp");
+        let task = builder.build().expect("task ctx builds");
+        assert!(task.datasource_configs.is_empty());
     }
 }

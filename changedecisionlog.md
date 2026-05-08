@@ -4,6 +4,52 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 
 ---
 
+## 2026-05-08 — CB-P1.13: capability propagation for MCP `view=` dispatch
+
+**Decision:** Extracted the REST primary-handler datasource-wiring loop
+(`view_engine/pipeline.rs:282-323`) into
+`crate::task_enrichment::wire_datasources(builder, executor, dv_namespace)`
+and called it from `mcp::dispatch::dispatch_codecomponent_tool` immediately
+before `task_enrichment::enrich`. Same iteration order; same `ns_prefix =
+"{dv_namespace}:"` filter; same three branches (filesystem → direct
+DatasourceToken; broker → token + datasource_config; SQL/NoSQL/other →
+datasource_config only). Behavior of the REST path is unchanged; the MCP
+codecomponent path now matches it exactly.
+
+**Why this and not a per-view subset:** The pre-existing REST loop already
+grants every app-scoped datasource declared by the bundle, not a per-view
+intersection. Honouring "the inner view's resources" via that loop matches
+the established framework convention; introducing a per-view filter for MCP
+only would diverge MCP from REST and require a parallel access-rights
+model. CB's report calls for parity with REST, not stricter-than-REST.
+
+**Files affected:**
+
+| File | Change | Spec ref | Method |
+|------|--------|----------|--------|
+| `crates/riversd/src/task_enrichment.rs` | New `wire_datasources` helper. Two new tests (`wire_datasources_populates_per_app_configs`, `wire_datasources_is_noop_without_executor`). | CB-P1.13 | Extract identical logic from REST path; doc comment cross-links the symptom. |
+| `crates/riversd/src/view_engine/pipeline.rs` | Replaced 42-line inline loop with single helper call; behavior preserved. | CB-P1.13 | Single source of truth — REST + MCP share the wiring. |
+| `crates/riversd/src/mcp/dispatch.rs` | `dispatch_codecomponent_tool` reads `ctx.dataview_executor` and calls `wire_datasources` before `enrich`. Without this, `TASK_DS_CONFIGS` was empty and every `Rivers.db.execute(...)` threw `CapabilityError`. | CB-P1.13 | Matches REST order: datasources → enrich (which sets app/storage/factory/dataview/lockbox/keystore). |
+| `docs/arch/rivers-mcp-view-spec.md` §13.2 | Added explicit note: when `view = "..."` is used, inner-view resources are honoured the same as REST. | CB-P1.13 | Closes documentation gap CB called out in their feature request. |
+
+**Spec reference:** `cb-rivers-feature-request.md` P1.13;
+`docs/superpowers/plans/2026-05-08-cb-mcp-followups.md` Plan A.
+
+**Resolution method:** Traced symptom from CB report (`CapabilityError:
+datasource 'cb_db' not declared in view config`) through
+`crates/riversd/src/process_pool/v8_engine/rivers_global.rs:1719`
+(`TASK_DS_CONFIGS` check) → `TaskContext.datasource_configs` source.
+Confirmed REST populates the map at `pipeline.rs:284`; confirmed MCP did
+not. Extracted helper to keep one wiring path; verified WS/SSE share the
+same gap (deferred to follow-up — see `todo/gutter.md`).
+
+**Follow-up captured:** WebSocket (`websocket.rs:497, 546`) and SSE
+(`sse.rs:424`) dispatch sites have the same gap — they call only
+`task_enrichment::enrich` without `wire_datasources`. Out of scope for the
+P1.13 PR; tracked in gutter.
+
+---
+
 ## 2026-04-30 — P2.3: Multi-Bundle MCP Federation
 
 ### P2.3.1 — Federation config belongs on ApiViewConfig, not McpConfig

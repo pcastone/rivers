@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-05-08 — CB-P1.13: capability propagation for MCP `view=` dispatch
+
+Closes the gap CB filed 2026-05-08: MCP-dispatched codecomponent handlers
+now see the same datasource set as REST-dispatched ones. Prior behavior:
+`Rivers.db.execute('cb_db', ...)` threw `CapabilityError: datasource 'cb_db'
+not declared in view config` for any handler reached via MCP `tools/call`
+on a `view = "..."` tool.
+
+| File | Change | Spec ref | Notes |
+|------|--------|----------|-------|
+| `crates/riversd/src/task_enrichment.rs` | New `wire_datasources(builder, executor, dv_namespace)` helper. Iterates `executor.datasource_params()` filtered by `dv_namespace:` prefix, populates `TaskContextBuilder` datasource tokens (filesystem direct, broker tokens) and `datasource_configs` (all drivers). Two new tests. | CB-P1.13 | Single helper for REST + MCP wiring. |
+| `crates/riversd/src/view_engine/pipeline.rs` | REST primary-handler loop replaced with `wire_datasources` call. No semantic change. | CB-P1.13 | Removes 42 lines of duplicated logic. |
+| `crates/riversd/src/mcp/dispatch.rs` | `dispatch_codecomponent_tool` calls `wire_datasources` before `enrich`. | CB-P1.13 | Fix landing site. |
+| `docs/arch/rivers-mcp-view-spec.md` §13.2 | Documented the `view` alternative and that inner-view resources are honoured. | CB-P1.13 | |
+| `Cargo.toml` (workspace) | Patch bump on top of 0.60.0 base — closes documented-but-missing capability for MCP view dispatch. | CLAUDE.md versioning | |
+
+**Tests:** `cargo test -p riversd --lib` 474/474 + 7 ignored;
+`cargo test -p rivers-runtime --lib` 230/230. New unit tests:
+`task_enrichment::tests::wire_datasources_populates_per_app_configs`,
+`task_enrichment::tests::wire_datasources_is_noop_without_executor`.
+
+**Follow-up:** WebSocket and SSE dispatch sites have the same gap —
+tracked in `todo/gutter.md` for a separate PR.
+
+---
+
 ## 2026-05-05 — Canary Sprint: 144/148 passing (0 fail, 4 expected PROXY 503)
 
 All canary sprint work complete. Six root causes fixed; canary score improved from 126→144 pass.
