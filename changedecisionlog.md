@@ -4,6 +4,50 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 
 ---
 
+## 2026-05-08 — CB-P1.9: thread `path_params` into MCP dispatch handler context
+
+**Decision:** When an MCP route is mounted with a templated path (e.g.
+`/mcp/builder/{projectId}`), the matched path variables now reach the
+codecomponent handler under `args.path_params`. Implementation threads the
+existing `MatchedRoute.path_params` (same shape REST uses) through
+`mcp::dispatch::dispatch` → `handle_tools_call` /
+`handle_tools_call_batch` → `dispatch_codecomponent_tool` and into the
+args JSON. Non-templated MCP routes pass an empty object so handlers can
+uniformly read `args.path_params.foo` without null guards.
+
+The args-building step was factored into `build_codecomponent_args`, a
+small pure function over `(arguments, auth_context, path_params)`. This
+made the wire-format unit-testable without spinning up V8 and codified
+the contract as a single named place rather than an inline json! macro
+buried in the dispatch function.
+
+**Why a separate field rather than merging into `request`:** keeping
+`path_params` distinct preserves the asymmetry CB called out — URL
+identifiers (defense-in-depth, e.g. `path.projectId == auth.projectId`)
+should be distinguishable from caller-supplied tool arguments. Merging
+them would make handler-side enforcement weaker (a caller could spoof
+`projectId` in `arguments`).
+
+**Files affected:**
+
+| File | Change | Spec ref | Method |
+|------|--------|----------|--------|
+| `crates/riversd/src/mcp/dispatch.rs` | `dispatch`, `handle_tools_call`, `handle_tools_call_batch`, `dispatch_codecomponent_tool` all take `path_params: &HashMap<String, String>`. New pure helper `build_codecomponent_args(arguments, auth_context, path_params)`. Two unit tests. | CB-P1.9 | Additive — handlers ignoring the field continue to work. |
+| `crates/riversd/src/server/view_dispatch.rs` | Both MCP `dispatch()` call sites (batch + single) now pass `&matched.path_params`. | CB-P1.9 | `MatchedRoute.path_params` already populated by the router; just had to be threaded. |
+| `docs/arch/rivers-mcp-view-spec.md` §10.4 | New section documenting the handler args shape (`request` / `session` / `path_params`) for codecomponent-backed tools. | CB-P1.9 | Closes the documentation gap CB pointed out — the URL template was decorative for the handler. |
+
+**Spec reference:** `cb-rivers-feature-request.md` P1.9;
+`docs/superpowers/plans/2026-05-08-cb-mcp-followups.md` Plan B.
+
+**Resolution method:** Read `MatchedRoute` (carries `path_params`),
+`execute_mcp_view`, `dispatch()` chain. Confirmed `path_params` was
+already extracted by the router but never threaded into the JSON-RPC
+dispatcher. Mirrored the REST contract. Picked the helper-function path
+over an inline `serde_json!` so the args shape is documented and tested
+in one place.
+
+---
+
 ## 2026-05-08 — CB-P1.13: capability propagation for MCP `view=` dispatch
 
 **Decision:** Extracted the REST primary-handler datasource-wiring loop

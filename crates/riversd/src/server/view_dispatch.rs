@@ -703,7 +703,7 @@ async fn execute_mcp_view(
                         };
                         let resp = crate::mcp::dispatch::dispatch(
                             &ctx, &req, tools, resources, prompts, app_id, dv_namespace, app_dir, instructions,
-                            auth_context.as_ref(), session_id.as_deref(), federation,
+                            auth_context.as_ref(), session_id.as_deref(), federation, &matched.path_params,
                         ).await;
                         responses.push(serde_json::to_value(&resp).unwrap_or_default());
                     }
@@ -751,7 +751,7 @@ async fn execute_mcp_view(
 
                 let resp = crate::mcp::dispatch::dispatch(
                     &ctx, &req, tools, resources, prompts, app_id, dv_namespace, app_dir, instructions,
-                    auth_context.as_ref(), session_id.as_deref(), federation,
+                    auth_context.as_ref(), session_id.as_deref(), federation, &matched.path_params,
                 ).await;
 
                 // For initialize: create session (storing auth identity) and attach Mcp-Session-Id header

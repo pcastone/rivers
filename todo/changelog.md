@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-05-08 — CB-P1.9: thread `path_params` into MCP dispatch handler context
+
+Closes the gap CB filed 2026-05-07: templated MCP routes
+(`/mcp/builder/{projectId}`) now deliver matched URL variables to
+codecomponent handlers under `args.path_params` — parity with the REST
+dispatch contract. Without this the URL template was decorative; the
+handler could not enforce `path.projectId == auth.projectId`.
+
+| File | Change | Spec ref | Notes |
+|------|--------|----------|-------|
+| `crates/riversd/src/mcp/dispatch.rs` | `dispatch`, `handle_tools_call`, `handle_tools_call_batch`, `dispatch_codecomponent_tool` all carry `path_params`. New pure helper `build_codecomponent_args(arguments, auth_context, path_params)` with 2 unit tests covering populated and empty path-params shapes. | CB-P1.9 | Empty-map default keeps non-templated routes additive — no handler change required. |
+| `crates/riversd/src/server/view_dispatch.rs` | MCP dispatch call sites pass `&matched.path_params`. | CB-P1.9 | `MatchedRoute.path_params` already populated by the router; threading only. |
+| `docs/arch/rivers-mcp-view-spec.md` §10.4 | New section documenting the codecomponent handler args shape. | CB-P1.9 | |
+| `Cargo.toml` (workspace) | Patch bump on top of 0.60.3. | CLAUDE.md versioning | |
+
+**Tests:** `cargo test -p riversd --lib` 476/476 + 7 ignored (was 474/474; 2 new).
+New unit tests:
+`mcp::dispatch::tests::build_codecomponent_args_threads_path_params`,
+`mcp::dispatch::tests::build_codecomponent_args_empty_path_params_is_object_not_null`.
+
+---
+
 ## 2026-05-08 — CB-P1.13: capability propagation for MCP `view=` dispatch
 
 Closes the gap CB filed 2026-05-08: MCP-dispatched codecomponent handlers
