@@ -324,6 +324,7 @@ mod tests {
                 instructions: None,
                 session: None,
                 federation: vec![],
+        response_headers: None,
             });
         }
 

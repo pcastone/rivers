@@ -72,7 +72,16 @@ pub(super) async fn combined_fallback_handler(
     }; // read lock dropped here
 
     if let Some(matched) = matched {
-        return view_dispatch_handler(State(ctx), request, matched).await.into_response();
+        // CB-P1.11: clone the static response_headers config before `matched`
+        // is moved into the handler, then apply them to the materialized
+        // response. Single intercept point covers REST + MCP + SSE/WS — every
+        // view type goes through this branch.
+        let static_headers = matched.config.response_headers.clone();
+        let mut response = view_dispatch_handler(State(ctx), request, matched)
+            .await
+            .into_response();
+        crate::view_engine::apply_static_response_headers(&mut response, static_headers.as_ref());
+        return response;
     }
 
     // Check if request path matches a failed app — return 503 with driver info

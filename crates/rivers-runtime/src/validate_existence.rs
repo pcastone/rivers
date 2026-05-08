@@ -629,6 +629,7 @@ nopassword = true
                 instructions: None,
                 session: None,
                 federation: vec![],
+            response_headers: None,
             },
         );
     }
@@ -1120,6 +1121,7 @@ nopassword = true
             instructions: None,
             session: None,
             federation: vec![],
+            response_headers: None,
         };
         bundle.apps[0]
             .config
@@ -1189,6 +1191,7 @@ nopassword = true
             instructions: None,
             session: None,
             federation: vec![],
+            response_headers: None,
         };
         bundle.apps[0]
             .config
@@ -1269,6 +1272,7 @@ nopassword = true
             instructions: None,
             session: None,
             federation: vec![],
+            response_headers: None,
         };
         bundle.apps[0]
             .config

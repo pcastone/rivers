@@ -72,6 +72,7 @@ fn rest_view_with_handlers(
         instructions: None,
         session: None,
         federation: vec![],
+        response_headers: None,
     }
 }
 
@@ -111,6 +112,7 @@ fn none_handler_view(event_handlers: Option<ViewEventHandlers>) -> ApiViewConfig
         instructions: None,
         session: None,
         federation: vec![],
+        response_headers: None,
     }
 }
 
