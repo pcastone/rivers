@@ -761,11 +761,16 @@ cross-cutting contract.
 
 | Code | Severity | What it catches |
 |---|---|---|
-| `X014` | error | `guard_view` references a missing view |
-| `X014` | error | `guard_view` target is not a codecomponent (DataView / `none` handlers can't return the `{ allow }` envelope) |
-| `X014` | error | `guard_view` target itself declares a `guard_view` (chains forbidden in v1: catches self-reference, mutual recursion, deep chains in one rule) |
-| `W009` | warning | `guard_view` target has `auth = "session"` — sessions don't exist when the guard runs |
-| `W010` | warning | View has both `guard = true` (server-wide gate) and `guard_view = "..."` (per-view gate) |
+| `X014` | error | `guard_view` (or any chain hop) references a missing view |
+| `X014` | error | `guard_view` (or any chain hop) target is not a codecomponent |
+| `X014` | error | Chain forms a cycle (self-reference, mutual recursion, longer cycle) |
+| `X014` | error | Chain exceeds `MAX_GUARD_CHAIN_DEPTH` (5 hops) |
+| `W009` | warning | Any chain hop has `auth = "session"` |
+| `W010` | warning | View has both `guard = true` and `guard_view` |
+
+**Chain composition:** a guard view may itself declare `guard_view`
+to compose multi-stage auth — see `rivers-view-layer-spec.md` §14.4
+for semantics, depth cap, and claims-propagation rules.
 
 ---
 

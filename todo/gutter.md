@@ -26,25 +26,17 @@ unusual. The slug-equivalent fix is already in place (line 89,
 the datasource-wiring extension until a real bundle author asks for
 it; the surface change isn't justified by speculation.
 
-## 2026-05-08 — Plan H follow-ups (deliberately deferred)
+## 2026-05-08 — Plan H follow-ups
 
-### Lift v1 chain prohibition
+### Closed: lift v1 chain prohibition
 
-Plan H rejected `guard_view` chains (target view declaring its own
-`guard_view`) at validate time with a single rule that catches
-self-reference, mutual recursion, and arbitrary depth. Multi-tenant
-deployments may eventually want chains (e.g. `tenant_auth →
-tenant_role_check`), but Plan H's multi-tenant motivation was
-per-route guards, not chained guards.
-
-**Why deferred:** lifting the prohibition is non-trivial. It requires
-(1) replacing the validator's chain-rejection rule with cycle
-detection (DFS, depth cap), (2) extending the runtime helper to
-dispatch chains transitively, (3) defining how `session_claims` from
-multiple guard levels merge, (4) spec section overhaul, (5)
-cross-level tests. ~2-3 hours of focused work that adds runtime
-complexity to solve a use case nobody has reported. Re-open when a
-real bundle authoring scenario surfaces.
+Shipped. `guard_view` chains are now allowed up to
+`MAX_GUARD_CHAIN_DEPTH` (5 hops). Validator replaces the chain
+prohibition with cycle detection (DFS visited set) + depth cap;
+runtime walks the chain inside-out (deepest leaf first) and
+short-circuits on the first `allow: false`. Claims propagation
+across chain levels remains v1-not-shipped — chains compose
+allow/deny decisions only.
 
 ### Per-view-type runtime tests for `guard_view`
 

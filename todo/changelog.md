@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-05-08 — Lift v1 chain prohibition for guard_view
+
+`guard_view` chains are now allowed up to `MAX_GUARD_CHAIN_DEPTH`
+(5 hops past the protected view). The validator's "target must not
+declare guard_view" prohibition is replaced with cycle detection
+(DFS visited set) + depth cap. The runtime walks the chain
+inside-out (deepest leaf first) and short-circuits on the first
+`allow: false` with HTTP 401.
+
+Multi-tenant deployments can now compose auth stages — e.g.
+`token_validate → role_check → resource_check` — without collapsing
+all logic into one handler.
+
+| File | Change | Spec ref | Notes |
+|------|--------|----------|-------|
+| `crates/rivers-runtime/src/validate_crossref.rs` | Chain walker replaces v1 prohibition; per-hop X014 + W009 checks; cycle + depth-cap rejections via X014. | CB-P1.10 follow-up | DFS visited tracking covers self-reference, mutual recursion, longer cycles. |
+| `crates/riversd/src/security_pipeline.rs` | `run_named_guard_preflight` refactored into `build_guard_chain` + `dispatch_one_guard`. Defensive runtime cycle/depth re-checks. | CB-P1.10 follow-up | Deepest-leaf-first dispatch order. |
+| `docs/arch/rivers-view-layer-spec.md` §14.4 | New "Chain composition" section with multi-tenant example. | | |
+| `docs/arch/rivers-mcp-view-spec.md` §13.5 | Constraint table updated. | | |
+| `todo/gutter.md` | Closed the "Lift v1 chain prohibition" deferred item. | | |
+| `Cargo.toml` (workspace) | Build-stamp-only bump (sprint-end policy). | CLAUDE.md versioning | |
+
+**Tests:** `cargo test -p rivers-runtime --lib` 256/256 (was 252;
++4 new tests, -1 renamed). 485/485 riversd lib (no regression).
+
+**v1 ships:** allow/deny composition only. **v1 does not ship:**
+session_claims propagation across chain levels — that has its own
+semantic decisions (merge order, key collisions, ctx.session
+visibility). If you need cross-level data flow, use `ctx.store` or
+headers in v1.
+
+---
+
 ## 2026-05-08 — Gutter cleanup: pre-existing test fixture fix + scope decisions
 
 Closes the `slow_observer_does_not_extend_request_latency` failure

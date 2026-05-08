@@ -884,17 +884,75 @@ guard_view = "user_guard"
 # no guard_view — public.
 ```
 
-### 14.4 Constraints (validator-enforced)
+### 14.4 Chain composition
+
+A guard view may itself declare `guard_view` to compose multi-stage
+auth. Chains run **inside-out** — deepest leaf first, then each layer
+back up to the protected view. Every level must return
+`{ allow: true }` for the request to proceed; the first rejection
+short-circuits with HTTP 401.
+
+```toml
+# Multi-tenant: validate token → check role → reach the protected route.
+[api.views.tenant_auth]
+view_type = "Rest"
+auth      = "none"
+[api.views.tenant_auth.handler]
+type       = "codecomponent"
+module     = "handlers/tenant.ts"
+entrypoint = "validate_token"
+language   = "typescript"
+
+[api.views.tenant_admin_check]
+view_type  = "Rest"
+auth       = "none"
+guard_view = "tenant_auth"            # depth 1
+[api.views.tenant_admin_check.handler]
+type       = "codecomponent"
+module     = "handlers/tenant.ts"
+entrypoint = "require_admin"
+language   = "typescript"
+
+[api.views.admin_orders]
+guard_view = "tenant_admin_check"     # depth 2
+```
+
+For a request to `admin_orders`:
+
+1. `tenant_auth` runs (deepest leaf). On `allow: true`, proceed.
+2. `tenant_admin_check` runs. On `allow: true`, proceed.
+3. `admin_orders` handler runs.
+
+Any level returning `allow: false` rejects the request immediately.
+
+**Chain limits:**
+
+- Maximum depth: **5** hops past the protected view (a constant in
+  `crates/riversd/src/security_pipeline.rs`). Validator rejects deeper
+  chains at config load with `X014`. Runtime check is
+  defense-in-depth.
+- Cycles forbidden. Validator catches self-reference (V → V), mutual
+  recursion (A → B → A), and longer cycles via DFS visited tracking.
+  Runtime check is defense-in-depth.
+
+**Claims propagation (v1):** `session_claims` returned by guards in
+the chain are **not** propagated to the protected view's
+`ctx.session`. The chain composes allow/deny decisions only. Cross-level
+claim merging is a separate feature; if a chain needs to share data
+between levels, use `ctx.store` or pass via headers.
+
+### 14.5 Constraints (validator-enforced)
 
 | Code | Severity | Catches |
 |---|---|---|
-| `X014` | error | `guard_view` references a missing view |
-| `X014` | error | `guard_view` target is not a codecomponent (DataView / `none` handlers can't return the `{ allow }` envelope) |
-| `X014` | error | `guard_view` target itself declares `guard_view` — **chains are not supported in v1.** Catches self-reference (V → V), mutual recursion (A → B → A), and arbitrarily deep chains in one rule. Lift in a follow-up PR if a real chained-auth use case surfaces. |
-| `W009` | warning | `guard_view` target has `auth = "session"` — sessions don't exist when the guard runs |
-| `W010` | warning | View has both `guard = true` (server-wide gate) and `guard_view = "..."` (per-view gate) |
+| `X014` | error | `guard_view` (or any chain hop) references a missing view |
+| `X014` | error | `guard_view` (or any chain hop) target is not a codecomponent (DataView / `none` handlers can't return the `{ allow }` envelope) |
+| `X014` | error | Chain forms a cycle — self-reference (V → V), mutual recursion (A → B → A), or a longer cycle |
+| `X014` | error | Chain exceeds `MAX_GUARD_CHAIN_DEPTH` (5 hops) |
+| `W009` | warning | Any chain hop has `auth = "session"` — sessions don't exist when the guard runs |
+| `W010` | warning | Protected view has both `guard = true` (server-wide gate) and `guard_view = "..."` (per-view gate) |
 
-### 14.5 Cross-references
+### 14.6 Cross-references
 
 - `rivers-mcp-view-spec.md` §13.5 — MCP-specific config example.
 - `rivers-auth-session-spec.md` §11.5 — bearer-token recipe via a named guard (closes CB-P1.12).
