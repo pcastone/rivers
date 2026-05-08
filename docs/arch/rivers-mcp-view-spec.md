@@ -181,6 +181,53 @@ default = "active"                    →  "default": "active"
 
 The `location` field (path, query, body, header) is NOT exposed to the model. The model sees a flat input schema. The DataView engine handles routing each parameter to its declared location internally.
 
+#### 4.1.1 Codecomponent-backed tools — `inputSchema` resolution (CB-P0.2)
+
+Tools using `view = "..."` (codecomponent backend, §13.2) cannot be
+projected from DataView parameter declarations — the request shape
+lives in the handler's TypeScript types, not in declarative SQL. The
+framework resolves `inputSchema` for these tools in three steps:
+
+1. **Explicit declaration.** `[api.views.X.tools.Y].input_schema =
+   "schemas/foo.input.json"` — bundle author points at a JSON Schema
+   file relative to the app directory. The file is loaded at
+   `tools/list` time. Bundle-load validation (`MCP-VAL-8`) verifies the
+   path exists.
+
+2. **Conventional discovery.** When `input_schema` is omitted, the
+   framework looks for `<app_dir>/schemas/<tool_name>.input.json`
+   (named after the tool, not the handler). If present and valid JSON,
+   that file is used. This lets bundles drop the per-tool
+   `input_schema =` line for the common case — write the file at the
+   conventional path, the framework finds it.
+
+3. **Open-object fallback.** When neither path resolves, the framework
+   serves `{"type":"object","properties":{}}`. The model sees the tool
+   exists but gets no input shape — usable, but discoverability suffers.
+
+Recommended workflow for codecomponent tools with non-trivial input:
+
+- Define your handler's request type in TypeScript (e.g. `interface
+  PullTaskRequest { taskId: string; force?: boolean }`).
+- Generate the JSON Schema with the npm tool
+  [`ts-json-schema-generator`](https://github.com/vega/ts-json-schema-generator):
+
+  ```sh
+  npx ts-json-schema-generator \
+    --path 'libraries/handlers/lifecycle.ts' \
+    --type 'PullTaskRequest' \
+    --out 'schemas/pull_task.input.json'
+  ```
+
+- Commit the generated schema to the bundle. The conventional name
+  matches the tool name in `[api.views.X.tools.<tool_name>]` — discovery
+  is automatic, no `input_schema = "..."` line required in `app.toml`.
+
+This is the documented path until first-class TS-type → JSON Schema
+generation lands inside `riverpackage`. The convention works the same
+either way; the eventual CLI subcommand will write to the same file
+locations.
+
 ### 4.2 Tool Execution
 
 `tools/call` request:
