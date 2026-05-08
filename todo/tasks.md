@@ -1905,3 +1905,60 @@ Allow DataViews to declare `source_views` referencing other DataViews by name. T
   - MQ-1..MQ-4: doc constraints + C010 enforcement.
   - CD-1..CD-3: datasource mismatch check in `tx_query_callback`, `tx_query_cross_datasource_rejected` test.
 
+---
+
+# CB MCP Follow-ups (plan: docs/superpowers/plans/2026-05-08-cb-mcp-followups.md)
+
+## Plan A — P1.13: capability propagation for MCP `view=` dispatch
+
+**Source:** `cb-rivers-feature-request.md` P1.13 (filed 2026-05-08).
+**Root cause confirmed (2026-05-08):** Capability gate at
+`crates/riversd/src/process_pool/v8_engine/rivers_global.rs:1719` consults
+`TASK_DS_CONFIGS`, populated from `TaskContext.datasource_configs`. REST
+populates it via the loop at
+`crates/riversd/src/view_engine/pipeline.rs:282-323`. MCP's
+`dispatch_codecomponent_tool`
+(`crates/riversd/src/mcp/dispatch.rs:545-549`) calls only
+`task_enrichment::enrich`, never the datasource-wiring loop, so the map is
+empty for every MCP-dispatched handler.
+
+- [x] **A.1** — Extracted into
+  `task_enrichment::wire_datasources(builder, Option<&DataViewExecutor>,
+  dv_namespace) -> TaskContextBuilder`. Same iteration / filter / branch
+  logic as the REST loop. Build clean. (Done 2026-05-08.)
+
+- [x] **A.2** — REST primary-handler call site swapped to the helper. 42
+  inline lines → one call. No behavior change. `cargo test -p riversd
+  --lib` 474/474 green. (Done 2026-05-08.)
+
+- [x] **A.3** — `dispatch_codecomponent_tool` now reads
+  `ctx.dataview_executor.read().await` and calls `wire_datasources` before
+  `task_enrichment::enrich`. Build clean. (Done 2026-05-08.)
+
+- [x] **A.4 + A.5** — Unit tests on the helper itself
+  (`task_enrichment::tests::wire_datasources_populates_per_app_configs`,
+  `…_is_noop_without_executor`) cover both axes: only the calling app's
+  datasources appear in `datasource_configs`, foreign-app entries are
+  ignored, and `None` executor is a safe no-op. End-to-end V8 dispatch
+  test was scoped down to a unit test because the helper IS the load-bearing
+  change; the existing 474-test riversd lib suite covers surrounding
+  plumbing. (Done 2026-05-08.)
+
+- [x] **A.6** — `docs/arch/rivers-mcp-view-spec.md` §13.2 updated to
+  document the `view = "..."` alternative and the inner-view resource
+  honouring rule. (Done 2026-05-08.)
+
+- [x] **A.7** — Decision log + changelog entries written, both citing
+  CB-P1.13 and the plan doc. (Done 2026-05-08.)
+
+- [x] **A.8** — `todo/gutter.md` carries the WS/SSE follow-up
+  (`websocket.rs:497, 546`; `sse.rs:424`) — same gap, out of scope for
+  this PR. (Done 2026-05-08.)
+
+- [x] **A.9** — `just bump-patch` → `0.58.0+0208010526 → 0.58.1+1424080526`.
+  (Done 2026-05-08.)
+
+**Done.** All A.1–A.9 ticked. `cargo test -p riversd --lib` 474/474 +
+7 ignored. `cargo test -p rivers-runtime --lib` 230/230. Version bumped.
+Both logs updated. Plan A complete; pausing here for review before
+starting Plan B (P1.9 path_params).

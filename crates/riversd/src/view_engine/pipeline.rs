@@ -279,49 +279,11 @@ pub async fn execute_rest_view(
                     // - All others (SQL, NoSQL, etc.): datasource_config only — used by
                     //   ctx.transaction() and Rivers.db.begin() to open a connection
                     //   on demand. No token needed; driver dispatch is via DriverFactory.
-                    if let Some(exec) = executor {
-                        let ns_prefix = format!("{}:", ctx.dv_namespace);
-                        for (key, params) in exec.datasource_params().iter() {
-                            let ds_name = if let Some(n) = key.strip_prefix(&ns_prefix) {
-                                n
-                            } else {
-                                continue;
-                            };
-                            let driver = params.options.get("driver").map(|s| s.as_str()).unwrap_or("");
-                            if driver == "filesystem" {
-                                let token = rivers_runtime::process_pool::DatasourceToken::direct(
-                                    "filesystem",
-                                    std::path::PathBuf::from(&params.database),
-                                );
-                                builder = builder.datasource(ds_name.to_string(), token);
-                            } else if rivers_runtime::process_pool::BROKER_DRIVER_NAMES
-                                .contains(&driver)
-                            {
-                                // BR-2026-04-23: broker datasources get a
-                                // Broker token + full ConnectionParams copy so
-                                // the worker can lazy-build a BrokerProducer.
-                                let token = rivers_runtime::process_pool::DatasourceToken::broker(driver);
-                                builder = builder.datasource(ds_name.to_string(), token.clone());
-                                // Also feed datasource_configs so task_locals'
-                                // producer bootstrap finds the ConnectionParams.
-                                let resolved = rivers_runtime::process_pool::ResolvedDatasource {
-                                    driver_name: driver.to_string(),
-                                    params: params.clone(),
-                                };
-                                builder = builder.datasource_config(ds_name.to_string(), resolved);
-                            } else if !driver.is_empty() {
-                                // SQL / NoSQL / other regular drivers: wire into
-                                // datasource_configs so ctx.transaction() and
-                                // Rivers.db.begin() can open a connection by name.
-                                // No token is needed; the DriverFactory routes by driver name.
-                                let resolved = rivers_runtime::process_pool::ResolvedDatasource {
-                                    driver_name: driver.to_string(),
-                                    params: params.clone(),
-                                };
-                                builder = builder.datasource_config(ds_name.to_string(), resolved);
-                            }
-                        }
-                    }
+                    builder = crate::task_enrichment::wire_datasources(
+                        builder,
+                        executor,
+                        &ctx.dv_namespace,
+                    );
                     let builder = crate::task_enrichment::enrich(
                         builder,
                         &ctx.dv_namespace,

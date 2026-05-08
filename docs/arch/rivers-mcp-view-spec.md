@@ -596,11 +596,19 @@ ttl_seconds  = 3600                # default: 3600
 
 ```toml
 [api.views.mcp.tools.{tool_name}]
-dataview    = "dataview_name"      # REQUIRED — DataView reference
+dataview    = "dataview_name"      # one of dataview | view — REQUIRED
+view        = "view_name"          # alternative — references a codecomponent REST view
 description = "..."                # REQUIRED — human-readable for AI model
 method      = "GET"                # optional — restrict to one HTTP method
 hints       = { ... }              # optional — MCP annotations
 ```
+
+When `view` is set the tool dispatches the inner view's codecomponent
+handler through the same ProcessPool path as REST. The inner view's
+declared resources (datasources, lockbox secrets, keystore entries) are
+honoured exactly as in the REST primary-handler path: any
+`Rivers.db.execute('<datasource>', ...)` call from the handler resolves
+against the app's datasource set, not the outer MCP view's. (CB-P1.13)
 
 ### 13.3 Resource
 
