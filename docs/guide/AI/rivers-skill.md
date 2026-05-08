@@ -48,6 +48,7 @@ Build and administer Rivers applications. Rivers is a declarative app-service fr
 | Atomic multi-write | `RECIPE:ATOMIC-MULTI-WRITE` |
 | MCP tool (read) | `RECIPE:MCP-READ-TOOL` |
 | MCP tool (multi-step write) | `RECIPE:MCP-MULTI-STEP` |
+| Multiple tools, one MCP server | `RECIPE:MCP-MULTI-TOOL-SERVER` |
 | Connect a datasource | `RECIPE:DATASOURCE-SQL`, `RECIPE:DATASOURCE-REDIS`, etc. |
 | Schema file | `RECIPE:SCHEMA-FILE` |
 | Validate a bundle | `RECIPE:BUNDLE-VALIDATION` |
@@ -72,7 +73,7 @@ Build and administer Rivers applications. Rivers is a declarative app-service fr
 4. **Multi-query orchestration belongs in handlers**, not in DataView TOML.
 5. **Transactions are sync**: `Rivers.db.tx.begin()` / `tx.query()` / `tx.commit()`. No promises.
 6. **`transaction = true`** on a DataView wraps its single query in BEGIN/COMMIT. Independent of handler transactions.
-7. **`view_type = "Mcp"`** — CamelCase, NOT all-caps `"MCP"`.
+7. **`view_type = "Mcp"`** — CamelCase, NOT all-caps `"MCP"`. Multiple `Mcp` views are allowed per app and per bundle — each registers its own JSON-RPC endpoint at its `path`. MCP clients connect to one path at a time.
 8. **`type = "dataview"`** — lowercase one word, NOT `"data_view"`.
 9. **`destructive = false`** must be explicit on non-destructive MCP tools — default is `true`.
 10. **`method = "POST"`** required for write MCP tools — without it, engine calls `get_query`.
