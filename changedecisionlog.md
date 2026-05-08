@@ -4,6 +4,90 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 
 ---
 
+## 2026-05-08 — Plan G: WS + SSE datasource-wiring + slug parity (CB-P1.13 follow-up)
+
+**Decision:** Closes the gutter item filed by Plan A (PR #100).
+WebSocket and SSE codecomponent handlers now go through the same
+`wire_datasources` + slug-to-`enrich` pattern that REST and MCP use,
+removing the silent-failure mode where `Rivers.db.execute('<ds>', ...)`
+in a WS or SSE handler would throw `CapabilityError` because the
+datasource map was never populated.
+
+The fix has two halves and bundles both into the same change (Standard 5
+— "fix while you're in there"):
+
+1. **Datasource wiring.** Each dispatch helper
+   (`websocket.rs::execute_ws_on_stream`,
+   `websocket.rs::dispatch_ws_lifecycle`,
+   `sse.rs::run_sse_push_loop`) now takes
+   `executor: Option<&DataViewExecutor>` and calls
+   `task_enrichment::wire_datasources` before
+   `task_enrichment::enrich`. Callers in
+   `server/streaming.rs::handle_ws_connection` snapshot the executor
+   from `ctx.dataview_executor.read().await` once per dispatched
+   hook/message and pass it through.
+
+2. **RT-CTX-APP-ID parity.** Each helper's `app_id` parameter became
+   `dv_namespace`. The slug — `matched.app_entry_point` — is what
+   `keystore_resolver.get_for_entry_point(...)` keys on and what JS
+   handlers see as `ctx.app_id`. Same correction REST and MCP got
+   in the canary sprint and Plan A (CB-P1.13).
+
+**Why snapshot the executor per dispatch rather than once per
+connection:** the executor lives behind an `RwLock<Option<...>>` to
+support hot-reload. Reading the lock per message preserves the
+hot-reload contract without holding the read guard across
+arbitrarily long connections. The cost is one read-lock acquire per
+WS message — negligible compared to the V8 dispatch cost itself.
+Same shape REST uses on every request.
+
+**Why MCP (PR #100) was fixed first and WS/SSE are this PR:** CB
+reported the symptom against MCP. The same gap existed in WS/SSE but
+wasn't reported because most WS/SSE handlers use `ctx.dataview(...)`
+rather than direct `Rivers.db.execute(...)`. Plan A explicitly
+narrowed scope to MCP and tracked the remainder in `todo/gutter.md`.
+This PR closes that gutter item.
+
+**Files affected:**
+
+| File | Change | Spec ref | Method |
+|------|--------|----------|--------|
+| `crates/riversd/src/websocket.rs` | `execute_ws_on_stream` and `dispatch_ws_lifecycle` take `dv_namespace` + `executor`. Both call `wire_datasources` before `enrich`; both pass `dv_namespace` (slug) to `enrich`. Internal tests pass `None` for the executor (the engine-unavailable path is the unit's intent). | CB-P1.13 follow-up | Mirrors PR #100's pattern exactly. |
+| `crates/riversd/src/sse.rs` | `run_sse_push_loop` takes `dv_namespace` + `executor`. Same wiring + slug fix. | CB-P1.13 follow-up | `run_sse_push_loop` is `pub` but only test-callable today; updating it keeps the API consistent for the eventual production caller. |
+| `crates/riversd/src/server/streaming.rs` | `execute_ws_view` clones `matched.app_entry_point` instead of `matched.app_id`; `handle_ws_connection` reads `ctx.dataview_executor` per dispatched hook and threads it. Four dispatch call sites updated (`on_connect`, `on_message`, `on_stream`, `on_disconnect`). | CB-P1.13 follow-up | Single-point intercept on the snapshot — every helper that the WS connection runs sees the same per-tick view. |
+| `docs/arch/rivers-view-layer-spec.md` §6.9 + §7.5 | New sections documenting the datasource-capability-propagation contract for WS and SSE handlers (parity with §5/§13.2 of mcp spec). | CB-P1.13 follow-up | Closes the documentation gap. |
+| `todo/gutter.md` | WS/SSE entry removed. | CB-P1.13 follow-up | |
+
+**Spec reference:** `cb-rivers-feature-request.md` P1.13 (closed by
+PR #100); plan
+`docs/superpowers/plans/2026-05-08-cb-mcp-followup-batch-2.md` Plan G.
+
+**Test status:** `cargo test -p riversd --lib` 485/485 + 7 ignored
+(no regression vs. main). Pre-existing test
+`view_engine_tests::slow_observer_does_not_extend_request_latency`
+fails on `main` independently of this PR — verified by stashing all
+changes and reproducing the same failure on the bare `main` HEAD.
+Test passes the empty string for `dv_namespace` to `ViewContext::new`,
+which trips the dispatcher's empty-app_id check after the canary
+sprint's RT-CTX-APP-ID fix changed the source-of-truth for the value
+passed to `enrich`. Out of scope for Plan G; tracked separately for a
+follow-up that updates the test fixture.
+
+**Why no version bump:** sprint-end minor bump policy. The five
+capability items landing today (PR #100–#103, #105, this PR)
+collapse into the 0.61.0 minor that's held until you call sprint-end.
+Build stamp only.
+
+**Follow-up captured:** `polling/runner.rs::dispatch_change_detect`
+has an analogous `enrich(builder, app_id, ...)` call. The `app_id`
+there is already a slug (extracted via
+`task_enrichment::app_id_from_qualified_name`), so the slug-parity
+half is moot. Adding `wire_datasources` is a separate concern (the
+change-detect handler is a small diff callback not expected to need
+DB access). Tracked in gutter for a follow-up if/when reported.
+
+---
+
 ## 2026-05-08 — CB-P0.2 (full): convention-based `input_schema` discovery for codecomponent MCP tools
 
 **Decision:** Codecomponent-backed MCP tools that don't declare an

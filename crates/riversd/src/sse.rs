@@ -340,7 +340,8 @@ pub async fn run_sse_push_loop(
     mut event_rx: broadcast::Receiver<Event>,
     sender: mpsc::Sender<SseEvent>,
     trace_id: &str,
-    app_id: &str,
+    dv_namespace: &str,
+    executor: Option<&rivers_runtime::DataViewExecutor>,
 ) -> Result<(), StreamingError> {
     let tick_duration = if tick_interval_ms > 0 {
         Some(tokio::time::Duration::from_millis(tick_interval_ms))
@@ -421,9 +422,11 @@ pub async fn run_sse_push_loop(
             .entrypoint(entrypoint.clone())
             .args(args)
             .trace_id(trace_id.to_string());
+        // CB-P1.13 follow-up (Plan G): wire datasources + use slug for enrich.
+        let builder = crate::task_enrichment::wire_datasources(builder, executor, dv_namespace);
         let builder = crate::task_enrichment::enrich(
             builder,
-            app_id,
+            dv_namespace,
             rivers_runtime::process_pool::TaskKind::Rest,
         );
         let ctx = builder
@@ -654,6 +657,7 @@ mod tests {
             sender,
             "trace-1",
             "test-app",
+            None,
         )
         .await;
 
@@ -735,6 +739,7 @@ mod tests {
             sender,
             "trace-1",
             "test-app",
+            None,
         )
         .await;
 
