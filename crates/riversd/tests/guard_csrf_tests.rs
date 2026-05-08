@@ -52,6 +52,7 @@ fn make_view(view_type: &str, guard: bool, auth: Option<&str>) -> ApiViewConfig 
         session: None,
         federation: vec![],
         response_headers: None,
+            guard_view: None,
     }
 }
 
@@ -93,6 +94,7 @@ fn make_dataview_view() -> ApiViewConfig {
         session: None,
         federation: vec![],
         response_headers: None,
+            guard_view: None,
     }
 }
 

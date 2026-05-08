@@ -76,6 +76,7 @@ mod tests {
             session: None,
             federation: vec![],
         response_headers: None,
+            guard_view: None,
         }
     }
 

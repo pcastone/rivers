@@ -4,6 +4,74 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 
 ---
 
+## 2026-05-08 — CB-P1.10: per-view named guards (`guard_view`)
+
+**Decision:** Added `guard_view: Option<String>` as a new field on
+`ApiViewConfig`. When set on an MCP view, the named view's codecomponent
+handler runs as a pre-flight before JSON-RPC dispatch — same handler
+contract as the existing server-wide guard (`{ allow: true }` proceeds,
+anything else rejects with HTTP 401). Honoured only for MCP views in
+this PR; other view types accept the field but ignore it at runtime
+(documented as a gap to close in follow-up rather than a feature).
+
+**Why a new field rather than polymorphic `guard: bool | string`:**
+Considered the polymorphic shape (option 1) but the two semantics are
+genuinely different — `guard: true` means "this view IS the auth gate"
+(server-wide singleton), while `guard_view: "name"` means "the named
+view is the gate that protects this one." Overloading a single field
+across both semantics would have been confusing both in the type system
+and in operator-facing TOML. The named field is also the lower-risk
+path: the existing `pub guard: bool` reader sites stay unchanged.
+
+The MCP spec's existing `guard = "name"` examples (5 occurrences) were
+updated to use `guard_view = "name"` to match the implementation. CB
+referenced the old wording in `cb-rivers-feature-request.md` P1.10;
+this PR reconciles spec and runtime.
+
+**Why HTTP 401 rather than a JSON-RPC error envelope:** Mirrors MCP-27.
+Auth failures map to HTTP status codes so clients can apply standard
+re-auth flows without parsing the body.
+
+**Why the guard sees `body: Null`:** The pre-flight runs *before* the
+POST body is consumed — the guard cannot inspect tool arguments.
+Restricting the guard to authentication-shape decisions (header /
+session-token validation) is intentional; allowing payload inspection
+would push application logic into the auth layer.
+
+**Files affected:**
+
+| File | Change | Spec ref | Method |
+|------|--------|----------|--------|
+| `crates/rivers-runtime/src/view.rs` | New `guard_view: Option<String>` field on `ApiViewConfig`. | CB-P1.10 | Optional + `#[serde(default)]`. |
+| `crates/rivers-runtime/src/validate_structural.rs` | `guard_view` added to `VIEW_FIELDS` allowlist. | CB-P1.10 | |
+| `crates/rivers-runtime/src/validate_crossref.rs` | New X014 cross-ref check: named guard must reference a codecomponent-handler view in the same app. 3 unit tests (unknown target, dataview-handler target, valid path). | CB-P1.10 | Suggestion of nearest match included via `validate_format::suggest_key`. |
+| `crates/rivers-runtime/src/validate_result.rs` | New error code `X014`. | CB-P1.10 | |
+| `crates/rivers-runtime/src/{validate_existence,validate_crossref}.rs` test fixtures | `guard_view: None` added to all `ApiViewConfig` literals. | CB-P1.10 | Mechanical. |
+| `crates/riversd/src/server/view_dispatch.rs` | `execute_mcp_view` runs `run_mcp_named_guard_preflight` before body extraction when `config.guard_view` is set. New helper resolves the named view, builds a `ParsedRequest` from a snapshot of headers (taken before the body is consumed — `Body` is `!Sync` so a `&Request` can't cross an `.await` boundary), calls existing `crate::guard::execute_guard_handler`, and rejects with HTTP 401 on `allow: false` / dispatcher error. | CB-P1.10 | Reuses the existing `execute_guard_handler` so the result-parsing contract (allow / session_claims) is identical to the server-wide guard. |
+| `crates/riversd/src/{bundle_diff,bundle_loader/load,view_engine/mod}.rs` + tests | `guard_view: None` in `ApiViewConfig` literals. | CB-P1.10 | Mechanical. |
+| `docs/arch/rivers-mcp-view-spec.md` MCP-5 + §13.5 + 5 example blocks | Spec aligned with implementation: `guard` → `guard_view` everywhere; new §13.5 documents contract, return shape, HTTP-401-not-JSON-RPC rationale, and the MCP-only restriction. | CB-P1.10 | Closes the long-standing gap CB called out where the spec had `guard = "name"` but the runtime accepted only `guard = bool`. |
+
+**Spec reference:** `cb-rivers-feature-request.md` P1.10;
+`docs/superpowers/plans/2026-05-08-cb-mcp-followups.md` Plan D.
+
+**Resolution method:** Read CB's report (looking for per-route bearer
+validation independent of the server-wide session guard). Confirmed the
+existing runtime accepted only `guard = bool` (`view.rs:53`). Picked
+the new-field shape (option 2) over polymorphic deserialization because
+the semantics are genuinely different. Reused the existing
+`execute_guard_handler` infrastructure — same `{ allow }` contract — so
+operators writing guard codecomponents can move freely between
+server-wide and per-view guard roles.
+
+**Related work that follows:** CB-P1.12 (`auth = "bearer"` view mode)
+is now subsumable as documentation. With named guards a bundle can
+declare a small codecomponent that hashes `Authorization: Bearer <token>`
+against `api_keys` and writes the matching identity claims back; that
+recipe is the sanctioned `auth = "bearer"` answer. Plan E in the
+follow-ups doc captures the doc-only close.
+
+---
+
 ## 2026-05-08 — CB-P1.11: per-view static `response_headers`
 
 **Decision:** Added `[api.views.*.response_headers]` as a first-class

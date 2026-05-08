@@ -63,7 +63,7 @@ MCP Streamable HTTP is a single-endpoint protocol: the client POSTs JSON-RPC mes
 [api.views.mcp]
 path         = "/mcp"
 view_type    = "MCP"
-guard        = "api_key_guard"
+guard_view        = "api_key_guard"
 instructions = "docs/mcp-help.md"
 
 [api.views.mcp.tools.get_orders]
@@ -111,7 +111,7 @@ default  = "normal"
 | MCP-2 | Only one MCP view per application. Multiple MCP views in the same app fail at config validation. |
 | MCP-3 | Every tool and resource MUST reference a DataView declared in `[data.dataviews.*]`. References to undeclared DataViews fail at config validation. |
 | MCP-4 | `instructions` path is relative to the app bundle root. File must exist at startup. Missing file fails at config validation. If omitted, only the auto-generated tool catalog is served. |
-| MCP-5 | `guard` is optional. If omitted, the MCP endpoint is unauthenticated. The guard follows the same contract as REST view guards. |
+| MCP-5 | `guard_view` is optional. If set, the named view's codecomponent runs as a pre-flight before JSON-RPC dispatch — `{ allow: true }` proceeds, anything else rejects with HTTP 401. (CB-P1.10.) |
 
 ---
 
@@ -610,7 +610,7 @@ Config validation at app startup (fail-fast):
 [api.views.mcp]
 path         = "/mcp"              # REQUIRED — endpoint path
 view_type    = "MCP"               # REQUIRED — activates MCP dispatcher
-guard        = "api_key_guard"     # optional — guard view name
+guard_view        = "api_key_guard"     # optional — guard view name
 instructions = "docs/mcp-help.md"  # optional — static instructions file
 
 [api.views.mcp.session]
@@ -658,6 +658,56 @@ required    = true                 # default: false
 default     = "value"              # optional — used when argument absent
 ```
 
+### 13.5 Named Guard (CB-P1.10)
+
+`guard_view = "name"` references another view in the same app whose
+codecomponent handler runs as a pre-flight before this MCP view dispatches
+its JSON-RPC body. Distinct from `guard = true` (which marks a view as
+THE server-wide auth gate — exactly one view per server may set that).
+
+```toml
+[api.views.advisor_guard]
+view_type = "Rest"
+path      = "/internal/advisor-guard"
+method    = "POST"
+auth      = "none"
+
+[api.views.advisor_guard.handler]
+type       = "codecomponent"
+language   = "javascript"
+module     = "handlers/advisor-guard.js"
+entrypoint = "validate"
+
+[api.views.mcp_advisor]
+view_type  = "Mcp"
+path       = "/mcp/advisor"
+method     = "POST"
+guard_view = "advisor_guard"
+```
+
+**Contract:**
+
+- The named view MUST be a codecomponent handler (DataView and `none`
+  handlers are rejected by `X014` at validate time).
+- The guard handler receives a `ParsedRequest` with the original method,
+  path, headers (incl. `Authorization`, `Mcp-Session-Id`), and matched
+  `path_params`. The JSON-RPC body has not been read yet — the guard
+  cannot inspect it.
+- Return `{ allow: true }` (with optional `session_claims`) to proceed
+  with JSON-RPC dispatch. Return `{ allow: false }` (or any other shape)
+  to reject the request with HTTP 401.
+- Dispatcher errors (process pool unavailable, handler exception)
+  reject with HTTP 401 and a trace ID — auth must fail closed.
+
+**Why HTTP 401 rather than a JSON-RPC error envelope:** per MCP-27, auth
+failures map to HTTP status codes so MCP clients can apply standard
+re-auth flows without parsing the body.
+
+**Cross-reference:** `[api.views.X.guard_view]` is currently honoured
+only on MCP views. Other view types accept the field in TOML but ignore
+it at runtime; treat that as a behaviour gap to close in a follow-up,
+not a feature.
+
 ---
 
 ## 14. Examples
@@ -704,7 +754,7 @@ required = true
 [api.views.mcp]
 path      = "/mcp"
 view_type = "MCP"
-guard     = "api_key_guard"
+guard_view     = "api_key_guard"
 
 [api.views.mcp.tools.get_contacts]
 dataview    = "get_contacts"
@@ -730,7 +780,7 @@ The AI model calls `tools/call` with `{"name": "search_contacts", "arguments": {
 [api.views.mcp]
 path         = "/mcp"
 view_type    = "MCP"
-guard        = "api_key_guard"
+guard_view        = "api_key_guard"
 instructions = "docs/order-api-help.md"
 
 # ── Tools ──
@@ -834,7 +884,7 @@ required = true
 [api.views.mcp]
 path      = "/mcp"
 view_type = "MCP"
-guard     = "api_key_guard"
+guard_view     = "api_key_guard"
 
 [api.views.mcp.tools.generate]
 dataview    = "generate"

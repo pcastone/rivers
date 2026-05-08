@@ -684,6 +684,75 @@ fn check_view_refs(
             }
         }
 
+        // X014: `guard_view = "name"` must reference a view in the same app
+        // that has a codecomponent handler — DataView- and None-handler views
+        // can't return the `{ allow: bool }` envelope the named-guard contract
+        // expects. CB-P1.10.
+        if let Some(ref guard_view_name) = view.guard_view {
+            match app.config.api.views.get(guard_view_name.as_str()) {
+                Some(target) => {
+                    if !matches!(target.handler, HandlerConfig::Codecomponent { .. }) {
+                        let kind = match &target.handler {
+                            HandlerConfig::Dataview { .. } => "dataview",
+                            HandlerConfig::Codecomponent { .. } => "codecomponent",
+                            HandlerConfig::None {} => "none",
+                        };
+                        results.push(
+                            ValidationResult::fail(
+                                error_codes::X014,
+                                format!("{}/app.toml", app_name),
+                                format!(
+                                    "View '{}' guard_view '{}' must reference a codecomponent-handler view; got '{}'",
+                                    view_name, guard_view_name, kind,
+                                ),
+                            )
+                            .with_app(app_name)
+                            .with_table_path(format!("api.views.{}", view_name))
+                            .with_field("guard_view"),
+                        );
+                    } else {
+                        results.push(
+                            ValidationResult::pass(
+                                format!("{}/app.toml", app_name),
+                                format!(
+                                    "View '{}' guard_view '{}' resolved",
+                                    view_name, guard_view_name,
+                                ),
+                            )
+                            .with_app(app_name)
+                            .with_crossref(
+                                format!("api.views.{}.guard_view", view_name),
+                                guard_view_name.as_str(),
+                                "view",
+                            ),
+                        );
+                    }
+                }
+                None => {
+                    let mut result = ValidationResult::fail(
+                        error_codes::X014,
+                        format!("{}/app.toml", app_name),
+                        format!(
+                            "View '{}' references guard_view '{}' not declared in {}/app.toml",
+                            view_name, guard_view_name, app_name,
+                        ),
+                    )
+                    .with_app(app_name)
+                    .with_table_path(format!("api.views.{}", view_name))
+                    .with_field("guard_view");
+                    let known: Vec<&str> = app.config.api.views.keys()
+                        .map(|s| s.as_str())
+                        .collect();
+                    if let Some(sug) = crate::validate_format::suggest_key(
+                        guard_view_name.as_str(), &known,
+                    ) {
+                        result = result.with_suggestion(sug);
+                    }
+                    results.push(result);
+                }
+            }
+        }
+
         // X009: WebSocket requires method=GET
         if view_type == "Websocket" {
             if let Some(method) = &view.method {
@@ -1309,6 +1378,7 @@ mod tests {
             session: None,
             federation: vec![],
             response_headers: None,
+            guard_view: None,
         }
     }
 
@@ -1353,6 +1423,7 @@ mod tests {
             session: None,
             federation: vec![],
             response_headers: None,
+            guard_view: None,
         }
     }
 
@@ -1392,6 +1463,7 @@ mod tests {
             session: None,
             federation: vec![],
             response_headers: None,
+            guard_view: None,
         }
     }
 
@@ -1869,6 +1941,86 @@ mod tests {
     }
 
     // ── X008: Dataview handler on non-Rest view ─────────────────────
+
+    // ── X014: guard_view must reference a codecomponent view in the same app ──
+
+    #[test]
+    fn x014_guard_view_unknown_target_fails() {
+        let mut views = HashMap::new();
+        let mut bad = make_view_codecomponent(vec![]);
+        bad.guard_view = Some("nonexistent_guard".into());
+        views.insert("mcp_main".into(), bad);
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+        assert!(has_fail(&results, error_codes::X014),
+            "expected X014 for guard_view referencing missing view");
+    }
+
+    #[test]
+    fn x014_guard_view_pointing_at_dataview_handler_fails() {
+        let mut dataviews = HashMap::new();
+        dataviews.insert("d1".into(), make_dv_config("d1", "db"));
+
+        let mut views = HashMap::new();
+        // Target view is a DataView handler — not a codecomponent.
+        views.insert("dv_view".into(), make_view_dataview("Rest", "d1"));
+        let mut bad = make_view_codecomponent(vec![]);
+        bad.guard_view = Some("dv_view".into());
+        views.insert("mcp_main".into(), bad);
+
+        let mut datasources = HashMap::new();
+        datasources.insert("db".into(), make_ds_config("db", "faker"));
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("db", "faker")],
+            vec![],
+            datasources,
+            dataviews,
+            views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+        assert!(has_fail(&results, error_codes::X014),
+            "expected X014 when guard_view points at a non-codecomponent view");
+    }
+
+    #[test]
+    fn x014_guard_view_passing_path() {
+        let mut views = HashMap::new();
+        views.insert("api_key_guard".into(), make_view_codecomponent(vec![]));
+        let mut protected = make_view_codecomponent(vec![]);
+        protected.guard_view = Some("api_key_guard".into());
+        views.insert("mcp_main".into(), protected);
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+        assert!(!has_fail(&results, error_codes::X014),
+            "expected no X014 when guard_view points at a codecomponent view");
+    }
 
     #[test]
     fn x008_dataview_handler_on_websocket() {
@@ -2790,6 +2942,7 @@ mod tests {
             session: None,
             federation: vec![],
             response_headers: None,
+            guard_view: None,
         }
     }
 
@@ -3034,6 +3187,7 @@ mod tests {
             session: None,
             federation: vec![],
             response_headers: None,
+            guard_view: None,
         }
     }
 

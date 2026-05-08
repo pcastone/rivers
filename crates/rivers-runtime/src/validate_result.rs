@@ -552,6 +552,8 @@ pub mod error_codes {
     pub const X012: &str = "X012";
     /// `x-type` does not match `driver`.
     pub const X013: &str = "X013";
+    /// View `guard_view` references a view that does not exist in the same app.
+    pub const X014: &str = "X014";
 
     // ── C: Syntax verification (Layer 4) ────────────────────────────
 

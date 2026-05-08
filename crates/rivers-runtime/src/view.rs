@@ -59,6 +59,15 @@ pub struct ApiViewConfig {
     #[serde(default)]
     pub guard_config: Option<GuardConfig>,
 
+    /// Per-view named guard — references another view (same app) whose
+    /// codecomponent runs as a pre-flight before this view dispatches.
+    /// 200 + `{ allow: true }` proceeds; otherwise the request is rejected
+    /// with HTTP 401. Distinct from `guard: bool` (which marks a view as
+    /// THE server-wide auth gate). Currently honoured for MCP views; other
+    /// view types ignore this field. CB-P1.10.
+    #[serde(default)]
+    pub guard_view: Option<String>,
+
     // ── Outbound HTTP capability ────────────────────────────────────
 
     /// When true, this view's CodeComponent has access to `Rivers.http`.
