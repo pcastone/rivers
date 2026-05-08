@@ -51,6 +51,7 @@ fn consumer_view(topic: &str, handler: &str) -> ApiViewConfig {
         instructions: None,
         session: None,
         federation: vec![],
+        response_headers: None,
     }
 }
 

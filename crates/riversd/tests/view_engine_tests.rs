@@ -45,6 +45,7 @@ fn rest_view(method: &str, path: &str, dataview: &str) -> ApiViewConfig {
         instructions: None,
         session: None,
         federation: vec![],
+        response_headers: None,
     }
 }
 
@@ -88,6 +89,7 @@ fn codecomponent_view(method: &str, path: &str) -> ApiViewConfig {
         instructions: None,
         session: None,
         federation: vec![],
+        response_headers: None,
     }
 }
 

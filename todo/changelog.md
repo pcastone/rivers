@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026-05-08 — CB-P1.11: per-view static `response_headers`
+
+Closes the gap CB filed 2026-05-08: `[api.views.*.response_headers]`
+is now a first-class config field. CB can attach `Deprecation` /
+`Sunset` / `Link` headers (RFC 8594) to legacy MCP routes for
+protocol-level deprecation signaling, and `Cache-Control` to
+read-heavy DataView responses. Handler-set headers always win when
+both sides set the same name.
+
+| File | Change | Spec ref | Notes |
+|------|--------|----------|-------|
+| `crates/rivers-runtime/src/view.rs` | New `response_headers: Option<HashMap<String, String>>` on `ApiViewConfig`. | CB-P1.11 | Optional, `#[serde(default)]`. |
+| `crates/rivers-runtime/src/validate_structural.rs` | Allowlist + new `validate_response_headers`. Rejects reserved names (`Content-Type`, `Content-Length`, `Transfer-Encoding`, `Mcp-Session-Id`), malformed names (non-token chars), and non-printable values. 3 unit tests. | CB-P1.11 | `S005` on each. |
+| `crates/riversd/src/view_engine/response_headers.rs` (new) | `apply_static_response_headers(response, config)` helper. 4 unit tests. | CB-P1.11 | Handler-override-wins precedence. Defense-in-depth: malformed entries that survive validation get logged + skipped. |
+| `crates/riversd/src/server/view_dispatch.rs` | `combined_fallback_handler` clones config + applies after dispatch. | CB-P1.11 | Single intercept — covers REST/WS/SSE/MCP. |
+| `docs/arch/rivers-view-layer-spec.md` §5.4 | New section. | CB-P1.11 | |
+| `Cargo.toml` (workspace) | Patch bump. | CLAUDE.md versioning | |
+
+**Tests:** `cargo test -p riversd --lib` 480/480 (was 476; +4).
+`cargo test -p rivers-runtime --lib` 243/243 (was 240; +3).
+
+**Mechanical follow-on:** `response_headers: None` added to every
+`ApiViewConfig` literal across the workspace (test fixtures, bundle
+loader, bundle diff). No behavior change in those sites.
+
+---
+
 ## 2026-05-08 — CB-P1.9: thread `path_params` into MCP dispatch handler context
 
 Closes the gap CB filed 2026-05-07: templated MCP routes

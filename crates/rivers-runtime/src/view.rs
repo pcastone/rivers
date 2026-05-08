@@ -140,6 +140,15 @@ pub struct ApiViewConfig {
     /// into this server's `tools/list` and `resources/list` under a namespaced prefix.
     #[serde(default)]
     pub federation: Vec<McpFederationConfig>,
+
+    /// Static response headers added to every HTTP response from this view.
+    ///
+    /// Applied after handler-set headers — handler overrides win when the
+    /// same name is set on both sides. Reserved headers (`Content-Type`,
+    /// `Content-Length`, `Transfer-Encoding`, `Mcp-Session-Id`) are rejected
+    /// at structural validation time. CB-P1.11.
+    #[serde(default)]
+    pub response_headers: Option<HashMap<String, String>>,
 }
 
 /// Guard lifecycle hooks — all optional, all side-effects only.

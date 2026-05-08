@@ -3,11 +3,13 @@
 //! Per `rivers-view-layer-spec.md` §1-5, §12-13.
 
 mod pipeline;
+mod response_headers;
 mod router;
 mod types;
 mod validation;
 
 pub use pipeline::*;
+pub use response_headers::apply_static_response_headers;
 pub use router::*;
 pub use types::*;
 pub use validation::*;
@@ -73,6 +75,7 @@ mod tests {
             instructions: None,
             session: None,
             federation: vec![],
+        response_headers: None,
         }
     }
 

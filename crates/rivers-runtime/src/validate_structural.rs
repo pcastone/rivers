@@ -105,6 +105,7 @@ const VIEW_FIELDS: &[&str] = &[
     "session_revalidation_interval_s", "polling", "event_handlers",
     "on_stream", "ws_hooks", "on_event",
     "tools", "resources", "prompts", "instructions", "session", "federation",
+    "response_headers",
 ];
 const VIEW_REQUIRED: &[&str] = &["path", "method", "view_type", "handler"];
 
@@ -841,6 +842,13 @@ fn validate_view(
         }
     }
 
+    // Validate [api.views.*.response_headers] (CB-P1.11).
+    // Names must be RFC 7230 tokens; values must be ASCII-printable; a small
+    // reserved set is rejected because the framework manages those headers.
+    if let Some(rh) = table.get("response_headers") {
+        validate_response_headers(rh, file, table_path, app_name, results);
+    }
+
     // Validate MCP resources sub-table (if present — MCP view type only).
     // S-MCP-2: warn when a resource has subscribable = true but view method is not GET.
     if let Some(resources_val) = table.get("resources") {
@@ -910,6 +918,116 @@ fn check_unknown_keys(
             }
 
             results.push(result);
+        }
+    }
+}
+
+/// Validate `[api.views.*.response_headers]` (CB-P1.11).
+///
+/// Rules:
+/// - Must be a TOML table.
+/// - Header names match RFC 7230 token grammar (alphanumerics + `-`).
+/// - Header values must be ASCII-printable (`\x20`–`\x7E`); no control chars.
+/// - Reserved framework-managed headers are rejected (case-insensitive):
+///   `Content-Type`, `Content-Length`, `Transfer-Encoding`, `Mcp-Session-Id`.
+fn validate_response_headers(
+    value: &toml::Value,
+    file: &str,
+    table_path: &str,
+    app_name: &str,
+    results: &mut Vec<ValidationResult>,
+) {
+    const RESERVED: &[&str] = &[
+        "content-type",
+        "content-length",
+        "transfer-encoding",
+        "mcp-session-id",
+    ];
+
+    let headers_path = format!("{}.response_headers", table_path);
+    let table = match value.as_table() {
+        Some(t) => t,
+        None => {
+            results.push(
+                ValidationResult::fail(
+                    error_codes::S004,
+                    file,
+                    format!("{} must be a table", headers_path),
+                )
+                .with_table_path(&headers_path)
+                .with_app(app_name),
+            );
+            return;
+        }
+    };
+
+    for (name, val) in table {
+        let name_lc = name.to_ascii_lowercase();
+        if RESERVED.iter().any(|r| *r == name_lc) {
+            results.push(
+                ValidationResult::fail(
+                    error_codes::S005,
+                    file,
+                    format!(
+                        "{}.\"{}\" is a framework-managed header and cannot be set via response_headers",
+                        headers_path, name
+                    ),
+                )
+                .with_table_path(&headers_path)
+                .with_field(name)
+                .with_app(app_name),
+            );
+            continue;
+        }
+        let name_ok = !name.is_empty()
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+        if !name_ok {
+            results.push(
+                ValidationResult::fail(
+                    error_codes::S005,
+                    file,
+                    format!(
+                        "{}.\"{}\" is not a valid HTTP header name (alphanumerics and `-` only)",
+                        headers_path, name
+                    ),
+                )
+                .with_table_path(&headers_path)
+                .with_field(name)
+                .with_app(app_name),
+            );
+            continue;
+        }
+
+        let s = match val.as_str() {
+            Some(s) => s,
+            None => {
+                results.push(
+                    ValidationResult::fail(
+                        error_codes::S004,
+                        file,
+                        format!("{}.\"{}\" must be a string", headers_path, name),
+                    )
+                    .with_table_path(&headers_path)
+                    .with_field(name)
+                    .with_app(app_name),
+                );
+                continue;
+            }
+        };
+        if !s.bytes().all(|b| (0x20..=0x7E).contains(&b)) {
+            results.push(
+                ValidationResult::fail(
+                    error_codes::S005,
+                    file,
+                    format!(
+                        "{}.\"{}\" contains non-printable or non-ASCII bytes; HTTP header values must be ASCII-printable",
+                        headers_path, name
+                    ),
+                )
+                .with_table_path(&headers_path)
+                .with_field(name)
+                .with_app(app_name),
+            );
         }
     }
 }
@@ -1654,6 +1772,125 @@ qeury = {limit = "limit"}
             .expect("expected S002 for unknown 'qeury' in parameter_mapping");
 
         assert!(fail.suggestion.as_ref().unwrap().contains("query"));
+    }
+
+    // ── CB-P1.11 response_headers validation ──────────────────────
+
+    #[test]
+    fn response_headers_rejects_reserved_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        std::fs::write(
+            bundle_dir.join("test-app/app.toml"),
+            r#"
+[data.dataviews.items]
+name       = "items"
+datasource = "data"
+
+[api.views.items]
+path       = "items"
+method     = "GET"
+view_type  = "Rest"
+auth       = "none"
+
+[api.views.items.handler]
+type     = "dataview"
+dataview = "items"
+
+[api.views.items.response_headers]
+"Deprecation"  = "true"
+"content-type" = "application/json"
+"Mcp-Session-Id" = "abc"
+"#,
+        )
+        .unwrap();
+        let results = validate_structural(&bundle_dir);
+        let bad: Vec<_> = results.iter()
+            .filter(|r| r.error_code.as_deref() == Some("S005")
+                && r.message.contains("framework-managed"))
+            .collect();
+        assert_eq!(bad.len(), 2,
+            "expected S005 on both reserved headers, got {}: {:?}",
+            bad.len(),
+            results.iter().map(|r| (&r.error_code, &r.message)).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn response_headers_rejects_invalid_name_and_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        std::fs::write(
+            bundle_dir.join("test-app/app.toml"),
+            r#"
+[data.dataviews.items]
+name       = "items"
+datasource = "data"
+
+[api.views.items]
+path       = "items"
+method     = "GET"
+view_type  = "Rest"
+auth       = "none"
+
+[api.views.items.handler]
+type     = "dataview"
+dataview = "items"
+
+[api.views.items.response_headers]
+"Bad Name" = "ok"
+"X-Bell" = "\u0007warn"
+"#,
+        )
+        .unwrap();
+        let results = validate_structural(&bundle_dir);
+        assert!(results.iter().any(|r| r.error_code.as_deref() == Some("S005")
+            && r.message.contains("not a valid HTTP header name")),
+            "expected S005 for invalid header name (Bad Name)");
+        assert!(results.iter().any(|r| r.error_code.as_deref() == Some("S005")
+            && r.message.contains("non-printable")),
+            "expected S005 for non-printable header value (X-Bell)");
+    }
+
+    #[test]
+    fn response_headers_accepts_valid_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        std::fs::write(
+            bundle_dir.join("test-app/app.toml"),
+            r#"
+[data.dataviews.items]
+name       = "items"
+datasource = "data"
+
+[api.views.items]
+path       = "items"
+method     = "GET"
+view_type  = "Rest"
+auth       = "none"
+
+[api.views.items.handler]
+type     = "dataview"
+dataview = "items"
+
+[api.views.items.response_headers]
+"Deprecation" = "true"
+"Sunset"      = "Wed, 31 Dec 2026 23:59:59 GMT"
+"Cache-Control" = "max-age=60"
+"#,
+        )
+        .unwrap();
+        let results = validate_structural(&bundle_dir);
+        let view_failures: Vec<_> = results.iter()
+            .filter(|r| r.status == ValidationStatus::Fail
+                && r.table_path.as_deref()
+                    .map(|p| p.contains("response_headers"))
+                    .unwrap_or(false))
+            .collect();
+        assert!(view_failures.is_empty(),
+            "expected no failures on valid response_headers, got: {:?}",
+            view_failures.iter().map(|r| (&r.error_code, &r.message)).collect::<Vec<_>>(),
+        );
     }
 
     // ── Multiple errors collected ─────────────────────────────────

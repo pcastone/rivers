@@ -326,6 +326,41 @@ For DataView handlers, parameter mapping is declared explicitly in config — ea
 
 The final value in `ctx.sources["primary"]` after all pipeline stages is serialized to JSON and returned. Status code is 200 by default. CodeComponent handlers can return explicit `{ status, headers, body }` envelopes. DataView handlers always return 200 with the `QueryResult` rows serialized.
 
+### 5.4 Static response headers (CB-P1.11)
+
+Every view type — REST, WebSocket, SSE, MCP — supports an optional
+`[api.views.*.response_headers]` table. Entries are appended to every
+HTTP response from the view after handler-set headers; **handler
+overrides win** when the same name is set on both sides.
+
+```toml
+[api.views.legacy_mcp.response_headers]
+"Deprecation" = "true"
+"Sunset"      = "Wed, 31 Dec 2026 23:59:59 GMT"
+"Link"        = "</mcp/advisor>; rel=\"successor-version\""
+```
+
+**Validation rules** (Layer 1, structural):
+
+- Header names match RFC 7230 token grammar: alphanumerics + `-`.
+- Header values must be ASCII-printable (`\x20`–`\x7E`); no control
+  characters.
+- The framework manages four header names — they are rejected at
+  bundle-load time with `S005`: `Content-Type`, `Content-Length`,
+  `Transfer-Encoding`, `Mcp-Session-Id`.
+
+**Runtime semantics:**
+
+- Applied in `combined_fallback_handler` once per request — the same
+  intercept point covers all view types.
+- A configured header is inserted only if the response does not already
+  carry one with the same name (case-insensitive). This preserves
+  handler intent: if a handler sets `Cache-Control: no-store`, a
+  configured `Cache-Control: max-age=60` is dropped.
+- Defense-in-depth: any entry that survives validation but trips axum's
+  stricter runtime parser is logged at WARN and skipped — failure to
+  attach a deprecation header never turns a 200 into a 500.
+
 ---
 
 ## 6. WebSocket Views

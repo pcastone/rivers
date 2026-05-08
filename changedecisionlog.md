@@ -4,6 +4,69 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 
 ---
 
+## 2026-05-08 — CB-P1.11: per-view static `response_headers`
+
+**Decision:** Added `[api.views.*.response_headers]` as a first-class
+config field on `ApiViewConfig`. Static headers configured here are
+appended to every HTTP response from the view, after handler-set
+headers. Handler overrides win — a configured header is inserted only
+when the response does not already carry one with the same name. This
+satisfies CB's request for protocol-level deprecation signaling on the
+legacy `/api/mcp` route (`Deprecation` / `Sunset` / `Link` per RFC 8594)
+while preserving the existing handler-controlled-headers contract.
+
+**Why a single intercept in `combined_fallback_handler`:** Every view
+type — REST, WebSocket, SSE, MCP — flows through `view_dispatch_handler`
+and back out through `combined_fallback_handler`. Cloning
+`matched.config.response_headers` before moving `matched` into the
+dispatcher and applying the helper to the materialized `Response` after
+return covers all view types from one place. Avoiding per-view-type
+injection sites was the alternative considered and rejected: MCP alone
+has 9 distinct response paths, and each return would have needed its
+own header pass.
+
+**Why validation is in Layer 1 (structural):** Header name + value
+constraints are syntactic, not relational — they don't require the
+bundle to be loaded or other apps to be present. Catching reserved
+headers and malformed names at `riverpackage validate` time means
+`riversd` start-up never sees an unbuildable header.
+
+**Reserved set choice:**
+
+| Header | Why reserved |
+|---|---|
+| `Content-Type` | Set per response by the body serializer (JSON / SSE / markdown). User override would lie about the body. |
+| `Content-Length` | Set by axum's body builder; user override would desync. |
+| `Transfer-Encoding` | Connection-level concern; managed by the HTTP layer. |
+| `Mcp-Session-Id` | MCP protocol header set by `crate::mcp::session::create_session` on `initialize`. User override would corrupt session resumption. |
+
+**Files affected:**
+
+| File | Change | Spec ref | Method |
+|------|--------|----------|--------|
+| `crates/rivers-runtime/src/view.rs` | New `response_headers: Option<HashMap<String, String>>` field on `ApiViewConfig`. | CB-P1.11 | Optional + `#[serde(default)]` so existing bundles deserialize unchanged. |
+| `crates/rivers-runtime/src/validate_structural.rs` | `response_headers` added to `VIEW_FIELDS` allowlist. New `validate_response_headers` helper invoked from `validate_view`. 3 unit tests covering reserved-name rejection, malformed name + non-printable value rejection, and a happy path. | CB-P1.11 | `S005` on each invalid entry — same code already used for "invalid value for field" so no new error code needed. |
+| `crates/rivers-runtime/src/{validate_existence,validate_crossref}.rs` | All `ApiViewConfig` test fixtures updated with `response_headers: None`. | CB-P1.11 | Mechanical follow-on of the new field. |
+| `crates/riversd/src/view_engine/response_headers.rs` (new) | `apply_static_response_headers` helper. 4 unit tests: applied-when-absent, handler-override-wins, no-op-when-config-is-none, malformed-entries-skipped. | CB-P1.11 | Dropped malformed entries with WARN rather than letting them propagate as 500s. |
+| `crates/riversd/src/view_engine/mod.rs` | Module wiring + re-export. | CB-P1.11 | |
+| `crates/riversd/src/server/view_dispatch.rs` | `combined_fallback_handler` clones `matched.config.response_headers` before moving `matched` and applies headers to the returned response. | CB-P1.11 | Single intercept covers all view types. |
+| `crates/riversd/src/{bundle_diff,bundle_loader/load,view_engine/mod}.rs` + tests | All `ApiViewConfig` literals updated. | CB-P1.11 | Mechanical. |
+| `docs/arch/rivers-view-layer-spec.md` §5.4 | New section documenting config shape, validation rules, runtime semantics, handler-override-wins precedence, and reserved-header rejection. | CB-P1.11 | |
+
+**Spec reference:** `cb-rivers-feature-request.md` P1.11;
+`docs/superpowers/plans/2026-05-08-cb-mcp-followups.md` Plan C.
+
+**Resolution method:** Read CB's report (looking for protocol-level
+deprecation signaling — `Deprecation`/`Sunset` headers on the legacy
+`/api/mcp` route). Confirmed `[api.views.X.response_headers]` was
+silently dropped today (`unknown key` warning). Picked the single
+intercept site over per-view-type injection because every view goes
+through `view_dispatch_handler`. Picked handler-override-wins as
+default because handlers are the late-binding source of intent
+(per-request) while config is the early-binding source (per-deploy).
+
+---
+
 ## 2026-05-08 — CB-P1.9: thread `path_params` into MCP dispatch handler context
 
 **Decision:** When an MCP route is mounted with a templated path (e.g.
