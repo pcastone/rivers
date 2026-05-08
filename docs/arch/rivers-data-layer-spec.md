@@ -958,3 +958,86 @@ enabled           = true
 max_size          = 5000
 flush_interval_ms = 1000
 ```
+
+---
+
+## 13. Single-Statement Enforcement & Transactions
+
+> **Spec:** `docs/arch/rivers-transaction-multi-query-spec.md`
+
+### 13.1 Single-statement rule (§2)
+
+Each DataView query field (`query`, `get_query`, `post_query`, `put_query`, `delete_query`) **must contain exactly one SQL statement**. A semicolon (`;`) that is not inside a string literal or SQL comment is a validation error (C010) at both Gate 1 (`riverpackage validate`) and Gate 2 (riversd bundle load).
+
+Correct message format: `DataView '{name}' field '{field}' contains multiple statements (semicolon detected). Use a handler with Rivers.db.tx for multi-query operations.`
+
+Semicolons inside string literals (`'foo;bar'`) and SQL comments (`-- note;` or `/* note; */`) do **not** trigger the error.
+
+### 13.2 DataView `transaction = true` (§3)
+
+```toml
+[data.dataviews.critical_update]
+datasource  = "primary_db"
+transaction = true
+post_query  = "UPDATE accounts SET balance = balance - $amount WHERE id = $id"
+```
+
+When `transaction = true`, the DataViewEngine wraps the single query in BEGIN/COMMIT automatically. On error, ROLLBACK is sent. This flag is ignored when the DataView is called via `tx.query()` — the handler's transaction governs (TF-2).
+
+Setting `transaction = true` on a datasource whose driver returns `supports_transactions() = false` emits a **warning** (W008), not an error.
+
+### 13.3 Handler transaction API — `Rivers.db.tx` (§4–8)
+
+For multi-query atomic operations, use the synchronous `Rivers.db.tx` API in handler code. All methods are sync — no `await`.
+
+```typescript
+const tx = Rivers.db.tx.begin("datasource_name");
+
+try {
+    tx.query("archive_wip",       { goal_id });
+    tx.query("clear_wip",         { goal_id, project_id });
+    tx.query("mark_goal_complete", { goal_id, project_id });
+    tx.query("get_goal",           { goal_id });
+
+    const results = tx.commit();
+    return { status: 200, body: results["get_goal"][0].rows[0] };
+} catch (e) {
+    // Auto-rollback already fired on any tx.query() or tx.commit() failure.
+    return { status: 500, body: { error: e.message } };
+}
+```
+
+**`tx.commit()` return shape:**
+```typescript
+// HashMap<dataview_name, Array<QueryResult>>
+results["get_goal"][0].rows         // Array of row objects
+results["archive_wip"][0].affected_rows  // Number of rows affected
+```
+
+**`tx.peek(name)`** — read accumulated results mid-transaction for conditional logic:
+```typescript
+tx.query("check_inventory", { product_id });
+const inv = tx.peek("check_inventory");
+if (inv[0].rows[0].quantity < qty) {
+    tx.rollback();
+    return { status: 422, body: { error: "insufficient inventory" } };
+}
+tx.query("decrement_inventory", { product_id, qty });
+const results = tx.commit();
+```
+
+**Rules:**
+- One transaction at a time per handler. Nested `tx.begin()` throws.
+- All DataViews called via `tx.query()` must use the same datasource as `tx.begin()`.
+- If the handler exits without calling `commit()` or `rollback()`, auto-rollback fires and a WARN is logged.
+- `tx.query()` uses the default `query` field (no HTTP method context inside a transaction).
+
+### 13.4 Driver transaction support matrix (§10.3)
+
+| Driver | `supports_transactions()` |
+|---|---|
+| PostgreSQL | `true` |
+| MySQL | `true` |
+| SQLite | `true` |
+| MongoDB | `true` (v4.0+ multi-document) |
+| Redis, Elasticsearch, CouchDB, Cassandra, Kafka, LDAP, Faker, HTTP, Filesystem, Exec | `false` |

@@ -236,6 +236,14 @@ pub struct DataViewConfig {
     #[serde(default)]
     pub cursor_key: Option<String>,
 
+    // ── Transaction (TXN spec §3) ─────────────────────────────────────
+
+    /// When true, wrap the single query in an explicit BEGIN/COMMIT transaction.
+    /// Ignored when the DataView is called inside a handler-level transaction
+    /// (`Rivers.db.tx`), in which case the handler's transaction governs.
+    #[serde(default)]
+    pub transaction: bool,
+
     // ── Composability (P2.9) ─────────────────────────────────────────
 
     /// Other DataView names whose results this DataView composes.
@@ -281,6 +289,8 @@ impl DataViewConfig {
             "POST" => self.post_query.as_deref(),
             "PUT" => self.put_query.as_deref(),
             "DELETE" => self.delete_query.as_deref(),
+            // TQ-8: tx.query() always uses the default query field regardless of HTTP method.
+            "DEFAULT" => self.query.as_deref(),
             _ => None,
         }
     }

@@ -7,6 +7,7 @@
 //! - Handler modules compile (C001-C003) — via engine dylib FFI
 //! - Handler entrypoints exist in exports (C002)
 //! - Relative import paths resolve within the app boundary (C004-C005)
+//! - DataView query fields contain exactly one SQL statement (C010, §SS-1..SS-6)
 
 use std::path::Path;
 
@@ -84,6 +85,72 @@ pub fn validate_syntax(
                 .with_table_path(&format!("data.dataviews.{}", dv_name))
                 .with_field("join_key");
                 results.push(result);
+            }
+
+            // SS-1..SS-6 (C010): each query field must contain exactly one SQL statement.
+            // Semicolons inside string literals and SQL comments do NOT trigger this.
+            {
+                let query_fields: &[(&str, Option<&str>)] = &[
+                    ("query",        dv.query.as_deref()),
+                    ("get_query",    dv.get_query.as_deref()),
+                    ("post_query",   dv.post_query.as_deref()),
+                    ("put_query",    dv.put_query.as_deref()),
+                    ("delete_query", dv.delete_query.as_deref()),
+                ];
+                let display = format!("{}/app.toml", app_name);
+                for (field, sql_opt) in query_fields {
+                    let Some(sql) = sql_opt else { continue };
+                    if has_multiple_statements(sql) {
+                        results.push(
+                            ValidationResult::fail(
+                                error_codes::C010,
+                                &display,
+                                format!(
+                                    "DataView '{}' field '{}' contains multiple statements \
+                                     (semicolon detected). Use a handler with Rivers.db.tx \
+                                     for multi-query operations.",
+                                    dv_name, field
+                                ),
+                            )
+                            .with_app(app_name)
+                            .with_table_path(&format!("data.dataviews.{}", dv_name))
+                            .with_field(*field),
+                        );
+                    }
+                }
+            }
+
+            // TF-3 (W008): transaction=true on a driver that does not support transactions
+            // → validation warning (not error). Uses static §10.3 matrix.
+            if dv.transaction {
+                // Drivers known to NOT support transactions per spec §10.3.
+                const NON_TRANSACTIONAL: &[&str] = &[
+                    "redis", "elasticsearch", "couchdb", "cassandra",
+                    "kafka", "ldap", "faker", "http", "filesystem", "exec",
+                    "nats", "rabbitmq", "influxdb", "neo4j", "mongodb_atlas",
+                ];
+                let driver_for_txn = app
+                    .config
+                    .data
+                    .datasources
+                    .get(&dv.datasource)
+                    .map(|ds| ds.driver.as_str())
+                    .unwrap_or("");
+                if NON_TRANSACTIONAL.contains(&driver_for_txn) {
+                    let display = format!("{}/app.toml", app_name);
+                    let mut result = ValidationResult::warn(
+                        error_codes::W008,
+                        format!(
+                            "DataView '{}' has transaction=true but driver '{}' does not support transactions",
+                            dv_name, driver_for_txn
+                        ),
+                    )
+                    .with_app(app_name)
+                    .with_table_path(&format!("data.dataviews.{}", dv_name))
+                    .with_field("transaction");
+                    result.file = Some(display);
+                    results.push(result);
+                }
             }
 
             // Look up the driver name so broker-specific checks can run (C009).
@@ -765,6 +832,82 @@ fn validate_imports(
     results
 }
 
+/// Returns `Some(field_name)` if the SQL string contains a statement-terminating
+/// semicolon (i.e., a `;` that is not inside a string literal or SQL comment).
+///
+/// Algorithm (§2.4):
+/// 1. Strip `--` line comments and `/* */` block comments from consideration
+///    by tracking position rather than modifying the string.
+/// 2. Walk chars tracking single-quote open/closed, respecting `''` as an
+///    escaped single quote.
+/// 3. A `;` encountered outside a quoted string is a violation.
+pub(crate) fn has_multiple_statements(sql: &str) -> bool {
+    let chars: Vec<char> = sql.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    let mut in_single_quote = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+
+    while i < len {
+        // ── Block comment ────────────────────────────────────────────
+        if !in_single_quote && !in_line_comment && i + 1 < len
+            && chars[i] == '/' && chars[i + 1] == '*'
+        {
+            in_block_comment = true;
+            i += 2;
+            continue;
+        }
+        if in_block_comment {
+            if i + 1 < len && chars[i] == '*' && chars[i + 1] == '/' {
+                in_block_comment = false;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        // ── Line comment ─────────────────────────────────────────────
+        if !in_single_quote && i + 1 < len && chars[i] == '-' && chars[i + 1] == '-' {
+            in_line_comment = true;
+            i += 2;
+            continue;
+        }
+        if in_line_comment {
+            if chars[i] == '\n' {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        // ── Single-quote handling ─────────────────────────────────────
+        if chars[i] == '\'' {
+            if in_single_quote {
+                // '' escape sequence → stay in quote
+                if i + 1 < len && chars[i + 1] == '\'' {
+                    i += 2;
+                    continue;
+                }
+                in_single_quote = false;
+            } else {
+                in_single_quote = true;
+            }
+            i += 1;
+            continue;
+        }
+
+        // ── Semicolon outside any context ─────────────────────────────
+        if !in_single_quote && chars[i] == ';' {
+            return true;
+        }
+
+        i += 1;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -974,6 +1117,7 @@ import { foo } from "@org/pkg";
             compose_strategy: Some("enrich".into()),
             join_key: None, // missing — should trigger C-DV-COMPOSE-3
             enrich_mode: "nest".into(),
+            transaction: false,
         };
 
         let mut dataviews = HashMap::new();
@@ -1076,6 +1220,7 @@ import { foo } from "@org/pkg";
             compose_strategy: Some("enrich".into()),
             join_key: Some("order_id".into()), // set — should NOT trigger C-DV-COMPOSE-3
             enrich_mode: "nest".into(),
+            transaction: false,
         };
 
         let mut dataviews = HashMap::new();
@@ -1130,5 +1275,156 @@ import { foo } from "@org/pkg";
             "enrich with join_key should not emit C-DV-COMPOSE-3, got: {:?}",
             results
         );
+    }
+
+    // ── Single-statement scanner tests (TXN-A.5) ───────────────────
+
+    #[test]
+    fn ss_plain_semicolon_rejected() {
+        assert!(has_multiple_statements("SELECT 1;"), "bare trailing ; must be rejected");
+    }
+
+    #[test]
+    fn ss_two_statements_rejected() {
+        assert!(has_multiple_statements("SELECT 1; SELECT 2"));
+    }
+
+    #[test]
+    fn ss_trailing_whitespace_rejected() {
+        assert!(has_multiple_statements("SELECT 1;  "), "trailing whitespace after ; still a violation");
+    }
+
+    #[test]
+    fn ss_no_semicolon_accepted() {
+        assert!(!has_multiple_statements("SELECT 1"));
+        assert!(!has_multiple_statements("SELECT id, name FROM users WHERE id = $1"));
+    }
+
+    #[test]
+    fn ss_semicolon_in_string_literal_accepted() {
+        // SS-5: semicolons inside string literals must NOT trigger the error
+        assert!(!has_multiple_statements("SELECT * FROM t WHERE name = 'foo;bar'"));
+    }
+
+    #[test]
+    fn ss_line_comment_with_semicolon_accepted() {
+        // SS-6: semicolons in -- comments must NOT trigger the error
+        assert!(!has_multiple_statements("SELECT 1 -- this is a comment;"));
+        assert!(!has_multiple_statements("-- comment;\nSELECT 1"));
+    }
+
+    #[test]
+    fn ss_block_comment_with_semicolon_accepted() {
+        assert!(!has_multiple_statements("/* a;b */ SELECT 1"));
+        assert!(!has_multiple_statements("SELECT /* ;; */ 1"));
+    }
+
+    #[test]
+    fn ss_escaped_quote_in_string_accepted() {
+        // '' is an escaped single quote; the ; is inside the string
+        assert!(!has_multiple_statements("SELECT * FROM t WHERE name = 'it''s;ok'"));
+    }
+
+    #[test]
+    fn ss_empty_string_accepted() {
+        assert!(!has_multiple_statements(""));
+        assert!(!has_multiple_statements("   "));
+    }
+
+    #[test]
+    fn ss_c010_emitted_in_validate_syntax() {
+        use std::collections::HashMap;
+        use crate::bundle::{AppConfig, AppApiConfig, AppDataConfig};
+        use crate::loader::{LoadedApp, LoadedBundle};
+        use crate::bundle::{AppManifest, BundleManifest, ResourcesConfig};
+        use crate::dataview::DataViewConfig;
+        use std::path::PathBuf;
+
+        let dv = DataViewConfig {
+            name: "bad_dv".into(),
+            datasource: "db".into(),
+            query: Some("SELECT 1; SELECT 2".into()),
+            parameters: vec![],
+            return_schema: None,
+            get_query: None,
+            post_query: None,
+            put_query: None,
+            delete_query: None,
+            get_schema: None,
+            post_schema: None,
+            put_schema: None,
+            delete_schema: None,
+            get_parameters: vec![],
+            post_parameters: vec![],
+            put_parameters: vec![],
+            delete_parameters: vec![],
+            streaming: false,
+            circuit_breaker_id: None,
+            prepared: false,
+            query_params: HashMap::new(),
+            caching: None,
+            invalidates: vec![],
+            validate_result: false,
+            strict_parameters: false,
+            max_rows: 1000,
+            skip_introspect: false,
+            cursor_key: None,
+            source_views: vec![],
+            compose_strategy: None,
+            join_key: None,
+            enrich_mode: "nest".into(),
+            transaction: false,
+        };
+        let mut dataviews = HashMap::new();
+        dataviews.insert("bad_dv".into(), dv);
+
+        let app = LoadedApp {
+            manifest: AppManifest {
+                app_name: "test-app".into(),
+                description: None,
+                version: None,
+                app_type: "app-service".into(),
+                app_id: "00000000-0000-0000-0000-000000000002".into(),
+                entry_point: None,
+                app_entry_point: None,
+                source: None,
+                spa: None,
+                init: None,
+            },
+            resources: ResourcesConfig {
+                datasources: vec![],
+                keystores: vec![],
+                services: vec![],
+            },
+            config: AppConfig {
+                data: AppDataConfig {
+                    datasources: HashMap::new(),
+                    dataviews,
+                    keystore: HashMap::new(),
+                },
+                api: AppApiConfig { views: HashMap::new() },
+                static_files: None,
+                base: Default::default(),
+            },
+            app_dir: PathBuf::from("/tmp/test-app"),
+        };
+        let bundle = LoadedBundle {
+            manifest: BundleManifest {
+                bundle_name: "test".into(),
+                bundle_version: "1.0.0".into(),
+                source: None,
+                apps: vec!["test-app".into()],
+            },
+            apps: vec![app],
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let results = validate_syntax(dir.path(), &bundle, &EngineHandles::none());
+        let c010 = results.iter().find(|r| r.error_code.as_deref() == Some("C010"));
+        assert!(c010.is_some(), "C010 must be emitted for multi-statement query; got: {:?}", results);
+        let msg = &c010.unwrap().message;
+        assert!(msg.contains("bad_dv"), "message must name the DataView");
+        assert!(msg.contains("query"), "message must name the field");
+        assert!(msg.contains("Rivers.db.tx"), "message must reference Rivers.db.tx");
     }
 }

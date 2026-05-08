@@ -85,7 +85,7 @@ introspect = false
 run_as_user                = "nobody"
 working_directory          = "/tmp"
 max_concurrent             = "10"
-"commands.wc.path"         = "/Users/pcastone/Projects/rust/rivers.pub/canary-bundle/canary-handlers/libraries/scripts/wc-json.sh"
+"commands.wc.path"         = "/var/lib/rivers/bundles/canary-bundle/canary-handlers/libraries/scripts/wc-json.sh"
 "commands.wc.sha256"       = "1573a43390b7237e583d90fd0ab01e45ced0332dd7fd6aaf47f93b10dc9d7a8f"
 "commands.wc.input_mode"   = "stdin"
 

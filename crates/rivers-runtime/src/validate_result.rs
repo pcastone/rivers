@@ -573,6 +573,8 @@ pub mod error_codes {
     pub const C008: &str = "C008";
     /// Driver-specific schema constraint violated (e.g. missing subject for NATS).
     pub const C009: &str = "C009";
+    /// DataView query field contains multiple SQL statements (semicolon detected).
+    pub const C010: &str = "C010";
 
     // ── L: Live checks (Gate 2 only) ────────────────────────────────
 
@@ -608,6 +610,8 @@ pub mod error_codes {
     pub const W006: &str = "W006";
     /// cursor_key is set but the query has no ORDER BY clause (cursor pagination requires deterministic ordering).
     pub const W007: &str = "W007";
+    /// transaction=true on a DataView backed by a driver that does not support transactions.
+    pub const W008: &str = "W008";
 }
 
 // ── Tests ──────────────────────────────────────────────────────────

@@ -286,7 +286,7 @@ async fn view_dispatch_handler(
         &method,
         &trace_id,
         guard_view_path.as_deref(),
-        &manifest_app_id,
+        &app_entry_point,
     ).await;
     let session_id = match security {
         Ok(outcome) => {

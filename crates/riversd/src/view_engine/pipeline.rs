@@ -198,7 +198,7 @@ pub async fn execute_rest_view(
                     .trace_id(ctx.trace_id.clone());
                 let builder = crate::task_enrichment::enrich(
                     builder,
-                    &ctx.app_id,
+                    &ctx.dv_namespace,
                     rivers_runtime::process_pool::TaskKind::PreProcess,
                 );
                 let task_ctx = builder
@@ -324,7 +324,7 @@ pub async fn execute_rest_view(
                     }
                     let builder = crate::task_enrichment::enrich(
                         builder,
-                        &ctx.app_id,
+                        &ctx.dv_namespace,
                         rivers_runtime::process_pool::TaskKind::Rest,
                     );
                     let task_ctx = builder
@@ -395,7 +395,7 @@ pub async fn execute_rest_view(
                     .trace_id(ctx.trace_id.clone());
                 let builder = crate::task_enrichment::enrich(
                     builder,
-                    &ctx.app_id,
+                    &ctx.dv_namespace,
                     rivers_runtime::process_pool::TaskKind::Rest,
                 );
                 let task_ctx = builder
@@ -437,7 +437,7 @@ pub async fn execute_rest_view(
                     .trace_id(ctx.trace_id.clone());
                 let builder = crate::task_enrichment::enrich(
                     builder,
-                    &ctx.app_id,
+                    &ctx.dv_namespace,
                     rivers_runtime::process_pool::TaskKind::PostProcess,
                 );
                 let task_ctx = builder

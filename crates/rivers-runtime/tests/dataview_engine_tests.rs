@@ -59,6 +59,7 @@ fn test_config() -> DataViewConfig {
         compose_strategy: None,
         join_key: None,
         enrich_mode: "nest".into(),
+            transaction: false,
     }
 }
 
@@ -534,6 +535,7 @@ fn executor_datasource_info_empty_when_no_datasources() {
 
 // ── Cache Invalidation Tests ──────────────────────────────────────
 
+#[cfg(feature = "drivers")]
 #[tokio::test]
 async fn executor_invalidates_cache_after_write() {
     use std::sync::Arc;
@@ -596,6 +598,7 @@ async fn executor_invalidates_cache_after_write() {
         compose_strategy: None,
         join_key: None,
         enrich_mode: "nest".into(),
+            transaction: false,
     };
     registry.register(write_config);
 
@@ -623,8 +626,9 @@ async fn executor_invalidates_cache_after_write() {
         cache.clone() as Arc<dyn DataViewCache>,
     );
 
-    // Execute the write DataView
-    let result = executor.execute("create_contact", HashMap::new(), "POST", "trace-1", None).await;
+    // Execute the write DataView. Use GET so the legacy `query` field resolves
+    // (the write_config only has `query`, no per-method post_query).
+    let result = executor.execute("create_contact", HashMap::new(), "GET", "trace-1", None).await;
     assert!(result.is_ok(), "execute should succeed: {:?}", result.err());
 
     // Verify "list_contacts" cache was invalidated
@@ -899,6 +903,7 @@ mod d3_timeout {
             compose_strategy: None,
             join_key: None,
             enrich_mode: "nest".into(),
+            transaction: false,
         }
     }
 

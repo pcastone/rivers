@@ -238,69 +238,73 @@ function sqliteDiskPersistence(ctx) {
     ctx.resdata = t.finish();
 }
 
-// ── 9. INT-PG-DDL — DDL + DataView roundtrip on PostgreSQL ──
+// ── 9. INT-PG-DDL — Init DDL + DataView roundtrip on PostgreSQL ──
+// Verifies: (1) init handler's ctx.ddl() created the messages table on PG,
+// (2) INSERT + SELECT via DataView works end-to-end.
+// ctx.ddl() is only available during ApplicationInit; this test proves the
+// init DDL persisted and the DataView pipeline is operational.
 
 function pgDdlCreateSelect(ctx) {
     var t = new TestResult("INT-PG-DDL", "INTEGRATION", "rivers-data-layer-spec.md section 6");
     try {
-        // Create table via DDL
-        ctx.ddl("canary-pg", "CREATE TABLE IF NOT EXISTS int_ddl_test (id SERIAL PRIMARY KEY, val TEXT NOT NULL)");
-        t.assert("create_table_ok", true, "DDL CREATE TABLE succeeded");
+        var id = "int-pg-ddl-" + Rivers.crypto.randomHex(6);
 
-        // Insert via DataView
-        var val = "pg-int-" + Rivers.crypto.randomHex(6);
-        ctx.dataview("pg_int_insert", { val: val });
-        t.assert("insert_ok", true, "INSERT via DataView succeeded");
+        // INSERT via DataView (proves messages table exists from init DDL)
+        ctx.dataview("msg_insert_pg", {
+            id: id, zsender: "int-test", recipient: "pg-ddl",
+            subject: "INT-PG-DDL", body: "ddl-roundtrip",
+            is_secret: 0, cipher: ""
+        });
+        t.assert("init_ddl_created_table", true, "INSERT succeeded — messages table exists from init DDL");
 
-        // Select via DataView
-        var result = ctx.dataview("pg_int_select");
+        // SELECT back to confirm DataView roundtrip
+        var result = ctx.dataview("msg_search_pg", { recipient: "pg-ddl", pattern: "%ddl-roundtrip%" });
         t.assert("select_ok", result !== null && result !== undefined);
         var found = false;
         if (result && result.rows) {
             for (var i = 0; i < result.rows.length; i++) {
-                if (result.rows[i].val === val) { found = true; break; }
+                if (result.rows[i].id === id) { found = true; break; }
             }
         }
-        t.assert("row_found", found, "inserted row found in select results");
+        t.assert("row_found", found, "inserted row found via SELECT DataView");
 
         // Cleanup
-        try { ctx.ddl("canary-pg", "DROP TABLE IF EXISTS int_ddl_test"); } catch (e2) {}
+        try { ctx.dataview("msg_cleanup_pg", { id_prefix: id }); } catch (e2) {}
     } catch (e) {
-        try { ctx.ddl("canary-pg", "DROP TABLE IF EXISTS int_ddl_test"); } catch (e3) {}
         return t.fail(String(e));
     }
     ctx.resdata = t.finish();
 }
 
-// ── 10. INT-MYSQL-DDL — DDL + DataView roundtrip on MySQL ──
+// ── 10. INT-MYSQL-DDL — Init DDL + DataView roundtrip on MySQL ──
 
 function mysqlDdlCreateSelect(ctx) {
     var t = new TestResult("INT-MYSQL-DDL", "INTEGRATION", "rivers-data-layer-spec.md section 6");
     try {
-        // Create table via DDL
-        ctx.ddl("canary-mysql", "CREATE TABLE IF NOT EXISTS int_ddl_test (id INT AUTO_INCREMENT PRIMARY KEY, val VARCHAR(255) NOT NULL)");
-        t.assert("create_table_ok", true, "DDL CREATE TABLE succeeded");
+        var id = "int-mysql-ddl-" + Rivers.crypto.randomHex(6);
 
-        // Insert via DataView
-        var val = "mysql-int-" + Rivers.crypto.randomHex(6);
-        ctx.dataview("mysql_int_insert", { val: val });
-        t.assert("insert_ok", true, "INSERT via DataView succeeded");
+        // INSERT via DataView (proves messages table exists from init DDL)
+        ctx.dataview("msg_insert_mysql", {
+            id: id, zsender: "int-test", recipient: "mysql-ddl",
+            subject: "INT-MYSQL-DDL", body: "ddl-roundtrip",
+            is_secret: 0, cipher: ""
+        });
+        t.assert("init_ddl_created_table", true, "INSERT succeeded — messages table exists from init DDL");
 
-        // Select via DataView
-        var result = ctx.dataview("mysql_int_select");
+        // SELECT back to confirm DataView roundtrip
+        var result = ctx.dataview("msg_search_mysql", { recipient: "mysql-ddl", pattern: "%ddl-roundtrip%" });
         t.assert("select_ok", result !== null && result !== undefined);
         var found = false;
         if (result && result.rows) {
             for (var i = 0; i < result.rows.length; i++) {
-                if (result.rows[i].val === val) { found = true; break; }
+                if (result.rows[i].id === id) { found = true; break; }
             }
         }
-        t.assert("row_found", found, "inserted row found in select results");
+        t.assert("row_found", found, "inserted row found via SELECT DataView");
 
         // Cleanup
-        try { ctx.ddl("canary-mysql", "DROP TABLE IF EXISTS int_ddl_test"); } catch (e2) {}
+        try { ctx.dataview("msg_cleanup_mysql", { id_prefix: id }); } catch (e2) {}
     } catch (e) {
-        try { ctx.ddl("canary-mysql", "DROP TABLE IF EXISTS int_ddl_test"); } catch (e3) {}
         return t.fail(String(e));
     }
     ctx.resdata = t.finish();

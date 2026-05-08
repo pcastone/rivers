@@ -85,6 +85,8 @@ cargo deploy /opt/rivers
 cargo deploy /opt/rivers --static
 ```
 
+> **Validate before deploying:** Run `riverpackage validate <bundle-dir>` before `cargo deploy` or `just deploy`. The 4-layer validation pipeline catches structural errors, missing handler files, and broken datasource references without starting the server. See [Bundle validation](#bundle-validation-v0540--4-layer-pipeline).
+
 > **v0.54.0 change:** `just deploy` now defaults to **static** builds. Previously it produced dynamic-mode deployments. Use `just deploy-dynamic` for the old behavior. `cargo deploy` still defaults to dynamic mode for backwards compatibility.
 
 Output structure (static, v0.54.0+):

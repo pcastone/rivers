@@ -577,6 +577,7 @@ nopassword = true
                 compose_strategy: None,
                 join_key: None,
                 enrich_mode: "nest".into(),
+            transaction: false,
             },
         );
     }
@@ -840,6 +841,7 @@ nopassword = true
             compose_strategy: None,
             join_key: None,
             enrich_mode: "nest".into(),
+            transaction: false,
         };
         bundle.apps[0]
             .config

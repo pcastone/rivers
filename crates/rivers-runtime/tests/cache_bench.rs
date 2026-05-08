@@ -198,6 +198,7 @@ async fn bench_2_faker_cached_vs_uncached() {
         skip_introspect: false,
         cursor_key: None,
         source_views: vec![], compose_strategy: None, join_key: None, enrich_mode: "nest".into(),
+            transaction: false,
     };
 
     // Uncached
@@ -245,7 +246,7 @@ async fn bench_2_faker_cached_vs_uncached() {
 async fn bench_3_sqlite_cached_vs_uncached() {
     use rivers_core::DriverFactory;
     use rivers_core::drivers::SqliteDriver;
-    use rivers_driver_sdk::{ConnectionParams, DatabaseDriver, Query};
+    use rivers_driver_sdk::ConnectionParams;
     use rivers_runtime::dataview::{DataViewConfig, DataViewCachingConfig};
     use rivers_runtime::dataview_engine::DataViewRegistry;
     use rivers_runtime::tiered_cache::NoopDataViewCache;
@@ -253,24 +254,28 @@ async fn bench_3_sqlite_cached_vs_uncached() {
     let iterations = 2_000;
 
     println!("\n{}", "=".repeat(70));
-    println!("  SQLite (:memory:): Uncached vs L1 Cached ({} iters)", iterations);
+    println!("  SQLite (file): Uncached vs L1 Cached ({} iters)", iterations);
     println!("{}\n", "=".repeat(70));
 
-    // Seed a temp SQLite DB
-    let sqlite = SqliteDriver::new();
-    let params = ConnectionParams {
-        host: String::new(), port: 0, database: ":memory:".into(),
-        username: String::new(), password: String::new(), options: HashMap::new(),
-    };
-    let mut conn = DatabaseDriver::connect(&sqlite, &params).await.unwrap();
-    conn.execute(&Query::with_operation("create", "",
-        "CREATE TABLE contacts (id INTEGER PRIMARY KEY, name TEXT, email TEXT)")).await.unwrap();
-    for i in 0..100 {
-        conn.execute(&Query::with_operation("insert", "",
-            &format!("INSERT INTO contacts VALUES ({}, 'User {}', 'u{}@test.com')", i, i, i))).await.unwrap();
+    // Use a temp file DB so setup DDL and executor share the same database.
+    // DDL goes through rusqlite directly to bypass the admin guard (which
+    // only applies to the DataView execution path, not init DDL).
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("bench3.db");
+    {
+        let c = rusqlite::Connection::open(&db_path).unwrap();
+        c.execute_batch(
+            "CREATE TABLE contacts (id INTEGER PRIMARY KEY, name TEXT, email TEXT);"
+        ).unwrap();
+        for i in 0..100_i32 {
+            c.execute(
+                "INSERT INTO contacts VALUES (?1, ?2, ?3)",
+                rusqlite::params![i, format!("User {i}"), format!("u{i}@test.com")],
+            ).unwrap();
+        }
     }
-    drop(conn);
 
+    let sqlite = SqliteDriver::new();
     let mut factory = DriverFactory::new();
     factory.register_database_driver(Arc::new(sqlite));
     let factory = Arc::new(factory);
@@ -279,7 +284,8 @@ async fn bench_3_sqlite_cached_vs_uncached() {
     opts.insert("driver".to_string(), "sqlite".to_string());
     let mut ds_params = HashMap::new();
     ds_params.insert("sqlite-ds".to_string(), ConnectionParams {
-        host: String::new(), port: 0, database: ":memory:".into(),
+        host: String::new(), port: 0,
+        database: db_path.to_string_lossy().to_string(),
         username: String::new(), password: String::new(), options: opts,
     });
     let ds_params = Arc::new(ds_params);
@@ -297,6 +303,7 @@ async fn bench_3_sqlite_cached_vs_uncached() {
         skip_introspect: false,
         cursor_key: None,
         source_views: vec![], compose_strategy: None, join_key: None, enrich_mode: "nest".into(),
+            transaction: false,
     };
 
     // Uncached
@@ -510,6 +517,7 @@ async fn bench_5_postgres_cached_vs_uncached() {
         skip_introspect: false,
         cursor_key: None,
         source_views: vec![], compose_strategy: None, join_key: None, enrich_mode: "nest".into(),
+            transaction: false,
     };
 
     // Uncached

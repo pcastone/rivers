@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use async_trait::async_trait;
-use rskafka::client::partition::{PartitionClient, UnknownTopicHandling};
+use rskafka::client::partition::{OffsetAt, PartitionClient, UnknownTopicHandling};
+use rskafka::client::error::{Error as RskafkaError, ProtocolError};
 use rskafka::client::{Client, ClientBuilder};
 use rskafka::record::Record;
 use tokio::sync::{Mutex, RwLock};
@@ -316,18 +317,34 @@ pub struct KafkaConsumer {
 #[async_trait]
 impl BrokerConsumer for KafkaConsumer {
     async fn receive(&mut self) -> Result<InboundMessage, DriverError> {
-        let fetch_offset = self.offset + 1;
+        let mut fetch_offset = self.offset + 1;
 
         loop {
-            let (records, _high_watermark) = self
+            let result = self
                 .partition_client
                 .fetch_records(
                     fetch_offset,
                     1..1_000_000,
                     500, // max_wait_ms: 500ms poll interval (vs 5s) for faster delivery
                 )
-                .await
-                .map_err(|e| DriverError::Query(format!("kafka fetch: {e}")))?;
+                .await;
+
+            // When the requested offset is below the log-start offset (retention
+            // deleted old segments), reset to the earliest available offset so
+            // the consumer can resume rather than loop-failing forever.
+            let (records, _high_watermark) = match result {
+                Err(RskafkaError::ServerError { protocol_error: ProtocolError::OffsetOutOfRange, .. }) => {
+                    let earliest = self.partition_client
+                        .get_offset(OffsetAt::Earliest)
+                        .await
+                        .map_err(|e| DriverError::Query(format!("kafka get earliest offset: {e}")))?;
+                    fetch_offset = earliest;
+                    self.offset = earliest - 1;
+                    continue;
+                }
+                Err(e) => return Err(DriverError::Query(format!("kafka fetch: {e}"))),
+                Ok(v) => v,
+            };
 
             if let Some(record_and_offset) = records.into_iter().next() {
                 let rec_offset = record_and_offset.offset;

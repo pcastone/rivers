@@ -704,6 +704,7 @@ mod d2 {
             compose_strategy: None,
             join_key: None,
             enrich_mode: "nest".to_string(),
+            transaction: false,
         }
     }
 

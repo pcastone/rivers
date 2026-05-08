@@ -1,8 +1,30 @@
 # Rivers Application Development — Build Spec
 
-**Rivers v0.54.0**
+**Rivers v0.54.1**
 
-> **v0.54.0 changes for bundle authors:** (1) All drivers are compiled into `riversd` — no external plugin dylibs. (2) Init handlers can call `ctx.ddl()` to run DDL on app load. (3) Views support `rate_limit_per_minute` / `rate_limit_burst_size` for per-view rate limiting. (4) Guard views support fire-and-forget `lifecycle_hooks`. (5) `riverpackage validate` now runs a 4-layer validation pipeline, and `riversd` runs the same pipeline at startup.
+> **Cookbook Reference:** All Rivers patterns, templates, and anti-patterns are defined in the Rivers Cookbook (`rivers-cookbook-sonnet.md` for Sonnet, `rivers-cookbook-opus.md` for Opus). This document provides the detailed specification. The cookbook provides copy-paste recipes. **Use the cookbook first** for building; use this spec for understanding the architecture.
+
+> **Key architectural changes (post v0.54.1):**
+> - **ONE statement per query field.** Multi-statement SQL is a validation error. Use handler transactions for multi-query operations.
+> - **Handlers call DataViews by name** via `Rivers.view.query(name, params)`. SQL lives in TOML, not handler code.
+> - **Transactions are sync:** `Rivers.db.tx.begin()` / `tx.query()` / `tx.commit()`. Results returned as `HashMap<string, Array<QueryResult>>` on commit.
+> - **`tx.peek(name)`** for inspecting intermediate results mid-transaction (not final until commit).
+> - **`view_type = "Mcp"`** uses CamelCase, NOT all-caps `"MCP"`.
+> - **`destructive = false`** must be explicit on non-destructive MCP tools — default is `true`.
+> - **`method = "POST"`** required for write MCP tools.
+> - **`RETURNING *`** causes driver errors on SQLite — use follow-up read DataView instead.
+
+## Getting Started (v0.54.1)
+
+The recommended way to create a new bundle is `riverpackage init`:
+
+```bash
+riverpackage init my-bundle/
+```
+
+This scaffolds the full bundle directory structure with template manifests, empty schema directories, and placeholder config files. You can then edit the generated TOML files to define your app.
+
+---
 
 ## What You Are Building
 
@@ -68,7 +90,7 @@ description   = "{description}"
 version       = "1.0.0"
 type          = "app-service"
 appId         = "{uuid}"
-entryPoint    = "http://0.0.0.0:{port}"
+entryPoint    = "{slug}"
 appEntryPoint = "https://{internal-hostname}"
 source        = "{repo-url}"
 ```
@@ -81,7 +103,7 @@ description   = "{description}"
 version       = "1.0.0"
 type          = "app-main"
 appId         = "{uuid}"
-entryPoint    = "http://0.0.0.0:{port}"
+entryPoint    = "{slug}"
 appEntryPoint = "https://{external-hostname}"
 source        = "{repo-url}"
 ```
@@ -94,7 +116,7 @@ source        = "{repo-url}"
 | `version` | yes | Developer | Semantic version |
 | `type` | yes | Developer | `app-service` or `app-main` |
 | `appId` | yes | Build tool | Stable UUID. NEVER regenerate. |
-| `entryPoint` | yes | Developer | Where Rivers binds this app |
+| `entryPoint` | yes | Developer | URL path slug — used as route namespace (e.g. `"service"`, `"main"`) |
 | `appEntryPoint` | no | Developer | Public URL (informational) |
 | `source` | yes | Build tool | Stamped at package time |
 
@@ -128,13 +150,13 @@ required   = true
 | Field | Required | Notes |
 |-------|----------|-------|
 | `name` | yes | Logical name — used in app.toml |
-| `driver` | yes | Driver type (postgresql, redis, faker, http, etc.) |
+| `driver` | yes | Driver type (postgres, redis, faker, http, etc.) |
 | `x-type` | yes | Build-time contract — same as driver for built-ins |
 | `lockbox` | conditional | Lockbox alias — required unless `nopassword = true` |
 | `nopassword` | no | Set `true` for credential-free drivers (faker, sqlite) |
 | `required` | yes | If true, startup fails when unavailable |
 
-MUST: Use `nopassword = true` for faker, sqlite — omit `lockbox` entirely.
+MUST: Use `nopassword = true` for faker, sqlite, filesystem — omit `lockbox` entirely.
 MUST NOT: Include `lockbox` when `nopassword = true`.
 
 ### Keystores (Application Encryption Keys)
@@ -172,32 +194,28 @@ required = true
 
 MUST: `appId` matches the app-service's `manifest.toml` appId exactly.
 
-### Supported Drivers (v0.54.0)
-
-All drivers are compiled into `riversd` — there are no external plugin dylibs in v0.54.0.
+### Supported Drivers
 
 | Driver | x-type | Credentials | Use Case |
 |--------|--------|-------------|----------|
 | `faker` | `faker` | `nopassword = true` | Mock data, dev/demo |
-| `postgresql` | `postgresql` | lockbox | Relational data |
+| `postgres` | `postgres` | lockbox | Relational data |
 | `mysql` | `mysql` | lockbox | Relational data |
 | `sqlite` | `sqlite` | `nopassword = true` | Embedded relational |
+| `filesystem` | `filesystem` | `nopassword = true` | Chroot-sandboxed file I/O |
 | `redis` | `redis` | lockbox | Cache, sessions, KV, streams |
-| `mongodb` | `mongodb` | lockbox | Document store |
-| `elasticsearch` | `elasticsearch` | optional | Search / analytics |
-| `couchdb` | `couchdb` | lockbox | Document store |
-| `cassandra` | `cassandra` | lockbox | Wide-column |
-| `neo4j` | `neo4j` | lockbox | Graph |
-| `influxdb` | `influxdb` | lockbox | Time-series |
-| `ldap` | `ldap` | lockbox | Directory |
 | `http` | `http` | optional | External API proxy |
-| `kafka` | `kafka` | lockbox | Message streaming |
-| `rabbitmq` | `rabbitmq` | lockbox | Message queue |
-| `nats` | `nats` | optional | Message broker |
-| `redis-streams` | `redis-streams` | lockbox | Stream broker |
+| `mongodb` | `mongodb` | lockbox | Document store |
+| `elasticsearch` | `elasticsearch` | lockbox | Search |
+| `cassandra` | `cassandra` | lockbox | Wide-column store |
+| `couchdb` | `couchdb` | lockbox | Document store |
+| `influxdb` | `influxdb` | lockbox | Time series |
+| `ldap` | `ldap` | lockbox | Directory |
 | `rivers-exec` | `exec` | `nopassword = true` | Script execution |
-
-If a declared driver cannot be resolved at startup, the entire app is blocked from loading and its endpoints return `503 Service Unavailable`. Other apps in the bundle load normally.
+| `kafka` | `kafka` | lockbox | Message streaming |
+| `rabbitmq` | `rabbitmq` | lockbox | Message queuing |
+| `nats` | `nats` | lockbox | Message pub/sub |
+| `redis-streams` | `redis-streams` | lockbox | Stream processing |
 
 ---
 
@@ -239,9 +257,9 @@ Location: `{app}/schemas/{name}.schema.json`
 | Attribute | Supported Drivers | Description |
 |-----------|-------------------|-------------|
 | `faker` | `faker` only | Faker.js dot-notation: `"name.firstName"` |
-| `min` | `postgresql`, `mysql` | Minimum numeric value |
-| `max` | `postgresql`, `mysql` | Maximum numeric value |
-| `pattern` | `postgresql`, `mysql`, `ldap` | Regex pattern |
+| `min` | `postgres`, `mysql` | Minimum numeric value |
+| `max` | `postgres`, `mysql` | Maximum numeric value |
+| `pattern` | `postgres`, `mysql`, `ldap` | Regex pattern |
 
 MUST NOT: Use `faker` attribute with non-faker drivers — validation error.
 
@@ -285,7 +303,7 @@ max_records_per_query = 500
 
 ```toml
 [data.datasources.orders_db]
-driver             = "postgresql"
+driver             = "postgres"
 host               = "${DB_HOST}"
 port               = 5432
 database           = "orders"
@@ -341,6 +359,58 @@ timeout_ms = 60000
 
 Commands are pinned by SHA-256 hash. Input is validated against JSON Schema. Processes run as a restricted OS user.
 
+### Filesystem Datasource (Chroot File I/O)
+
+For reading and writing files under a sandboxed root directory:
+
+```toml
+# resources.toml
+[[datasources]]
+name       = "fs"
+driver     = "filesystem"
+x-type     = "filesystem"
+nopassword = true
+required   = true
+
+# app.toml
+[data.datasources.fs]
+name       = "fs"
+driver     = "filesystem"
+database   = "/var/rivers/uploads"
+nopassword = true
+```
+
+`database` is the chroot root — must be an absolute path to an existing directory. No credentials required.
+
+The filesystem driver uses a **typed proxy** — `ctx.datasource("fs")` returns a typed object, not a query builder:
+
+```typescript
+const fs = ctx.datasource("fs");
+
+// Reads
+fs.readFile("config.json")              // → string (utf-8)
+fs.readFile("photo.jpg", "base64")      // → base64 string
+fs.readDir("uploads")                   // → [{name: "file.txt"}, …]
+fs.stat("report.pdf")                   // → {size, mtime, atime, ctime, isFile, isDirectory}
+fs.exists("data.csv")                   // → boolean (escape returns false, not error)
+fs.find("**/*.log", 100)                // → {results: ["path/a.log", …], truncated: bool}
+fs.grep("ERROR", "logs")               // → {results: [{file, line, content}], truncated: bool}
+
+// Writes
+fs.writeFile("out.txt", "hello")        // utf-8, overwrites, creates parent dirs
+fs.writeFile("img.png", base64, "base64")
+fs.mkdir("a/b/c")                       // recursive, idempotent
+fs.delete("old.txt")                    // file or recursive dir; missing → no-op
+fs.rename("old.txt", "new.txt")
+fs.copy("src.txt", "dst.txt")           // file or recursive dir
+```
+
+MUST: `database` must be an absolute path that exists at startup.
+MUST NOT: Pass absolute paths in operation arguments — rejected with `Query` error.
+MUST NOT: Declare `lockbox` — use `nopassword = true`.
+NOTE: Symlinks inside the root are rejected at operation time (`Forbidden` error). `exists()` on an escaping path returns `false` silently.
+NOTE: Optional config keys in `app.toml`: `max_file_size` (bytes, default 50 MB) and `max_depth` (default 100).
+
 ---
 
 ## DataView Configuration
@@ -353,8 +423,7 @@ datasource    = "contacts"
 query         = "schemas/contact.schema.json"
 return_schema = "schemas/contact.schema.json"
 
-[data.dataviews.list_contacts.cache]
-enabled     = true
+[data.dataviews.list_contacts.caching]
 ttl_seconds = 60
 
 [[data.dataviews.list_contacts.parameters]]
@@ -640,76 +709,6 @@ resources  = ["users_db"]
 |-------|--------|-------|
 | `auth` | `"none"`, `"session"` | `"none"` — no authentication check; `"session"` — requires valid session token |
 | `guard` | `true`, `false` | When `true`, marks this view as a login/auth guard endpoint that creates sessions |
-| `rate_limit_per_minute` | integer | v0.54.0 — per-view token-bucket limit (overrides global) |
-| `rate_limit_burst_size` | integer | v0.54.0 — burst capacity for per-view limit |
-
-### Per-view Rate Limiting (v0.54.0)
-
-Views can declare their own token-bucket rate limits:
-
-```toml
-[api.views.search]
-path                  = "/api/search"
-method                = "GET"
-view_type             = "Rest"
-rate_limit_per_minute = 30
-rate_limit_burst_size = 10
-```
-
-Client IP is proxy-aware: when the request comes from a trusted proxy, the left-most `X-Forwarded-For` entry is used as the key. Per-view limiters are cached by view_id. Exceeding the limit returns `429 Too Many Requests` with a `Retry-After` header.
-
-### Guard Lifecycle Hooks (v0.54.0)
-
-Guard views can declare fire-and-forget hooks that fire on session state changes. Hooks run via `tokio::spawn` and **cannot influence the auth flow** — use them only for audit logging, metrics, or external event emission.
-
-```toml
-[api.views.login]
-path      = "/api/login"
-method    = "POST"
-view_type = "Rest"
-auth      = "none"
-guard     = true
-
-[api.views.login.lifecycle_hooks]
-on_session_valid.module       = "libraries/handlers/audit.ts"
-on_session_valid.entrypoint   = "onSessionValid"
-on_invalid_session.module     = "libraries/handlers/audit.ts"
-on_invalid_session.entrypoint = "onInvalidSession"
-on_failed.module              = "libraries/handlers/audit.ts"
-on_failed.entrypoint          = "onLoginFailed"
-```
-
-| Hook | Fires when |
-|------|-----------|
-| `on_session_valid` | Session validation succeeds on a protected request. |
-| `on_invalid_session` | Session validation fails (expired, revoked, unknown). |
-| `on_failed` | Guard credentials rejected. |
-
-MUST NOT: Block or perform long-running work in a hook — they run concurrently with the request and their return values are ignored.
-
-### Init Handlers and `ctx.ddl` (v0.54.0)
-
-Apps can declare an init handler that runs once on app load. Init handlers can execute DDL via `ctx.ddl(datasource, statement)` — useful for seeding test schemas in canary apps or creating audit tables at deploy time.
-
-```typescript
-// libraries/handlers/init.ts
-export function init(ctx: InitContext): void {
-  ctx.ddl("orders_db", "CREATE TABLE IF NOT EXISTS audit_log (id SERIAL PRIMARY KEY, message TEXT)");
-}
-```
-
-DDL is gated by a **Gate 3 whitelist** in `riversd.toml` (admin-controlled, not bundle-controlled):
-
-```toml
-[security]
-ddl_whitelist = [
-  "orders_db@c7a3e1f0-8b2d-4d6e-9f1a-3c5b7d9e2f4a",
-]
-```
-
-Calls from apps not on the whitelist for the requested datasource are rejected at the gate. DDL events (`DdlExecuted`, `DdlFailed`, `DdlRejected`) are logged to the per-app log.
-
-Init handlers do **not** run for apps that are blocked by the missing-driver check — the app is isolated before init.
 
 ---
 
@@ -785,30 +784,85 @@ Rivers REST views return envelope format by default:
 
 ## CodeComponent Handler Signature
 
-### TypeScript/JavaScript
+### JavaScript
 
-```typescript
-interface ViewContext {
-  request: ParsedRequest;
-  sources: Record<string, any>;
-  meta: Record<string, any>;
-  trace_id: string;
-}
+```javascript
+function handler(ctx) {
+    // Request data
+    var method = ctx.request.method;
+    var body = ctx.request.body;
+    var id = ctx.request.path_params.id;
+    var q = ctx.request.query;
 
-interface ParsedRequest {
-  method: string;
-  path: string;
-  query_params: Record<string, string>;
-  headers: Record<string, string>;
-  body: any | null;
-  path_params: Record<string, string>;
-}
+    // Pre-fetched DataView results (keyed by DataView name)
+    var users = ctx.data.list_users;
 
-// Primary handler
-export function handler(ctx: ViewContext): any {
-  // Return value becomes ctx.sources["primary"]
+    // Call DataView dynamically
+    var orders = ctx.dataview("get_orders", { user_id: id });
+
+    // Application KV store (TTL in ms)
+    ctx.store.set("key", { data: 42 }, 60000);
+    var cached = ctx.store.get("key");
+    ctx.store.del("key");
+
+    // WebSocket context (only in ws_hooks handlers)
+    // ctx.ws.connection_id, ctx.ws.message
+
+    // Globals — structured logging
+    // When app_log_dir is configured, output goes to log/apps/<app-name>.log (v0.53.0)
+    Rivers.log.info("message", { key: "value" });
+    Rivers.crypto.randomHex(16);
+    Rivers.crypto.hashPassword("secret");
+    Rivers.crypto.verifyPassword("secret", hash);
+
+    // Set response
+    ctx.resdata = { users, orders };
 }
 ```
+
+### Context Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `ctx.request` | Object | `{method, path, headers, query, body, path_params}` |
+| `ctx.resdata` | Any | Set this to return response data |
+| `ctx.data` | Object | Pre-fetched DataView results keyed by name |
+| `ctx.store` | Object | KV store: `get(key)`, `set(key, value, ttl_ms)`, `del(key)` |
+| `ctx.dataview()` | Function | Call DataView dynamically: `ctx.dataview(name, params)` |
+| `ctx.ws` | Object | WebSocket: `connection_id`, `message` (only in ws_hooks) |
+| `ctx.trace_id` | String | Request trace ID |
+| `ctx.app_id` | String | Application ID |
+| `ctx.node_id` | String | Node identifier |
+| `ctx.env` | String | Runtime environment |
+
+### Rivers.view — DataView Dispatch (Preferred)
+
+```typescript
+// Call a declared DataView by name — preferred over ctx.dataview() and Rivers.db.query()
+const result = await Rivers.view.query("get_order", { order_id: "abc-123" });
+// result = { rows: [...], affected_rows: 0, last_insert_id: null }
+```
+
+### Rivers.db.tx — Sync Transaction API
+
+```typescript
+const tx = Rivers.db.tx.begin("datasource_name");    // sync — checks out connection, sends BEGIN
+
+tx.query("dataview_name", { params });                // sync — executes, returns void
+tx.query("another_dv", { params });
+
+const pending = tx.peek("dataview_name");             // Array<QueryResult> — NOT final until commit
+// pending[0].affected_rows, pending[0].rows
+
+const results = tx.commit();                          // sync — sends COMMIT, returns HashMap
+// results["dataview_name"][0].rows                   // every value is Array — use [0]
+// results["another_dv"][0].affected_rows
+
+tx.rollback();                                        // explicit rollback for early exit
+// Auto-rollback on handler exit without commit — logged at WARN
+```
+
+**Rules:** All DataViews in a transaction MUST use the same datasource. Same name called N times produces `results["name"][0]`, `results["name"][1]`, etc. See `RECIPE:ATOMIC-MULTI-WRITE` and `RECIPE:CONDITIONAL-WRITE` in the cookbook.
 
 ### Supported Languages
 
@@ -837,22 +891,66 @@ MUST: Append decisions, gaps, and ambiguities — never replace.
 
 ---
 
+## New Config Fields (v0.53.0)
+
+### Per-App Logging
+
+```toml
+[base.logging]
+level           = "info"
+format          = "json"
+local_file_path = "log/riversd.log"
+app_log_dir     = "log/apps"            # Per-app log directory
+```
+
+When `app_log_dir` is set, each app's `Rivers.log.*` calls write to `log/apps/<app-name>.log` instead of the main server log. This is useful for debugging individual apps without filtering.
+
+### Metrics
+
+```toml
+[metrics]
+enabled  = true
+endpoint = "/metrics"
+```
+
+Exposes a Prometheus-compatible metrics endpoint on the main server port.
+
+### Engines
+
+```toml
+[engines]
+v8_path   = "lib/librivers_engine_v8.dylib"
+wasm_path = "lib/librivers_engine_wasm.dylib"
+```
+
+Explicit paths to engine dylibs for dynamic build mode. The correct filename pattern is `librivers_engine_v8.dylib` (not `librivers_v8.dylib`).
+
+### Plugins
+
+```toml
+[plugins]
+directory = "plugins/"
+```
+
+Directory where Rivers searches for plugin dylibs (`librivers_plugin_*.dylib`).
+
+---
+
 ## Verification
 
 ```bash
+# Scaffold a new bundle (recommended starting point)
+riverpackage init {bundle-name}/
+
+# Validate before deploying — runs the 4-layer pipeline (structural, existence,
+# cross-reference, syntax). Fix all errors locally before riversctl start or cargo deploy.
+riverpackage validate {bundle-path}/
+
 # Build SPA (if applicable)
 cd {app-main}/libraries && npm install && npm run build
 
-# v0.54.0 — run the 4-layer validation pipeline before deploying
-riverpackage validate ./{bundle-name}
-riverpackage validate ./{bundle-name} --format json
-riverpackage validate ./{bundle-name} --config /opt/rivers/config/riversd.toml
-
-# Start services first
-riversd --config {app-service}/app.toml
-
-# Start main (waits for service healthy)
-riversd --config {app-main}/app.toml
+# Start server (config points to bundle)
+riversd --config riversd.toml
 
 # Test endpoints
 curl "http://localhost:{port}/api/{endpoint}"
@@ -861,15 +959,6 @@ curl "http://localhost:{port}/api/{endpoint}?limit=10"
 # SPA
 open http://localhost:{port}
 ```
-
-The `riverpackage validate` pipeline runs four layers:
-
-1. **Structural** — TOML parse of bundle/app manifests, `resources.toml`, `app.toml`
-2. **Existence** — all referenced files (schemas, handler modules, libraries) exist
-3. **Cross-reference** — DataViews resolve to datasources, views resolve to DataViews, services resolve
-4. **Syntax** — JSON schemas parse, TS/JS handler modules compile via V8
-
-`riversd` runs the same pipeline at startup. A bundle that passes `riverpackage validate` on the same Rivers version loads cleanly on the server.
 
 ---
 

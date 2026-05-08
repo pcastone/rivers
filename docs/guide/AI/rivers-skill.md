@@ -1,281 +1,256 @@
 ---
 name: rivers-dev
-description: Build Rivers application bundles — declarative REST APIs, WebSocket, SSE, streaming, and GraphQL endpoints using TOML configuration, JSON schemas, and JavaScript/WASM CodeComponent handlers. Use when building Rivers apps, writing handlers, configuring datasources/DataViews/views, or administering riversd. Covers the full Rivers v0.53.0 stack.
+description: Build Rivers application bundles — declarative REST APIs, WebSocket, SSE, streaming, MCP tools, and GraphQL endpoints using TOML configuration, JSON schemas, and TypeScript/JavaScript/WASM CodeComponent handlers. Use when building Rivers apps, writing handlers, configuring datasources/DataViews/views, or administering riversd. Covers the full Rivers v1 stack.
 ---
 
 # Rivers Application Development Skill
 
-Build and administer Rivers applications. Rivers is a declarative app-service framework where applications are defined entirely through TOML configuration, JSON schemas, and optional JavaScript/WASM handlers — no Rust code required.
+Build and administer Rivers applications. Rivers is a declarative app-service framework where applications are defined entirely through TOML configuration, JSON schemas, and optional TypeScript/JavaScript/WASM handlers — no Rust code required.
 
 ## When to Use
 
 - User asks to build a Rivers app, bundle, or endpoint
-- User asks to write a JavaScript or WASM handler for Rivers
+- User asks to write a TypeScript, JavaScript, or WASM handler for Rivers
 - User asks about Rivers DataViews, views, schemas, or config
 - User asks to configure riversd, riversctl, or rivers-lockbox
-- User mentions TOML config for REST API, WebSocket, SSE, or GraphQL
+- User mentions TOML config for REST API, WebSocket, SSE, MCP, or GraphQL
 
 ---
 
-## Bundle Structure
+## Cookbook — Primary Pattern Reference
 
-```
-{bundle-name}/
-├── manifest.toml              # bundleName, bundleVersion, apps[]
-├── {app-service}/
-│   ├── manifest.toml          # appName, appId, type="app-service", entryPoint
-│   ├── resources.toml         # [[datasources]], [[services]]
-│   ├── app.toml               # [data.datasources.*], [data.dataviews.*], [api.views.*]
-│   ├── schemas/               # JSON schema files (.schema.json)
-│   └── libraries/             # JS/TS/WASM handlers
-└── {app-main}/
-    ├── manifest.toml          # type="app-main"
-    ├── resources.toml
-    ├── app.toml
-    └── libraries/spa/         # SPA assets (Svelte, React, etc.)
-```
+**All Rivers patterns, templates, and anti-patterns are defined in the Rivers Cookbook.** Before writing any TOML, handler code, or configuration, consult the cookbook for the correct recipe.
 
-**Rules:**
-- `apps` array: services before mains
-- `appId` is a stable UUID — NEVER regenerate
-- `type = "data_view"` is WRONG — use `type = "dataview"` (lowercase, one word)
+### Cookbook Files
 
----
+| File | Model | Use |
+|------|-------|-----|
+| `rivers-cookbook-sonnet.md` | Sonnet | Checklist → Template → Example → Constraints → Escalation |
+| `rivers-cookbook-opus.md` | Opus | Decision logic → Composition → Template → Failure modes → Escalation |
 
-## DataView Configuration
+### Recipe Selection
 
-```toml
-[data.dataviews.list_contacts]
-name          = "list_contacts"
-datasource    = "contacts"
-query         = "schemas/contact.schema.json"
-return_schema = "schemas/contact.schema.json"
+1. Identify what you're building (read endpoint, write endpoint, transaction, MCP tool, etc.)
+2. Find the matching `RECIPE:` entry in the cookbook
+3. Check the match criteria (Sonnet) or decision logic (Opus)
+4. Copy the template, fill in the specifics
+5. Check the constraints and anti-patterns
 
-# Cache invalidation: clear these DataView caches on successful execution
-invalidates = ["list_contacts", "search_contacts"]
+### Key Recipes by Task
 
-[data.dataviews.list_contacts.caching]
-ttl_seconds = 60
+| Task | Recipe |
+|------|--------|
+| Start a new app | `RECIPE:NEW-BUNDLE` |
+| Simple GET endpoint | `RECIPE:SINGLE-READ` |
+| Simple POST/PUT/DELETE | `RECIPE:SINGLE-WRITE` |
+| Full CRUD resource | `RECIPE:REST-CRUD` |
+| Multiple queries in one response | `RECIPE:MULTI-QUERY-READ` |
+| Atomic multi-write | `RECIPE:ATOMIC-MULTI-WRITE` |
+| MCP tool (read) | `RECIPE:MCP-READ-TOOL` |
+| MCP tool (multi-step write) | `RECIPE:MCP-MULTI-STEP` |
+| Connect a datasource | `RECIPE:DATASOURCE-SQL`, `RECIPE:DATASOURCE-REDIS`, etc. |
+| Schema file | `RECIPE:SCHEMA-FILE` |
+| Validate a bundle | `RECIPE:BUNDLE-VALIDATION` |
 
-[[data.dataviews.list_contacts.parameters]]
-name     = "limit"
-type     = "integer"
-required = false
-default  = 20
-```
+### Critical Anti-Patterns
 
-### CRUD DataViews (per-method queries)
-
-```toml
-[data.dataviews.users]
-name       = "users"
-datasource = "db"
-get_query    = "SELECT * FROM users WHERE id = $id"
-post_query   = "INSERT INTO users (name, email) VALUES ($name, $email) RETURNING *"
-put_query    = "UPDATE users SET name = $name WHERE id = $id RETURNING *"
-delete_query = "DELETE FROM users WHERE id = $id"
-get_schema    = "schemas/user.schema.json"
-post_schema   = "schemas/user-create.schema.json"
-```
-
-### Parameter Types
-
-`string`, `integer`, `float`, `boolean`, `array`, `uuid`, `email`, `phone`, `datetime`, `date`, `url`, `json`
+| Anti-Pattern | Rule |
+|---|---|
+| `ANTI:MULTI-STATEMENT-SQL` | ONE statement per query field. Semicolons → validation error. |
+| `ANTI:RAW-SQL-IN-HANDLER` | Handlers call DataViews by name, not raw SQL. |
+| `ANTI:SPLIT-TOOL-SEQUENCING` | One logical operation = one tool, one handler, one transaction. |
+| `ANTI:HANDLER-FOR-SIMPLE-CRUD` | Don't write a handler that just passes through to a DataView. |
+| `ANTI:RETURNING-CLAUSE` | Don't use `RETURNING *` — use a follow-up read DataView. |
 
 ---
 
-## View Configuration
+## Architectural Rules
 
-### REST View with DataView Handler
-
-```toml
-[api.views.list_contacts]
-path      = "/api/contacts"
-method    = "GET"
-view_type = "Rest"
-auth      = "none"
-
-[api.views.list_contacts.handler]
-type     = "dataview"
-dataview = "list_contacts"
-
-[api.views.list_contacts.parameter_mapping.query]
-limit  = "limit"
-offset = "offset"
-```
-
-### REST View with CodeComponent Handler
-
-```toml
-[api.views.create_order]
-path      = "/api/orders"
-method    = "POST"
-view_type = "Rest"
-
-[api.views.create_order.handler]
-type       = "codecomponent"
-language   = "javascript"
-module     = "libraries/handlers/orders.js"
-entrypoint = "createOrder"
-resources  = ["orders_db"]
-```
-
-### View Types
-
-| Type | Transport |
-|------|-----------|
-| `Rest` | HTTP request/response |
-| `Websocket` | WS upgrade, bidirectional |
-| `ServerSentEvents` | HTTP long-lived, server→client |
-| `MessageConsumer` | EventBus event (no HTTP route) |
-
-### Auth & Guard Views
-
-```toml
-auth  = "none"       # Public
-auth  = "session"    # Requires valid session
-guard = true         # This IS the login endpoint (creates sessions)
-```
-
-### SSE Views
-
-```toml
-[api.views.events]
-view_type              = "ServerSentEvents"
-path                   = "/api/events"
-sse_tick_interval_ms   = 5000
-sse_trigger_events     = ["OrderCreated", "OrderUpdated"]
-sse_event_buffer_size  = 200    # Last-Event-ID replay buffer (default 100)
-```
-
-### WebSocket Views with Lifecycle Hooks
-
-```toml
-[api.views.chat]
-view_type      = "Websocket"
-path           = "/ws/chat"
-websocket_mode = "Broadcast"    # or "Direct"
-
-[api.views.chat.ws_hooks]
-on_connect.module       = "handlers/chat.js"
-on_connect.entrypoint   = "onConnect"
-on_message.module       = "handlers/chat.js"
-on_message.entrypoint   = "onMessage"
-on_disconnect.module    = "handlers/chat.js"
-on_disconnect.entrypoint = "onDisconnect"
-```
-
-### Streaming REST Views
-
-```toml
-[api.views.export]
-view_type         = "Rest"
-path              = "/api/export"
-method            = "POST"
-streaming         = true
-streaming_format  = "ndjson"    # or "sse"
-stream_timeout_ms = 120000
-```
-
-Handler uses `{chunk, done}` protocol: return `{chunk: <data>, done: false}` per yield, `{done: true}` to complete.
-
-### Polling on SSE/WS Views
-
-```toml
-[api.views.dashboard.polling]
-tick_interval_ms = 3000
-diff_strategy    = "hash"       # hash | null | change_detect
-poll_state_ttl_s = 300
-```
+1. **ONE statement per query field.** Semicolons in a query string → validation error at Gate 1.
+2. **Handlers call DataViews by name** via `Rivers.view.query(name, params)`. SQL lives in TOML.
+3. **`query`** is the default query field (handler dispatch). Method-specific variants (`get_query`, `post_query`, `put_query`, `delete_query`) fire on REST dispatch by HTTP method.
+4. **Multi-query orchestration belongs in handlers**, not in DataView TOML.
+5. **Transactions are sync**: `Rivers.db.tx.begin()` / `tx.query()` / `tx.commit()`. No promises.
+6. **`transaction = true`** on a DataView wraps its single query in BEGIN/COMMIT. Independent of handler transactions.
+7. **`view_type = "Mcp"`** — CamelCase, NOT all-caps `"MCP"`.
+8. **`type = "dataview"`** — lowercase one word, NOT `"data_view"`.
+9. **`destructive = false`** must be explicit on non-destructive MCP tools — default is `true`.
+10. **`method = "POST"`** required for write MCP tools — without it, engine calls `get_query`.
 
 ---
 
-## GraphQL Configuration
+## Handler API Reference
 
-```toml
-[graphql]
-enabled        = true
-path           = "/graphql"
-introspection  = true
-max_depth      = 10
-max_complexity = 1000
-```
+### TypeScript/JavaScript Handler Signature
 
-- **Query fields** auto-generated from DataViews
-- **Mutation fields** auto-generated from CodeComponent POST/PUT/DELETE views
-- **Subscription fields** auto-generated from SSE trigger events via EventBus
-- Playground at `/graphql/playground` when introspection enabled
+```typescript
+interface ViewContext {
+    request: ParsedRequest;
+    sources: Record<string, any>;
+    meta: Record<string, any>;
+    session: SessionContext;
+    trace_id: string;
+    app_id: string;
+    node_id: string;
+    env: string;
+}
 
----
+interface ParsedRequest {
+    method: string;
+    path: string;
+    headers: Record<string, string>;
+    query_params: Record<string, string>;
+    path_params: Record<string, string>;
+    body: any | null;
+}
 
-## JavaScript Handler API
+interface SessionContext {
+    identity: { username: string; groups: string[] };
+    apikey?: { key_id: string; scopes: string[] };
+}
 
-Handlers receive a `ctx` object:
-
-```javascript
-function handler(ctx) {
-    // Request data (read-only)
-    const method = ctx.request.method;
-    const body = ctx.request.body;
-    const id = ctx.request.params.id;
-    const query = ctx.request.query;
-
-    // Pre-fetched DataView results
-    const users = ctx.data.list_users;
-
-    // Call DataView dynamically
-    const orders = ctx.dataview("get_orders", { user_id: id });
-
-    // Application KV store
-    ctx.store.set("cache:key", { data: 42 }, 60000);  // TTL in ms
-    const cached = ctx.store.get("cache:key");
-    ctx.store.del("cache:key");
-    // Reserved prefixes blocked: session:, csrf:, cache:, raft:, rivers:
-
-    // Set response
-    ctx.resdata = { users, orders };
+// Primary handler
+export async function handler(ctx: ViewContext): Promise<Rivers.Response> {
+    return { status: 200, body: { data: "result" } };
 }
 ```
 
-### Context Properties
+### Rivers.view — DataView Dispatch (Preferred)
 
-| Property | Type | Description |
-|----------|------|-------------|
-| `ctx.request` | Object | `{method, path, headers, query, body, path_params}` (read-only) |
-| `ctx.resdata` | Any | Response payload (set this to return data) |
-| `ctx.data` | Object | Pre-fetched DataView results keyed by name |
-| `ctx.store` | Object | Application KV store (`get`, `set`, `del`) |
-| `ctx.dataview()` | Function | Call DataView dynamically |
-| `ctx.ws` | Object | WebSocket context (`connection_id`, `message`) — only in WS hooks |
-| `ctx.trace_id` | String | Request trace ID |
-| `ctx.app_id` | String | Application ID |
-| `ctx.node_id` | String | Node identifier |
-| `ctx.env` | String | Runtime environment |
+```typescript
+// Call a declared DataView by name — goes through DataViewEngine
+const result = await Rivers.view.query("get_order", { order_id: "abc-123" });
+// result = { rows: [...], affected_rows: 0, last_insert_id: null }
+```
 
-### Rivers Global APIs
+### Rivers.db.tx — Sync Transaction API
 
-```javascript
-// Structured logging (trace_id auto-included)
-// Output goes to log/apps/<app-name>.log when app_log_dir is configured (v0.53.0)
+```typescript
+// Transactions are SYNC — no await, no promises
+const tx = Rivers.db.tx.begin("datasource_name");
+
+try {
+    tx.query("archive_wip", { goal_id });          // sync, returns void
+    tx.query("clear_wip", { goal_id, project_id });
+    tx.query("mark_goal_complete", { goal_id, project_id });
+
+    // Peek at intermediate results (not final until commit)
+    const pending = tx.peek("mark_goal_complete");  // returns Array<QueryResult>
+    if (pending[0].affected_rows === 0) {
+        tx.rollback();
+        return { status: 404, body: { error: "goal not found" } };
+    }
+
+    tx.query("get_goal", { goal_id });
+
+    // Commit — returns HashMap<string, Array<QueryResult>>
+    const results = tx.commit();
+
+    // Every value is an array — even single calls use [0]
+    return { status: 200, body: results["get_goal"][0].rows[0] };
+
+} catch (e) {
+    // Auto-rollback on throw, logged at WARN
+    return { status: 500, body: { error: e.message } };
+}
+```
+
+**Transaction rules:**
+- `tx.begin(datasource)` — sync, checks out connection, sends BEGIN
+- `tx.query(dataview_name, params)` — sync, executes on txn connection, returns void
+- `tx.peek(name)` — returns `Array<QueryResult>`, NOT final until commit
+- `tx.commit()` — sync, sends COMMIT, returns all results as `HashMap<string, Array<QueryResult>>`
+- `tx.rollback()` — sync, sends ROLLBACK, releases connection
+- Same DataView called N times: `results["name"][0]`, `results["name"][1]`, etc.
+- Auto-rollback if handler exits without commit/rollback — logged at WARN
+- All DataViews in a transaction MUST use the same datasource
+
+### Rivers.db.query — Raw SQL (Escape Hatch)
+
+```typescript
+// Available but NOT preferred — use Rivers.view.query() instead
+const result = await Rivers.db.query("datasource_name", "SELECT * FROM users WHERE id = $1", [userId]);
+```
+
+### Rivers.log — Structured Logging
+
+```typescript
 Rivers.log.info("user login", { userId: 123 });
 Rivers.log.warn("rate limit approaching");
 Rivers.log.error("payment failed", { reason: "declined" });
-
-// Crypto
-var hash = Rivers.crypto.hashPassword("secret");
-var valid = Rivers.crypto.verifyPassword("secret", hash);
-var hex = Rivers.crypto.randomHex(16);
-var token = Rivers.crypto.randomBase64url(32);
-var sig = Rivers.crypto.hmac("key", "data");
-var eq = Rivers.crypto.timingSafeEqual("a", "b");
-
+// trace_id auto-included in all log output
 ```
 
-### Guard Handler (Authentication)
+### Rivers.crypto — Cryptography
 
-```javascript
-function authenticate(ctx) {
-    var user = ctx.dataview("get_user_by_username", { username: ctx.request.body.username });
+```typescript
+const hash = Rivers.crypto.hashPassword("secret");
+const valid = Rivers.crypto.verifyPassword("secret", hash);
+const hex = Rivers.crypto.randomHex(16);
+const token = Rivers.crypto.randomBase64url(32);
+const sig = Rivers.crypto.hmac("key", "data");
+const eq = Rivers.crypto.timingSafeEqual("a", "b");
+```
+
+### Rivers.http — Outbound HTTP (Escape Hatch)
+
+```typescript
+// Only available when allow_outbound_http = true on the handler
+const response = await Rivers.http.get("https://external.com/api/data");
+const response = await Rivers.http.post("https://external.com/webhook", body, {
+    headers: { "Content-Type": "application/json" },
+});
+```
+
+### ctx.store — Application KV Store
+
+```typescript
+ctx.store.set("cache:key", { data: 42 }, 60000);  // TTL in ms
+const cached = ctx.store.get("cache:key");
+ctx.store.del("cache:key");
+// Reserved prefixes blocked: session:, csrf:, cache:, raft:, rivers:
+```
+
+### Pseudo DataView Builder
+
+```typescript
+// One-off query without TOML declaration — prototype only
+const view = ctx.datasource("db")
+    .fromQuery("SELECT department, SUM(amount) FROM expenses GROUP BY department")
+    .withGetSchema({ driver: "postgresql", type: "object", fields: [...] })
+    .build();
+
+const result = await view({ year: 2024 });
+// No caching, no invalidation — promote to TOML when stable
+```
+
+---
+
+## Pipeline Stages
+
+```
+on_session_valid  → pre_process → on_request → Primary → transform → on_response → post_process
+```
+
+| Stage | Type | Return |
+|-------|------|--------|
+| `on_session_valid` | Hook | void — loads permissions into `ctx.meta` |
+| `pre_process` | Observer | void — fire-and-forget, errors logged |
+| `on_request` | Accumulator | `{ key, data }` or `null` → deposited into `ctx.sources` |
+| Primary | Handler/DataView | result → `ctx.sources["primary"]` |
+| `transform` | Chained | shapes data |
+| `on_response` | Accumulator | `{ key, data }` or `null` → merges/collapses sources |
+| `post_process` | Observer | void — fire-and-forget |
+
+---
+
+## Guard Handler (Authentication)
+
+```typescript
+export function authenticate(ctx: ViewContext): any {
+    const user = ctx.dataview("get_user_by_username", {
+        username: ctx.request.body.username,
+    });
     if (!user || !Rivers.crypto.verifyPassword(ctx.request.body.password, user.password_hash)) {
         throw new Error("invalid credentials");
     }
@@ -284,39 +259,40 @@ function authenticate(ctx) {
 }
 ```
 
-### Streaming Handler ({chunk, done} Protocol)
+---
 
-```javascript
-function generate(ctx) {
-    var iteration = __args.iteration || 0;
+## Streaming Handler ({chunk, done} Protocol)
+
+```typescript
+export function generate(ctx: ViewContext): any {
+    const iteration = __args.iteration || 0;
     if (iteration >= 100) return { done: true };
     return {
         chunk: { index: iteration, data: "row-" + iteration },
-        done: false
+        done: false,
     };
 }
 ```
 
-State is passed between iterations via `__args.state` (previous return value) and `__args.iteration` (counter).
+State passed between iterations via `__args.state` and `__args.iteration`.
 
-### WebSocket Lifecycle Hooks
+---
 
-```javascript
-// on_connect: return non-null to send welcome, return false to reject
-function onConnect(ctx) {
+## WebSocket Lifecycle Hooks
+
+```typescript
+export function onConnect(ctx: ViewContext): any {
     Rivers.log.info("client connected", { connection_id: ctx.ws.connection_id });
     return { welcome: "Connected to chat" };
 }
 
-// on_message: receives message, return non-null to reply
-function onMessage(ctx) {
-    var msg = ctx.ws.message;
+export function onMessage(ctx: ViewContext): any {
+    const msg = ctx.ws.message;
     Rivers.log.info("message received", { text: msg.text });
     return { echo: msg.text };
 }
 
-// on_disconnect: cleanup
-function onDisconnect(ctx) {
+export function onDisconnect(ctx: ViewContext): void {
     Rivers.log.info("client disconnected", { connection_id: ctx.ws.connection_id });
 }
 ```
@@ -327,23 +303,11 @@ function onDisconnect(ctx) {
 
 WASM handlers run in Wasmtime. Write in any language with WASM target (Rust, C, Go/TinyGo, AssemblyScript, Zig).
 
-### WAT Example
-
-```wat
-(module
-  (func (export "handler") (result i32)
-    (i32.add (i32.const 17) (i32.const 25))
-  )
-)
-```
-
-### Configuration
-
 ```toml
 [api.views.compute.handler]
 type       = "codecomponent"
 language   = "wasm"
-module     = "libraries/compute.wat"    # or .wasm
+module     = "libraries/compute.wasm"
 entrypoint = "handler"
 
 [runtime.process_pools.wasm]
@@ -351,8 +315,6 @@ engine          = "wasmtime"
 workers         = 2
 task_timeout_ms = 5000
 ```
-
-### WASM Runtime Limits
 
 | Config | Default | Description |
 |--------|---------|-------------|
@@ -366,107 +328,34 @@ task_timeout_ms = 5000
 
 ```toml
 [runtime.process_pools.default]
-engine                   = "v8"         # v8 | wasmtime
-workers                  = 4
-task_timeout_ms          = 5000
-max_heap_mb              = 128
-max_queue_depth          = 0            # 0 = workers × 4
-recycle_after_tasks      = 0            # 0 = never recycle
-heap_recycle_threshold   = 0.8          # recycle isolate if heap > 80%
-
-[runtime.process_pools.wasm]
-engine                   = "wasmtime"
-workers                  = 2
-task_timeout_ms          = 5000
+engine                 = "v8"
+workers                = 4
+task_timeout_ms        = 5000
+max_heap_mb            = 128
+max_queue_depth        = 0            # 0 = workers × 4
+recycle_after_tasks    = 0            # 0 = never recycle
+heap_recycle_threshold = 0.8          # recycle isolate if heap > 80%
 ```
 
-- V8 isolates are pooled and reused (SHAPE-9)
-- No V8 snapshots — state injected via globals (SHAPE-10)
+- V8 isolates are pooled and reused
 - Per-request isolation via context unbinding
 - Watchdog thread terminates timed-out tasks
 
 ---
 
-## Datasource Drivers
+## Supported Languages
 
-| Driver | Type | Credentials | Use Case |
-|--------|------|-------------|----------|
-| `faker` | Database | `nopassword = true` | Synthetic test data |
-| `postgres` | Database | lockbox | Relational data |
-| `mysql` | Database | lockbox | Relational data |
-| `sqlite` | Database | `nopassword = true` | Embedded relational |
-| `redis` | Database | lockbox | Cache, sessions, KV |
-| `mongodb` | Database (plugin) | lockbox | Document store |
-| `elasticsearch` | Database (plugin) | lockbox | Search |
-| `cassandra` | Database (plugin) | lockbox | Wide-column |
-| `couchdb` | Database (plugin) | lockbox | Document store |
-| `influxdb` | Database (plugin) | lockbox | Time series |
-| `ldap` | Database (plugin) | lockbox | Directory |
-| `rivers-exec` | Database (plugin) | `nopassword = true` | Script execution |
-| `kafka` | Broker (plugin) | lockbox | Message streaming |
-| `rabbitmq` | Broker (plugin) | lockbox | Message queuing |
-| `nats` | Broker (plugin) | lockbox | Message pub/sub |
-| `redis-streams` | Broker (plugin) | lockbox | Stream processing |
-| `http` | HTTP | optional | Inter-service proxy |
-| `eventbus` | Internal | none | Pub/sub via standard interface |
+| Language | Aliases | Runtime |
+|----------|---------|---------|
+| JavaScript | `javascript`, `js`, `js_v8` | V8 |
+| TypeScript | `typescript`, `ts`, `ts_v8`, `typescript_strict` | V8 |
+| WASM | `wasm` | Wasmtime |
 
 ---
 
-## Server Configuration (`riversd.toml`)
+## Parameter Types
 
-```toml
-bundle_path = "my-bundle/"
-
-[base]
-host = "0.0.0.0"
-port = 8080
-request_timeout_seconds = 30
-
-[base.tls]
-# Optional — auto-generates self-signed certs if absent
-cert = "/etc/rivers/tls/server.crt"
-key  = "/etc/rivers/tls/server.key"
-redirect = true
-
-[base.admin_api]
-enabled = true
-host    = "127.0.0.1"
-port    = 9090
-
-[security]
-cors_enabled         = true
-cors_allowed_origins = ["https://app.example.com"]
-rate_limit_per_minute = 120
-
-[storage_engine]
-backend = "memory"              # memory | sled | redis
-path    = "data/rivers.db"
-
-[graphql]
-enabled = true
-
-[lockbox]
-path       = "lockbox/keystore.rkeystore"
-key_source = "env"
-key_env_var = "RIVERS_LOCKBOX_KEY"
-
-[base.logging]
-level           = "info"
-format          = "json"
-local_file_path = "log/riversd.log"
-app_log_dir     = "log/apps"            # Per-app log directory (v0.53.0)
-
-[metrics]
-enabled  = true
-endpoint = "/metrics"                   # Prometheus-compatible metrics (v0.53.0)
-
-[engines]
-v8_path   = "lib/librivers_engine_v8.dylib"     # Correct dylib filename
-wasm_path = "lib/librivers_engine_wasm.dylib"
-
-[plugins]
-directory = "plugins/"                  # Plugin dylib search directory
-```
+`string`, `integer`, `float`, `boolean`, `array`, `uuid`, `email`, `phone`, `datetime`, `date`, `url`, `json`
 
 ---
 
@@ -475,92 +364,60 @@ directory = "plugins/"                  # Plugin dylib search directory
 ```bash
 # Server
 riversd --config riversd.toml            # Start server
-riversd --version                         # Print version
+riversd --version                        # Print version
 riversd --no-ssl --port 8080             # Plain HTTP (dev only)
 riversd --log-level debug                # Override log level
 
 # Control
-riversctl start --config riversd.toml     # Start via helper
-riversctl doctor                           # Health check diagnostics
-riverpackage validate my-bundle/          # Validate bundle (4-layer pipeline)
-riverpackage validate my-bundle/ --format json  # JSON output for CI/CD
-riverpackage validate --config /opt/rivers/config/riversd.toml my-bundle/  # Include engine checks
-riversctl exec hash <input>               # Hash utility
-riversctl admin status                     # Query admin API
-riversctl admin deploy my-bundle/         # Deploy via admin API
+riversctl start --config riversd.toml    # Start via helper
+riversctl stop                           # Graceful shutdown
+riversctl status                         # Check if running
+riversctl doctor                         # Health check diagnostics
+riversctl doctor --fix                   # Auto-fix common issues
+riversctl admin status                   # Query admin API
+riversctl admin deploy my-bundle/        # Deploy via admin API
+
+# Validation & Packaging
+riverpackage init my-bundle/             # Scaffold new bundle
+riverpackage validate my-bundle/         # Validate bundle (4-layer pipeline)
+riverpackage validate --format json      # JSON output for CI/CD
+riverpackage preflight my-bundle/        # Pre-deployment checks
+riverpackage pack my-bundle/             # Package for deployment
 
 # Secrets
-rivers-lockbox init                       # Create keystore
+rivers-lockbox init                      # Create keystore
 rivers-lockbox add db-password --value secret
-rivers-lockbox list                       # List entries (no values)
-rivers-lockbox show db-password           # Decrypt and display
-rivers-lockbox alias db-password alt-name # Add alias
-rivers-lockbox rotate db-password         # Rotate entry
-rivers-lockbox remove db-password         # Remove entry
-rivers-lockbox validate                   # Validate keystore integrity
+rivers-lockbox list                      # List entries (no values)
+rivers-lockbox show db-password          # Decrypt and display
+rivers-lockbox alias db-password alt-name
+rivers-lockbox rotate db-password        # Rotate entry
+rivers-lockbox remove db-password        # Remove entry
+rivers-lockbox validate                  # Validate integrity
 
 # App Keystore
-rivers-keystore init <path>               # Create keystore
-rivers-keystore generate <path> <name>    # Generate key
-rivers-keystore list <path>               # List keys
-rivers-keystore info <path> <name>        # Key metadata
-rivers-keystore delete <path> <name>      # Delete key
-rivers-keystore rotate <path> <name>      # Rotate key
-
-# Control (additional commands)
-riversctl stop                             # Graceful shutdown via PID file
-riversctl status                           # Check if riversd is running
-riversctl doctor --fix                     # Auto-fix common issues
-riversctl doctor --lint                    # Lint config without fixing
-riversctl tls renew                        # Renew TLS certificates
-
-# Packaging
-riverpackage init my-bundle/              # Scaffold a new bundle (recommended)
-riverpackage validate my-bundle/          # Validate bundle structure
-riverpackage preflight my-bundle/         # Pre-deployment checks
-riverpackage pack my-bundle/              # Package for deployment
-riverpackage import-exec <path>           # Import exec scripts
-
-# Deployment (recommended)
-cargo deploy <path>                       # Deploy dynamic mode
-cargo deploy <path> --static              # Deploy static mode
+rivers-keystore init <path>
+rivers-keystore generate <path> <name>
+rivers-keystore list <path>
+rivers-keystore rotate <path> <name>
+rivers-keystore delete <path> <name>
 ```
 
 ---
 
-## Error Response Format (SHAPE-2)
-
-All server-generated errors use:
-
-```json
-{"code": 404, "message": "view not found", "trace_id": "abc-123"}
-```
-
-| Code | Condition |
-|------|-----------|
-| 400 | Bad request, parameter validation |
-| 401 | Admin auth failed |
-| 403 | RBAC permission denied |
-| 404 | View/file not found |
-| 405 | Method not allowed |
-| 408 | Request timeout |
-| 422 | Schema validation failed |
-| 429 | Rate limit exceeded |
-| 500 | Internal server error |
-| 503 | Server draining, backpressure, circuit open |
-
----
-
-## Validation Rules
+## Validation Rules (Quick Reference)
 
 | Rule | Error |
 |------|-------|
-| Handler `type = "data_view"` | WRONG — use `type = "dataview"` |
+| `type = "data_view"` | WRONG — use `type = "dataview"` |
+| `view_type = "MCP"` | WRONG — use `view_type = "Mcp"` |
 | `invalidates` target not found | `invalidates target 'X' does not exist` |
-| Unknown `view_type` | `unknown view_type 'X' (expected: Rest, Websocket, ServerSentEvents, MessageConsumer)` |
+| Unknown `view_type` | `unknown view_type 'X'` |
 | Unknown driver | warning: `unknown driver 'X'` |
 | Duplicate datasource names | `duplicate datasource name 'X'` |
 | Schema file not found | `schema file 'X' not found` |
 | Service references unknown appId | `service references unknown appId 'X'` |
 | `appId` missing or not UUID | `appId is required` |
 | Duplicate appId in bundle | `duplicate appId` |
+| Semicolons in query field | Multi-statement SQL rejected |
+| Write MCP tool without `method = "POST"` | Engine calls `get_query` which doesn't exist |
+| `destructive` not set on read tool | Defaults to `true` — explicitly set `false` |

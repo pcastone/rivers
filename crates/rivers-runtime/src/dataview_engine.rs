@@ -1001,17 +1001,53 @@ impl DataViewExecutor {
                     match acquirer.acquire(datasource_id).await {
                         Ok(mut guard) => {
                             let conn = guard.conn_mut();
+                            // TF-1/TF-2 (§3): when `transaction = true` and no ambient handler
+                            // transaction is active (txn_conn is None), wrap in BEGIN/COMMIT.
+                            // On error send ROLLBACK before propagating.
+                            // TF-3: Unsupported from begin_transaction = non-transactional driver;
+                            // silently skip the wrapper per spec (W008 warning already at Gate 1).
+                            let mut use_txn_wrapper = config.transaction;
+                            if use_txn_wrapper {
+                                match conn.begin_transaction().await {
+                                    Ok(()) => {}
+                                    Err(DriverError::Unsupported(_)) => {
+                                        use_txn_wrapper = false;
+                                    }
+                                    Err(e) => {
+                                        return Err(DataViewError::Driver(format!("BEGIN failed: {e}")));
+                                    }
+                                }
+                            }
                             let r = if config.prepared && conn.has_prepared(&query.statement) {
                                 conn.execute_prepared(&query).await
                             } else if config.prepared {
                                 if let Err(e) = conn.prepare(&query.statement).await {
+                                    if use_txn_wrapper {
+                                        let _ = conn.rollback_transaction().await;
+                                    }
                                     return Err(DataViewError::Driver(format!("prepare: {e}")));
                                 }
                                 conn.execute_prepared(&query).await
                             } else {
                                 conn.execute(&query).await
                             };
-                            Ok(InnerOutcome::Query(r))
+                            if use_txn_wrapper {
+                                match r {
+                                    Ok(qr) => {
+                                        if let Err(e) = conn.commit_transaction().await {
+                                            let _ = conn.rollback_transaction().await;
+                                            return Err(DataViewError::Driver(format!("COMMIT failed: {e}")));
+                                        }
+                                        Ok(InnerOutcome::Query(Ok(qr)))
+                                    }
+                                    Err(e) => {
+                                        let _ = conn.rollback_transaction().await;
+                                        Ok(InnerOutcome::Query(Err(e)))
+                                    }
+                                }
+                            } else {
+                                Ok(InnerOutcome::Query(r))
+                            }
                         }
                         Err(e) => Err(DataViewError::Pool(format!("pool acquire failed: {e}"))),
                     }

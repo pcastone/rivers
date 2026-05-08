@@ -2,6 +2,23 @@
 
 **Rivers v0.53.0**
 
+> **Cookbook Reference:** Server configuration patterns (storage engine, connection pools, rate limiting, CORS, logging, tracing, environment overrides, hot reload) are defined in the Rivers Cookbook (`rivers-cookbook-sonnet.md` / `rivers-cookbook-opus.md`) under the "Infrastructure & Server Config" section. This document provides the full operations reference. The cookbook provides copy-paste recipes.
+
+> **Key recipes for operations:**
+> - `RECIPE:STORAGE-ENGINE` — memory/sqlite/redis backend selection
+> - `RECIPE:CONNECTION-POOL` — pool sizing and circuit breaker config
+> - `RECIPE:RATE-LIMITING` — per-app and per-view rate limits
+> - `RECIPE:CORS-CONFIG` — cross-origin setup
+> - `RECIPE:LOGGING-CONFIG` — level and format
+> - `RECIPE:TRACING-CONFIG` — OpenTelemetry/OTLP setup
+> - `RECIPE:ENVIRONMENT-OVERRIDES` — prod/staging/dev config
+> - `RECIPE:HOT-RELOAD` — dev mode auto-reload
+> - `RECIPE:DDL-WHITELIST` — init handler DDL permissions
+> - `RECIPE:LOCKBOX-CREDENTIALS` — credential management
+> - `RECIPE:BUNDLE-VALIDATION` — pre-deployment validation
+> - `RECIPE:GRACEFUL-SHUTDOWN` — drain behavior
+> - `RECIPE:ERROR-RESPONSE-FORMAT` — standard error envelope
+
 ## Environment
 
 Single-node Rivers V1 deployment. No clustering. RPS not applicable for app operations.
@@ -133,8 +150,8 @@ cors_allow_credentials = false
 
 ```toml
 [storage_engine]
-backend = "memory"             # memory | sled | redis
-path = "/var/data/rivers"      # sled data directory
+backend = "memory"             # memory | sqlite | redis
+path = "/var/data/rivers.db"   # sqlite path
 url = "redis://localhost:6379" # redis URL
 retention_ms = 86400000        # 24 hours (default)
 ```

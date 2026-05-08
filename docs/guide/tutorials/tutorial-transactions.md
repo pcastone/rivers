@@ -1,601 +1,186 @@
-# Tutorial: Transactions, Prepared Statements, and Batch Operations
+# Tutorial: Transactions & Multi-Query Operations
 
-**Rivers v0.54.0**
+**Covers:** `Rivers.db.tx`, DataView `transaction = true`, `tx.peek()`, cross-datasource patterns.
 
-## Overview
-
-Transactions let handlers group multiple DataView operations into atomic units, ensuring that either all operations succeed or all are rolled back. Prepared statements cache query plans at the driver level, reducing overhead for repeated queries. Batch operations execute a single DataView with multiple parameter sets using a single connection, inheriting any active transaction state.
+**Spec reference:** `docs/arch/rivers-transaction-multi-query-spec.md`
 
 ---
 
-## Transactions
+## 1. Single-statement rule
 
-Transactions ensure atomicity: if your handler groups multiple database operations together and one fails, all changes are rolled back automatically.
-
-### Start a Transaction
-
-Use `Rivers.db.begin()` to start a transaction on a specific datasource:
-
-```javascript
-function transferFunds(ctx) {
-    var body = ctx.request.body;
-
-    // Start a transaction
-    Rivers.db.begin("postgres-accounts");
-
-    try {
-        // Debit account A
-        ctx.dataview("debit_account", {
-            account_id: body.from_id,
-            amount: body.amount
-        });
-
-        // Credit account B
-        ctx.dataview("credit_account", {
-            account_id: body.to_id,
-            amount: body.amount
-        });
-
-        // Both operations succeeded — commit the transaction
-        Rivers.db.commit("postgres-accounts");
-
-        ctx.resdata = {
-            status: "success",
-            message: "Transfer completed"
-        };
-    } catch (e) {
-        // An error occurred — rollback the entire transaction
-        Rivers.db.rollback("postgres-accounts");
-
-        Rivers.log.error("transfer failed", {
-            error: e.message,
-            from_id: body.from_id,
-            to_id: body.to_id
-        });
-
-        throw e;
-    }
-}
-```
-
-### Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| **One transaction per datasource** | You can have multiple active transactions (one per datasource) in a single handler request. |
-| **Datasource name** | The datasource name (e.g., `"postgres-accounts"`) is the identifier in your `resources.toml` file. |
-| **Connection held** | When you call `begin()`, a connection is acquired from the pool and held until `commit()` or `rollback()`. |
-| **Auto-rollback** | If your handler exits without calling `commit()`, all active transactions are rolled back automatically with a warning logged. |
-
-### Supported Drivers
-
-The following drivers support transactions:
-
-- **PostgreSQL** — Full ACID support
-- **MySQL** — Full ACID support (InnoDB)
-- **SQLite** — Full ACID support
-- **MongoDB** — Multi-document transactions (v4.0+)
-- **Neo4j** — Full transaction support
-
-Other drivers (Elasticsearch, Redis, Kafka, HTTP, Faker, etc.) will throw an error if you call `begin()` on them.
-
-### Testing Transactions
-
-Create a test scenario with two DataViews:
-
-**File:** `resources.toml`
+Each DataView query field must contain **exactly one SQL statement**. A semicolon outside a string literal or comment is a validation error (C010).
 
 ```toml
-[[datasources]]
-name     = "postgres-accounts"
-driver   = "postgres"
-pool     = { max = 10, min = 2 }
-secrets  = "DB_URL"
+# WRONG — riverpackage validate will fail with C010
+[data.dataviews.bad]
+datasource = "db"
+query = "INSERT INTO log VALUES ($x); SELECT 1"
+
+# RIGHT — one statement per DataView
+[data.dataviews.write_log]
+datasource = "db"
+post_query = "INSERT INTO log VALUES ($x)"
+
+[data.dataviews.read_last]
+datasource = "db"
+query = "SELECT * FROM log ORDER BY id DESC LIMIT 1"
 ```
 
-**File:** `app.toml`
+---
+
+## 2. DataView `transaction = true` — single-query wrapper
+
+For cases where a single write must be atomic, set `transaction = true` on the DataView:
 
 ```toml
 [data.dataviews.debit_account]
-name       = "debit_account"
-datasource = "postgres-accounts"
-query      = "UPDATE accounts SET balance = balance - $1 WHERE id = $2"
-
-[data.dataviews.credit_account]
-name       = "credit_account"
-datasource = "postgres-accounts"
-query      = "UPDATE accounts SET balance = balance + $1 WHERE id = $2"
-
-[api.views.transfer]
-path      = "transfer"
-method    = "POST"
-view_type = "Rest"
-
-[api.views.transfer.handler]
-type       = "codecomponent"
-language   = "javascript"
-module     = "libraries/handlers/accounts.js"
-entrypoint = "transferFunds"
-resources  = ["postgres-accounts"]
+datasource  = "payments_db"
+transaction = true
+post_query  = "UPDATE accounts SET balance = balance - $amount WHERE id = $id AND balance >= $amount"
 ```
 
-**Test:**
+Rivers automatically sends `BEGIN` before the query and `COMMIT` on success. On driver error it sends `ROLLBACK`.
 
-```bash
-curl -X POST http://localhost:8080/transfer \
-  -H "Content-Type: application/json" \
-  -d '{"from_id":"acc-001","to_id":"acc-002","amount":100}'
-```
-
-If the debit succeeds but the credit fails, the debit is rolled back. The account balances remain unchanged.
+> **Note:** `transaction = true` is silently ignored (with a validation warning W008) if the driver does not support transactions (Redis, Elasticsearch, Faker, etc.).
 
 ---
 
-## Prepared Statements
+## 3. Multi-query atomic writes with `Rivers.db.tx`
 
-Prepared statements cache query plans at the driver level, reducing parsing and planning overhead. This is especially useful for DataViews that are called frequently with different parameters.
+When you need multiple DataViews to succeed or fail together, use the synchronous `Rivers.db.tx` API.
 
-### Enable Prepared Statements
+### 3.1 Basic pattern
 
-Add the `prepared = true` field to a DataView in `app.toml`:
+```typescript
+export function handler(ctx) {
+    const { goal_id, project_id } = ctx.request.params;
 
-```toml
-[data.dataviews.search_orders]
-name       = "search_orders"
-datasource = "postgres-main"
-query      = "SELECT * FROM orders WHERE customer_id = $1 AND status = $2"
-prepared   = true
-```
-
-### How It Works
-
-1. **First execution** — The driver prepares the query and caches the plan
-2. **Subsequent executions** — The cached plan is reused, skipping the parse and plan phases
-3. **Pool connection reuse** — Prepared plans are tied to specific connections. To maximize reuse, Rivers keeps pool connections open between requests
-4. **Transparent** — Your handler code does not change. Prepared statements work automatically
-
-```javascript
-function searchOrders(ctx) {
-    // This uses the prepared statement on the first call
-    var results = ctx.dataview("search_orders", {
-        customer_id: "C001",
-        status: "pending"
-    });
-
-    // Subsequent calls reuse the cached plan
-    ctx.resdata = results;
-}
-```
-
-### When to Use
-
-Prepared statements are beneficial for:
-
-- **High-frequency queries** — DataViews called many times per second
-- **Complex queries** — Large SELECT statements with joins or aggregations
-- **Parameter variance** — Same query with different WHERE clause parameters
-
-Prepared statements have minimal benefit for:
-
-- **One-off queries** — Infrequently executed DataViews
-- **Simple queries** — Very fast to parse and plan anyway
-
-### Performance Note
-
-Prepared statements trade memory and connection utilization for reduced planning overhead. Each prepared statement consumes a small amount of driver memory. If your datasource has memory constraints, measure the trade-off before enabling prepared statements on every DataView.
-
----
-
-## Batch Operations
-
-Batch operations execute a single DataView multiple times with different parameter sets, using a single connection. This is faster than calling the DataView separately for each parameter set because it reuses the connection and avoids round-trip overhead.
-
-### Batch Execution
-
-Use `Rivers.db.batch()` to execute a DataView with multiple parameter sets:
-
-```javascript
-function createOrders(ctx) {
-    var body = ctx.request.body;  // Array of order objects
-
-    // Execute "insert_order" once for each item in the array
-    var results = Rivers.db.batch("insert_order", [
-        { customerId: "C001", amount: 100, status: "pending" },
-        { customerId: "C002", amount: 250, status: "pending" },
-        { customerId: "C003", amount: 75, status: "pending" }
-    ]);
-
-    Rivers.log.info("batch insert completed", {
-        count: results.length
-    });
-
-    ctx.resdata = {
-        status: "success",
-        inserted: results.length,
-        orders: results
-    };
-}
-```
-
-### Batch + Transactions
-
-Batch operations inherit the active transaction state. If you start a transaction and then call `batch()`, all parameter sets in the batch execute within the same transaction:
-
-```javascript
-function bulkCreateOrders(ctx) {
-    var body = ctx.request.body;
-
-    // Start a transaction
-    Rivers.db.begin("postgres-orders");
+    const tx = Rivers.db.tx.begin("cb_data");
 
     try {
-        // Batch execute within the transaction
-        var orders = Rivers.db.batch("insert_order", body.orders);
+        tx.query("archive_wip",        { goal_id });
+        tx.query("clear_wip",          { goal_id, project_id });
+        tx.query("mark_goal_complete", { goal_id, project_id });
+        tx.query("clear_project_ctx",  { project_id });
+        tx.query("get_goal",           { goal_id });
 
-        // Insert associated audit log entries
-        var auditLogs = Rivers.db.batch("insert_audit_log", 
-            orders.map(o => ({ order_id: o.id, event: "created" }))
-        );
+        const results = tx.commit();
 
-        // Both batches succeeded — commit
-        Rivers.db.commit("postgres-orders");
-
-        ctx.resdata = {
-            status: "success",
-            orders_created: orders.length,
-            audit_logs: auditLogs.length
+        return {
+            status: 200,
+            body: results["get_goal"][0].rows[0],
         };
     } catch (e) {
-        // Rollback both batches
-        Rivers.db.rollback("postgres-orders");
-        throw e;
+        // Auto-rollback already fired before this catch block.
+        return { status: 500, body: { error: e.message } };
     }
 }
 ```
 
-### Batch Results
+**`tx.commit()` returns** `HashMap<string, Array<QueryResult>>`:
 
-The `batch()` function returns an array of results, one per parameter set:
-
-```javascript
-var results = Rivers.db.batch("insert_order", [
-    { customerId: "C001", amount: 100 },
-    { customerId: "C002", amount: 250 },
-    { customerId: "C003", amount: 75 }
-]);
-
-// results is an array of 3 elements
-// results[0] = { id: "order-001", customerId: "C001", ... }
-// results[1] = { id: "order-002", customerId: "C002", ... }
-// results[2] = { id: "order-003", customerId: "C003", ... }
+```typescript
+results["get_goal"][0].rows               // first call's rows
+results["archive_wip"][0].affected_rows   // rows affected
 ```
 
-### Performance Note
+If the same DataView is called multiple times, results are appended in order:
 
-Batch operations are efficient because they:
+```typescript
+tx.query("insert_task", { name: "A", goal_id });
+tx.query("insert_task", { name: "B", goal_id });
+tx.query("insert_task", { name: "C", goal_id });
 
-1. Use a single connection (no pool overhead)
-2. Execute one round-trip per parameter set (not one per DataView call)
-3. Reduce context switching between JavaScript and the driver
+const results = tx.commit();
+results["insert_task"][0]  // result for "A"
+results["insert_task"][1]  // result for "B"
+results["insert_task"][2]  // result for "C"
+```
 
-However, if a batch is very large (thousands of rows), consider splitting it into smaller batches to avoid memory spikes and connection timeouts.
+### 3.2 Key rules
+
+| Rule | Detail |
+|------|--------|
+| Sync | `tx.query()` blocks V8 until the driver responds. No `await`. |
+| Single datasource | All DataViews called via `tx.query()` must use the same datasource as `tx.begin()`. |
+| No nesting | Calling `Rivers.db.tx.begin()` while a transaction is active throws `TransactionError: nested transactions not supported`. |
+| Auto-rollback | If the handler exits without `commit()` or `rollback()`, Rivers sends ROLLBACK and logs WARN. |
+| DataView `transaction = true` ignored | When called via `tx.query()`, the DataView's own flag is overridden by the handler transaction. |
+| Default query field | `tx.query()` always uses the DataView's default `query` field — no HTTP method context inside a transaction. |
 
 ---
 
-## Inline SQL: `Rivers.db.query` and `Rivers.db.execute`
+## 4. Conditional writes with `tx.peek()`
 
-DataViews are the primary way to declare and reuse parameterized queries.
-For escape-hatch cases where a handler needs to issue raw SQL that doesn't
-fit a DataView (ad-hoc reports, dynamic schema introspection, one-off
-maintenance queries), use `Rivers.db.query()` and `Rivers.db.execute()`.
+`tx.peek(name)` reads accumulated results **without touching the database**, enabling conditional mid-transaction logic:
 
-Both functions take a datasource name (which must be declared in the
-view's `[[datasources]]` block, same capability gate as `ctx.dataview`),
-a SQL statement, and an optional positional parameter array.
+```typescript
+export function handler(ctx) {
+    const { product_id, qty, order_id } = ctx.request.body;
 
-### `Rivers.db.query(datasource, sql, params?)`
-
-For SELECT-style reads. Returns
-`{ rows, affected_rows, last_insert_id }`.
-
-```javascript
-function listRecentOrders(ctx) {
-    var since = ctx.request.query.since || "2026-01-01";
-
-    var result = Rivers.db.query(
-        "postgres-orders",
-        "SELECT id, customer_id, amount FROM orders WHERE created_at >= $1 ORDER BY created_at DESC LIMIT 100",
-        [since]
-    );
-
-    ctx.resdata = {
-        count: result.affected_rows,
-        orders: result.rows,
-    };
-}
-```
-
-Both `?` (MySQL/SQLite style) and `$1, $2, ...` (Postgres style)
-placeholders work — Rivers translates them to whichever form the
-target driver expects, so you can write SQL in your driver's natural
-dialect.
-
-### `Rivers.db.execute(datasource, sql, params?)`
-
-For INSERT/UPDATE/DELETE writes. Returns
-`{ affected_rows, last_insert_id }` (no `rows`). Use this when you don't
-need a result set back — the wire-level shape is smaller and the intent
-is explicit.
-
-```javascript
-function archiveOldOrders(ctx) {
-    var cutoff = ctx.request.body.cutoff;
-
-    var result = Rivers.db.execute(
-        "postgres-orders",
-        "UPDATE orders SET status = 'archived' WHERE created_at < $1 AND status = 'closed'",
-        [cutoff]
-    );
-
-    Rivers.log.info("archived orders", { count: result.affected_rows });
-
-    ctx.resdata = { archived: result.affected_rows };
-}
-```
-
-### Inside a transaction
-
-Both functions honor an active transaction on the same datasource —
-calls inside `Rivers.db.begin(name) ... Rivers.db.commit(name)` (or
-inside `ctx.transaction(name, fn)`) route through the held connection,
-so the writes are rolled back together if anything throws:
-
-```javascript
-function transferFunds(ctx) {
-    var body = ctx.request.body;
-
-    Rivers.db.begin("postgres-accounts");
-    try {
-        Rivers.db.execute(
-            "postgres-accounts",
-            "UPDATE accounts SET balance = balance - $1 WHERE id = $2",
-            [body.amount, body.from],
-        );
-        Rivers.db.execute(
-            "postgres-accounts",
-            "UPDATE accounts SET balance = balance + $1 WHERE id = $2",
-            [body.amount, body.to],
-        );
-        Rivers.db.commit("postgres-accounts");
-        ctx.resdata = { ok: true };
-    } catch (e) {
-        Rivers.db.rollback("postgres-accounts");
-        throw e;
-    }
-}
-```
-
-Calling `Rivers.db.query` or `Rivers.db.execute` against a different
-datasource while a transaction is active throws a `TransactionError` —
-a transaction binds to a single datasource, by design.
-
-### When to prefer DataViews
-
-DataViews stay the right choice for queries that:
-
-- Run on every request (caching kicks in).
-- Need declarative parameter validation against a JSON schema.
-- Are reused across multiple handlers.
-- Need to be discoverable in `app.toml` rather than buried in handler
-  code.
-
-`Rivers.db.query` and `Rivers.db.execute` are the right choice for raw
-SQL that genuinely doesn't fit the DataView shape — variably-shaped
-ad-hoc queries, multi-table reports, or migration-flavored cleanups.
-
----
-
-## Auto-Rollback
-
-If your handler exits without committing an active transaction, Rivers automatically rolls back all uncommitted changes and logs a warning.
-
-### Scenario
-
-```javascript
-function risky(ctx) {
-    Rivers.db.begin("postgres-main");
-
-    // Perform some operations...
-    ctx.dataview("update_data", { id: 1, value: "new" });
-
-    // Handler exits without calling commit()
-    // Rivers detects the unclosed transaction and rolls back
-}
-```
-
-### Log Output
-
-When auto-rollback occurs, you'll see a warning like this:
-
-```
-WARN: Auto-rollback of unclosed transaction on datasource 'postgres-main'
-      (handler did not call Rivers.db.commit)
-```
-
-This prevents accidental data corruption from incomplete transactions. However, you should always explicitly handle transaction completion in production code.
-
-### Best Practice
-
-Always wrap transaction code in try-catch and explicitly commit or rollback:
-
-```javascript
-Rivers.db.begin("postgres-main");
-
-try {
-    // Perform operations
-    ctx.resdata = ctx.dataview("do_something", params);
-    Rivers.db.commit("postgres-main");
-} catch (e) {
-    Rivers.db.rollback("postgres-main");
-    Rivers.log.error("transaction failed", { error: e.message });
-    throw e;
-}
-```
-
----
-
-## Complete Example: Order Processing
-
-Here's a complete example combining transactions, batch operations, and prepared statements:
-
-**File:** `resources.toml`
-
-```toml
-[[datasources]]
-name     = "postgres-orders"
-driver   = "postgres"
-pool     = { max = 20, min = 5 }
-secrets  = "DB_URL"
-```
-
-**File:** `app.toml`
-
-```toml
-[data.dataviews.insert_order]
-name       = "insert_order"
-datasource = "postgres-orders"
-query      = "INSERT INTO orders (customer_id, amount, status) VALUES ($1, $2, $3) RETURNING id, created_at"
-prepared   = true
-
-[data.dataviews.update_order_status]
-name       = "update_order_status"
-datasource = "postgres-orders"
-query      = "UPDATE orders SET status = $1 WHERE id = $2"
-prepared   = true
-
-[data.dataviews.insert_payment]
-name       = "insert_payment"
-datasource = "postgres-orders"
-query      = "INSERT INTO payments (order_id, amount, method) VALUES ($1, $2, $3) RETURNING id"
-prepared   = true
-
-[data.dataviews.insert_audit_log]
-name       = "insert_audit_log"
-datasource = "postgres-orders"
-query      = "INSERT INTO audit_logs (order_id, event, timestamp) VALUES ($1, $2, NOW())"
-prepared   = true
-
-[api.views.create_bulk_orders]
-path      = "orders/bulk"
-method    = "POST"
-view_type = "Rest"
-
-[api.views.create_bulk_orders.handler]
-type       = "codecomponent"
-language   = "javascript"
-module     = "libraries/handlers/orders.js"
-entrypoint = "createBulkOrders"
-resources  = ["postgres-orders"]
-```
-
-**File:** `libraries/handlers/orders.js`
-
-```javascript
-function createBulkOrders(ctx) {
-    var body = ctx.request.body;
-
-    // Start a transaction for the entire bulk operation
-    Rivers.db.begin("postgres-orders");
+    const tx = Rivers.db.tx.begin("inventory_db");
 
     try {
-        // Batch insert all orders
-        var orders = Rivers.db.batch("insert_order",
-            body.orders.map(o => [o.customer_id, o.amount, "pending"])
-        );
+        tx.query("check_inventory", { product_id });
 
-        // Batch insert associated payments
-        var payments = Rivers.db.batch("insert_payment",
-            orders.map((o, i) => [o.id, body.orders[i].amount, "credit_card"])
-        );
+        const inv = tx.peek("check_inventory");
+        if (inv[0].rows.length === 0 || inv[0].rows[0].quantity < qty) {
+            tx.rollback();
+            return { status: 422, body: { error: "insufficient inventory" } };
+        }
 
-        // Batch insert audit logs
-        Rivers.db.batch("insert_audit_log",
-            orders.map(o => [o.id, "order_created"])
-        );
+        tx.query("decrement_inventory", { product_id, qty });
+        tx.query("create_shipment",     { order_id, product_id, qty });
 
-        // All batches succeeded — commit
-        Rivers.db.commit("postgres-orders");
+        const results = tx.commit();
+        return { status: 200, body: results["create_shipment"][0].rows[0] };
 
-        Rivers.log.info("bulk order creation completed", {
-            orders_created: orders.length,
-            payments_created: payments.length
-        });
-
-        ctx.resdata = {
-            status: "success",
-            orders: orders,
-            payments: payments
-        };
     } catch (e) {
-        // Rollback entire transaction
-        Rivers.db.rollback("postgres-orders");
-
-        Rivers.log.error("bulk order creation failed", {
-            error: e.message,
-            order_count: body.orders.length
-        });
-
-        throw e;
+        return { status: 500, body: { error: e.message } };
     }
 }
 ```
 
-**Test:**
-
-```bash
-curl -X POST http://localhost:8080/orders/bulk \
-  -H "Content-Type: application/json" \
-  -d '{
-    "orders": [
-      {"customer_id":"C001","amount":100},
-      {"customer_id":"C002","amount":250},
-      {"customer_id":"C003","amount":75}
-    ]
-  }'
-```
-
-**Response:**
-
-```json
-{
-  "status": "success",
-  "orders": [
-    {"id":"order-001","customer_id":"C001","amount":100,"status":"pending","created_at":"2026-04-14T10:00:00Z"},
-    {"id":"order-002","customer_id":"C002","amount":250,"status":"pending","created_at":"2026-04-14T10:00:01Z"},
-    {"id":"order-003","customer_id":"C003","amount":75,"status":"pending","created_at":"2026-04-14T10:00:02Z"}
-  ],
-  "payments": [
-    {"id":"pay-001"},
-    {"id":"pay-002"},
-    {"id":"pay-003"}
-  ]
-}
-```
-
-If any batch fails (e.g., a constraint violation), all changes are rolled back. The orders, payments, and audit logs are all reverted to their initial state.
+> `tx.peek()` for an uncalled DataView throws `TransactionError: no results for '{name}'`.
 
 ---
 
-## Summary
+## 5. Cross-datasource operations (no atomicity)
 
-This tutorial covered:
+A `Rivers.db.tx` transaction cannot span multiple datasources. For operations across different datasources, call each independently using the async `Rivers.view.query()` API:
 
-1. **Transactions** — Group multiple DataView operations into atomic units with `Rivers.db.begin()`, `commit()`, and `rollback()`
-2. **Supported drivers** — PostgreSQL, MySQL, SQLite, MongoDB, and Neo4j support transactions
-3. **Prepared statements** — Set `prepared = true` on a DataView to cache query plans and reduce overhead
-4. **Batch operations** — Use `Rivers.db.batch()` to execute one DataView with multiple parameter sets efficiently
-5. **Batch + transactions** — Batches inherit active transaction state, allowing you to group multiple batches into a single atomic operation
-6. **Auto-rollback** — Transactions are rolled back automatically if your handler exits without committing
-7. **Best practices** — Always wrap transaction code in try-catch and explicitly handle success and failure cases
+```typescript
+export async function handler(ctx) {
+    // Each call uses a separate pool connection — no shared transaction
+    const order = await Rivers.view.query("create_order", ctx.request.body);
+    const notification = await Rivers.view.query("queue_notification", {
+        order_id: order.rows[0].id,
+    });
 
-Together, these features enable efficient, reliable processing of complex multi-step operations in your Rivers handlers.
+    // If notification fails, the order is already committed.
+    // The handler owns compensation logic.
+    return { status: 200, body: { order: order.rows[0] } };
+}
+```
+
+---
+
+## 6. DataView config reference
+
+```toml
+[data.dataviews.my_write]
+datasource  = "primary_db"
+transaction = true          # wrap single query in BEGIN/COMMIT
+
+post_query  = "INSERT INTO events (type, payload) VALUES ($type, $payload)"
+
+[[data.dataviews.my_write.parameters]]
+name     = "type"
+type     = "string"
+required = true
+
+[[data.dataviews.my_write.parameters]]
+name     = "payload"
+type     = "string"
+required = true
+```
