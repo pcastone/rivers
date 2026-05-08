@@ -684,134 +684,179 @@ fn check_view_refs(
             }
         }
 
-        // X014: `guard_view = "name"` must reference a view in the same app
-        // that has a codecomponent handler — DataView- and None-handler views
-        // can't return the `{ allow: bool }` envelope the named-guard contract
-        // expects. CB-P1.10.
-        if let Some(ref guard_view_name) = view.guard_view {
-            match app.config.api.views.get(guard_view_name.as_str()) {
-                Some(target) => {
-                    if !matches!(target.handler, HandlerConfig::Codecomponent { .. }) {
-                        let kind = match &target.handler {
-                            HandlerConfig::Dataview { .. } => "dataview",
-                            HandlerConfig::Codecomponent { .. } => "codecomponent",
-                            HandlerConfig::None {} => "none",
-                        };
-                        results.push(
-                            ValidationResult::fail(
-                                error_codes::X014,
-                                format!("{}/app.toml", app_name),
-                                format!(
-                                    "View '{}' guard_view '{}' must reference a codecomponent-handler view; got '{}'",
-                                    view_name, guard_view_name, kind,
-                                ),
-                            )
-                            .with_app(app_name)
-                            .with_table_path(format!("api.views.{}", view_name))
-                            .with_field("guard_view"),
-                        );
-                    } else if target.guard_view.is_some() {
-                        // CB-P1.10 Plan H.4: chains are not supported in v1.
-                        // Catches self-reference (V → V), mutual recursion
-                        // (A → B → A), and arbitrarily deep chains in one
-                        // check. Lift this restriction in a follow-up if a
-                        // real multi-tenant chained-auth use case surfaces;
-                        // cycle detection then becomes the constraint.
-                        results.push(
-                            ValidationResult::fail(
-                                error_codes::X014,
-                                format!("{}/app.toml", app_name),
-                                format!(
-                                    "View '{}' guard_view '{}' must not itself declare a guard_view (chains are not supported in v1; the named-guard preflight runs once per request, not transitively).",
-                                    view_name, guard_view_name,
-                                ),
-                            )
-                            .with_app(app_name)
-                            .with_table_path(format!("api.views.{}", view_name))
-                            .with_field("guard_view"),
-                        );
-                    } else {
-                        // CB-P1.10 Plan H.5: warn when the guard target has
-                        // `auth = "session"`. Sessions don't exist when the
-                        // guard runs (the guard IS the auth boundary), so
-                        // the session pipeline would never let the guard
-                        // run for an unauthenticated request — defeats the
-                        // purpose. Warning, not error: chained-auth setups
-                        // could be intentional.
-                        if target.auth.as_deref() == Some("session") {
-                            let mut w = ValidationResult::warn(
-                                error_codes::W009,
-                                format!(
-                                    "View '{}' guard_view '{}' has auth = \"session\" — the named-guard preflight runs before any session validation, so a request without a valid session would never reach this guard. Consider auth = \"none\" on the guard view itself.",
-                                    view_name, guard_view_name,
-                                ),
-                            )
-                            .with_app(app_name)
-                            .with_table_path(format!("api.views.{}", guard_view_name))
-                            .with_field("auth");
-                            w.file = Some(format!("{}/app.toml", app_name));
-                            results.push(w);
-                        }
+        // X014: `guard_view = "name"` cross-reference + chain validation.
+        //
+        // Walks the chain starting at the protected view's `guard_view`
+        // and verifies every hop:
+        //   - target view exists in the same app
+        //   - target view's handler is a codecomponent (DataView and
+        //     `none` handlers can't return the `{ allow }` envelope)
+        //   - chain length stays within `MAX_GUARD_CHAIN_DEPTH`
+        //   - chain does not cycle (visited set; catches self-reference,
+        //     mutual recursion, and longer cycles)
+        //
+        // W009: any hop with `auth = "session"` warns — sessions don't
+        // exist when the guard runs.
+        // W010: protected view declares both `guard = true` and
+        // `guard_view = "..."` — applies once at the chain head.
+        //
+        // CB-P1.10 Plan H.4 (initial v1 chain prohibition) +
+        // post-Plan-H lift to support per-tenant guard composition.
+        if let Some(ref initial_guard_name) = view.guard_view {
+            // W010 — applies to the protected view itself, not chain links.
+            if view.guard {
+                let mut w = ValidationResult::warn(
+                    error_codes::W010,
+                    format!(
+                        "View '{}' has both `guard = true` (server-wide auth gate) and `guard_view = \"{}\"` (per-view gate). Two auth gates on one view is unusual; verify this is intentional.",
+                        view_name, initial_guard_name,
+                    ),
+                )
+                .with_app(app_name)
+                .with_table_path(format!("api.views.{}", view_name));
+                w.file = Some(format!("{}/app.toml", app_name));
+                results.push(w);
+            }
 
-                        // CB-P1.10 Plan H.5: warn when the protected view
-                        // declares both `guard = true` (server-wide gate)
-                        // and `guard_view = "..."` (per-view gate). Two
-                        // auth gates on the same view is unusual and most
-                        // likely a configuration mistake. Warning, not
-                        // error: leaves room for legitimate edge cases.
-                        if view.guard {
-                            let mut w = ValidationResult::warn(
-                                error_codes::W010,
-                                format!(
-                                    "View '{}' has both `guard = true` (server-wide auth gate) and `guard_view = \"{}\"` (per-view gate). Two auth gates on one view is unusual; verify this is intentional.",
-                                    view_name, guard_view_name,
-                                ),
-                            )
-                            .with_app(app_name)
-                            .with_table_path(format!("api.views.{}", view_name));
-                            w.file = Some(format!("{}/app.toml", app_name));
-                            results.push(w);
-                        }
+            const MAX_GUARD_CHAIN_DEPTH: usize = 5;
+            let mut visited: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            visited.insert(view_name.to_string());
 
-                        results.push(
-                            ValidationResult::pass(
-                                format!("{}/app.toml", app_name),
-                                format!(
-                                    "View '{}' guard_view '{}' resolved",
-                                    view_name, guard_view_name,
-                                ),
-                            )
-                            .with_app(app_name)
-                            .with_crossref(
-                                format!("api.views.{}.guard_view", view_name),
-                                guard_view_name.as_str(),
-                                "view",
+            let mut current = initial_guard_name.clone();
+            let mut chain_failed = false;
+
+            loop {
+                // Cycle check (against the protected view + every hop seen).
+                if !visited.insert(current.clone()) {
+                    results.push(
+                        ValidationResult::fail(
+                            error_codes::X014,
+                            format!("{}/app.toml", app_name),
+                            format!(
+                                "View '{}' guard_view chain forms a cycle revisiting '{}' — guards cannot reference themselves directly or transitively.",
+                                view_name, current,
                             ),
-                        );
-                    }
+                        )
+                        .with_app(app_name)
+                        .with_table_path(format!("api.views.{}", view_name))
+                        .with_field("guard_view"),
+                    );
+                    chain_failed = true;
+                    break;
                 }
-                None => {
-                    let mut result = ValidationResult::fail(
-                        error_codes::X014,
-                        format!("{}/app.toml", app_name),
+
+                // Depth cap (counts hops; 5 hops past the protected view).
+                if visited.len() > MAX_GUARD_CHAIN_DEPTH + 1 {
+                    results.push(
+                        ValidationResult::fail(
+                            error_codes::X014,
+                            format!("{}/app.toml", app_name),
+                            format!(
+                                "View '{}' guard_view chain exceeds MAX_GUARD_CHAIN_DEPTH ({MAX_GUARD_CHAIN_DEPTH}) — collapse intermediate guards into a single handler.",
+                                view_name,
+                            ),
+                        )
+                        .with_app(app_name)
+                        .with_table_path(format!("api.views.{}", view_name))
+                        .with_field("guard_view"),
+                    );
+                    chain_failed = true;
+                    break;
+                }
+
+                // Existence check.
+                let target = match app.config.api.views.get(current.as_str()) {
+                    Some(t) => t,
+                    None => {
+                        let mut result = ValidationResult::fail(
+                            error_codes::X014,
+                            format!("{}/app.toml", app_name),
+                            format!(
+                                "View '{}' references guard_view '{}' not declared in {}/app.toml",
+                                view_name, current, app_name,
+                            ),
+                        )
+                        .with_app(app_name)
+                        .with_table_path(format!("api.views.{}", view_name))
+                        .with_field("guard_view");
+                        let known: Vec<&str> = app.config.api.views.keys()
+                            .map(|s| s.as_str())
+                            .collect();
+                        if let Some(sug) = crate::validate_format::suggest_key(
+                            current.as_str(), &known,
+                        ) {
+                            result = result.with_suggestion(sug);
+                        }
+                        results.push(result);
+                        chain_failed = true;
+                        break;
+                    }
+                };
+
+                // Codecomponent check.
+                if !matches!(target.handler, HandlerConfig::Codecomponent { .. }) {
+                    let kind = match &target.handler {
+                        HandlerConfig::Dataview { .. } => "dataview",
+                        HandlerConfig::Codecomponent { .. } => "codecomponent",
+                        HandlerConfig::None {} => "none",
+                    };
+                    results.push(
+                        ValidationResult::fail(
+                            error_codes::X014,
+                            format!("{}/app.toml", app_name),
+                            format!(
+                                "View '{}' guard_view chain reaches '{}' which must be a codecomponent-handler view; got '{}'",
+                                view_name, current, kind,
+                            ),
+                        )
+                        .with_app(app_name)
+                        .with_table_path(format!("api.views.{}", view_name))
+                        .with_field("guard_view"),
+                    );
+                    chain_failed = true;
+                    break;
+                }
+
+                // W009 — warn per hop where target.auth = "session".
+                if target.auth.as_deref() == Some("session") {
+                    let mut w = ValidationResult::warn(
+                        error_codes::W009,
                         format!(
-                            "View '{}' references guard_view '{}' not declared in {}/app.toml",
-                            view_name, guard_view_name, app_name,
+                            "View '{}' guard chain hop '{}' has auth = \"session\" — the named-guard preflight runs before any session validation, so a request without a valid session would never reach this guard. Consider auth = \"none\" on the guard view itself.",
+                            view_name, current,
                         ),
                     )
                     .with_app(app_name)
-                    .with_table_path(format!("api.views.{}", view_name))
-                    .with_field("guard_view");
-                    let known: Vec<&str> = app.config.api.views.keys()
-                        .map(|s| s.as_str())
-                        .collect();
-                    if let Some(sug) = crate::validate_format::suggest_key(
-                        guard_view_name.as_str(), &known,
-                    ) {
-                        result = result.with_suggestion(sug);
-                    }
-                    results.push(result);
+                    .with_table_path(format!("api.views.{}", current))
+                    .with_field("auth");
+                    w.file = Some(format!("{}/app.toml", app_name));
+                    results.push(w);
                 }
+
+                // Walk to next hop (if any).
+                match &target.guard_view {
+                    Some(next) => current = next.clone(),
+                    None => break,
+                }
+            }
+
+            if !chain_failed {
+                results.push(
+                    ValidationResult::pass(
+                        format!("{}/app.toml", app_name),
+                        format!(
+                            "View '{}' guard_view chain (head '{}') resolved",
+                            view_name, initial_guard_name,
+                        ),
+                    )
+                    .with_app(app_name)
+                    .with_crossref(
+                        format!("api.views.{}.guard_view", view_name),
+                        initial_guard_name.as_str(),
+                        "view",
+                    ),
+                );
             }
         }
 
@@ -2088,8 +2133,7 @@ mod tests {
 
     #[test]
     fn x014_guard_view_self_reference_fails() {
-        // V.guard_view = V (V references itself). Caught by the chain
-        // check: V's target is V, V has guard_view set.
+        // V.guard_view = V — caught by cycle detection.
         let mut views = HashMap::new();
         let mut self_ref = make_view_codecomponent(vec![]);
         self_ref.guard_view = Some("self_ref".into());
@@ -2111,8 +2155,8 @@ mod tests {
             "expected X014 for guard_view self-reference");
         assert!(results.iter().any(|r|
             r.error_code.as_deref() == Some("X014")
-                && r.message.contains("must not itself declare a guard_view")
-        ), "expected chain-rejection error message");
+                && r.message.contains("forms a cycle")
+        ), "expected cycle-detection error message");
     }
 
     #[test]
@@ -2144,13 +2188,13 @@ mod tests {
     }
 
     #[test]
-    fn x014_guard_view_chain_three_views_fails() {
-        // A → B → C: A's target B has guard_view set → fail.
+    fn x014_guard_view_chain_of_three_passes() {
+        // A → B → C with C a leaf — chains are allowed up to MAX depth.
         let mut a = make_view_codecomponent(vec![]);
         a.guard_view = Some("b".into());
         let mut b = make_view_codecomponent(vec![]);
         b.guard_view = Some("c".into());
-        let c = make_view_codecomponent(vec![]); // C is a leaf — no guard_view.
+        let c = make_view_codecomponent(vec![]); // leaf
 
         let mut views = HashMap::new();
         views.insert("a".into(), a);
@@ -2169,8 +2213,172 @@ mod tests {
         );
         let bundle = make_bundle(vec![app]);
         let results = validate_crossref(&bundle);
+        assert!(!has_fail(&results, error_codes::X014),
+            "chain of three (A → B → C) should validate cleanly; got: {:?}",
+            results.iter().filter(|r| r.error_code.as_deref() == Some("X014"))
+                .map(|r| &r.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn x014_guard_view_chain_at_max_depth_passes() {
+        // Chain of 5 hops past the protected view — at the cap.
+        // Protected ROOT → g1 → g2 → g3 → g4 → leaf
+        let mut root = make_view_codecomponent(vec![]);
+        root.guard_view = Some("g1".into());
+        let mut g1 = make_view_codecomponent(vec![]);
+        g1.guard_view = Some("g2".into());
+        let mut g2 = make_view_codecomponent(vec![]);
+        g2.guard_view = Some("g3".into());
+        let mut g3 = make_view_codecomponent(vec![]);
+        g3.guard_view = Some("g4".into());
+        let mut g4 = make_view_codecomponent(vec![]);
+        g4.guard_view = Some("leaf".into());
+        let leaf = make_view_codecomponent(vec![]);
+
+        let mut views = HashMap::new();
+        views.insert("root".into(), root);
+        views.insert("g1".into(), g1);
+        views.insert("g2".into(), g2);
+        views.insert("g3".into(), g3);
+        views.insert("g4".into(), g4);
+        views.insert("leaf".into(), leaf);
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+        assert!(!has_fail(&results, error_codes::X014),
+            "chain at MAX_GUARD_CHAIN_DEPTH (5) must validate; got: {:?}",
+            results.iter().filter(|r| r.error_code.as_deref() == Some("X014"))
+                .map(|r| &r.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn x014_guard_view_chain_exceeds_max_depth_fails() {
+        // Chain of 6 hops past the protected view — over the cap.
+        // root → g1 → g2 → g3 → g4 → g5 → leaf
+        let mut root = make_view_codecomponent(vec![]);
+        root.guard_view = Some("g1".into());
+        let mut g1 = make_view_codecomponent(vec![]);
+        g1.guard_view = Some("g2".into());
+        let mut g2 = make_view_codecomponent(vec![]);
+        g2.guard_view = Some("g3".into());
+        let mut g3 = make_view_codecomponent(vec![]);
+        g3.guard_view = Some("g4".into());
+        let mut g4 = make_view_codecomponent(vec![]);
+        g4.guard_view = Some("g5".into());
+        let mut g5 = make_view_codecomponent(vec![]);
+        g5.guard_view = Some("leaf".into());
+        let leaf = make_view_codecomponent(vec![]);
+
+        let mut views = HashMap::new();
+        views.insert("root".into(), root);
+        views.insert("g1".into(), g1);
+        views.insert("g2".into(), g2);
+        views.insert("g3".into(), g3);
+        views.insert("g4".into(), g4);
+        views.insert("g5".into(), g5);
+        views.insert("leaf".into(), leaf);
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
         assert!(has_fail(&results, error_codes::X014),
-            "expected X014 for deep chain (A → B → C)");
+            "chain of 6 must trip the depth cap");
+        assert!(results.iter().any(|r|
+            r.error_code.as_deref() == Some("X014")
+                && r.message.contains("exceeds MAX_GUARD_CHAIN_DEPTH")
+        ), "expected depth-cap error message");
+    }
+
+    #[test]
+    fn x014_guard_view_chain_codecomponent_check_at_every_hop() {
+        // Chain hop 2 (B) is a DataView — must fail at validate even
+        // though hop 1 (A) is a clean codecomponent.
+        let mut dataviews = HashMap::new();
+        dataviews.insert("dv1".into(), make_dv_config("dv1", "db"));
+
+        let mut a = make_view_codecomponent(vec![]);
+        a.guard_view = Some("b".into());
+        let b = make_view_dataview("Rest", "dv1"); // DataView handler — not codecomponent.
+        let mut protected = make_view_codecomponent(vec![]);
+        protected.guard_view = Some("a".into());
+
+        let mut views = HashMap::new();
+        views.insert("a".into(), a);
+        views.insert("b".into(), b);
+        views.insert("protected".into(), protected);
+
+        let mut datasources = HashMap::new();
+        datasources.insert("db".into(), make_ds_config("db", "faker"));
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("db", "faker")],
+            vec![],
+            datasources,
+            dataviews,
+            views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+        assert!(has_fail(&results, error_codes::X014),
+            "chain hop must be codecomponent, even past the head");
+        assert!(results.iter().any(|r|
+            r.error_code.as_deref() == Some("X014")
+                && r.message.contains("must be a codecomponent-handler view")
+        ), "expected per-hop codecomponent rejection");
+    }
+
+    #[test]
+    fn w009_fires_on_chain_hop_with_session_auth() {
+        // Chain hop B has auth = "session" — should warn even though
+        // it's not the head of the chain.
+        let mut a = make_view_codecomponent(vec![]);
+        a.guard_view = Some("b".into());
+        let mut b = make_view_codecomponent(vec![]);
+        b.auth = Some("session".into());
+        let mut protected = make_view_codecomponent(vec![]);
+        protected.guard_view = Some("a".into());
+
+        let mut views = HashMap::new();
+        views.insert("a".into(), a);
+        views.insert("b".into(), b);
+        views.insert("protected".into(), protected);
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![],
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+        assert!(has_warn(&results, error_codes::W009),
+            "expected W009 when a chain hop has auth = \"session\"");
     }
 
     // ── W009 guard target has auth = "session" (CB-P1.10 Plan H.5) ───

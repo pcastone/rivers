@@ -4,6 +4,95 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 
 ---
 
+## 2026-05-08 — Lift v1 chain prohibition: guard_view chains supported up to depth 5
+
+**Decision:** Plan H shipped a v1 chain prohibition (any `guard_view`
+target itself declaring `guard_view` was rejected at validate time).
+This entry lifts that restriction — chains are now allowed up to
+`MAX_GUARD_CHAIN_DEPTH` (5 hops past the protected view), with
+cycle detection replacing the blanket prohibition.
+
+**Why ship now:** Plan H's multi-tenant motivation extends naturally
+to chained auth (`tenant_auth → tenant_role_check → ...`). Composing
+guards is strictly more powerful than collapsing both checks into
+one beefier handler — chains let bundle authors build reusable
+guard primitives. The runtime work landed in this PR is bounded
+(walk chain → dispatch in order → short-circuit on first deny).
+
+**Validator change.** The single "target must not declare
+guard_view" rule is replaced with a chain walker that:
+
+- Tracks visited views in a HashSet (catches self-reference,
+  mutual recursion, longer cycles)
+- Caps chain length at 5 hops past the protected view
+- Re-applies per-hop X014 checks (target exists, target is
+  codecomponent)
+- Re-applies per-hop W009 (auth = "session" warns at any depth)
+- W010 still fires once at the chain head
+
+**Runtime change.** `run_named_guard_preflight` is restructured into
+two pieces:
+
+- `build_guard_chain` — walks from the initial guard view, returns
+  outermost-first chain (defensive runtime cycle/depth checks
+  return 500, since the validator should have caught these at
+  config load).
+- `dispatch_one_guard` — single-level dispatch (the previous
+  helper's body, refactored to take borrows so it can be called
+  in a loop).
+- Public `run_named_guard_preflight` calls `build_guard_chain`,
+  reverses to deepest-first, then dispatches each in order via
+  `dispatch_one_guard`. First `allow: false` short-circuits with
+  HTTP 401.
+
+**Why dispatch deepest-leaf-first:** semantically the deepest leaf
+is the "lowest" gate (e.g. token validation); each layer above it
+adds further gates (e.g. role check). Running deepest first matches
+the intuition that base auth precedes role-specific checks.
+
+**Why depth cap of 5:** realistic max useful depth is 3
+(auth → role → resource). Cap at 5 leaves headroom without
+inviting pathological chains.
+
+**Why claims-propagation deferred:** propagating session_claims
+across chain levels (so the role-check guard sees the token-validate
+guard's claims) opens semantic decisions about merge order, key
+collisions, and `ctx.session` visibility for the protected view.
+Each is a real product decision; v1 ships the simpler "allow/deny
+composition only" contract. Bundles that need cross-level data flow
+can use `ctx.store` or pass via headers in v1.
+
+**Files affected:**
+
+| File | Change | Spec ref | Method |
+|------|--------|----------|--------|
+| `crates/rivers-runtime/src/validate_crossref.rs` | Replaced chain prohibition with cycle detection + depth cap. Per-hop codecomponent + W009 checks. | CB-P1.10 follow-up | DFS visited tracking; cap at 5. |
+| `crates/riversd/src/security_pipeline.rs` | Refactored helper into `build_guard_chain` + `dispatch_one_guard`; public `run_named_guard_preflight` walks chain inside-out. | CB-P1.10 follow-up | Defensive runtime cycle/depth re-checks return 500 (validator should have caught at config load). |
+| `crates/rivers-runtime/src/validate_crossref.rs` (tests) | 4 new tests + flipped expectations on the previously-rejecting chain test. | CB-P1.10 follow-up | Coverage: chain-of-3 passes, chain-at-depth-5 passes, chain-of-6 fails (depth cap), per-hop codecomponent check enforced, W009 fires on chain hops. |
+| `docs/arch/rivers-view-layer-spec.md` §14.4 | New "Chain composition" section with multi-tenant example and depth/cycle/claims rules. §14.5 constraint table updated. | CB-P1.10 follow-up | |
+| `docs/arch/rivers-mcp-view-spec.md` §13.5 | Constraint table updated to match the lifted shape. | CB-P1.10 follow-up | |
+| `todo/gutter.md` | Closed the "Lift v1 chain prohibition" deferred item. | CB-P1.10 follow-up | |
+
+**Spec reference:** Plan H rebuilt
+(`docs/superpowers/plans/2026-05-08-cb-mcp-followup-batch-2-h-rebuilt.md`)
+explicitly named chain lift as a follow-up trigger; this entry is
+that follow-up.
+
+**Resolution method:** Re-read the v1 prohibition rule. Confirmed
+the validator rule was a single early-return; replaced with chain
+walker. Confirmed the runtime helper had a single dispatch site;
+factored into chain-walk + per-level dispatch. Picked depth cap 5
+based on realistic-max-useful-depth (3) plus headroom (2). Picked
+deepest-first dispatch order to match auth-then-role intuition.
+
+**Test status:** `cargo test -p rivers-runtime --lib` 256/256 (was
+252; +4 new chain tests, -1 renamed). `cargo test -p riversd --lib`
+485/485 (no regression).
+
+**Why no version bump:** sprint-end policy. Build stamp only.
+
+---
+
 ## 2026-05-08 — Plan H: `guard_view` honoured uniformly across all view types (CB-P1.10 follow-up)
 
 **Decision:** Closes the long-standing footgun where `guard_view`

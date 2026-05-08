@@ -238,22 +238,37 @@ pub async fn run_security_pipeline(
     })
 }
 
-// ── Named guard pre-flight (CB-P1.10 Plan H) ─────────────────────────
+// ── Named guard pre-flight (CB-P1.10 Plan H + chain lift) ────────────
 
-/// Run a per-view named guard's codecomponent before the view's
-/// primary handler dispatches.
+/// Maximum chain depth honoured at runtime. Defense-in-depth: validator
+/// already enforces this at config load (X014).
+const MAX_GUARD_CHAIN_DEPTH: usize = 5;
+
+/// Run the named-guard chain rooted at `initial_guard_view_name` before
+/// the protected view's primary handler dispatches.
 ///
 /// Honoured uniformly on every view type that flows through
 /// `view_dispatch_handler` — REST, streaming REST, MCP, WebSocket, SSE.
-/// The guard handler receives a `ParsedRequest` with the original
-/// method, path, and headers; the view's body has not been consumed
-/// yet (auth-shape decisions only).
 ///
-/// Returns `Ok(())` if the guard returned `{ allow: true }`. Returns
-/// `Err(Response)` with HTTP 401 when the guard rejected, the named
-/// view is missing at runtime (X014 should have caught this; defensive
-/// fallback), the named view is not a codecomponent, or the guard
-/// dispatcher itself errored.
+/// **Chain semantics:** if the named guard view itself declares a
+/// `guard_view`, the framework walks the chain inside-out — deepest
+/// leaf runs first, then each layer back up. Every level must return
+/// `{ allow: true }` for the request to proceed; the first rejection
+/// short-circuits the request with HTTP 401.
+///
+/// Each guard handler receives an independent `ParsedRequest` snapshot
+/// (method, path, headers, path_params); the protected view's body has
+/// not been consumed yet (auth-shape decisions only). `session_claims`
+/// returned by guards in the chain are not propagated to the protected
+/// view in v1 — that's a separate feature; the chain lift focuses on
+/// composition of allow/deny decisions.
+///
+/// Errors:
+/// - missing bundle / app / view at runtime → 500 (defensive fallback;
+///   validator should have caught these at config load)
+/// - cycle detected at runtime → 500 (defensive)
+/// - depth exceeded at runtime → 500 (defensive)
+/// - any guard returns `allow: false` or dispatcher errors → 401
 pub async fn run_named_guard_preflight(
     ctx: &crate::server::AppContext,
     app_entry_point: &str,
@@ -261,6 +276,128 @@ pub async fn run_named_guard_preflight(
     method: String,
     path: String,
     headers_map: HashMap<String, String>,
+    initial_guard_view_name: &str,
+) -> Result<(), axum::response::Response> {
+    // 1. Walk the chain to collect guard names in outermost-first order.
+    let chain = build_guard_chain(ctx, app_entry_point, initial_guard_view_name)?;
+
+    // 2. Reverse to dispatch deepest-leaf-first.
+    let dispatch_order: Vec<String> = chain.into_iter().rev().collect();
+
+    // 3. Dispatch each guard in order. First rejection short-circuits.
+    for guard_name in &dispatch_order {
+        dispatch_one_guard(
+            ctx,
+            app_entry_point,
+            path_params,
+            &method,
+            &path,
+            &headers_map,
+            guard_name,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// Walk from the initial guard view following each target's
+/// `guard_view`, collecting names in outermost-first order. Returns the
+/// chain or a 401/500 response if the chain is malformed at runtime.
+fn build_guard_chain(
+    ctx: &crate::server::AppContext,
+    app_entry_point: &str,
+    initial_guard_view_name: &str,
+) -> Result<Vec<String>, axum::response::Response> {
+    use crate::error_response;
+
+    let bundle = match ctx.loaded_bundle.as_ref() {
+        Some(b) => b,
+        None => {
+            tracing::error!(
+                guard_view = %initial_guard_view_name,
+                "named guard pre-flight: no bundle loaded"
+            );
+            return Err(error_response::internal_error(
+                "named guard pre-flight: bundle not loaded",
+            )
+            .into_axum_response()
+            .into_response());
+        }
+    };
+    let app = bundle.apps.iter().find(|a| {
+        a.manifest.entry_point.as_deref() == Some(app_entry_point)
+            || a.manifest.app_entry_point.as_deref() == Some(app_entry_point)
+    });
+    let Some(app) = app else {
+        return Err(error_response::internal_error(
+            "named guard pre-flight: app not found in bundle",
+        )
+        .into_axum_response()
+        .into_response());
+    };
+
+    let mut chain: Vec<String> = Vec::new();
+    let mut current = initial_guard_view_name.to_string();
+    loop {
+        if chain.len() >= MAX_GUARD_CHAIN_DEPTH {
+            tracing::error!(
+                guard_view = %initial_guard_view_name,
+                depth = chain.len(),
+                "named guard chain exceeds runtime depth cap (validator should have caught this)"
+            );
+            return Err(error_response::internal_error(
+                "named guard chain exceeds depth cap",
+            )
+            .into_axum_response()
+            .into_response());
+        }
+        if chain.contains(&current) {
+            tracing::error!(
+                guard_view = %initial_guard_view_name,
+                cycle_at = %current,
+                "named guard chain has a cycle (validator should have caught this)"
+            );
+            return Err(error_response::internal_error(
+                "named guard chain forms a cycle",
+            )
+            .into_axum_response()
+            .into_response());
+        }
+
+        match app.config.api.views.get(current.as_str()) {
+            Some(target) => {
+                chain.push(current.clone());
+                match &target.guard_view {
+                    Some(next) => current = next.clone(),
+                    None => break,
+                }
+            }
+            None => {
+                tracing::error!(
+                    guard_view = %current,
+                    app = %app_entry_point,
+                    "named guard pre-flight: chain hop not found at runtime",
+                );
+                return Err(error_response::unauthorized("named guard not configured")
+                    .into_axum_response()
+                    .into_response());
+            }
+        }
+    }
+
+    Ok(chain)
+}
+
+/// Dispatch a single guard view's codecomponent and return Ok(()) on
+/// `allow: true`, Err(401) otherwise.
+async fn dispatch_one_guard(
+    ctx: &crate::server::AppContext,
+    app_entry_point: &str,
+    path_params: &HashMap<String, String>,
+    method: &str,
+    path: &str,
+    headers_map: &HashMap<String, String>,
     guard_view_name: &str,
 ) -> Result<(), axum::response::Response> {
     use rivers_runtime::view::HandlerConfig;
@@ -271,10 +408,6 @@ pub async fn run_named_guard_preflight(
         let bundle = match ctx.loaded_bundle.as_ref() {
             Some(b) => b,
             None => {
-                tracing::error!(
-                    guard_view = %guard_view_name,
-                    "named guard pre-flight: no bundle loaded"
-                );
                 return Err(error_response::internal_error(
                     "named guard pre-flight: bundle not loaded",
                 )
@@ -324,11 +457,11 @@ pub async fn run_named_guard_preflight(
     };
 
     let parsed = crate::view_engine::ParsedRequest {
-        method,
-        path,
+        method: method.to_string(),
+        path: path.to_string(),
         query_params: HashMap::new(),
         query_all: HashMap::new(),
-        headers: headers_map,
+        headers: headers_map.clone(),
         body: serde_json::Value::Null,
         path_params: path_params.clone(),
     };
