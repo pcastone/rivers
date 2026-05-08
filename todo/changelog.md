@@ -1,5 +1,47 @@
 # Changelog
 
+## 2026-05-08 — CB-P0.2 (full): convention-based `input_schema` discovery
+
+Codecomponent-backed MCP tools that don't declare an explicit
+`input_schema = "..."` are now auto-discovered from the conventional
+path `<app_dir>/schemas/<tool_name>.input.json`. Removes the per-tool
+TOML duplication that was the original P0.2 pain point. Bundles can
+generate the JSON Schema with `npx ts-json-schema-generator` once per
+type and the framework picks it up — no `app.toml` change needed.
+
+| File | Change | Spec ref | Notes |
+|------|--------|----------|-------|
+| `crates/riversd/src/mcp/dispatch.rs` | New `resolve_codecomponent_input_schema` helper with three-tier lookup (explicit > conventional > open). 5 unit tests. | CB-P0.2 | Pure function; explicit declaration always wins; malformed conventional files fall through silently rather than 500ing the dispatcher. |
+| `docs/arch/rivers-mcp-view-spec.md` §4.1.1 | New section documenting resolution order + recommended `ts-json-schema-generator` workflow. | CB-P0.2 | |
+| `Cargo.toml` (workspace) | Patch bump. | CLAUDE.md versioning | |
+
+**Tests:** `cargo test -p riversd --lib` 485/485 (was 480; +5 covering
+all branches of the resolution logic). `cargo test -p rivers-runtime
+--lib` 246/246 (no change).
+
+**What this is and isn't:**
+
+- **Is:** Convention-based discovery + clear documentation of the
+  recommended workflow. Eliminates per-tool TOML duplication.
+- **Isn't:** A Rust-native TS-type → JSON Schema transformer. The
+  npm `ts-json-schema-generator` is the recommended path; a
+  Rust-native generator inside `riverpackage` is captured as a
+  follow-up but not needed to close the original ask.
+
+**Closes the original P0.2 batch.** All six items from the
+2026-05-08 CB MCP follow-up plan are now landed:
+
+| Item | PR |
+|---|---|
+| CB-P1.13 (capability propagation) | [#100](https://github.com/pcastone/rivers/pull/100) |
+| CB-P1.9 (path_params) | [#101](https://github.com/pcastone/rivers/pull/101) |
+| CB-P1.11 (response_headers) | [#102](https://github.com/pcastone/rivers/pull/102) |
+| CB-P1.10 (named guards) | [#103](https://github.com/pcastone/rivers/pull/103) |
+| CB-P1.12 (closed as duplicate) | [#104](https://github.com/pcastone/rivers/pull/104) |
+| CB-P0.2 (this PR) | follow-up minor bump at sprint end |
+
+---
+
 ## 2026-05-08 — CB-P1.12: closed as superseded by CB-P1.10 (docs only)
 
 `auth = "bearer"` will not ship as a first-class view mode. CB-P1.10

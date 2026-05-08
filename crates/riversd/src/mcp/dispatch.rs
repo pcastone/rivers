@@ -158,18 +158,12 @@ async fn handle_tools_list(
     let mut tool_list: Vec<serde_json::Value> = tools.iter().map(|(name, config)| {
         let schema = if config.view.is_some() {
             // CB-P0.2.c: load explicit JSON Schema file when declared.
-            if let Some(schema_path) = &config.input_schema {
-                let full_path = app_dir.join(schema_path);
-                match std::fs::read_to_string(&full_path)
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                {
-                    Some(v) => v,
-                    None => serde_json::json!({"type": "object", "properties": {}}),
-                }
-            } else {
-                serde_json::json!({"type": "object", "properties": {}})
-            }
+            // CB-P0.2 (full): if `input_schema` is omitted, fall back to the
+            // conventional path `schemas/{tool_name}.input.json` under the
+            // app directory. Discovery is silent — a missing conventional
+            // file just yields the open-object schema, so existing bundles
+            // are unaffected.
+            resolve_codecomponent_input_schema(name, config.input_schema.as_deref(), app_dir)
         } else if let Some(executor) = executor_opt {
             let namespaced = format!("{}:{}", dv_namespace, config.dataview);
             let method = config.method.as_deref().unwrap_or("GET");
@@ -1245,6 +1239,102 @@ mod tests {
         assert_eq!(entry["content"][0]["text"], serde_json::json!("Unknown tool: bad_tool"));
     }
 
+    // ── CB-P0.2 input_schema resolution ────────────────────────
+
+    /// Explicit `input_schema = "path"` is loaded from the app dir when
+    /// readable.
+    #[test]
+    fn resolve_input_schema_uses_explicit_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_dir = tmp.path();
+        std::fs::create_dir_all(app_dir.join("custom")).unwrap();
+        std::fs::write(
+            app_dir.join("custom/explicit.json"),
+            r#"{"type":"object","properties":{"foo":{"type":"string"}}}"#,
+        ).unwrap();
+
+        let schema = resolve_codecomponent_input_schema(
+            "any_tool",
+            Some("custom/explicit.json"),
+            app_dir,
+        );
+        assert_eq!(schema["properties"]["foo"]["type"], "string");
+    }
+
+    /// CB-P0.2: when `input_schema` is omitted, the conventional path
+    /// `schemas/<tool_name>.input.json` is auto-discovered.
+    #[test]
+    fn resolve_input_schema_falls_back_to_conventional_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_dir = tmp.path();
+        std::fs::create_dir_all(app_dir.join("schemas")).unwrap();
+        std::fs::write(
+            app_dir.join("schemas/pull_task.input.json"),
+            r#"{"type":"object","properties":{"taskId":{"type":"string"}},"required":["taskId"]}"#,
+        ).unwrap();
+
+        let schema = resolve_codecomponent_input_schema("pull_task", None, app_dir);
+        assert_eq!(schema["properties"]["taskId"]["type"], "string");
+        assert_eq!(schema["required"][0], "taskId");
+    }
+
+    /// CB-P0.2: explicit setting wins over the conventional file when both
+    /// exist — the bundle author's stated path is authoritative.
+    #[test]
+    fn resolve_input_schema_explicit_overrides_conventional() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_dir = tmp.path();
+        std::fs::create_dir_all(app_dir.join("schemas")).unwrap();
+        std::fs::write(
+            app_dir.join("schemas/pull_task.input.json"),
+            r#"{"type":"object","properties":{"discovered":{"type":"boolean"}}}"#,
+        ).unwrap();
+        std::fs::create_dir_all(app_dir.join("custom")).unwrap();
+        std::fs::write(
+            app_dir.join("custom/explicit.json"),
+            r#"{"type":"object","properties":{"explicit":{"type":"integer"}}}"#,
+        ).unwrap();
+
+        let schema = resolve_codecomponent_input_schema(
+            "pull_task",
+            Some("custom/explicit.json"),
+            app_dir,
+        );
+        assert!(schema["properties"].get("explicit").is_some(),
+            "explicit declaration should win");
+        assert!(schema["properties"].get("discovered").is_none(),
+            "conventional file must be ignored when explicit is set");
+    }
+
+    /// Existing bundles (no explicit, no conventional file) keep getting
+    /// the open-object fallback. No regression.
+    #[test]
+    fn resolve_input_schema_falls_back_to_open_object_when_nothing_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let schema = resolve_codecomponent_input_schema("any_tool", None, tmp.path());
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"].is_object());
+        assert_eq!(schema["properties"].as_object().unwrap().len(), 0);
+    }
+
+    /// Malformed conventional file → silent fallback to open object,
+    /// not a panic. Bundles can develop with WIP schemas without breaking
+    /// `tools/list`.
+    #[test]
+    fn resolve_input_schema_malformed_conventional_falls_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_dir = tmp.path();
+        std::fs::create_dir_all(app_dir.join("schemas")).unwrap();
+        std::fs::write(
+            app_dir.join("schemas/broken.input.json"),
+            "this isn't json {{",
+        ).unwrap();
+
+        let schema = resolve_codecomponent_input_schema("broken", None, app_dir);
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"].as_object().unwrap().len(), 0);
+    }
+
     /// CB-P1.9: when the route template includes path variables, the matched
     /// values must reach the codecomponent handler under `path_params` —
     /// parity with the REST dispatch contract (`MatchedRoute.path_params`).
@@ -1282,6 +1372,50 @@ mod tests {
         assert_eq!(args["path_params"].as_object().map(|m| m.len()), Some(0));
         assert!(args["session"].is_null(), "session should be null when no auth");
     }
+}
+
+/// Resolve a codecomponent-backed MCP tool's `inputSchema` from disk.
+///
+/// CB-P0.2: lookup order is
+///
+/// 1. `config_path` — the explicit `input_schema = "..."` declaration.
+///    Used as-is when set, even if missing on disk (the bundle author asked
+///    for that file; we just fall through to open-schema if unreadable).
+/// 2. **Convention** — `<app_dir>/schemas/<tool_name>.input.json`. Picked
+///    up automatically when the explicit field is `None`. Lets bundles
+///    drop the per-tool `input_schema` line for the common case.
+/// 3. Open object schema fallback (`{"type":"object","properties":{}}`).
+///
+/// The conventional path matches what `riverpackage` and bundle authoring
+/// guides recommend. Pairs cleanly with external generators (e.g.
+/// `ts-json-schema-generator -p tsconfig.json -t MyToolInput -o
+/// schemas/my_tool.input.json`).
+fn resolve_codecomponent_input_schema(
+    tool_name: &str,
+    config_path: Option<&str>,
+    app_dir: &std::path::Path,
+) -> serde_json::Value {
+    let open_object = || serde_json::json!({"type": "object", "properties": {}});
+
+    // (1) explicit declaration
+    if let Some(path) = config_path {
+        let full_path = app_dir.join(path);
+        return std::fs::read_to_string(&full_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .unwrap_or_else(open_object);
+    }
+
+    // (2) conventional path: <app_dir>/schemas/<tool_name>.input.json
+    let conventional = app_dir.join("schemas").join(format!("{tool_name}.input.json"));
+    if let Ok(s) = std::fs::read_to_string(&conventional) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+            return v;
+        }
+    }
+
+    // (3) fallback
+    open_object()
 }
 
 /// Project DataView parameters into MCP JSON Schema inputSchema.

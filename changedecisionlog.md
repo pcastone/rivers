@@ -4,6 +4,86 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 
 ---
 
+## 2026-05-08 — CB-P0.2 (full): convention-based `input_schema` discovery for codecomponent MCP tools
+
+**Decision:** Codecomponent-backed MCP tools that don't declare an
+explicit `input_schema = "..."` are now auto-discovered from the
+conventional path `<app_dir>/schemas/<tool_name>.input.json`. Existing
+explicit declarations continue to work and take precedence; existing
+bundles with neither file get the open-object fallback unchanged.
+
+The discovery happens in `handle_tools_list` via a new pure helper
+`resolve_codecomponent_input_schema(tool_name, config_path, app_dir)`
+that codifies a three-tier lookup: explicit > conventional > open.
+
+**Why convention over a Rust-native TS-type extractor (deferred):**
+
+A from-scratch TypeScript-type → JSON-Schema transformer in Rust is a
+genuine project (the npm `ts-json-schema-generator` is ~10K LOC and
+covers a long tail of generics, conditional types, recursive types, and
+mapped types). Bundling it into `riverpackage` would balloon the crate
+size and would still ship a less-mature implementation than what npm
+already provides. Convention-based discovery delivers the
+single-source-of-truth half of the original P0.2 ask (no TOML
+duplication for every tool) without committing to a multi-month
+implementation effort. Bundle authors run the existing npm tool once
+per type, write to the conventional path, and `tools/list` picks it up
+automatically.
+
+The spec section now documents this as the recommended workflow with a
+worked `npx ts-json-schema-generator` invocation. The eventual
+Rust-native generator can land later without breaking the convention —
+it would write to the same paths.
+
+**Why explicit overrides convention rather than the reverse:** The
+explicit `input_schema = "..."` line is an author statement of intent.
+A bundle that declares an explicit path expects that file to be
+authoritative even if a conventional file happens to exist (e.g. left
+over from a rename). Inverting the precedence would silently break
+that contract.
+
+**Why malformed conventional files are silent fallbacks rather than
+errors:** Bundle authors edit schemas in place during development.
+Failing `tools/list` because a half-written schema doesn't parse would
+make the development loop painful and would also leak file-format
+details into the MCP wire response. The runtime falls back to the open
+object schema and continues serving; structural validation
+(`riverpackage validate`) is the place where malformed schemas should
+be caught.
+
+**Files affected:**
+
+| File | Change | Spec ref | Method |
+|------|--------|----------|--------|
+| `crates/riversd/src/mcp/dispatch.rs` | New `resolve_codecomponent_input_schema` helper. `handle_tools_list` delegates to it. 5 unit tests covering explicit, conventional, explicit-overrides-conventional, missing both, and malformed-conventional cases. | CB-P0.2 | Pure function — testable without spinning up V8 or the dispatcher. |
+| `docs/arch/rivers-mcp-view-spec.md` §4.1.1 | New section documenting the three-tier resolution (explicit → conventional → open) and the recommended `ts-json-schema-generator` workflow. | CB-P0.2 | Closes the documentation gap CB referenced — the convention is now explicit, not folklore. |
+
+**Spec reference:** `cb-rivers-feature-request.md` P0.2;
+`docs/superpowers/plans/2026-05-08-cb-mcp-followups.md` Plan F.
+
+**Resolution method:** Read CB's report (the original ask was
+"derive `inputSchema` from the codecomponent's TypeScript types"). The
+P0.2.c partial fix shipped explicit JSON Schema files. The remaining
+half — eliminating the TOML duplication of `input_schema = "..."` for
+every tool — was achievable as a small-footprint convention with no
+new framework concept. Picked this scope rather than the larger
+TS-type extractor because: (1) the npm tool already exists and is
+well-maintained, (2) the convention delivers SSoT today, and (3) the
+file location is the same either way, so a future Rust-native
+generator slots in without breaking bundles.
+
+**What this leaves on the table for a follow-up:**
+
+- A Rust-native TS-type extractor in `riverpackage` (e.g.
+  `riverpackage gen-schemas`) to remove the npm dependency entirely.
+  Worth doing if/when bundle authors push for it; the convention
+  established here is the integration point.
+- Cross-validation that the schema's properties match the handler's
+  declared TS request type. Requires SWC integration in `riverpackage`
+  (not currently linked there). Defer until there's reported friction.
+
+---
+
 ## 2026-05-08 — CB-P1.12: closed as superseded by CB-P1.10 (docs only)
 
 **Decision:** No first-class `auth = "bearer"` view mode. CB-P1.10
