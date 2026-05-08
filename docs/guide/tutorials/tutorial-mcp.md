@@ -426,6 +426,7 @@ When you deploy a bundle, `riverpackage validate` checks MCP configurations:
 - Tool descriptions are recommended but optional
 - Resources must map to read-only DataViews (no writes)
 - Prompt templates must exist at the specified path
+- Multiple `view_type = "Mcp"` views per app and per bundle are allowed — each registers its own JSON-RPC endpoint
 
 **Example:**
 

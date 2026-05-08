@@ -129,16 +129,6 @@ pub fn validate_crossref(bundle: &LoadedBundle) -> Vec<ValidationResult> {
                 .map(|(name, v)| (name.as_str(), v))
                 .collect();
 
-            // VAL-7: Only one MCP view per app
-            if mcp_views.len() > 1 {
-                let names: Vec<&str> = mcp_views.iter().map(|(n, _)| *n).collect();
-                results.push(ValidationResult::fail(
-                    "MCP-VAL-7",
-                    &format!("{}/app.toml", app.manifest.app_name),
-                    format!("only one MCP view allowed per app, found {}: {}", names.len(), names.join(", ")),
-                ));
-            }
-
             for (view_name, view_config) in &mcp_views {
                 // VAL-1: Tool backend references — dataview or codecomponent view
                 for (tool_name, tool_config) in &view_config.tools {

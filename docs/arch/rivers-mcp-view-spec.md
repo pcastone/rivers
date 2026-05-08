@@ -62,7 +62,7 @@ MCP Streamable HTTP is a single-endpoint protocol: the client POSTs JSON-RPC mes
 ```toml
 [api.views.mcp]
 path         = "/mcp"
-view_type    = "MCP"
+view_type    = "Mcp"
 guard        = "api_key_guard"
 instructions = "docs/mcp-help.md"
 
@@ -107,8 +107,8 @@ default  = "normal"
 
 | ID | Rule |
 |---|---|
-| MCP-1 | `view_type = "MCP"` activates the MCP JSON-RPC dispatcher. No other view type processes MCP traffic. |
-| MCP-2 | Only one MCP view per application. Multiple MCP views in the same app fail at config validation. |
+| MCP-1 | `view_type = "Mcp"` activates the MCP JSON-RPC dispatcher. No other view type processes MCP traffic. |
+| MCP-2 | Multiple MCP views per application are allowed. Each `view_type = "Mcp"` view registers its own JSON-RPC endpoint at its configured `path` and its own `/instructions` sibling route. MCP clients connect to one path at a time; there is no automatic tool aggregation across views. |
 | MCP-3 | Every tool and resource MUST reference a DataView declared in `[data.dataviews.*]`. References to undeclared DataViews fail at config validation. |
 | MCP-4 | `instructions` path is relative to the app bundle root. File must exist at startup. Missing file fails at config validation. If omitted, only the auto-generated tool catalog is served. |
 | MCP-5 | `guard` is optional. If omitted, the MCP endpoint is unauthenticated. The guard follows the same contract as REST view guards. |
@@ -166,20 +166,20 @@ Compiled once on app startup. Re-compiled on hot reload in dev mode.
 
 ## 4. Tools
 
-### 4.1 Schema Projection
+### 4.1 Input Schema
 
-Each exposed tool's MCP schema is generated from the DataView's parameter declarations. The framework walks the DataView's `parameters` array and produces the MCP `inputSchema` (JSON Schema object).
+Each exposed tool's MCP `inputSchema` is provided via an explicit JSON Schema file declared on the tool:
 
-```
-DataView parameter declaration        →  MCP tool inputSchema property
-─────────────────────────────────────────────────────────────────────
-name = "user_id"                      →  "user_id": { ... }
-type = "uuid"                         →  "type": "string", "format": "uuid"
-required = true                       →  added to "required" array
-default = "active"                    →  "default": "active"
+```toml
+[api.views.mcp.tools.get_orders]
+dataview     = "get_orders"
+description  = "Retrieve orders for a customer"
+input_schema = "schemas/get_orders_input.json"   # path relative to app bundle root
 ```
 
-The `location` field (path, query, body, header) is NOT exposed to the model. The model sees a flat input schema. The DataView engine handles routing each parameter to its declared location internally.
+The file must be a valid JSON Schema object. If omitted, the tool is exposed with an empty `inputSchema` (`{"type":"object","properties":{}}`).
+
+**Note:** Automatic schema projection from DataView parameter declarations is not yet implemented. Until it is, every tool that needs a typed `inputSchema` must supply the file explicitly.
 
 ### 4.2 Tool Execution
 
@@ -407,9 +407,11 @@ Both paths read the same compiled output. Compiled once at app startup, re-compi
 
 ## 8. Streaming Tools
 
+> **NOT YET IMPLEMENTED.** The dispatcher detects streaming DataViews but executes them synchronously. SSE response mode for MCP tools is planned. The spec below describes the intended wire format for reference.
+
 ### 8.1 Detection
 
-When `tools/call` targets a DataView with `streaming = true`, the MCP dispatcher automatically switches to SSE response mode. No special MCP-level configuration is required — the streaming property is on the DataView, not the tool exposure.
+When `tools/call` targets a DataView with `streaming = true`, the MCP dispatcher will automatically switch to SSE response mode. No special MCP-level configuration is required — the streaming property is on the DataView, not the tool exposure.
 
 ### 8.2 Wire Format
 
@@ -570,7 +572,7 @@ Config validation at app startup (fail-fast):
 | VAL-4 | `instructions` file path must exist in the bundle. |
 | VAL-5 | Every prompt `template` file path must exist in the bundle. |
 | VAL-6 | Every `{placeholder}` in a prompt template must have a matching argument declaration. |
-| VAL-7 | Only one `view_type = "MCP"` per application. |
+| VAL-7 | ~~Only one `view_type = "Mcp"` per application.~~ **Removed** — multiple MCP views per app are allowed (see MCP-2). |
 | VAL-8 | Tool names must be unique within the MCP view. |
 | VAL-9 | Resource names must be unique within the MCP view. |
 | VAL-10 | Prompt names must be unique within the MCP view. |
@@ -584,7 +586,7 @@ Config validation at app startup (fail-fast):
 ```toml
 [api.views.mcp]
 path         = "/mcp"              # REQUIRED — endpoint path
-view_type    = "MCP"               # REQUIRED — activates MCP dispatcher
+view_type    = "Mcp"               # REQUIRED — activates MCP dispatcher
 guard        = "api_key_guard"     # optional — guard view name
 instructions = "docs/mcp-help.md"  # optional — static instructions file
 
@@ -594,13 +596,30 @@ ttl_seconds  = 3600                # default: 3600
 
 ### 13.2 Tool
 
+Tools have two mutually exclusive backends: DataView-backed or CodeComponent-backed.
+
+**DataView-backed tool** (queries a datasource):
+
 ```toml
 [api.views.mcp.tools.{tool_name}]
-dataview    = "dataview_name"      # REQUIRED — DataView reference
-description = "..."                # REQUIRED — human-readable for AI model
-method      = "GET"                # optional — restrict to one HTTP method
-hints       = { ... }              # optional — MCP annotations
+dataview     = "dataview_name"      # REQUIRED for DataView backend
+description  = "..."                # REQUIRED — human-readable for AI model
+method       = "GET"                # optional — restrict to one HTTP method
+input_schema = "schemas/tool.json"  # optional — JSON Schema file for inputSchema
+hints        = { ... }              # optional — MCP annotations
 ```
+
+**CodeComponent-backed tool** (runs a handler view):
+
+```toml
+[api.views.mcp.tools.{tool_name}]
+view         = "handler_view_name"  # REQUIRED for CodeComponent backend — references a Codecomponent view in the same app
+description  = "..."                # REQUIRED
+input_schema = "schemas/tool.json"  # optional — JSON Schema file for inputSchema
+hints        = { ... }              # optional — MCP annotations
+```
+
+`view` and `dataview` are mutually exclusive — set exactly one. When `view` is set, the tool call dispatches through ProcessPool to the referenced handler view, receiving the tool `arguments` as the request body.
 
 ### 13.3 Resource
 
@@ -670,7 +689,7 @@ required = true
 # MCP exposure — this is the only addition
 [api.views.mcp]
 path      = "/mcp"
-view_type = "MCP"
+view_type = "Mcp"
 guard     = "api_key_guard"
 
 [api.views.mcp.tools.get_contacts]
@@ -696,7 +715,7 @@ The AI model calls `tools/call` with `{"name": "search_contacts", "arguments": {
 ```toml
 [api.views.mcp]
 path         = "/mcp"
-view_type    = "MCP"
+view_type    = "Mcp"
 guard        = "api_key_guard"
 instructions = "docs/order-api-help.md"
 
@@ -800,7 +819,7 @@ required = true
 # MCP exposure — streaming tool
 [api.views.mcp]
 path      = "/mcp"
-view_type = "MCP"
+view_type = "Mcp"
 guard     = "api_key_guard"
 
 [api.views.mcp.tools.generate]
