@@ -4,6 +4,41 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 
 ---
 
+## 2026-05-08 — CB-P1.12: closed as superseded by CB-P1.10 (docs only)
+
+**Decision:** No first-class `auth = "bearer"` view mode. CB-P1.10
+named guards (shipped earlier today as PR #103) already provide the
+enforcement boundary; a small codecomponent attached as `guard_view`
+gives operators full control over the lookup table, hash algorithm,
+identity claims projection, and audit fields without freezing any of
+those into framework config.
+
+**Why doc-only:** Every config knob a `auth = "bearer"` mode would need
+to expose (table name, hash column, hash algorithm, where-clause,
+claims projection, last-used update) is a one-liner inside the
+codecomponent. Adding the framework concept would have multiplied
+config surface for less flexibility than the recipe already delivers.
+This was the same conclusion CB drew in their own filing — "subsumed
+if P1.10 ships."
+
+**Files affected:**
+
+| File | Change | Spec ref | Method |
+|------|--------|----------|--------|
+| `docs/arch/rivers-auth-session-spec.md` §11.5 | New "Bearer-token authentication via a named guard" recipe — TOML config, TypeScript handler, design rationale table comparing the recipe to a hypothetical `auth = "bearer"` mode, and operational notes. | CB-P1.12 (closed) | Documents the canonical shape so bundles converge on one pattern. |
+| `docs/arch/rivers-auth-session-spec.md` Appendix | New "Superseded asks" section recording CB-P1.12 as closed 2026-05-08 with a pointer to §11.5. | CB-P1.12 (closed) | |
+| `docs/superpowers/plans/2026-05-08-cb-mcp-followups.md` Plan E | Marked done; tasks E.1/E.2 ticked. | CB-P1.12 (closed) | |
+
+**Spec reference:** `cb-rivers-feature-request.md` P1.12;
+`docs/superpowers/plans/2026-05-08-cb-mcp-followups.md` Plan E.
+
+**Resolution method:** Wrote the recipe + design table as the
+single-source-of-truth answer. Treated this as a doc-only change
+because the runtime primitive shipped in PR #103 already satisfies
+the use case end-to-end.
+
+---
+
 ## 2026-05-08 — CB-P1.10: per-view named guards (`guard_view`)
 
 **Decision:** Added `guard_view: Option<String>` as a new field on

@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-05-08 — CB-P1.12: closed as superseded by CB-P1.10 (docs only)
+
+`auth = "bearer"` will not ship as a first-class view mode. CB-P1.10
+named guards (PR #103) already deliver the enforcement boundary; a
+small codecomponent attached as `guard_view` gives operators full
+control over the lookup table, hash algorithm, identity claims, and
+audit fields without freezing any of those into framework config —
+strictly more flexibility than a built-in mode could expose.
+
+| File | Change | Spec ref |
+|------|--------|----------|
+| `docs/arch/rivers-auth-session-spec.md` §11.5 | New "Bearer-token authentication via a named guard" recipe (TOML + TypeScript handler + design rationale table + operational notes). | CB-P1.12 (closed) |
+| `docs/arch/rivers-auth-session-spec.md` Appendix | New "Superseded asks" section pointing CB-P1.12 readers at §11.5. | CB-P1.12 (closed) |
+| `docs/superpowers/plans/2026-05-08-cb-mcp-followups.md` | Plan E marked done. | |
+
+**No code change. No version bump** — pure documentation.
+
+---
+
 ## 2026-05-08 — CB-P1.10: per-view named guards (`guard_view`)
 
 Closes the long-standing gap between `rivers-mcp-view-spec.md` (which
