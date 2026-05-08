@@ -797,3 +797,104 @@ Enforced at config load time. Failures are reported as structured `RiversError::
 | ~~`on_event.topic` not registered in TopicRegistry~~ | ~~`unknown topic '{name}'`~~ — **removed** <!-- SHAPE-17 amendment --> |
 | `rate_limit_per_minute = 0` | `rate_limit_per_minute must be greater than 0` |
 | ~~Parallel stage with `on_failure` set~~ | ~~`on_failure is only valid for transform stages`~~ — **removed** (parallel stages removed) <!-- SHAPE-12 amendment --> |
+
+---
+
+## 14. Named Guards (CB-P1.10)
+
+`[api.views.X.guard_view] = "name"` references another view in the same
+app whose codecomponent runs as a pre-flight before view `X` dispatches.
+The named view's response (`{ allow: bool }`) decides whether the
+request proceeds. Honoured uniformly across REST, streaming REST, MCP,
+WebSocket, and SSE.
+
+### 14.1 Why two guard mechanisms
+
+The framework already has `guard = true` for the server-wide auth gate
+(per `rivers-auth-session-spec.md` §3). Named guards complement that:
+
+| Concern | `guard = true` | `guard_view = "name"` |
+|---|---|---|
+| Cardinality | exactly one per server | many per app |
+| Use case | session-cookie / OAuth login flow | per-route bearer / API-key / multi-tenant auth |
+| Result on success | establishes a session | proceeds with request (and may project claims into `ctx.session`) |
+| Result on failure | redirect to login URL | HTTP 401 |
+
+Multi-tenant deployments are the canonical case for named guards: each
+tenant gets a distinct guard view that validates its bearer token and
+projects tenant-scoped identity claims.
+
+### 14.2 Runtime contract
+
+The framework runs the named-guard preflight in `view_dispatch_handler`
+between rate limiting and the view-type dispatch switch. Order of
+operations:
+
+1. Rate limit (cheap; rejects before guard work)
+2. **Named-guard preflight** (this section)
+3. Existing security pipeline (session validation, CSRF, server-wide guard)
+4. View-type dispatch (REST handler, MCP JSON-RPC parse, WS upgrade, SSE attach)
+
+The single intercept means WS never starts a half-upgrade and SSE never
+attaches a stream when the guard rejects — the 401 response materialises
+before any view-type-specific work.
+
+The guard handler receives a `ParsedRequest` with the original method,
+path, headers, and matched `path_params`. The body has not been read
+yet (auth-shape decisions only). On `{ allow: true, session_claims: {...} }`,
+the claims propagate into `ctx.session` for the protected view's
+handler — same shape as the server-wide guard's output. On
+`{ allow: false }` (or any other shape, missing field, dispatcher
+error), the framework rejects with HTTP 401.
+
+### 14.3 Configuration
+
+```toml
+# The guard view (no auth — it IS the auth boundary).
+[api.views.tenant_guard]
+view_type = "Rest"
+path      = "/internal/tenant-guard"
+method    = "POST"
+auth      = "none"
+
+[api.views.tenant_guard.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "handlers/auth.ts"
+entrypoint = "validate_tenant"
+
+# A protected REST route.
+[api.views.tenant_orders]
+view_type  = "Rest"
+path       = "/api/orders"
+method     = "GET"
+guard_view = "tenant_guard"
+```
+
+Per-tenant scopes are typical:
+
+```toml
+[api.views.admin_orders]
+guard_view = "admin_guard"
+
+[api.views.user_orders]
+guard_view = "user_guard"
+
+[api.views.public_health]
+# no guard_view — public.
+```
+
+### 14.4 Constraints (validator-enforced)
+
+| Code | Severity | Catches |
+|---|---|---|
+| `X014` | error | `guard_view` references a missing view |
+| `X014` | error | `guard_view` target is not a codecomponent (DataView / `none` handlers can't return the `{ allow }` envelope) |
+| `X014` | error | `guard_view` target itself declares `guard_view` — **chains are not supported in v1.** Catches self-reference (V → V), mutual recursion (A → B → A), and arbitrarily deep chains in one rule. Lift in a follow-up PR if a real chained-auth use case surfaces. |
+| `W009` | warning | `guard_view` target has `auth = "session"` — sessions don't exist when the guard runs |
+| `W010` | warning | View has both `guard = true` (server-wide gate) and `guard_view = "..."` (per-view gate) |
+
+### 14.5 Cross-references
+
+- `rivers-mcp-view-spec.md` §13.5 — MCP-specific config example.
+- `rivers-auth-session-spec.md` §11.5 — bearer-token recipe via a named guard (closes CB-P1.12).

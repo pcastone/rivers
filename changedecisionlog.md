@@ -4,6 +4,113 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 
 ---
 
+## 2026-05-08 — Plan H: `guard_view` honoured uniformly across all view types (CB-P1.10 follow-up)
+
+**Decision:** Closes the long-standing footgun where `guard_view`
+was a first-class field on every `ApiViewConfig` but only honoured at
+runtime on `view_type = "Mcp"`. Plan H wires the named-guard preflight
+into a single intercept in `view_dispatch_handler` — between
+rate-limiting and the view-type switch — so REST, streaming REST,
+MCP, WebSocket, and SSE all get the same contract.
+
+**Why a single intercept rather than per-view-type wiring:**
+`view_dispatch_handler` already routes every request through one
+function before the view-type-specific helpers take ownership. The
+preflight insertion at line ~165 (after rate limit, before the match
+on `view_type`) covers all five view types from one site. WS upgrades
+and SSE stream attaches never start when the guard rejects — the 401
+materialises before any view-type-specific work. The MCP-specific
+preflight that landed in PR #103 is removed in this PR to prevent
+double-fire; the unified caller covers MCP identically.
+
+**Why the named-guard preflight runs before the existing security
+pipeline:**
+
+| Concern | Run guard before session pipeline | Run guard after |
+|---|---|---|
+| Bearer-only routes | no session work, fast 401 on bad bearer | session pipeline runs unnecessarily |
+| Multi-tenant scoping | guard sets per-tenant claims; session pipeline sees them | session pipeline can't observe guard's claims |
+| Server-wide guard interaction | can coexist (both fire); W010 warns | unclear ordering |
+
+The "before" choice is a deliberate lock-in. If a future use case
+requires the reverse, that's a spec change. Recorded here as a hinge
+point.
+
+**Why chains are forbidden in v1:** `guard_view` chains (A → B → C)
+introduce cycle-detection complexity, depth-limit performance
+considerations, and unclear semantics for what claims propagate
+through multi-level auth. The validator rejects chains with one rule
+at validate time: "guard target must not itself declare guard_view."
+Catches self-reference (V → V), mutual recursion (A ↔ B), and
+arbitrarily deep chains. If a real chained-auth use case surfaces
+(multi-tenant deployments could plausibly want tenant-auth →
+tenant-role-check), lift the restriction in a follow-up PR; cycle
+detection becomes the constraint at that point.
+
+**Why W009 and W010 are warnings rather than errors:**
+
+| Warning | Trigger | Why warning, not error |
+|---|---|---|
+| W009 | guard target has `auth = "session"` | a chained-auth setup might intentionally place a session-required guard behind a public one; we shouldn't preempt the choice |
+| W010 | view declares both `guard = true` and `guard_view` | unusual but legitimate — a server-wide login guard plus a per-route bearer guard could coexist for a hybrid SSO + API-key deployment |
+
+**Why no per-view-type runtime test:** the helper itself was already
+exercised by the existing MCP guard test path before this PR
+relocated it — the move-only refactor preserves the call shape. The
+validator tests (3 X014 + 3 W009/W010) cover the config-side
+guarantees. Per-view-type end-to-end runtime tests would require V8
+fixtures plus per-transport HTTP harnesses we don't currently have;
+the existing canary integration covers the runtime path. Risk
+mitigated by:
+1. The unified intercept being a single insertion (one code path, not five).
+2. The MCP preflight test path being preserved (proves the helper still works after relocation).
+3. The validator catching all 8 footgun scenarios at config load.
+
+**Multi-tenant motivation (recorded for future readers):**
+Plan H was driven by a multi-tenant deployment use case where each
+tenant gets a distinct guard view. Per-route auth boundaries
+(`/api/admin/*` → admin guard, `/api/users/*` → user guard,
+`/api/public/*` → no guard) are the design intent of named guards —
+the existing single server-wide guard can't slice the auth space this
+way.
+
+**Files affected:**
+
+| File | Change | Spec ref | Method |
+|------|--------|----------|--------|
+| `crates/riversd/src/security_pipeline.rs` | New `run_named_guard_preflight(ctx, app_entry_point, path_params, method, path, headers, guard_view_name)` helper. Same shape as the previous MCP-only `run_mcp_named_guard_preflight`; takes individual fields rather than `&MatchedRoute` to avoid module-visibility coupling. | CB-P1.10 Plan H.1 | Module is the natural home for cross-cutting auth concerns. |
+| `crates/riversd/src/server/view_dispatch.rs` | (a) Single-point intercept added in `view_dispatch_handler` between rate limit and view-type switch — snapshots headers/method/path before delegating. (b) MCP-specific preflight call removed from `execute_mcp_view`. (c) The MCP-only `run_mcp_named_guard_preflight` helper deleted. | CB-P1.10 Plan H.2/H.3 | One insertion covers all five view types. |
+| `crates/rivers-runtime/src/validate_crossref.rs` | (a) X014 chain rejection: "guard target must not itself declare guard_view." (b) W009 warning: target has `auth = "session"`. (c) W010 warning: view has both `guard = true` and `guard_view`. (d) 6 new tests: self-reference, mutual recursion, deep chain, W009 fires, W010 fires, clean config produces no warnings. | CB-P1.10 Plan H.4/H.5 | Footgun coverage table (8 scenarios) all have validator coverage. |
+| `crates/rivers-runtime/src/validate_result.rs` | New error codes `W009` and `W010`. | CB-P1.10 Plan H.5 | |
+| `docs/arch/rivers-mcp-view-spec.md` §13.5 | Removed "MCP-only" caveat; added validator-coverage table. | CB-P1.10 Plan H.7 | Spec aligned with runtime. |
+| `docs/arch/rivers-view-layer-spec.md` §14 | New "Named Guards (CB-P1.10)" cross-cutting section: motivation table contrasting `guard = true` vs `guard_view`, runtime contract with order-of-operations, configuration example for multi-tenant slicing, validator-enforced constraints, cross-references. | CB-P1.10 Plan H.7 | Cross-cutting home for the contract; linked from auth-session spec. |
+| `docs/arch/rivers-auth-session-spec.md` §11.5 | Updated "Operational notes" to drop the "REST follow-up" caveat; bearer-via-named-guard recipe now applies uniformly. | CB-P1.10 Plan H.7 | |
+
+**Spec reference:** `cb-rivers-feature-request.md` P1.10;
+`docs/superpowers/plans/2026-05-08-cb-mcp-followup-batch-2-h-rebuilt.md`.
+
+**Resolution method:** Re-grounded after Plan G — confirmed
+single-point intercept feasibility at `view_dispatch.rs:165` (after
+rate limit, before view-type switch). Picked the relocate-and-take-
+individual-fields refactor for the helper to avoid making
+`MatchedRoute` `pub(crate)` for one consumer. Footgun matrix expanded
+beyond the original Plan H sketch: the rebuilt plan locked in chain
+prohibition + W009 + W010 before any code was written, so the
+validator coverage shipped with all 8 scenarios accounted for.
+
+**Why no version bump:** sprint-end policy. Build stamp only.
+
+**Outstanding work captured for follow-ups:**
+
+- If multi-tenant deployments report a real chained-auth need, lift
+  the v1 chain prohibition (separate PR; cycle detection becomes the
+  constraint).
+- Per-view-type integration tests once we have a unified HTTP harness
+  (currently per-transport tests would each need their own
+  scaffolding; deferred to broader test-infrastructure work).
+
+---
+
 ## 2026-05-08 — Plan G: WS + SSE datasource-wiring + slug parity (CB-P1.13 follow-up)
 
 **Decision:** Closes the gutter item filed by Plan A (PR #100).

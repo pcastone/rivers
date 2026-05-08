@@ -237,3 +237,134 @@ pub async fn run_security_pipeline(
         clear_cookie: clear_session_cookie,
     })
 }
+
+// ── Named guard pre-flight (CB-P1.10 Plan H) ─────────────────────────
+
+/// Run a per-view named guard's codecomponent before the view's
+/// primary handler dispatches.
+///
+/// Honoured uniformly on every view type that flows through
+/// `view_dispatch_handler` — REST, streaming REST, MCP, WebSocket, SSE.
+/// The guard handler receives a `ParsedRequest` with the original
+/// method, path, and headers; the view's body has not been consumed
+/// yet (auth-shape decisions only).
+///
+/// Returns `Ok(())` if the guard returned `{ allow: true }`. Returns
+/// `Err(Response)` with HTTP 401 when the guard rejected, the named
+/// view is missing at runtime (X014 should have caught this; defensive
+/// fallback), the named view is not a codecomponent, or the guard
+/// dispatcher itself errored.
+pub async fn run_named_guard_preflight(
+    ctx: &crate::server::AppContext,
+    app_entry_point: &str,
+    path_params: &HashMap<String, String>,
+    method: String,
+    path: String,
+    headers_map: HashMap<String, String>,
+    guard_view_name: &str,
+) -> Result<(), axum::response::Response> {
+    use rivers_runtime::view::HandlerConfig;
+    use crate::error_response;
+
+    let dv_namespace = app_entry_point;
+    let entrypoint = {
+        let bundle = match ctx.loaded_bundle.as_ref() {
+            Some(b) => b,
+            None => {
+                tracing::error!(
+                    guard_view = %guard_view_name,
+                    "named guard pre-flight: no bundle loaded"
+                );
+                return Err(error_response::internal_error(
+                    "named guard pre-flight: bundle not loaded",
+                )
+                .into_axum_response()
+                .into_response());
+            }
+        };
+        let app = bundle.apps.iter().find(|a| {
+            a.manifest.entry_point.as_deref() == Some(dv_namespace)
+                || a.manifest.app_entry_point.as_deref() == Some(dv_namespace)
+        });
+        let Some(app) = app else {
+            return Err(error_response::internal_error(
+                "named guard pre-flight: app not found in bundle",
+            )
+            .into_axum_response()
+            .into_response());
+        };
+        let Some(view_config) = app.config.api.views.get(guard_view_name) else {
+            tracing::error!(
+                guard_view = %guard_view_name,
+                app = %dv_namespace,
+                "named guard pre-flight: guard view not found at runtime",
+            );
+            return Err(error_response::unauthorized("named guard not configured")
+                .into_axum_response()
+                .into_response());
+        };
+        match &view_config.handler {
+            HandlerConfig::Codecomponent { language, module, entrypoint, .. } => {
+                crate::process_pool::Entrypoint {
+                    language: language.clone(),
+                    module: module.clone(),
+                    function: entrypoint.clone(),
+                }
+            }
+            _ => {
+                tracing::error!(
+                    guard_view = %guard_view_name,
+                    "named guard pre-flight: target is not a codecomponent (X014 should have caught this)",
+                );
+                return Err(error_response::unauthorized("named guard misconfigured")
+                    .into_axum_response()
+                    .into_response());
+            }
+        }
+    };
+
+    let parsed = crate::view_engine::ParsedRequest {
+        method,
+        path,
+        query_params: HashMap::new(),
+        query_all: HashMap::new(),
+        headers: headers_map,
+        body: serde_json::Value::Null,
+        path_params: path_params.clone(),
+    };
+
+    let trace_id = uuid::Uuid::new_v4().to_string();
+    match crate::guard::execute_guard_handler(
+        &ctx.pool,
+        &entrypoint,
+        &parsed,
+        None,
+        &trace_id,
+        dv_namespace,
+    )
+    .await
+    {
+        Ok(result) if result.allow => Ok(()),
+        Ok(_) => {
+            tracing::info!(
+                guard_view = %guard_view_name,
+                "named guard pre-flight rejected request"
+            );
+            Err(error_response::unauthorized("guard rejected the request")
+                .with_trace_id(trace_id)
+                .into_axum_response()
+                .into_response())
+        }
+        Err(e) => {
+            tracing::error!(
+                guard_view = %guard_view_name,
+                error = %e,
+                "named guard pre-flight dispatch failed"
+            );
+            Err(error_response::unauthorized("guard dispatch failed")
+                .with_trace_id(trace_id)
+                .into_axum_response()
+                .into_response())
+        }
+    }
+}
