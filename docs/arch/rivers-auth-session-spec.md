@@ -811,3 +811,120 @@ async function logout(req: Rivers.Request): Promise<Rivers.Response> {
 ```
 
 `Rivers.session.destroy()` deletes from StorageEngine and instructs Rivers to clear the session cookie on the response. Client is redirected to the login page with no active session.
+
+### 11.5 Bearer-token authentication via a named guard (CB-P1.10 / closes P1.12)
+
+When a route needs `Authorization: Bearer <token>` validation rather
+than the cookie-session model — typical for MCP routes, machine-to-machine
+APIs, and CLI clients — the sanctioned shape is a small codecomponent
+attached as a per-view named guard (see §3 + `rivers-mcp-view-spec.md`
+§13.5). This recipe replaces the previously-considered first-class
+`auth = "bearer"` mode (CB-P1.12): the named-guard primitive already
+provides the same enforcement boundary with no new framework concept.
+
+```toml
+# The bearer-validating guard view.
+[api.views.api_key_guard]
+view_type = "Rest"
+path      = "/internal/api-key-guard"
+method    = "POST"
+auth      = "none"
+
+[api.views.api_key_guard.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "handlers/auth.ts"
+entrypoint = "validate_api_key"
+resources  = ["app_db"]
+
+# The protected MCP route — references the guard by name.
+[api.views.mcp_advisor]
+view_type  = "Mcp"
+path       = "/mcp/advisor"
+method     = "POST"
+guard_view = "api_key_guard"
+```
+
+```typescript
+import { sha256 } from "rivers/crypto";
+
+interface ApiKeyClaims {
+    user_id: string;
+    role: string;
+    project_id: string | null;
+}
+
+export async function validate_api_key(req: Rivers.Request) {
+    const auth = (req.headers["authorization"] ?? "").trim();
+    const prefix = "Bearer ";
+    if (!auth.startsWith(prefix)) {
+        return { allow: false };
+    }
+    const token = auth.slice(prefix.length).trim();
+    if (token.length === 0) {
+        return { allow: false };
+    }
+
+    // Match against the hash, never the raw token.
+    const key_hash = sha256(token);
+    const rows = Rivers.db.query("app_db", `
+        SELECT created_by AS user_id, role, project_id
+        FROM api_keys
+        WHERE key_hash = ?
+          AND revoked_at IS NULL
+        LIMIT 1
+    `, [key_hash]);
+
+    if (rows.length === 0) {
+        return { allow: false };
+    }
+    const claims: ApiKeyClaims = rows[0] as ApiKeyClaims;
+
+    // Optional audit: stamp last-used. Best-effort — don't fail auth if
+    // the audit write errors.
+    try {
+        Rivers.db.execute("app_db",
+            "UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE key_hash = ?",
+            [key_hash]);
+    } catch (_e) { /* swallow — audit is non-load-bearing */ }
+
+    return { allow: true, session_claims: claims };
+}
+```
+
+**Why this design rather than a first-class `auth = "bearer"` mode:**
+
+| Concern | Named-guard recipe | Hypothetical `auth = "bearer"` |
+|---|---|---|
+| Lookup table | bundle's own SQL | framework hard-codes `api_keys` schema |
+| Hash algorithm | bundle's choice | framework freezes one |
+| Identity claims | bundle's choice (any SQL projection) | framework's fixed shape |
+| Audit fields (`last_used_at`, etc.) | bundle's choice | framework would need config knobs |
+| Multi-role enforcement | `WHERE role = ?` in the SQL | needs additional config knob |
+| Cross-project bindings | composable in SQL | needs configurable predicate |
+
+Every dimension a hypothetical `auth = "bearer"` would expose as config
+(table name, hash column, hash algorithm, where-clause, claims
+projection, audit update) is already a one-liner inside the
+codecomponent. The named guard is the lower-config, higher-flexibility
+shape.
+
+**Operational notes:**
+
+- The guard codecomponent runs synchronously before JSON-RPC dispatch
+  on MCP views (and before REST handler dispatch once `guard_view` is
+  honoured by other view types — tracked follow-up). Keep the handler
+  fast — it is on the hot path.
+- The framework rejects with HTTP 401 + trace ID on `allow: false` or
+  any dispatcher error. Auth fails closed.
+- Per `rivers-mcp-view-spec.md` §13.5, the body is *not* yet parsed
+  when the guard runs. The guard cannot inspect tool arguments —
+  design for authentication-shape decisions only.
+
+---
+
+## Appendix — superseded asks
+
+- **CB-P1.12 — `auth = "bearer"` mode (closed 2026-05-08).** Subsumed
+  by CB-P1.10 named guards (§11.5 above). No framework change planned;
+  the recipe is the recommended shape for bearer enforcement.
