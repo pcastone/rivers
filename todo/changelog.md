@@ -1,5 +1,37 @@
 # Changelog
 
+## 2026-05-08 — Gutter cleanup: pre-existing test fixture fix + scope decisions
+
+Closes the `slow_observer_does_not_extend_request_latency` failure
+that pre-existed on `main`. The test was passing empty `dv_namespace`
+to `ViewContext::new`, which trips the dispatcher's empty-app_id check
+after the canary-sprint RT-CTX-APP-ID fix. Fixture now passes the
+`"test-app"` slug consistently (matches the `app_id` argument).
+
+Two other gutter items deferred with documented decisions in
+`todo/gutter.md`:
+
+- **Polling change-detect datasource wiring** — closed as
+  deprioritized. Threading a `DataViewExecutor` through three function
+  signatures for a callback that's a fast diff function isn't
+  justified by speculation; the slug-equivalent fix already in
+  `polling/runner.rs:89` handles keystore.
+- **Plan H follow-ups** (lift chain prohibition, per-view-type
+  runtime tests) — both deferred. Chain prohibition lift requires
+  runtime semantics work that has no reported demand. Per-view-type
+  tests need a unified HTTP harness that's its own initiative.
+
+| File | Change | Notes |
+|------|--------|-------|
+| `crates/riversd/tests/view_engine_tests.rs` | One-line fixture fix: pass `"test-app"` as `dv_namespace` instead of empty string. Comment explains the canary-fix interaction. | |
+| `todo/gutter.md` | Rewritten with honest scope decisions. | |
+| `Cargo.toml` (workspace) | Build-stamp-only bump (sprint-end policy). | |
+
+**Tests:** `slow_observer_does_not_extend_request_latency` passes;
+no regressions across riversd test binaries.
+
+---
+
 ## 2026-05-08 — Plan H: `guard_view` honoured uniformly across all view types
 
 Closes the long-standing footgun where `guard_view` was a first-class

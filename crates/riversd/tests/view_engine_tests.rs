@@ -594,11 +594,17 @@ async fn slow_observer_does_not_extend_request_latency() {
     });
 
     let req = ParsedRequest::new("GET", "/api/slow");
+    // Pre-existing main failure fix: ViewContext::new(req, trace_id,
+    // app_id, dv_namespace, ...) — `dv_namespace` is what the
+    // canary-sprint RT-CTX-APP-ID fix passes to `enrich`. An empty
+    // dv_namespace trips the dispatcher's empty-app_id check at the
+    // post-canary-fix code path. Use the same slug as app_id so the
+    // observer dispatch reaches the pool.
     let mut ctx = ViewContext::new(
         req,
         "trace-g-r4".into(),
         "test-app".into(),
-        String::new(),
+        "test-app".into(),
         String::new(),
         String::new(),
     );
