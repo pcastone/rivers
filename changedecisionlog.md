@@ -4,6 +4,16 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 
 ---
 
+## 2026-05-08 — P1.13: MCP `view = "..."` capability propagation
+
+| File | Decision | Spec ref | Resolution |
+|------|----------|----------|------------|
+| `crates/riversd/src/mcp/dispatch.rs::dispatch_codecomponent_tool` | Mirror the REST Codecomponent arm verbatim — wire ALL namespace datasources from `executor.datasource_params()` (filtered by the `dv_namespace:` prefix) into the TaskContextBuilder, plus `HttpToken` when `allow_outbound_http` is set. Did not add filtering by the inner view's `[handler] resources = [...]` list. | rivers-mcp-view-spec.md §13.2; case-rivers-mcp-view-capability-propagation.md | The CB P1.13 case file proposes filtering by the inner view's `resources` list, but the existing REST pipeline (`view_engine/pipeline.rs:282–323`) already grants every namespace datasource without that filter. Matching REST is the safe scope-bound fix; tightening to a per-handler whitelist is a separate conformance sprint that must affect both transports symmetrically. |
+| `crates/riversd/src/mcp/dispatch.rs` (entrypoint capture) | Captured `allow_outbound_http` alongside the codecomponent `Entrypoint` inside the bundle scope block instead of re-borrowing the bundle later. | — | Avoids re-borrowing `ctx.loaded_bundle` while `ctx.dataview_executor` is being read; keeps the lock scopes disjoint. |
+| Workspace version | Patch bump `0.60.1 → 0.60.11`. | CLAUDE.md bump rules | "Closing a documented-but-missing API path" — the spec advertises codecomponent-backed MCP tools and the form was previously unreachable for any handler that needed a datasource. Patch, not minor. |
+
+---
+
 ## 2026-04-30 — P2.3: Multi-Bundle MCP Federation
 
 ### P2.3.1 — Federation config belongs on ApiViewConfig, not McpConfig

@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-05-08 — P1.13: MCP `view = "..."` capability propagation (v0.60.11)
+
+Inner-view capabilities (datasources + outbound HTTP token) now propagate when
+an MCP tool dispatches into a codecomponent-backed REST view via the
+`view = "<name>"` form. Without this, `Rivers.db.query` / `Rivers.db.execute`
+called from a handler reached through MCP `tools/call` failed with
+`CapabilityError: datasource '<name>' not declared in view config`, even
+though the same handler invoked via direct REST POST worked correctly.
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `crates/riversd/src/mcp/dispatch.rs` | `dispatch_codecomponent_tool` now mirrors the REST pipeline's Codecomponent arm — captures `allow_outbound_http` from the inner view and, before `enrich()`, attaches `HttpToken` (when opted in) plus the namespace's datasources via `executor.datasource_params()` (filesystem → `DatasourceToken::direct`, broker → token + `ResolvedDatasource`, SQL/NoSQL → `ResolvedDatasource` only). This populates `TaskContext.datasource_configs`, which the V8 worker copies into `TASK_DS_CONFIGS` so capability checks in `ctx_datasource_build_callback` and `Rivers.db.*` succeed. | rivers-mcp-view-spec.md §13.2; case-rivers-mcp-view-capability-propagation.md (CB P1.13) | The bug case file pointed at `dispatch.rs` ~538 as the dispatch context construction; the fix attaches the same builder calls REST already issues at `view_engine/pipeline.rs:282–323`. |
+| `Cargo.toml` (workspace) | Version bump 0.60.1 → 0.60.11 + new build stamp | Bump rules (CLAUDE.md) | Patch bump — closes a documented-but-missing capability propagation. |
+| `crates/riversd/src/mcp/dispatch.rs` | Extracted the wiring inline-block into a private `wire_inner_view_capabilities(builder, dv_namespace, executor, allow_outbound_http)` helper so the contract is unit-testable without spinning up a full `AppContext`. Added 6 P1.13 smoke tests pinning: SQL datasource in-namespace gets a `ResolvedDatasource` with the namespace prefix stripped; cross-namespace datasources stay isolated; `None` executor doesn't panic; `allow_outbound_http` toggles `HttpToken` in/out; filesystem driver lands as a `DatasourceToken::Direct` (not in `datasource_configs`). All 6 pass + the 13 pre-existing dispatch tests still green. | rivers-mcp-view-spec.md §13.2 | Tests assert against the exact map (`TaskContext.datasource_configs`) the V8 worker copies into `TASK_DS_CONFIGS`, so any future regression on this path will be caught at unit-test time. |
+| `canary-bundle/canary-sql/libraries/handlers/p113-mcp-view.ts` (new) | New canary handler `p113Probe` — calls `Rivers.db.query("canary-sqlite", "SELECT 1 AS answer", [])` and shapes a TestResult-style envelope with `test_id="P113-MCP-VIEW"`. Same module is reached via two routes (REST control + MCP `view = "..."`) for a true differential test. | rivers-mcp-view-spec.md §13.2 | Uses `canary-sqlite` (no external infra) so the test runs unconditionally — no infra-gated SKIP needed. |
+| `canary-bundle/canary-sql/app.toml` | Added `[api.views.p113_probe_view]` (REST/POST/none, codecomponent → `p113Probe`, `resources = ["canary-sqlite"]`) and `[api.views.mcp.tools.p113_view_probe]` with `view = "p113_probe_view"`. The MCP tool block is the experiment side; the REST view is the control. | rivers-mcp-view-spec.md §13.2 | `riverpackage validate canary-bundle` → 0 errors. |
+| `canary-bundle/run-tests.sh` | Added two assertions in the MCP block: `p113-rest-control` (direct REST POST → `passed: true`) and `p113-mcp-view-tool-call` (MCP `tools/call` → unwraps `content[0].text`, parses inner envelope, asserts `passed: true` AND `test_id == "P113-MCP-VIEW"`). The MCP path explicitly distinguishes a `CapabilityError` regression with a `REGRESSED` verdict so a future failure of this exact bug surfaces unambiguously. | rivers-mcp-view-spec.md §13.2 | Differential pair (same handler, two transports) is the operationalisation of the case file's pass criteria #1 and #2. |
+
 ## 2026-05-05 — Canary Sprint: 144/148 passing (0 fail, 4 expected PROXY 503)
 
 All canary sprint work complete. Six root causes fixed; canary score improved from 126→144 pass.

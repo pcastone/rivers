@@ -417,7 +417,12 @@ async fn dispatch_codecomponent_tool(
     use rivers_runtime::view::HandlerConfig;
 
     // Locate the app in the loaded bundle by dv_namespace (entry_point slug).
-    let entrypoint = {
+    // Capture both the codecomponent entrypoint and the inner view's
+    // capability flags (allow_outbound_http) — the latter are required to
+    // mirror what the REST pipeline wires into the TaskContext, otherwise
+    // handlers reached via MCP `view = "..."` dispatch would fail any
+    // capability-gated host call (datasources, ctx.http, etc.).
+    let (entrypoint, allow_outbound_http) = {
         let bundle = match ctx.loaded_bundle.as_ref() {
             Some(b) => b,
             None => return JsonRpcResponse::server_error(req.id.clone(), "no bundle loaded"),
@@ -441,11 +446,14 @@ async fn dispatch_codecomponent_tool(
             ),
         };
         match &view_config.handler {
-            HandlerConfig::Codecomponent { language, module, entrypoint, .. } => Entrypoint {
-                language: language.clone(),
-                module: module.clone(),
-                function: entrypoint.clone(),
-            },
+            HandlerConfig::Codecomponent { language, module, entrypoint, .. } => (
+                Entrypoint {
+                    language: language.clone(),
+                    module: module.clone(),
+                    function: entrypoint.clone(),
+                },
+                view_config.allow_outbound_http,
+            ),
             _ => return JsonRpcResponse::server_error(
                 req.id.clone(),
                 format!("view '{}' is not a codecomponent handler", view_name),
@@ -546,6 +554,22 @@ async fn dispatch_codecomponent_tool(
         .entrypoint(entrypoint)
         .args(args)
         .trace_id(trace_id.clone());
+
+    // P1.13 fix — propagate the inner view's capabilities exactly as the
+    // REST pipeline does (see view_engine/pipeline.rs Codecomponent arm).
+    // Without this, Rivers.db.* and ctx.http calls from the codecomponent
+    // would fail with `CapabilityError: datasource '...' not declared in
+    // view config` because TASK_DS_CONFIGS would be empty.
+    let builder = {
+        let dv_guard = ctx.dataview_executor.read().await;
+        wire_inner_view_capabilities(
+            builder,
+            dv_namespace,
+            dv_guard.as_ref(),
+            allow_outbound_http,
+        )
+    };
+
     let builder = crate::task_enrichment::enrich(builder, app_id, TaskKind::Rest);
     let task_ctx = match builder.build() {
         Ok(c) => c,
@@ -567,6 +591,61 @@ async fn dispatch_codecomponent_tool(
             format!("handler error: {e}"),
         ),
     }
+}
+
+/// Attach the inner view's host-side capabilities to the TaskContextBuilder.
+///
+/// Mirrors `view_engine/pipeline.rs`'s Codecomponent arm: every datasource in
+/// `executor.datasource_params()` whose key starts with `<dv_namespace>:` is
+/// translated into the appropriate `DatasourceToken` / `ResolvedDatasource`
+/// pair, and `HttpToken` is attached when the view opted in via
+/// `allow_outbound_http`. Extracted from `dispatch_codecomponent_tool` so the
+/// wiring is unit-testable without spinning up a full `AppContext`.
+fn wire_inner_view_capabilities(
+    mut builder: crate::process_pool::TaskContextBuilder,
+    dv_namespace: &str,
+    executor: Option<&Arc<rivers_runtime::DataViewExecutor>>,
+    allow_outbound_http: bool,
+) -> crate::process_pool::TaskContextBuilder {
+    if allow_outbound_http {
+        builder = builder.http(crate::process_pool::HttpToken);
+    }
+    let Some(executor) = executor else {
+        return builder;
+    };
+    let ns_prefix = format!("{}:", dv_namespace);
+    for (key, params) in executor.datasource_params().iter() {
+        let Some(ds_name) = key.strip_prefix(&ns_prefix) else {
+            continue;
+        };
+        let driver = params
+            .options
+            .get("driver")
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        if driver == "filesystem" {
+            let token = rivers_runtime::process_pool::DatasourceToken::direct(
+                "filesystem",
+                std::path::PathBuf::from(&params.database),
+            );
+            builder = builder.datasource(ds_name.to_string(), token);
+        } else if rivers_runtime::process_pool::BROKER_DRIVER_NAMES.contains(&driver) {
+            let token = rivers_runtime::process_pool::DatasourceToken::broker(driver);
+            builder = builder.datasource(ds_name.to_string(), token.clone());
+            let resolved = rivers_runtime::process_pool::ResolvedDatasource {
+                driver_name: driver.to_string(),
+                params: params.clone(),
+            };
+            builder = builder.datasource_config(ds_name.to_string(), resolved);
+        } else if !driver.is_empty() {
+            let resolved = rivers_runtime::process_pool::ResolvedDatasource {
+                driver_name: driver.to_string(),
+                params: params.clone(),
+            };
+            builder = builder.datasource_config(ds_name.to_string(), resolved);
+        }
+    }
+    builder
 }
 
 async fn handle_resources_list(
@@ -1201,6 +1280,180 @@ mod tests {
         });
         assert_eq!(entry["isError"], serde_json::json!(true));
         assert_eq!(entry["content"][0]["text"], serde_json::json!("Unknown tool: bad_tool"));
+    }
+
+    // ── P1.13 — MCP `view = "..."` capability propagation ──────────────────────
+    //
+    // These smoke tests pin the wiring contract that `dispatch_codecomponent_tool`
+    // depends on: namespace-prefixed datasources from the executor must end up in
+    // `TaskContext.datasource_configs`, because the V8 worker copies that map
+    // verbatim into `TASK_DS_CONFIGS` (the thread-local the capability check at
+    // `process_pool/v8_engine/datasource.rs` reads). If any of these regress, an
+    // MCP-dispatched codecomponent would once again hit
+    // `CapabilityError: datasource '<name>' not declared in view config`.
+
+    fn p113_make_executor(
+        entries: &[(&str, &str, &str)], // (key, driver, database)
+    ) -> Arc<rivers_runtime::DataViewExecutor> {
+        use rivers_runtime::rivers_core::DriverFactory;
+        use rivers_runtime::rivers_driver_sdk::ConnectionParams;
+        use rivers_runtime::tiered_cache::NoopDataViewCache;
+        use rivers_runtime::{DataViewExecutor, DataViewRegistry};
+        use std::collections::HashMap;
+
+        let mut params_map: HashMap<String, ConnectionParams> = HashMap::new();
+        for (key, driver, database) in entries {
+            let mut opts: HashMap<String, String> = HashMap::new();
+            opts.insert("driver".into(), (*driver).to_string());
+            params_map.insert(
+                (*key).to_string(),
+                ConnectionParams {
+                    host: String::new(),
+                    port: 0,
+                    database: (*database).to_string(),
+                    username: String::new(),
+                    password: String::new(),
+                    options: opts,
+                },
+            );
+        }
+        let registry = DataViewRegistry::new();
+        let factory = Arc::new(DriverFactory::new());
+        let cache = Arc::new(NoopDataViewCache);
+        Arc::new(DataViewExecutor::new(
+            registry,
+            factory,
+            Arc::new(params_map),
+            cache,
+        ))
+    }
+
+    fn p113_seed_builder() -> crate::process_pool::TaskContextBuilder {
+        use crate::process_pool::{Entrypoint, TaskContextBuilder};
+        TaskContextBuilder::new()
+            .entrypoint(Entrypoint {
+                language: "javascript".into(),
+                module: "h.js".into(),
+                function: "h".into(),
+            })
+            .args(serde_json::json!({}))
+            .trace_id("p113-test".into())
+    }
+
+    #[test]
+    fn p113_sql_datasource_in_namespace_is_wired() {
+        // The reproducer's exact shape: a sqlite datasource keyed under the
+        // app's namespace must end up as a ResolvedDatasource keyed by the
+        // bare name (the namespace prefix is stripped, matching REST).
+        let executor = p113_make_executor(&[
+            ("probe-app:test_db", "sqlite", "data/probe.db"),
+        ]);
+        let builder = wire_inner_view_capabilities(
+            p113_seed_builder(),
+            "probe-app",
+            Some(&executor),
+            false,
+        );
+        let task = builder.build().expect("build ok");
+
+        assert!(
+            task.datasource_configs.contains_key("test_db"),
+            "test_db must be wired into datasource_configs (namespace-prefix stripped) — \
+             this is the exact map the V8 worker copies into TASK_DS_CONFIGS"
+        );
+        let resolved = &task.datasource_configs["test_db"];
+        assert_eq!(resolved.driver_name, "sqlite");
+        assert_eq!(resolved.params.database, "data/probe.db");
+    }
+
+    #[test]
+    fn p113_other_namespace_datasource_is_not_wired() {
+        // A datasource keyed under a different app's namespace must NOT
+        // leak into this view's TaskContext — same boundary REST enforces.
+        let executor = p113_make_executor(&[
+            ("other-app:other_db", "sqlite", ":memory:"),
+        ]);
+        let builder = wire_inner_view_capabilities(
+            p113_seed_builder(),
+            "probe-app",
+            Some(&executor),
+            false,
+        );
+        let task = builder.build().expect("build ok");
+        assert!(
+            task.datasource_configs.is_empty(),
+            "datasources from other namespaces must not cross the boundary"
+        );
+    }
+
+    #[test]
+    fn p113_no_executor_yields_empty_capabilities() {
+        // Defensive: pre-bundle-load dispatch (no executor wired yet) must
+        // not panic and must produce an empty datasource map.
+        let builder =
+            wire_inner_view_capabilities(p113_seed_builder(), "probe-app", None, false);
+        let task = builder.build().expect("build ok");
+        assert!(task.datasource_configs.is_empty());
+    }
+
+    #[test]
+    fn p113_allow_outbound_http_attaches_http_token() {
+        // The view-level `allow_outbound_http` flag is the only thing that
+        // unlocks `Rivers.http.*` inside the codecomponent — pin that it
+        // propagates through the helper.
+        let executor = p113_make_executor(&[]);
+        let builder = wire_inner_view_capabilities(
+            p113_seed_builder(),
+            "probe-app",
+            Some(&executor),
+            true,
+        );
+        let task = builder.build().expect("build ok");
+        assert!(
+            task.http.is_some(),
+            "allow_outbound_http=true must attach HttpToken so Rivers.http.* works"
+        );
+    }
+
+    #[test]
+    fn p113_allow_outbound_http_off_leaves_http_token_unset() {
+        // Opt-in only: views that didn't ask for outbound HTTP must not get
+        // a token.
+        let executor = p113_make_executor(&[]);
+        let builder = wire_inner_view_capabilities(
+            p113_seed_builder(),
+            "probe-app",
+            Some(&executor),
+            false,
+        );
+        let task = builder.build().expect("build ok");
+        assert!(
+            task.http.is_none(),
+            "allow_outbound_http=false must leave HttpToken unset"
+        );
+    }
+
+    #[test]
+    fn p113_filesystem_driver_yields_direct_token() {
+        // Filesystem datasources go through DatasourceToken::Direct (not a
+        // ResolvedDatasource) — pin that the dispatch path matches REST's
+        // shape so file IO from MCP-dispatched handlers behaves identically.
+        let executor = p113_make_executor(&[
+            ("probe-app:fs", "filesystem", "/tmp/probe-data"),
+        ]);
+        let builder = wire_inner_view_capabilities(
+            p113_seed_builder(),
+            "probe-app",
+            Some(&executor),
+            false,
+        );
+        let task = builder.build().expect("build ok");
+        assert!(
+            task.datasources.contains_key("fs"),
+            "filesystem datasource must be wired as a DatasourceToken (not just config)"
+        );
+        // Filesystem only goes through the token path, not datasource_configs.
+        assert!(!task.datasource_configs.contains_key("fs"));
     }
 }
 

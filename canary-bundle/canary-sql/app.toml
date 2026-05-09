@@ -872,6 +872,33 @@ dataview    = "pg_select_all"
 description = "Select all contacts from PostgreSQL"
 hints       = { read_only = true }
 
+# ── P1.13 — MCP `view = "..."` capability propagation ─────────
+# Regression probe for the bug where an MCP tool dispatching into a
+# codecomponent-backed REST view did not get the inner view's datasources
+# wired into TASK_DS_CONFIGS, causing `Rivers.db.*` to throw
+# CapabilityError. The same handler (p113Probe) is exposed via direct
+# REST at /canary/sql/p113/probe (control) and via this MCP tool
+# (experiment). Both must succeed and return identical envelopes.
+# Spec: rivers-mcp-view-spec.md §13.2; case-rivers-mcp-view-capability-propagation.md.
+
+[api.views.p113_probe_view]
+path      = "/canary/sql/p113/probe"
+view_type = "Rest"
+method    = "POST"
+auth      = "none"
+
+[api.views.p113_probe_view.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/p113-mcp-view.ts"
+entrypoint = "p113Probe"
+resources  = ["canary-sqlite"]
+
+[api.views.mcp.tools.p113_view_probe]
+view        = "p113_probe_view"
+description = "P1.13 — MCP view= dispatch into a codecomponent that calls Rivers.db.query"
+hints       = { read_only = true }
+
 # ── Scenario probe (CS1.4) ────────────────────────────────
 # SCENARIO-SQL-PROBE — validates the scenario-harness.ts envelope
 # shape end-to-end before CS2 Messaging scenarios are built on it.
