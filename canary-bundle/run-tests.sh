@@ -559,6 +559,54 @@ else
   FAIL=$((FAIL+1))
 fi
 
+# ── P1.13 — MCP `view = "..."` capability propagation ─────────
+# Regression for case-rivers-mcp-view-capability-propagation.md.
+# Both paths run the same handler (p113Probe). Both must return
+# `passed: true`. If `p113-mcp-view-tool-call` fails with a
+# CapabilityError, dispatch_codecomponent_tool has regressed — the
+# inner view's `[handler] resources` aren't being wired into the
+# task context for MCP-routed dispatches.
+
+# REST control — proves the handler works when reached the long way around.
+test_ep "p113-rest-control"        POST "$BASE/sql/canary/sql/p113/probe" '{}'
+
+# MCP experiment — the path that broke before P1.13. The MCP wrapper
+# nests the handler envelope as a JSON string inside content[0].text;
+# we verify the unwrapped envelope contains `passed: true` AND that
+# the answer row made it through (which proves Rivers.db.query
+# actually executed against canary-sqlite, i.e. the capability gate
+# accepted the datasource).
+P113_MCP=$(curl -skf -X POST "$MCP_EP" \
+  -H "Content-Type: application/json" \
+  -H "$MCP_SID_HEADER" \
+  -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"p113_view_probe","arguments":{}}}' 2>/dev/null) || P113_MCP=""
+P113_VERDICT=$(echo "$P113_MCP" | python3 -c '
+import json, sys
+try:
+    rpc = json.load(sys.stdin)
+    text = rpc["result"]["content"][0]["text"]
+    inner = json.loads(text)
+    if inner.get("passed") is True and inner.get("test_id") == "P113-MCP-VIEW":
+        print("PASS")
+    elif "CapabilityError" in (inner.get("error") or ""):
+        print("REGRESSED")
+    else:
+        print("FAIL")
+except Exception:
+    print("ERR")
+' 2>/dev/null) || P113_VERDICT="ERR"
+case "$P113_VERDICT" in
+  PASS)
+    printf "  PASS %-40s\n" "p113-mcp-view-tool-call"
+    PASS=$((PASS+1)) ;;
+  REGRESSED)
+    printf "  FAIL %-40s (CapabilityError — P1.13 regressed)\n" "p113-mcp-view-tool-call"
+    FAIL=$((FAIL+1)) ;;
+  *)
+    printf "  FAIL %-40s\n" "p113-mcp-view-tool-call"
+    FAIL=$((FAIL+1)) ;;
+esac
+
 # ── Query Parameter Tests ────────────────────────────────────
 echo ""
 echo "  ── Query Parameters ──"

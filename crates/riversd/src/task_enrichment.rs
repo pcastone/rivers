@@ -402,4 +402,138 @@ mod tests {
         let task = builder.build().expect("task ctx builds");
         assert!(task.datasource_configs.is_empty());
     }
+
+    // ── P1.13 follow-up: branch coverage for `wire_datasources` ─────────────
+    //
+    // The existing tests above cover the SQL/cross-namespace and no-executor
+    // branches. The helper has three more branches the original CB-P1.13
+    // patch didn't pin. Each one is a path that the V8 worker reads — if any
+    // regresses, an MCP-dispatched handler would silently lose access to a
+    // capability that worked under REST. These tests exist to fail loudly
+    // before that asymmetry slips back in.
+
+    /// Helper: build a single-app executor with a parameterised driver. Used
+    /// to keep each branch test focused on one driver class without the
+    /// boilerplate of constructing the executor + ConnectionParams inline.
+    fn p113_executor_with(
+        ds_key: &str,
+        driver: &str,
+        database: &str,
+    ) -> Arc<DataViewExecutor> {
+        use std::collections::HashMap;
+        use rivers_runtime::rivers_driver_sdk::ConnectionParams;
+
+        let mut opts: HashMap<String, String> = HashMap::new();
+        opts.insert("driver".into(), driver.to_string());
+        let mut params: HashMap<String, ConnectionParams> = HashMap::new();
+        params.insert(
+            ds_key.to_string(),
+            ConnectionParams {
+                host: "localhost".into(),
+                port: 0,
+                database: database.to_string(),
+                username: String::new(),
+                password: String::new(),
+                options: opts,
+            },
+        );
+        Arc::new(DataViewExecutor::new(
+            DataViewRegistry::new(),
+            Arc::new(DriverFactory::new()),
+            Arc::new(params),
+            Arc::new(NoopDataViewCache),
+        ))
+    }
+
+    fn p113_seed_builder() -> TaskContextBuilder {
+        TaskContextBuilder::new()
+            .entrypoint(Entrypoint {
+                module: "handlers/h.js".into(),
+                function: "handle".into(),
+                language: "javascript".into(),
+            })
+            .args(serde_json::json!({}))
+            .trace_id("p113-branch".into())
+            .app_id("myapp".into())
+    }
+
+    /// Filesystem driver: lands as a `DatasourceToken::Direct` token, NOT in
+    /// `datasource_configs`. The codecomponent reaches it through the
+    /// in-process direct-dispatch path, not the DriverFactory connect cycle.
+    #[test]
+    fn wire_datasources_filesystem_yields_direct_token_only() {
+        let executor = p113_executor_with("myapp:files", "filesystem", "/tmp/probe-data");
+        let builder = wire_datasources(p113_seed_builder(), Some(executor.as_ref()), "myapp");
+        let task = builder.build().expect("task ctx builds");
+
+        assert!(
+            task.datasources.contains_key("files"),
+            "filesystem ds must be wired as a DatasourceToken (got keys {:?})",
+            task.datasources.keys().collect::<Vec<_>>(),
+        );
+        assert!(
+            !task.datasource_configs.contains_key("files"),
+            "filesystem must NOT populate datasource_configs (the worker uses \
+             the direct token path, not DriverFactory)",
+        );
+    }
+
+    /// Broker driver: gets BOTH a `DatasourceToken::Broker` AND a
+    /// `ResolvedDatasource` config (per BR-2026-04-23 — the worker uses the
+    /// token to route and the config to lazy-build a BrokerProducer).
+    #[test]
+    fn wire_datasources_broker_yields_token_and_config() {
+        let executor = p113_executor_with("myapp:events", "kafka", "events-topic");
+        let builder = wire_datasources(p113_seed_builder(), Some(executor.as_ref()), "myapp");
+        let task = builder.build().expect("task ctx builds");
+
+        assert!(
+            task.datasources.contains_key("events"),
+            "broker ds must produce a DatasourceToken so the worker can route writes",
+        );
+        let resolved = task.datasource_configs.get("events").expect(
+            "broker ds must ALSO populate datasource_configs so the worker can \
+             lazy-build a producer with the right ConnectionParams",
+        );
+        assert_eq!(resolved.driver_name, "kafka");
+    }
+
+    /// A datasource entry whose `options.driver` is absent or empty must be
+    /// silently skipped — no token, no config. Defends against a partial
+    /// resources.toml ever inflating the task scope.
+    #[test]
+    fn wire_datasources_skips_entries_with_empty_driver() {
+        use std::collections::HashMap;
+        use rivers_runtime::rivers_driver_sdk::ConnectionParams;
+
+        // Build params manually so we can omit the `driver` option entirely.
+        let mut params: HashMap<String, ConnectionParams> = HashMap::new();
+        params.insert(
+            "myapp:no_driver".to_string(),
+            ConnectionParams {
+                host: String::new(),
+                port: 0,
+                database: String::new(),
+                username: String::new(),
+                password: String::new(),
+                options: HashMap::new(),
+            },
+        );
+        let executor = Arc::new(DataViewExecutor::new(
+            DataViewRegistry::new(),
+            Arc::new(DriverFactory::new()),
+            Arc::new(params),
+            Arc::new(NoopDataViewCache),
+        ));
+
+        let builder = wire_datasources(p113_seed_builder(), Some(executor.as_ref()), "myapp");
+        let task = builder.build().expect("task ctx builds");
+
+        assert!(
+            task.datasources.is_empty() && task.datasource_configs.is_empty(),
+            "missing/empty driver must skip the entry entirely; got tokens={:?}, configs={:?}",
+            task.datasources.keys().collect::<Vec<_>>(),
+            task.datasource_configs.keys().collect::<Vec<_>>(),
+        );
+    }
 }

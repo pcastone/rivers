@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-05-08 — P1.13 follow-up: HttpToken + canary regression + branch-coverage tests (v0.60.11)
+
+PR #100 shipped the runtime fix for case-rivers-mcp-view-capability-propagation.md
+(CB-P1.13) by wiring datasources through `dispatch_codecomponent_tool` via
+`task_enrichment::wire_datasources`. This follow-up closes three gaps it left:
+
+1. The MCP path still didn't propagate `allow_outbound_http`, so a view opting
+   into `Rivers.http.*` was still broken when reached via MCP.
+2. No fleet-level regression test — only unit coverage.
+3. `wire_datasources` had unit tests for the SQL/cross-namespace branches but
+   not for filesystem, broker, or empty-driver-skip.
+
+| File | What changed | Spec ref | Resolution |
+|------|-------------|----------|------------|
+| `crates/riversd/src/mcp/dispatch.rs` | `dispatch_codecomponent_tool` now captures `allow_outbound_http` from the inner view alongside the entrypoint, and attaches `crate::process_pool::HttpToken` to the builder when set. Mirrors REST pipeline at `view_engine/pipeline.rs:273-275`. | rivers-view-layer-spec.md §10.5; rivers-mcp-view-spec.md §13.2 | 3-line addition to the existing CB-P1.13 wiring block. No structural change to the dispatch flow. |
+| `crates/riversd/src/task_enrichment.rs` | Added 3 branch-coverage tests for `wire_datasources`: filesystem driver → `DatasourceToken::Direct` only (no config); broker driver → both token AND config (per BR-2026-04-23); empty/missing driver → silently skipped. Plus shared `p113_executor_with` / `p113_seed_builder` helpers to keep each test focused. | rivers-mcp-view-spec.md §13.2 | All 3 tests green; combined with main's existing 2 wire_datasources tests, every branch is now pinned. |
+| `canary-bundle/canary-sql/libraries/handlers/p113-mcp-view.ts` (new) | New canary handler `p113Probe` — calls `Rivers.db.query("canary-sqlite", "SELECT 1 AS answer", [])` and shapes a TestResult envelope with `test_id="P113-MCP-VIEW"`. Same module reached via two routes (REST control + MCP `view = "..."`). | rivers-mcp-view-spec.md §13.2 | Uses `canary-sqlite` (no external infra) so the test runs unconditionally. |
+| `canary-bundle/canary-sql/app.toml` | Added `[api.views.p113_probe_view]` (REST/POST/none, codecomponent → `p113Probe`, `resources = ["canary-sqlite"]`) and `[api.views.mcp.tools.p113_view_probe]` with `view = "p113_probe_view"`. | rivers-mcp-view-spec.md §13.2 | `riverpackage validate canary-bundle` → 0 errors. |
+| `canary-bundle/run-tests.sh` | Added two MCP-block assertions: `p113-rest-control` (REST POST → expect `passed:true`) and `p113-mcp-view-tool-call` (MCP `tools/call` → unwrap `content[0].text`, parse inner envelope, assert `passed:true && test_id=="P113-MCP-VIEW"`). MCP path explicitly distinguishes `CapabilityError` regression with a `REGRESSED` verdict so a future failure of this exact bug surfaces unambiguously. | rivers-mcp-view-spec.md §13.2 | Differential pair (same handler, two transports). +2 PASS on healthy canary. |
+| `Cargo.toml` (workspace) | Version bump 0.60.10 → 0.60.11 + new build stamp | Bump rules (CLAUDE.md) | Patch — closes a documented-but-missing API-coverage gap on top of #100. |
+
 ## 2026-05-08 — Lift v1 chain prohibition for guard_view
 
 `guard_view` chains are now allowed up to `MAX_GUARD_CHAIN_DEPTH`
