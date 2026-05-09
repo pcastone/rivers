@@ -4,6 +4,17 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 
 ---
 
+## 2026-05-08 — P1.13 follow-up: close MCP HttpToken gap + canary regression coverage
+
+| File | Decision | Spec ref | Resolution |
+|------|----------|----------|------------|
+| `crates/riversd/src/mcp/dispatch.rs::dispatch_codecomponent_tool` | Capture `view_config.allow_outbound_http` alongside the codecomponent entrypoint inside the bundle scope block, then conditionally `builder.http(HttpToken)` before the existing `wire_datasources` call. | rivers-view-layer-spec.md §10.5 | Mirrors the REST pipeline's Codecomponent arm exactly. PR #100 wired datasources through this path but missed the HTTP capability — same shape of bug, just a different capability. |
+| `crates/riversd/src/task_enrichment.rs` (test module) | Added shared `p113_executor_with` / `p113_seed_builder` helpers + 3 branch-coverage tests (filesystem-direct, broker-token-and-config, empty-driver-skip). Did not touch the existing 2 tests in main. | rivers-mcp-view-spec.md §13.2 | Helpers reduce 60+ lines of boilerplate per test to a single line each; fail mode pinned at the exact assertion that would catch a regression. |
+| Canary scenario (handler + app.toml + run-tests.sh) | Operationalise the runtime fix as a fleet-level differential test: same V8 module dispatched via REST (control) and MCP `view = "..."` (experiment). MCP path explicitly distinguishes `CapabilityError` regression from generic failure so a future occurrence of this exact bug surfaces unambiguously in the canary log. | rivers-mcp-view-spec.md §13.2 | `canary-sqlite` chosen over postgres so no infra-gating SKIP; counts as +2 PASS on every healthy run. |
+| Workspace version | Patch bump `0.60.10 → 0.60.11`. | CLAUDE.md bump rules | Closing a documented-but-missing capability propagation on top of #100 + adding regression coverage. Patch, not minor. |
+
+---
+
 ## 2026-05-08 — Lift v1 chain prohibition: guard_view chains supported up to depth 5
 
 **Decision:** Plan H shipped a v1 chain prohibition (any `guard_view`

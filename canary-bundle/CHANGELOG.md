@@ -1,5 +1,17 @@
 # Canary Fleet — Changelog
 
+## [P1.13 follow-up] — MCP `view = "..."` regression test (2026-05-08)
+**Files:**
+- `canary-sql/libraries/handlers/p113-mcp-view.ts` (new) — `p113Probe` calls `Rivers.db.query("canary-sqlite", "SELECT 1 AS answer", [])` and returns a TestResult envelope.
+- `canary-sql/app.toml` — new `[api.views.p113_probe_view]` (REST control) + `[api.views.mcp.tools.p113_view_probe]` with `view = "p113_probe_view"` (MCP experiment).
+- `run-tests.sh` — `p113-rest-control` and `p113-mcp-view-tool-call` assertions in the MCP block.
+
+**Description:** Operationalises the runtime fix that landed in #100 as a fleet-level regression test. Same V8 module is dispatched two ways: direct REST POST (control) and MCP `tools/call` with `view = "..."` (experiment). Both must return `passed: true`. If MCP regresses to throwing `CapabilityError: datasource 'canary-sqlite' not declared in view config`, the harness emits a `(CapabilityError — P1.13 regressed)` verdict so the failure is unambiguous.
+
+**Spec reference:** rivers-mcp-view-spec.md §13.2; CB upstream case-rivers-mcp-view-capability-propagation.md.
+
+**Resolution:** `riverpackage validate canary-bundle` → 0 errors. `canary-sqlite` chosen as the probe datasource so the test runs without external infra (no SKIP gate). +2 PASS in the canary score on a healthy build.
+
 ## [Decision] — Initial scaffolding
 **File:** manifest.toml, all app manifests
 **Description:** Created 6-app bundle structure per canary-fleet-spec.md

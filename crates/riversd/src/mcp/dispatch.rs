@@ -437,7 +437,13 @@ async fn dispatch_codecomponent_tool(
     use rivers_runtime::view::HandlerConfig;
 
     // Locate the app in the loaded bundle by dv_namespace (entry_point slug).
-    let entrypoint = {
+    // P1.13 follow-up: capture `allow_outbound_http` alongside the entrypoint
+    // so the caller can wire `HttpToken` into the TaskContext exactly the way
+    // the REST pipeline does. Without this, an MCP-dispatched codecomponent
+    // whose backing view declared `allow_outbound_http = true` would still
+    // fail any `Rivers.http.*` call — same shape as the original P1.13 bug,
+    // just for the HTTP capability instead of datasources.
+    let (entrypoint, allow_outbound_http) = {
         let bundle = match ctx.loaded_bundle.as_ref() {
             Some(b) => b,
             None => return JsonRpcResponse::server_error(req.id.clone(), "no bundle loaded"),
@@ -461,11 +467,14 @@ async fn dispatch_codecomponent_tool(
             ),
         };
         match &view_config.handler {
-            HandlerConfig::Codecomponent { language, module, entrypoint, .. } => Entrypoint {
-                language: language.clone(),
-                module: module.clone(),
-                function: entrypoint.clone(),
-            },
+            HandlerConfig::Codecomponent { language, module, entrypoint, .. } => (
+                Entrypoint {
+                    language: language.clone(),
+                    module: module.clone(),
+                    function: entrypoint.clone(),
+                },
+                view_config.allow_outbound_http,
+            ),
             _ => return JsonRpcResponse::server_error(
                 req.id.clone(),
                 format!("view '{}' is not a codecomponent handler", view_name),
@@ -563,6 +572,16 @@ async fn dispatch_codecomponent_tool(
         .entrypoint(entrypoint)
         .args(args)
         .trace_id(trace_id.clone());
+    // P1.13 follow-up: propagate `allow_outbound_http` from the inner view.
+    // CB-P1.13 wired datasources but missed the HTTP token, leaving any view
+    // that opted into `Rivers.http.*` still broken on the MCP path. The
+    // REST pipeline's Codecomponent arm at `view_engine/pipeline.rs:273-275`
+    // sets the same flag the same way.
+    let builder = if allow_outbound_http {
+        builder.http(crate::process_pool::HttpToken)
+    } else {
+        builder
+    };
     // CB-P1.13: wire per-app datasource tokens/configs so codecomponent
     // handlers reached via MCP `view = "..."` dispatch can call
     // `Rivers.db.execute(...)` against their declared datasources — same
