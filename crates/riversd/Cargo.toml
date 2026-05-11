@@ -66,6 +66,10 @@ opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 tracing-opentelemetry = "0.32"
 opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "with-serde", "trace", "metrics", "logs"] }
 prost = "0.14"
+# OTLP view: Content-Encoding gzip/deflate decompression (CB-OTLP Track O2).
+# Available transitively via reqwest/tower-http but required as a direct dep
+# to use `flate2::read::{GzDecoder, DeflateDecoder}` from `otlp_view.rs`.
+flate2 = "1"
 
 # TypeScript compilation (spec: rivers-javascript-typescript-spec.md §2.1)
 # Full-transform pipeline: parse → typescript::typescript() → emit.

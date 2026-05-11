@@ -10,6 +10,7 @@ mod handlers;
 mod admin_auth;
 mod drivers;
 mod lifecycle;
+mod otlp_view;
 #[cfg(feature = "metrics")]
 pub mod metrics;
 mod validation;

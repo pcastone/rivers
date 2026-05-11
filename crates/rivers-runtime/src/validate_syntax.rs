@@ -260,179 +260,28 @@ pub fn validate_syntax(
                 ..
             } = &view.handler
             {
-                let module_path = app_dir.join(module);
-                let display_path = format!("{}/{}", app_name, module);
-
-                if !module_path.exists() {
-                    continue; // Layer 2 handles missing files
-                }
-
-                // Determine engine type from language
-                let is_wasm = matches!(language.as_str(), "wasm");
-                let is_js_ts = matches!(
-                    language.as_str(),
-                    "typescript"
-                        | "ts"
-                        | "typescript_strict"
-                        | "ts_strict"
-                        | "javascript"
-                        | "js"
-                        | "javascript_v8"
-                        | "js_v8"
+                check_codecomponent_handler(
+                    language, module, entrypoint, app_dir, app_name, engines, &mut results,
                 );
+            }
 
-                if is_js_ts {
-                    if let Some(ref v8) = engines.v8 {
-                        match std::fs::read(&module_path) {
-                            Ok(source) => {
-                                let filename =
-                                    module_path.file_name().unwrap_or_default().to_string_lossy();
-                                match v8.compile_check(&source, &filename) {
-                                    Ok(check_result) => {
-                                        // Check entrypoint exists in exports
-                                        if check_result.exports.contains(&entrypoint.to_string())
-                                        {
-                                            results.push(
-                                                ValidationResult::pass(
-                                                    &display_path,
-                                                    format!(
-                                                        "compiles, export '{}' found",
-                                                        entrypoint
-                                                    ),
-                                                )
-                                                .with_app(app_name)
-                                                .with_exports(check_result.exports)
-                                                .with_entrypoint_verified(true),
-                                            );
-                                        } else {
-                                            results.push(
-                                                ValidationResult::fail(
-                                                    error_codes::C002,
-                                                    &display_path,
-                                                    format!(
-                                                        "entrypoint '{}' not found in exports — available: [{}]",
-                                                        entrypoint,
-                                                        check_result.exports.join(", ")
-                                                    ),
-                                                )
-                                                .with_app(app_name)
-                                                .with_exports(check_result.exports)
-                                                .with_entrypoint_verified(false),
-                                            );
-                                        }
-                                    }
-                                    Err(err) => {
-                                        let mut result = ValidationResult::fail(
-                                            error_codes::C001,
-                                            &display_path,
-                                            format!("SyntaxError: {}", err.message),
-                                        )
-                                        .with_app(app_name)
-                                        .with_error_type("SyntaxError");
-                                        if let Some(line) = err.line {
-                                            if let Some(col) = err.column {
-                                                result = result.with_location(line, col);
-                                            }
-                                        }
-                                        results.push(result);
-                                    }
-                                }
-
-                                // Import path resolution (C004-C005)
-                                if let Ok(source_str) = std::str::from_utf8(&source) {
-                                    let import_results = validate_imports(
-                                        source_str,
-                                        &module_path,
-                                        app_dir,
-                                        &display_path,
-                                        app_name,
-                                    );
-                                    results.extend(import_results);
-                                }
-                            }
-                            Err(_) => {
-                                // Can't read file — Layer 2 would have caught this
-                            }
-                        }
-                    } else {
-                        results.push(
-                            ValidationResult::skip(
-                                "v8",
-                                "V8 engine dylib not available — TS/JS syntax check skipped",
-                            )
-                            .with_app(app_name),
+            // CB-OTLP Track O1.3 — per-signal handlers.{metrics,logs,traces}.
+            // Same compile + entrypoint-in-exports check as the single
+            // `handler:` form. Failures surface as the existing C001/C002/C003
+            // codes; the structural layer already marks misconfigured OTLP
+            // views with `[X-OTLP-N]` markers in their messages.
+            if let Some(ref otlp_handlers) = view.handlers {
+                for (_signal, h) in otlp_handlers {
+                    if let HandlerConfig::Codecomponent {
+                        language,
+                        module,
+                        entrypoint,
+                        ..
+                    } = h
+                    {
+                        check_codecomponent_handler(
+                            language, module, entrypoint, app_dir, app_name, engines, &mut results,
                         );
-                    }
-                } else if is_wasm {
-                    if let Some(ref wasm) = engines.wasmtime {
-                        match std::fs::read(&module_path) {
-                            Ok(bytes) => {
-                                let filename =
-                                    module_path.file_name().unwrap_or_default().to_string_lossy();
-                                match wasm.compile_check(&bytes, &filename) {
-                                    Ok(check_result) => {
-                                        if check_result.exports.contains(&entrypoint.to_string())
-                                        {
-                                            results.push(
-                                                ValidationResult::pass(
-                                                    &display_path,
-                                                    format!(
-                                                        "valid WASM, export '{}' found",
-                                                        entrypoint
-                                                    ),
-                                                )
-                                                .with_app(app_name)
-                                                .with_exports(check_result.exports)
-                                                .with_entrypoint_verified(true),
-                                            );
-                                        } else {
-                                            results.push(
-                                                ValidationResult::fail(
-                                                    error_codes::C002,
-                                                    &display_path,
-                                                    format!(
-                                                        "entrypoint '{}' not found in WASM exports — available: [{}]",
-                                                        entrypoint,
-                                                        check_result.exports.join(", ")
-                                                    ),
-                                                )
-                                                .with_app(app_name)
-                                                .with_exports(check_result.exports)
-                                                .with_entrypoint_verified(false),
-                                            );
-                                        }
-                                    }
-                                    Err(err) => {
-                                        results.push(
-                                            ValidationResult::fail(
-                                                error_codes::C003,
-                                                &display_path,
-                                                format!("WASM validation failed: {}", err.message),
-                                            )
-                                            .with_app(app_name),
-                                        );
-                                    }
-                                }
-                            }
-                            Err(_) => {}
-                        }
-                    } else {
-                        results.push(
-                            ValidationResult::skip(
-                                "wasmtime",
-                                "Wasmtime engine dylib not available — WASM check skipped",
-                            )
-                            .with_app(app_name),
-                        );
-                    }
-                }
-
-                // Run import resolution for JS/TS even without engine (file existence)
-                if is_js_ts && engines.v8.is_none() {
-                    if let Ok(source) = std::fs::read_to_string(&module_path) {
-                        let import_results =
-                            validate_imports(&source, &module_path, app_dir, &display_path, app_name);
-                        results.extend(import_results);
                     }
                 }
             }
@@ -466,6 +315,199 @@ pub fn validate_syntax(
     let _ = bundle_dir; // used for future engine discovery
 
     results
+}
+
+/// Compile-check a single codecomponent handler and verify its entrypoint
+/// is exported. Extracted helper so both the top-level `view.handler` form
+/// and the OTLP per-signal `view.handlers.*` map share the same logic
+/// (CB-OTLP Track O1.3).
+///
+/// Emits:
+/// - `C001` (JS/TS SyntaxError),
+/// - `C002` (entrypoint not in exports — JS/TS or WASM),
+/// - `C003` (WASM validation failed),
+/// - `C004/C005` (import resolution — via `validate_imports`),
+/// - or a skip when the relevant engine dylib isn't loaded.
+fn check_codecomponent_handler(
+    language: &str,
+    module: &str,
+    entrypoint: &str,
+    app_dir: &Path,
+    app_name: &str,
+    engines: &EngineHandles,
+    results: &mut Vec<ValidationResult>,
+) {
+    let module_path = app_dir.join(module);
+    let display_path = format!("{}/{}", app_name, module);
+
+    if !module_path.exists() {
+        return; // Layer 2 handles missing files
+    }
+
+    let is_wasm = matches!(language, "wasm");
+    let is_js_ts = matches!(
+        language,
+        "typescript"
+            | "ts"
+            | "typescript_strict"
+            | "ts_strict"
+            | "javascript"
+            | "js"
+            | "javascript_v8"
+            | "js_v8"
+    );
+
+    if is_js_ts {
+        if let Some(ref v8) = engines.v8 {
+            match std::fs::read(&module_path) {
+                Ok(source) => {
+                    let filename = module_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    match v8.compile_check(&source, &filename) {
+                        Ok(check_result) => {
+                            if check_result.exports.contains(&entrypoint.to_string()) {
+                                results.push(
+                                    ValidationResult::pass(
+                                        &display_path,
+                                        format!("compiles, export '{}' found", entrypoint),
+                                    )
+                                    .with_app(app_name)
+                                    .with_exports(check_result.exports)
+                                    .with_entrypoint_verified(true),
+                                );
+                            } else {
+                                results.push(
+                                    ValidationResult::fail(
+                                        error_codes::C002,
+                                        &display_path,
+                                        format!(
+                                            "entrypoint '{}' not found in exports — available: [{}]",
+                                            entrypoint,
+                                            check_result.exports.join(", ")
+                                        ),
+                                    )
+                                    .with_app(app_name)
+                                    .with_exports(check_result.exports)
+                                    .with_entrypoint_verified(false),
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            let mut result = ValidationResult::fail(
+                                error_codes::C001,
+                                &display_path,
+                                format!("SyntaxError: {}", err.message),
+                            )
+                            .with_app(app_name)
+                            .with_error_type("SyntaxError");
+                            if let Some(line) = err.line {
+                                if let Some(col) = err.column {
+                                    result = result.with_location(line, col);
+                                }
+                            }
+                            results.push(result);
+                        }
+                    }
+
+                    if let Ok(source_str) = std::str::from_utf8(&source) {
+                        let import_results = validate_imports(
+                            source_str,
+                            &module_path,
+                            app_dir,
+                            &display_path,
+                            app_name,
+                        );
+                        results.extend(import_results);
+                    }
+                }
+                Err(_) => {
+                    // Can't read file — Layer 2 would have caught this
+                }
+            }
+        } else {
+            results.push(
+                ValidationResult::skip(
+                    "v8",
+                    "V8 engine dylib not available — TS/JS syntax check skipped",
+                )
+                .with_app(app_name),
+            );
+        }
+    } else if is_wasm {
+        if let Some(ref wasm) = engines.wasmtime {
+            match std::fs::read(&module_path) {
+                Ok(bytes) => {
+                    let filename = module_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    match wasm.compile_check(&bytes, &filename) {
+                        Ok(check_result) => {
+                            if check_result.exports.contains(&entrypoint.to_string()) {
+                                results.push(
+                                    ValidationResult::pass(
+                                        &display_path,
+                                        format!(
+                                            "valid WASM, export '{}' found",
+                                            entrypoint
+                                        ),
+                                    )
+                                    .with_app(app_name)
+                                    .with_exports(check_result.exports)
+                                    .with_entrypoint_verified(true),
+                                );
+                            } else {
+                                results.push(
+                                    ValidationResult::fail(
+                                        error_codes::C002,
+                                        &display_path,
+                                        format!(
+                                            "entrypoint '{}' not found in WASM exports — available: [{}]",
+                                            entrypoint,
+                                            check_result.exports.join(", ")
+                                        ),
+                                    )
+                                    .with_app(app_name)
+                                    .with_exports(check_result.exports)
+                                    .with_entrypoint_verified(false),
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            results.push(
+                                ValidationResult::fail(
+                                    error_codes::C003,
+                                    &display_path,
+                                    format!("WASM validation failed: {}", err.message),
+                                )
+                                .with_app(app_name),
+                            );
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        } else {
+            results.push(
+                ValidationResult::skip(
+                    "wasmtime",
+                    "Wasmtime engine dylib not available — WASM check skipped",
+                )
+                .with_app(app_name),
+            );
+        }
+    }
+
+    // Run import resolution for JS/TS even without engine (file existence)
+    if is_js_ts && engines.v8.is_none() {
+        if let Ok(source) = std::fs::read_to_string(&module_path) {
+            let import_results =
+                validate_imports(&source, &module_path, app_dir, &display_path, app_name);
+            results.extend(import_results);
+        }
+    }
 }
 
 // ── Schema JSON Validation ──────────────────────────────────────

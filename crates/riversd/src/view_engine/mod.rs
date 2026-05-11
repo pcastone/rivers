@@ -46,6 +46,8 @@ mod tests {
             path: Some("/api/computed".into()),
             method: Some("GET".into()),
             handler: HandlerConfig::None {},
+            handlers: None,
+            max_body_mb: None,
             parameter_mapping: None,
             dataviews: vec![],
             primary: None,

@@ -91,6 +91,17 @@ pub async fn load_and_wire_bundle(
         let app_dir = app.app_dir.clone();
         for view_cfg in app.config.api.views.values_mut() {
             resolve_handler_module(&app_dir, &mut view_cfg.handler);
+            // CB-OTLP Track O5.6 — the per-signal handlers.* map
+            // (`handlers.{metrics,logs,traces}` on view_type = "OTLP")
+            // gets the same app_dir-prefix treatment as the single
+            // `handler:` field; otherwise V8's resolve_module_source
+            // can't find the file off-CWD and we hit
+            // `cannot read module 'libraries/...'`.
+            if let Some(ref mut handlers) = view_cfg.handlers {
+                for h in handlers.values_mut() {
+                    resolve_handler_module(&app_dir, h);
+                }
+            }
             if let Some(ref mut os) = view_cfg.on_stream {
                 let resolved = app_dir.join(&os.module);
                 os.module = resolved.to_string_lossy().to_string();

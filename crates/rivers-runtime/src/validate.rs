@@ -55,8 +55,14 @@ pub fn validate_server_config(config: &ServerConfig) -> Result<(), Vec<RiversErr
 }
 
 /// Known view types accepted by the Rivers framework.
+///
+/// Kept in sync with `validate_structural::VALID_VIEW_TYPES` (Layer 1) —
+/// both gates must agree, otherwise structural may accept a value that
+/// bundle-load rejects (or vice versa). CB-OTLP Track O5.6 caught exactly
+/// that: `"OTLP"` was added to the structural list but not here, so the
+/// smoke probe couldn't even boot riversd against the OTLP fixture.
 const VALID_VIEW_TYPES: &[&str] = &[
-    "Rest", "Websocket", "ServerSentEvents", "MessageConsumer", "Mcp", "Cron",
+    "Rest", "Websocket", "ServerSentEvents", "MessageConsumer", "Mcp", "Cron", "OTLP",
 ];
 
 /// Validate a loaded app config for internal consistency.

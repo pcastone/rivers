@@ -205,6 +205,8 @@ fn mutation_mappings_from_codecomponent_post_views() {
             entrypoint: "create".into(),
             resources: vec![],
         },
+        handlers: None,
+        max_body_mb: None,
         ..default_view_config()
     });
 
@@ -219,6 +221,8 @@ fn mutation_mappings_from_codecomponent_post_views() {
             entrypoint: "list".into(),
             resources: vec![],
         },
+        handlers: None,
+        max_body_mb: None,
         ..default_view_config()
     });
 
@@ -228,6 +232,8 @@ fn mutation_mappings_from_codecomponent_post_views() {
         path: Some("/api/orders".into()),
         method: Some("POST".into()),
         handler: HandlerConfig::Dataview { dataview: "orders".into() },
+        handlers: None,
+        max_body_mb: None,
         ..default_view_config()
     });
 

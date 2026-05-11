@@ -43,6 +43,8 @@ fn rest_view_with_handlers(
         handler: HandlerConfig::Dataview {
             dataview: dataview.to_string(),
         },
+        handlers: None,
+        max_body_mb: None,
         parameter_mapping: None,
         dataviews: vec![],
         primary: None,
@@ -88,6 +90,8 @@ fn none_handler_view(event_handlers: Option<ViewEventHandlers>) -> ApiViewConfig
         path: Some("/api/noop".to_string()),
         method: Some("GET".to_string()),
         handler: HandlerConfig::None {},
+        handlers: None,
+        max_body_mb: None,
         parameter_mapping: None,
         dataviews: vec![],
         primary: None,

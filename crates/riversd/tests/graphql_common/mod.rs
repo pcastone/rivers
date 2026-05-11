@@ -20,6 +20,8 @@ pub fn default_view_config() -> ApiViewConfig {
         path: None,
         method: None,
         handler: HandlerConfig::None {},
+        handlers: None,
+        max_body_mb: None,
         parameter_mapping: None,
         dataviews: vec![],
         primary: None,

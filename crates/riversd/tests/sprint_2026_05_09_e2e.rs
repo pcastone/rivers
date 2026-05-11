@@ -523,6 +523,8 @@ fn make_skeleton_view_config() -> rivers_runtime::ApiViewConfig {
         handler: rivers_runtime::view::HandlerConfig::Dataview {
             dataview: "items".to_string(),
         },
+        handlers: None,
+        max_body_mb: None,
         parameter_mapping: None,
         dataviews: vec![],
         primary: None,

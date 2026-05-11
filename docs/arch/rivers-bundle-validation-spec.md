@@ -775,7 +775,7 @@ OTLP-view-specific structural failures are emitted as `S005` (the existing inval
 | `[X-OTLP-6]` | A field from another view type's domain is declared on an OTLP view |
 | `[W-OTLP-1]` | `max_body_mb > 16` — emitted as `W012`, not `S005` |
 
-`[X-OTLP-7]` and `[X-OTLP-8]` (Layer 3 module/entrypoint resolution for the `handlers.*` table) land when the dispatcher ships — see `rivers-otlp-view-spec.md` §14.3.
+`[X-OTLP-7]` (per-signal handler module-existence) lands at Layer 2 as the existing `E001` code with `[X-OTLP-7]` in the `referenced_by` path label. `[X-OTLP-8]` (entrypoint-in-exports) lands at Layer 4 as the existing `C002` code, exercised when the engine dylib is loaded — same path as the single-`handler` form. Resource cross-ref for per-signal handlers reuses `X003` (the `referenced_by` path names `handlers.<signal>.resources`). CB-OTLP Track O1.3.
 
 ### 11.6 Gate 2 live check errors
 

@@ -401,8 +401,9 @@ Validation runs at the `validate_structural` and `validate_crossref` layers in t
 | X-OTLP-4 | structural | `streaming = true` declared — OTLP/HTTP is unary | error |
 | X-OTLP-5 | structural | Both `handler` and `handlers.*` declared — choose one | error |
 | X-OTLP-6 | structural | Any forbidden field declared (see §3.4) | error |
-| X-OTLP-7 | crossref | A declared handler's `module` does not resolve to a file in the bundle | error |
-| X-OTLP-8 | crossref | A declared handler's `entrypoint` is not exported from `module` | error |
+| X-OTLP-7 | existence (L2) | A declared `handlers.{signal}` handler's `module` does not resolve to a file in the bundle. Emitted as `E001` with `[X-OTLP-7]` in the `referenced_by` path. | error |
+| X-OTLP-8 | syntax (L4) | A declared `handlers.{signal}` handler's `entrypoint` is not exported from `module`. Emitted as the existing `C002` code (same as single-`handler` form), available when the engine dylib is loaded. | error |
+| X003 | crossref (L3) | A declared `handlers.{signal}` handler's `resources` entry is not declared in `resources.toml`. Reuses the existing `X003` code with `handlers.<signal>` in the message. | error |
 | W-OTLP-1 | structural | `max_body_mb > 16` — likely a misconfiguration; OTLP recommends 4 | warning |
 | W-OTLP-2 | structural | `auth = "bearer"` declared while P1.12 has not yet landed | warning (suppressed once P1.12 ships) |
 

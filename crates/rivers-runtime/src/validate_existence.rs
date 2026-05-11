@@ -174,6 +174,13 @@ pub fn validate_existence_preload(
 // ── Internal helpers ──────────────────────────────────────────────
 
 /// Check CodeComponent handler `module` files referenced by views.
+///
+/// Walks both the single `handler:` form (every view type) and the OTLP
+/// per-signal `handlers.{metrics,logs,traces}` form. Module-existence
+/// failures emit `E001` with a path label that points at the exact
+/// declaration; for OTLP views the message includes `[X-OTLP-7]` so
+/// operators can grep for the spec rule (see
+/// `rivers-otlp-view-spec.md` §9).
 fn validate_handler_modules(
     app: &LoadedApp,
     app_dir: &Path,
@@ -189,6 +196,25 @@ fn validate_handler_modules(
                 &format!("api.views.{}.handler.module", view_name),
                 results,
             );
+        }
+        // CB-OTLP Track O1.3: walk the per-signal `handlers.*` map.
+        // The structural validator guarantees only well-known signal keys
+        // are present and that the type is Codecomponent.
+        if let Some(ref handlers) = view.handlers {
+            for (signal, h) in handlers {
+                if let HandlerConfig::Codecomponent { ref module, .. } = h {
+                    check_file_exists(
+                        app_dir,
+                        module,
+                        app_name,
+                        &format!(
+                            "[X-OTLP-7] api.views.{}.handlers.{}.module",
+                            view_name, signal
+                        ),
+                        results,
+                    );
+                }
+            }
         }
     }
 }
@@ -600,6 +626,8 @@ nopassword = true
                     entrypoint: "handler".into(),
                     resources: vec![],
                 },
+                handlers: None,
+                max_body_mb: None,
                 parameter_mapping: None,
                 dataviews: vec![],
                 primary: None,
@@ -927,6 +955,170 @@ nopassword = true
         assert!(fail.referenced_by.as_ref().unwrap().contains("handler.module"));
     }
 
+    // ── CB-OTLP Track O1.3 — per-signal handlers.* module existence ───
+
+    /// Inserts an OTLP view (`handler` = None, `handlers.{metrics,logs,traces}`
+    /// each a codecomponent with the given module path). Used to exercise
+    /// the per-signal module-existence check.
+    fn add_otlp_view(bundle: &mut LoadedBundle, view_name: &str, module_path: &str) {
+        let mut handlers: HashMap<String, HandlerConfig> = HashMap::new();
+        for signal in &["metrics", "logs", "traces"] {
+            handlers.insert(
+                (*signal).into(),
+                HandlerConfig::Codecomponent {
+                    language: "javascript".into(),
+                    module: module_path.into(),
+                    entrypoint: format!("ingest{}", capitalise(signal)),
+                    resources: vec![],
+                },
+            );
+        }
+        bundle.apps[0].config.api.views.insert(
+            view_name.into(),
+            ApiViewConfig {
+                view_type: "OTLP".into(),
+                path: Some("/otel".into()),
+                method: None,
+                handler: HandlerConfig::None {},
+                handlers: Some(handlers),
+                max_body_mb: None,
+                parameter_mapping: None,
+                dataviews: vec![],
+                primary: None,
+                streaming: None,
+                streaming_format: None,
+                stream_timeout_ms: None,
+                guard: false,
+                auth: None,
+                guard_config: None,
+                allow_outbound_http: false,
+                rate_limit_per_minute: None,
+                rate_limit_burst_size: None,
+                websocket_mode: None,
+                max_connections: None,
+                sse_tick_interval_ms: None,
+                sse_trigger_events: vec![],
+                sse_event_buffer_size: None,
+                session_revalidation_interval_s: None,
+                polling: None,
+                event_handlers: None,
+                on_stream: None,
+                ws_hooks: None,
+                on_event: None,
+                tools: HashMap::new(),
+                resources: HashMap::new(),
+                prompts: HashMap::new(),
+                instructions: None,
+                session: None,
+                federation: vec![],
+                response_headers: None,
+                schedule: None,
+                interval_seconds: None,
+                overlap_policy: None,
+                max_concurrent: None,
+                guard_view: None,
+            },
+        );
+    }
+
+    fn capitalise(s: &str) -> String {
+        let mut chars = s.chars();
+        match chars.next() {
+            None => String::new(),
+            Some(c) => c.to_uppercase().chain(chars).collect(),
+        }
+    }
+
+    #[test]
+    fn otlp_handlers_module_missing_marks_x_otlp_7() {
+        let tmp = TempDir::new().unwrap();
+        let (mut bundle, bundle_dir) = create_test_bundle(tmp.path());
+
+        // No `libraries/handlers/otel.js` file on disk — each per-signal
+        // handler reference triggers its own E001 with an [X-OTLP-7] marker
+        // in the path label.
+        add_otlp_view(&mut bundle, "otel_ingest", "libraries/handlers/otel.js");
+
+        let results = validate_existence(&bundle_dir, &bundle);
+
+        let otlp_fails: Vec<_> = results
+            .iter()
+            .filter(|r| {
+                r.status == ValidationStatus::Fail
+                    && r.error_code.as_deref() == Some(error_codes::E001)
+                    && r.referenced_by
+                        .as_ref()
+                        .map(|s| s.contains("[X-OTLP-7]"))
+                        .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(
+            otlp_fails.len(),
+            3,
+            "expected one E001 per signal (metrics, logs, traces), got: {:?}",
+            otlp_fails
+                .iter()
+                .map(|r| r.referenced_by.as_deref().unwrap_or(""))
+                .collect::<Vec<_>>()
+        );
+        // Each path label names a different signal.
+        let mut signals_seen: Vec<&str> = otlp_fails
+            .iter()
+            .filter_map(|r| r.referenced_by.as_deref())
+            .filter_map(|s| {
+                if s.contains("handlers.metrics.module") {
+                    Some("metrics")
+                } else if s.contains("handlers.logs.module") {
+                    Some("logs")
+                } else if s.contains("handlers.traces.module") {
+                    Some("traces")
+                } else {
+                    None
+                }
+            })
+            .collect();
+        signals_seen.sort();
+        assert_eq!(signals_seen, vec!["logs", "metrics", "traces"]);
+    }
+
+    #[test]
+    fn otlp_handlers_module_present_passes() {
+        let tmp = TempDir::new().unwrap();
+        let (mut bundle, bundle_dir) = create_test_bundle(tmp.path());
+
+        // Create the file all three per-signal handlers reference.
+        let handler_dir = bundle_dir
+            .join("test-app")
+            .join("libraries")
+            .join("handlers");
+        fs::create_dir_all(&handler_dir).unwrap();
+        fs::write(
+            handler_dir.join("otel.js"),
+            "export function ingestMetrics(){} export function ingestLogs(){} export function ingestTraces(){}",
+        )
+        .unwrap();
+
+        add_otlp_view(&mut bundle, "otel_ingest", "libraries/handlers/otel.js");
+
+        let results = validate_existence(&bundle_dir, &bundle);
+
+        let otlp_fails: Vec<_> = results
+            .iter()
+            .filter(|r| {
+                r.status == ValidationStatus::Fail
+                    && r.referenced_by
+                        .as_ref()
+                        .map(|s| s.contains("[X-OTLP-7]"))
+                        .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            otlp_fails.is_empty(),
+            "no [X-OTLP-7] failures expected when the module exists, got: {:?}",
+            otlp_fails.iter().map(|r| &r.message).collect::<Vec<_>>()
+        );
+    }
+
     // ── Init handler tests ───────────────────────────────────────────
 
     #[test]
@@ -1082,6 +1274,8 @@ nopassword = true
             path: Some("/test".into()),
             method: Some("POST".into()),
             handler: HandlerConfig::None {},
+            handlers: None,
+            max_body_mb: None,
             parameter_mapping: None,
             dataviews: vec![],
             primary: None,
@@ -1168,6 +1362,8 @@ nopassword = true
             path: Some("/ws".into()),
             method: Some("GET".into()),
             handler: HandlerConfig::None {},
+            handlers: None,
+            max_body_mb: None,
             parameter_mapping: None,
             dataviews: vec![],
             primary: None,
@@ -1244,6 +1440,8 @@ nopassword = true
             path: Some("/ws".into()),
             method: Some("GET".into()),
             handler: HandlerConfig::None {},
+            handlers: None,
+            max_body_mb: None,
             parameter_mapping: None,
             dataviews: vec![],
             primary: None,

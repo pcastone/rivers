@@ -203,6 +203,9 @@ async fn view_dispatch_handler(
         "Mcp" => {
             return execute_mcp_view(ctx, request, matched).await;
         }
+        "OTLP" => {
+            return crate::server::otlp_view::execute_otlp_view(ctx, request, matched).await;
+        }
         _ => {
             // Rest (default) or streaming Rest — falls through to body extraction below
         }

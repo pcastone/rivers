@@ -304,6 +304,44 @@ mod tests {
     }
 
     #[test]
+    fn execute_exposes_ctx_otel() {
+        // CB-OTLP Track O2: when the dispatcher places an `otel` key into
+        // `args` (alongside `_source`), the V8 engine must expose it as
+        // `ctx.otel` to the handler. Mirrors the existing ctx.request /
+        // ctx.session / ctx.ws injection at execution.rs:246-274.
+        let mut ctx = make_ctx(
+            "function handler(ctx) { return { kind: ctx.otel.kind, n: ctx.otel.payload.resourceMetrics.length, enc: ctx.otel.encoding }; }",
+            "handler",
+        );
+        ctx.args = serde_json::json!({
+            "_source": ctx.inline_source,
+            "otel": {
+                "kind": "metrics",
+                "encoding": "json",
+                "payload": { "resourceMetrics": [{}, {}, {}] },
+            },
+        });
+        let result = execute_js(ctx).unwrap();
+        assert_eq!(result.value["kind"], "metrics");
+        assert_eq!(result.value["n"], 3);
+        assert_eq!(result.value["enc"], "json");
+    }
+
+    #[test]
+    fn execute_otel_handler_can_return_partial_success() {
+        // Handlers signal partial success by returning { rejected, errorMessage }
+        // as the handler return value. The dispatcher (otlp_view.rs) reads
+        // these from SerializedTaskResult.value to shape the OTLP response.
+        let ctx = make_ctx(
+            "function handler(ctx) { return { rejected: 2, errorMessage: 'two bad points' }; }",
+            "handler",
+        );
+        let result = execute_js(ctx).unwrap();
+        assert_eq!(result.value["rejected"], 2);
+        assert_eq!(result.value["errorMessage"], "two bad points");
+    }
+
+    #[test]
     fn execute_crypto_random_hex() {
         let ctx = make_ctx(
             "function handler(ctx) { return { hex: Rivers.crypto.randomHex(16) }; }",
