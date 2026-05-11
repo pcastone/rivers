@@ -46,6 +46,10 @@ fn rest_view(method: &str, path: &str, dataview: &str) -> ApiViewConfig {
         session: None,
         federation: vec![],
         response_headers: None,
+        schedule: None,
+        interval_seconds: None,
+        overlap_policy: None,
+        max_concurrent: None,
             guard_view: None,
     }
 }
@@ -91,6 +95,10 @@ fn codecomponent_view(method: &str, path: &str) -> ApiViewConfig {
         session: None,
         federation: vec![],
         response_headers: None,
+        schedule: None,
+        interval_seconds: None,
+        overlap_policy: None,
+        max_concurrent: None,
             guard_view: None,
     }
 }

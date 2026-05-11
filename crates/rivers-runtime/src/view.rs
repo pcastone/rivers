@@ -158,6 +158,30 @@ pub struct ApiViewConfig {
     /// at structural validation time. CB-P1.11.
     #[serde(default)]
     pub response_headers: Option<HashMap<String, String>>,
+
+    // ── Cron view fields (CB-P1.14, Sprint 2026-05-09 Track 3) ──────
+
+    /// 6-field cron expression (`sec min hour dom month dow`). Mutually
+    /// exclusive with `interval_seconds`. Only meaningful when
+    /// `view_type = "Cron"`.
+    #[serde(default)]
+    pub schedule: Option<String>,
+
+    /// Plain integer interval in seconds. Mutually exclusive with `schedule`.
+    /// Only meaningful when `view_type = "Cron"`.
+    #[serde(default)]
+    pub interval_seconds: Option<u64>,
+
+    /// Overlap policy when the previous tick is still running.
+    /// `"skip"` (default) | `"queue"` | `"allow"`. Only meaningful when
+    /// `view_type = "Cron"`.
+    #[serde(default)]
+    pub overlap_policy: Option<String>,
+
+    /// Max concurrent in-flight ticks for `overlap_policy = "queue"`.
+    /// Default 16. Ignored for `skip` / `allow`.
+    #[serde(default)]
+    pub max_concurrent: Option<u32>,
 }
 
 /// Guard lifecycle hooks — all optional, all side-effects only.

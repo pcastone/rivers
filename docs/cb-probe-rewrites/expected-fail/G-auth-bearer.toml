@@ -1,0 +1,44 @@
+# Case G — Bearer-token auth via named guard (CB-P1.12 closed-as-superseded).
+#
+# `auth = "bearer"` was filed as P1.12 but CLOSED-AS-SUPERSEDED by P1.10
+# (PR #104, doc-only). The sanctioned shape is the §11.5 recipe:
+# a small codecomponent attached as `guard_view` validates Authorization:
+# Bearer <token>. Strictly more flexible than a built-in mode (lookup
+# table, hash algo, identity claims, audit fields all live in operator
+# code, none frozen into framework config).
+#
+# Spec ref: rivers-auth-session-spec.md §11.5.
+#
+# Splice this fragment into app/app.toml; expected on v0.60.12+:
+# validate PASSES, run-probe.sh exercises absent / wrong / correct token.
+
+# ── The bearer-validating guard ─────────────────────────────────────
+
+[api.views.case_g_bearer_guard]
+path      = "case-g/_guard"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.case_g_bearer_guard.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/cases.ts"
+entrypoint = "caseGBearerGuard"
+resources  = []
+
+# ── The protected route ─────────────────────────────────────────────
+
+[api.views.case_g_protected]
+path       = "case-g/protected"
+method     = "POST"
+view_type  = "Rest"
+auth       = "none"
+guard_view = "case_g_bearer_guard"
+
+[api.views.case_g_protected.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/cases.ts"
+entrypoint = "caseB"
+resources  = []

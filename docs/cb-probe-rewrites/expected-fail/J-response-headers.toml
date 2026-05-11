@@ -1,0 +1,40 @@
+# Case J — Per-view static response headers (CB-P1.11).
+#
+# SHIPPED in Rivers v0.60.x (PR #102).
+#
+# Field path is `[api.views.X.response_headers]` — FLAT, no `response.`
+# parent table. The previous probe form `[api.views.X.response.headers]`
+# silently passes today (the `response` key is just unknown and warned)
+# and will hard-fail with S005 once Track 2 validator hardening lands.
+#
+# Spec ref: rivers-view-layer-spec.md §5.4.
+#
+# Validation gates already enforced:
+# - Header names match RFC 7230 token grammar (alphanumerics + `-`).
+# - Values must be ASCII-printable (\x20–\x7E).
+# - Framework-managed names rejected with S005:
+#   Content-Type, Content-Length, Transfer-Encoding, Mcp-Session-Id.
+#
+# Runtime contract: handler-set headers WIN if both sides set the same
+# name (case-insensitive).
+#
+# Splice this fragment into app/app.toml; expected on v0.60.12+:
+# validate PASSES, run-probe.sh asserts the headers arrive on responses.
+
+[api.views.case_j_response_headers]
+path      = "case-j/response-headers"
+method    = "GET"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.case_j_response_headers.response_headers]
+"Deprecation" = "true"
+"Sunset"      = "Wed, 01 Apr 2026 00:00:00 GMT"
+"Link"        = "</api/v2/replacement>; rel=\"successor-version\""
+
+[api.views.case_j_response_headers.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/cases.ts"
+entrypoint = "caseB"
+resources  = []

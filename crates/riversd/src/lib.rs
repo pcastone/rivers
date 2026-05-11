@@ -16,6 +16,8 @@ pub mod backpressure;
 /// App-level circuit breaker registry for manual DataView traffic control.
 pub mod circuit_breaker;
 pub mod broker_bridge;
+/// Cron view scheduler (CB-P1.14, Sprint 2026-05-09 Track 3).
+pub mod cron;
 /// Nonblocking supervisor for broker consumers (P0-4).
 pub mod broker_supervisor;
 pub mod bundle_diff;

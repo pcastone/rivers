@@ -34,7 +34,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-version = "0.60.12+0337090526"
+version = "0.61.0+0008110526"
 license = "MIT"
 
 [workspace.dependencies]
@@ -49,6 +49,8 @@ async-trait = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 toml = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
+# Cron expression parser for `view_type = "Cron"` (CB-P1.14, Sprint 2026-05-09 Track 3).
+cron = "0.16"
 age = { version = "0.11", features = ["armor"] }
 zeroize = { version = "1", features = ["derive"] }
 secrecy = "0.10"

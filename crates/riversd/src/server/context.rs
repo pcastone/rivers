@@ -182,6 +182,11 @@ pub struct AppContext {
     /// is keyed by a UUID; the V8 worker blocks on a `oneshot::Receiver` while
     /// the MCP client sends back an `elicitation/response` message.
     pub elicitation_registry: Arc<ElicitationRegistry>,
+    /// Cron view scheduler — `Some` after bundle load if any Cron views are
+    /// declared and StorageEngine is configured. `None` if no Cron views or
+    /// startup conditions weren't met (logged at warn). CB-P1.14 / Sprint
+    /// 2026-05-09 Track 3.
+    pub cron_scheduler: Arc<tokio::sync::Mutex<Option<crate::cron::CronScheduler>>>,
 }
 
 impl AppContext {
@@ -228,6 +233,7 @@ impl AppContext {
             change_poller: Arc::new(ChangePoller::new()),
             audit_bus: None,
             elicitation_registry: Arc::new(ElicitationRegistry::new()),
+            cron_scheduler: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 }

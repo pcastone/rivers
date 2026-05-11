@@ -6,6 +6,46 @@ readers.
 
 ---
 
+### Sprint 2026-05-09 — CB unblock plan (probe-derived)
+
+**CB-PROBE-D1 — Probe shape mismatch is a CB-side migration, not a Rivers code fix**
+- Files: `/Users/pcastone/Projects/cb/docs/rivers-upstream/cb-rivers-feature-validation-bundle/{expected-fail/*.toml,app/libraries/handlers/cases.ts}`
+- Finding: CB's regression bundle for v0.60.12 reports EXPECTED FAIL on P1.9/P1.10/P1.11 because the probes were written against a presumed config shape that differs from what we actually shipped (`guard_view` vs `guard`, `response_headers` vs `[response.headers]`, `args.path_params` vs `ctx.request.path_params`). Validator output confirmed the shipped fixes work; the probe just doesn't exercise them.
+- Decision: Track 1 of this sprint is a doc + CB-side bundle PR migrating the probes to canonical shapes. Rivers ships nothing here — the contract is right.
+- Resolution: `docs/cb-probe-v0.60.12-migration.md` (this repo) + PR against CB's bundle.
+
+**CB-PROBE-D2 — `auth` and `view_type` will be enum-validated**
+- Files: `crates/rivers-runtime/src/{view.rs,validate_structural.rs}`
+- Finding: Probe revealed silent passes — `auth = "bearer"` and `view_type = "Cron"` produce no validator error. Both fields are typed `Option<String>` / `String` with no enum check, so any string slides through structural and is silently treated as a no-op at runtime. CB's probe relied on validator rejection to detect missing-feature gaps; it gets a green where it should get an `S005`.
+- Decision: Add structural-layer enum validation. Field types stay `String` (forward-compat — runtime can grow new variants without struct changes) but the validator gates value to a closed allowlist with did-you-mean.
+- Rationale: Reusing existing `S005` (Invalid value for field) keeps the error catalog stable. Bumping to enum types in the struct would force a coordinated change across every literal site for marginal benefit.
+- Resolution: `validate_view_type()` and `validate_auth_mode()` in `validate_structural.rs`; canonical sets pinned in this sprint (`view_type ∈ {Rest,Mcp,WebSocket,Sse,Streaming}`, `auth ∈ {none,session}`).
+
+**CB-PROBE-D3 — P1.12 stays closed-as-superseded (`auth = "bearer"` will not ship)**
+- Files: `docs/arch/rivers-auth-session-spec.md` §11.5
+- Finding: After Track 2 ships, `auth = "bearer"` will produce a hard `S005`. CB needs a signed-off path forward — the named-guard recipe (already documented in §11.5) IS the answer.
+- Decision: Track 1 rewrites the CB probe's Case G fragment from "EXPECTED FAIL on `auth = "bearer"`" to "PASS via named-guard bearer recipe", with a clear comment that the validator hardening is intentional.
+- Resolution: G fragment becomes a positive sentinel for the recipe; close-out cited in changelog.
+
+**CB-PROBE-D4 — P1.14 design follows polling-view dedupe pattern, not external scheduler**
+- Files: `crates/riversd/src/cron/mod.rs` (new), `crates/riversd/src/polling/runner.rs` (reference)
+- Finding: CB's case explicitly suggests "synthetic always-subscribed client on top of polling infrastructure" as the implementation direction. Reviewing `polling/runner.rs` confirms the loop-key-as-StorageEngine-write-lock dedupe pattern is the right transplant — same multi-instance guarantees, same execution environment as REST/MCP handlers.
+- Decision: New `CronScheduler` per app, one tokio task per Cron view. StorageEngine `set_if_absent` with key `cron:{app}:{view}:{tick_epoch}` for first-writer-wins multi-node dedupe. Overlap policy `skip` is default, `queue` is a bounded `mpsc`, `allow` just spawns. No retry in v1 — handlers retry internally if they want it.
+- Rationale: Avoids re-implementing distributed-scheduler primitives we already have. Honors the case's pass/fail criteria 1–4 directly.
+- Resolution: Implemented 2026-05-10. `cron 0.16` selected over `croner` (T3.2) — smaller dep tree (chrono + once_cell + phf + winnow + serde, all already-or-trivially in the workspace). 5-field POSIX cron was initially planned to be supported via "second 0 prepended" shim but `cron 0.16` rejects 5-field at parse — spec adjusted to require the leading seconds field. Scheduler + 12 unit tests live in `crates/riversd/src/cron/mod.rs`. Wiring at `crates/riversd/src/bundle_loader/load.rs::load_and_wire_bundle` after `ctx.loaded_bundle = Some(...)`. Storage-engine-not-configured logs a startup error and skips (does NOT crash riversd; non-Cron apps continue to serve).
+
+**CB-PROBE-D5 — Cron does not retry, does not catch up, does not run timezones**
+- Files: `docs/arch/rivers-cron-view-spec.md` §12
+- Finding: Adding retry/dead-letter, catch-up replay, and timezone scheduling each introduces meaningful design surface (retry-state persistence, replay queue semantics, timezone library choice and DST behavior). None are required to satisfy CB's pass/fail criteria.
+- Decision: All three are explicit non-goals in v1. Documented in spec §12. Operators wanting any of them either (a) implement in their handler (retry), (b) accept that ticks during downtime are gone (catch-up), or (c) compute UTC offsets themselves (timezones).
+- Rationale: Honors "Don't add features beyond what the task requires" (CLAUDE.md). Each is its own conversation when a real use case surfaces.
+
+---
+
+### Original filesystem-driver entries follow ↓
+
+---
+
 ### Canary Sprint — 2026-05-05
 
 **KAFKA-D1 — Separate datasource for `canary.events` vs `kafka_consume` topic**

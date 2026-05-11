@@ -106,8 +106,29 @@ const VIEW_FIELDS: &[&str] = &[
     "on_stream", "ws_hooks", "on_event",
     "tools", "resources", "prompts", "instructions", "session", "federation",
     "response_headers", "guard_view",
+    // Cron view fields (CB-P1.14 Track 3)
+    "schedule", "interval_seconds", "overlap_policy", "max_concurrent",
 ];
 const VIEW_REQUIRED: &[&str] = &["path", "method", "view_type", "handler"];
+
+/// Canonical `view_type` values accepted by the framework. Mirrors
+/// `crates/rivers-runtime/src/validate.rs::VALID_VIEW_TYPES` (the runtime
+/// load path) so the bundle validator catches unknown values at structural
+/// layer instead of letting them slip through to runtime as silent no-ops.
+/// Sprint 2026-05-09 Track 2 + Track 3 (added `Cron`).
+const VALID_VIEW_TYPES: &[&str] = &[
+    "Rest", "Websocket", "ServerSentEvents", "MessageConsumer", "Mcp", "Cron",
+];
+
+/// Canonical `overlap_policy` values for Cron views (CB-P1.14 Track 3).
+const VALID_OVERLAP_POLICIES: &[&str] = &["skip", "queue", "allow"];
+
+/// Canonical `auth` values. Anything else (e.g. `"bearer"` from CB-P1.12)
+/// is rejected at structural layer with `S005`. The bearer pattern is
+/// expressed via `guard_view` referencing a codecomponent that returns
+/// `{ allow: bool }` — see `rivers-auth-session-spec.md` §11.5.
+/// Sprint 2026-05-09 Track 2.
+const VALID_AUTH_MODES: &[&str] = &["none", "session"];
 
 /// Handler config.
 const HANDLER_FIELDS: &[&str] = &[
@@ -756,17 +777,55 @@ fn validate_view(
 
     check_unknown_keys(table, VIEW_FIELDS, file, table_path, results);
 
+    // Enum-validate `view_type` and `auth` (Sprint 2026-05-09 Track 2).
+    // Catches CB-probe-style silent passes — e.g. `view_type = "Cron"`
+    // (P1.14 pending) and `auth = "bearer"` (P1.12 closed) used to slide
+    // through structural and become no-ops at runtime; they now surface
+    // as S005 with a did-you-mean hint.
+    if let Some(vt) = table.get("view_type") {
+        validate_view_type(vt, file, table_path, app_name, results);
+    }
+    if let Some(au) = table.get("auth") {
+        validate_auth_mode(au, file, table_path, app_name, results);
+    }
+
     // MessageConsumer views are event-driven — no HTTP route, so path/method
     // are forbidden by the runtime validator (see crates/riversd/src/
-    // view_engine/validation.rs). Restrict the required-fields check to the
-    // common view_type + handler pair for those views.
+    // view_engine/validation.rs). Cron views are time-driven, same shape:
+    // no HTTP route. Restrict the required-fields check to the common
+    // view_type + handler pair for those views.
     let view_type = table.get("view_type").and_then(|v| v.as_str()).unwrap_or("");
-    let required: &[&str] = if view_type == "MessageConsumer" {
+    let required: &[&str] = if view_type == "MessageConsumer" || view_type == "Cron" {
         &["view_type", "handler"]
     } else {
         VIEW_REQUIRED
     };
     check_required_fields(table, required, file, table_path, results);
+
+    // Cron-view-specific structural rules (CB-P1.14, Track 3).
+    if view_type == "Cron" {
+        validate_cron_view(table, file, table_path, app_name, results);
+    } else {
+        // Cron-only fields on non-Cron views are no-ops at runtime — flag as
+        // S005 so the misuse surfaces at validation rather than silently.
+        for f in &["schedule", "interval_seconds", "overlap_policy", "max_concurrent"] {
+            if table.contains_key(*f) {
+                results.push(
+                    ValidationResult::fail(
+                        error_codes::S005,
+                        file,
+                        format!(
+                            "{}.{} is only valid when view_type=\"Cron\"",
+                            table_path, f
+                        ),
+                    )
+                    .with_table_path(table_path)
+                    .with_field(*f)
+                    .with_app(app_name),
+                );
+            }
+        }
+    }
 
     // Validate handler sub-table
     if let Some(handler) = table.get("handler") {
@@ -920,6 +979,268 @@ fn check_unknown_keys(
             results.push(result);
         }
     }
+}
+
+/// Validate Cron-view-specific structural rules (CB-P1.14, Track 3).
+///
+/// Walks `[api.views.<name>]` when `view_type = "Cron"` and enforces:
+/// - Exactly one of `schedule` (cron expression) or `interval_seconds`.
+/// - `schedule` parses via the `cron` crate.
+/// - `interval_seconds >= 1`.
+/// - `overlap_policy ∈ {skip, queue, allow}` if set.
+/// - `path`, `method`, `auth`, `guard_view`, `response_headers` not allowed.
+///
+/// All errors are `S005`. The required-fields path/method check is suppressed
+/// elsewhere when `view_type = "Cron"` (see [`super::validate_structural`] —
+/// the per-view walker branches on `view_type` for `VIEW_REQUIRED`).
+fn validate_cron_view(
+    table: &toml::value::Table,
+    file: &str,
+    table_path: &str,
+    app_name: &str,
+    results: &mut Vec<ValidationResult>,
+) {
+    // Forbidden fields for Cron — they have no semantic meaning when there is
+    // no caller. Each is its own S005 so all problems surface in one pass.
+    const FORBIDDEN: &[&str] = &[
+        "path", "method", "auth", "guard_view", "response_headers",
+        "polling", "tools", "resources", "prompts", "instructions",
+        "session", "federation", "websocket_mode", "max_connections",
+        "sse_tick_interval_ms", "sse_trigger_events", "sse_event_buffer_size",
+        "session_revalidation_interval_s", "streaming", "streaming_format",
+        "stream_timeout_ms",
+    ];
+    for f in FORBIDDEN {
+        if table.contains_key(*f) {
+            results.push(
+                ValidationResult::fail(
+                    error_codes::S005,
+                    file,
+                    format!(
+                        "{}.{} is not allowed on view_type=\"Cron\" — Cron views have no caller",
+                        table_path, f
+                    ),
+                )
+                .with_table_path(table_path)
+                .with_field(*f)
+                .with_app(app_name),
+            );
+        }
+    }
+
+    let has_schedule = table.contains_key("schedule");
+    let has_interval = table.contains_key("interval_seconds");
+
+    match (has_schedule, has_interval) {
+        (true, true) => {
+            results.push(
+                ValidationResult::fail(
+                    error_codes::S005,
+                    file,
+                    format!(
+                        "{} declares both `schedule` and `interval_seconds` — exactly one is required for view_type=\"Cron\"",
+                        table_path
+                    ),
+                )
+                .with_table_path(table_path)
+                .with_app(app_name),
+            );
+        }
+        (false, false) => {
+            results.push(
+                ValidationResult::fail(
+                    error_codes::S005,
+                    file,
+                    format!(
+                        "{} requires exactly one of `schedule` (cron expression) or `interval_seconds` for view_type=\"Cron\"",
+                        table_path
+                    ),
+                )
+                .with_table_path(table_path)
+                .with_app(app_name),
+            );
+        }
+        (true, false) => {
+            if let Some(s) = table.get("schedule").and_then(|v| v.as_str()) {
+                // The `cron` crate parses 6- or 7-field expressions through
+                // `Schedule::from_str`. Wrap parse failure as S005 with the
+                // parse error message so users see exactly what the parser
+                // didn't like.
+                if let Err(e) = <cron::Schedule as std::str::FromStr>::from_str(s) {
+                    results.push(
+                        ValidationResult::fail(
+                            error_codes::S005,
+                            file,
+                            format!(
+                                "{}.schedule '{}' is not a valid cron expression: {}",
+                                table_path, s, e
+                            ),
+                        )
+                        .with_table_path(table_path)
+                        .with_field("schedule")
+                        .with_app(app_name),
+                    );
+                }
+            } else {
+                results.push(
+                    ValidationResult::fail(
+                        error_codes::S004,
+                        file,
+                        format!("{}.schedule must be a string", table_path),
+                    )
+                    .with_table_path(table_path)
+                    .with_field("schedule")
+                    .with_app(app_name),
+                );
+            }
+        }
+        (false, true) => {
+            // interval_seconds — must be a positive integer.
+            let v = table.get("interval_seconds").unwrap();
+            match v.as_integer() {
+                Some(n) if n >= 1 => {}
+                Some(n) => {
+                    results.push(
+                        ValidationResult::fail(
+                            error_codes::S005,
+                            file,
+                            format!(
+                                "{}.interval_seconds must be >= 1, got {}",
+                                table_path, n
+                            ),
+                        )
+                        .with_table_path(table_path)
+                        .with_field("interval_seconds")
+                        .with_app(app_name),
+                    );
+                }
+                None => {
+                    results.push(
+                        ValidationResult::fail(
+                            error_codes::S004,
+                            file,
+                            format!(
+                                "{}.interval_seconds must be a positive integer",
+                                table_path
+                            ),
+                        )
+                        .with_table_path(table_path)
+                        .with_field("interval_seconds")
+                        .with_app(app_name),
+                    );
+                }
+            }
+        }
+    }
+
+    if let Some(op_val) = table.get("overlap_policy") {
+        match op_val.as_str() {
+            Some(s) if VALID_OVERLAP_POLICIES.contains(&s) => {}
+            Some(s) => {
+                let mut msg = format!(
+                    "{}.overlap_policy '{}' is not one of [{}]",
+                    table_path,
+                    s,
+                    VALID_OVERLAP_POLICIES.join(", "),
+                );
+                if let Some(hint) = suggest_key(s, VALID_OVERLAP_POLICIES) {
+                    msg.push_str(" — ");
+                    msg.push_str(&hint);
+                }
+                results.push(
+                    ValidationResult::fail(error_codes::S005, file, msg)
+                        .with_table_path(table_path)
+                        .with_field("overlap_policy")
+                        .with_app(app_name),
+                );
+            }
+            None => {
+                results.push(
+                    ValidationResult::fail(
+                        error_codes::S004,
+                        file,
+                        format!("{}.overlap_policy must be a string", table_path),
+                    )
+                    .with_table_path(table_path)
+                    .with_field("overlap_policy")
+                    .with_app(app_name),
+                );
+            }
+        }
+    }
+}
+
+/// Validate `view_type` against the canonical set (Sprint 2026-05-09 Track 2).
+///
+/// Emits `S005` for any value outside [`VALID_VIEW_TYPES`] with a
+/// did-you-mean suggestion when the typo is close. A missing `view_type` is
+/// handled by [`VIEW_REQUIRED`]'s required-fields check, not here.
+fn validate_view_type(
+    value: &toml::Value,
+    file: &str,
+    table_path: &str,
+    app_name: &str,
+    results: &mut Vec<ValidationResult>,
+) {
+    let s = match value.as_str() {
+        Some(s) => s,
+        None => return,
+    };
+    if VALID_VIEW_TYPES.contains(&s) {
+        return;
+    }
+    let mut msg = format!(
+        "{}.view_type '{}' is not one of [{}]",
+        table_path,
+        s,
+        VALID_VIEW_TYPES.join(", "),
+    );
+    if let Some(hint) = suggest_key(s, VALID_VIEW_TYPES) {
+        msg.push_str(" — ");
+        msg.push_str(&hint);
+    }
+    results.push(
+        ValidationResult::fail(error_codes::S005, file, msg)
+            .with_table_path(table_path)
+            .with_field("view_type")
+            .with_app(app_name),
+    );
+}
+
+/// Validate `auth` against the canonical set (Sprint 2026-05-09 Track 2).
+///
+/// Emits `S005` for any value outside [`VALID_AUTH_MODES`] with a
+/// did-you-mean. `auth` is optional, so `None` here is a no-op.
+fn validate_auth_mode(
+    value: &toml::Value,
+    file: &str,
+    table_path: &str,
+    app_name: &str,
+    results: &mut Vec<ValidationResult>,
+) {
+    let s = match value.as_str() {
+        Some(s) => s,
+        None => return,
+    };
+    if VALID_AUTH_MODES.contains(&s) {
+        return;
+    }
+    let mut msg = format!(
+        "{}.auth '{}' is not one of [{}]",
+        table_path,
+        s,
+        VALID_AUTH_MODES.join(", "),
+    );
+    if let Some(hint) = suggest_key(s, VALID_AUTH_MODES) {
+        msg.push_str(" — ");
+        msg.push_str(&hint);
+    }
+    results.push(
+        ValidationResult::fail(error_codes::S005, file, msg)
+            .with_table_path(table_path)
+            .with_field("auth")
+            .with_app(app_name),
+    );
 }
 
 /// Validate `[api.views.*.response_headers]` (CB-P1.11).
@@ -1891,6 +2212,479 @@ dataview = "items"
             "expected no failures on valid response_headers, got: {:?}",
             view_failures.iter().map(|r| (&r.error_code, &r.message)).collect::<Vec<_>>(),
         );
+    }
+
+    // ── CB-PROBE Track 2: view_type / auth enum validation ────────
+
+    #[test]
+    fn view_type_rejects_unknown_string() {
+        // Track 3 added `Cron` to the canonical set, so the original CB
+        // probe value ('Cron') now passes view_type. Use a clearly-bogus
+        // value to confirm the enum gate still rejects unknowns.
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        std::fs::write(
+            bundle_dir.join("test-app/app.toml"),
+            r#"
+[data.dataviews.items]
+name       = "items"
+datasource = "data"
+
+[api.views.items]
+path       = "items"
+method     = "GET"
+view_type  = "QuantumStreamer"
+auth       = "none"
+
+[api.views.items.handler]
+type     = "dataview"
+dataview = "items"
+"#,
+        )
+        .unwrap();
+        let results = validate_structural(&bundle_dir);
+        let bad: Vec<_> = results.iter()
+            .filter(|r| r.error_code.as_deref() == Some("S005")
+                && r.field.as_deref() == Some("view_type")
+                && r.message.contains("'QuantumStreamer'"))
+            .collect();
+        assert_eq!(bad.len(), 1,
+            "expected exactly one S005 on view_type='QuantumStreamer', got: {:?}",
+            results.iter().map(|r| (&r.error_code, &r.field, &r.message)).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn view_type_accepts_canonical_values() {
+        for vt in &["Rest", "Mcp", "Websocket", "ServerSentEvents", "MessageConsumer"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let bundle_dir = create_valid_bundle(tmp.path());
+            // MessageConsumer doesn't take path/method; skip those for it.
+            let body = if *vt == "MessageConsumer" {
+                format!(r#"
+[data.dataviews.items]
+name       = "items"
+datasource = "data"
+
+[api.views.items]
+view_type  = "{}"
+
+[api.views.items.handler]
+type     = "dataview"
+dataview = "items"
+"#, vt)
+            } else {
+                format!(r#"
+[data.dataviews.items]
+name       = "items"
+datasource = "data"
+
+[api.views.items]
+path       = "items"
+method     = "GET"
+view_type  = "{}"
+auth       = "none"
+
+[api.views.items.handler]
+type     = "dataview"
+dataview = "items"
+"#, vt)
+            };
+            std::fs::write(bundle_dir.join("test-app/app.toml"), body).unwrap();
+            let results = validate_structural(&bundle_dir);
+            let bad: Vec<_> = results.iter()
+                .filter(|r| r.error_code.as_deref() == Some("S005")
+                    && r.field.as_deref() == Some("view_type"))
+                .collect();
+            assert!(bad.is_empty(),
+                "view_type='{}' should be accepted, got: {:?}",
+                vt,
+                bad.iter().map(|r| &r.message).collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    #[test]
+    fn view_type_did_you_mean_suggests_canonical() {
+        // Lowercase typo should produce a "did you mean 'Rest'?" hint.
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        std::fs::write(
+            bundle_dir.join("test-app/app.toml"),
+            r#"
+[data.dataviews.items]
+name       = "items"
+datasource = "data"
+
+[api.views.items]
+path       = "items"
+method     = "GET"
+view_type  = "rest"
+auth       = "none"
+
+[api.views.items.handler]
+type     = "dataview"
+dataview = "items"
+"#,
+        )
+        .unwrap();
+        let results = validate_structural(&bundle_dir);
+        let hit = results.iter().find(|r|
+            r.error_code.as_deref() == Some("S005")
+            && r.field.as_deref() == Some("view_type")
+            && r.message.contains("'Rest'")
+            && r.message.contains("did you mean")
+        );
+        assert!(hit.is_some(),
+            "expected did-you-mean Rest hint for view_type='rest', got: {:?}",
+            results.iter().map(|r| &r.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn auth_rejects_unknown_string() {
+        // CB probe Case G — `auth = "bearer"` (P1.12 closed-as-superseded)
+        // should now produce S005 instead of silently passing.
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        std::fs::write(
+            bundle_dir.join("test-app/app.toml"),
+            r#"
+[data.dataviews.items]
+name       = "items"
+datasource = "data"
+
+[api.views.items]
+path       = "items"
+method     = "GET"
+view_type  = "Rest"
+auth       = "bearer"
+
+[api.views.items.handler]
+type     = "dataview"
+dataview = "items"
+"#,
+        )
+        .unwrap();
+        let results = validate_structural(&bundle_dir);
+        let bad: Vec<_> = results.iter()
+            .filter(|r| r.error_code.as_deref() == Some("S005")
+                && r.field.as_deref() == Some("auth")
+                && r.message.contains("'bearer'"))
+            .collect();
+        assert_eq!(bad.len(), 1,
+            "expected exactly one S005 on auth='bearer', got: {:?}",
+            results.iter().map(|r| (&r.error_code, &r.field, &r.message)).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn auth_accepts_canonical_and_omitted() {
+        // none + session + omitted (auth field absent) all valid.
+        for body in &[
+            r#"
+[data.dataviews.items]
+name = "items"
+datasource = "data"
+
+[api.views.items]
+path = "items"
+method = "GET"
+view_type = "Rest"
+auth = "none"
+
+[api.views.items.handler]
+type = "dataview"
+dataview = "items"
+"#,
+            r#"
+[data.dataviews.items]
+name = "items"
+datasource = "data"
+
+[api.views.items]
+path = "items"
+method = "GET"
+view_type = "Rest"
+auth = "session"
+
+[api.views.items.handler]
+type = "dataview"
+dataview = "items"
+"#,
+            r#"
+[data.dataviews.items]
+name = "items"
+datasource = "data"
+
+[api.views.items]
+path = "items"
+method = "GET"
+view_type = "Rest"
+
+[api.views.items.handler]
+type = "dataview"
+dataview = "items"
+"#,
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let bundle_dir = create_valid_bundle(tmp.path());
+            std::fs::write(bundle_dir.join("test-app/app.toml"), body).unwrap();
+            let results = validate_structural(&bundle_dir);
+            let bad: Vec<_> = results.iter()
+                .filter(|r| r.error_code.as_deref() == Some("S005")
+                    && r.field.as_deref() == Some("auth"))
+                .collect();
+            assert!(bad.is_empty(),
+                "expected no auth S005, got: {:?}",
+                bad.iter().map(|r| &r.message).collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    // ── CB-PROBE Track 3: Cron view validation (P1.14) ────────────
+
+    fn write_cron_view(dir: &Path, body: &str) {
+        std::fs::write(
+            dir.join("test-app/app.toml"),
+            format!(r#"
+[data.dataviews.items]
+name       = "items"
+datasource = "data"
+
+{}
+"#, body),
+        ).unwrap();
+    }
+
+    #[test]
+    fn cron_view_accepts_canonical_schedule() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_cron_view(&bundle_dir, r#"
+[api.views.recompute]
+view_type = "Cron"
+schedule  = "0 */5 * * * *"
+overlap_policy = "skip"
+
+[api.views.recompute.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/recompute.ts"
+entrypoint = "tick"
+resources  = []
+"#);
+        // libraries/handlers/recompute.ts isn't required for structural — that's Layer 2.
+        let results = validate_structural(&bundle_dir);
+        let view_failures: Vec<_> = results.iter()
+            .filter(|r| r.status == ValidationStatus::Fail
+                && r.table_path.as_deref()
+                    .map(|p| p.contains("recompute"))
+                    .unwrap_or(false))
+            .collect();
+        assert!(view_failures.is_empty(),
+            "expected no failures on canonical Cron view, got: {:?}",
+            view_failures.iter().map(|r| &r.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn cron_view_accepts_interval_seconds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_cron_view(&bundle_dir, r#"
+[api.views.recompute]
+view_type        = "Cron"
+interval_seconds = 300
+
+[api.views.recompute.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/recompute.ts"
+entrypoint = "tick"
+resources  = []
+"#);
+        let results = validate_structural(&bundle_dir);
+        let view_failures: Vec<_> = results.iter()
+            .filter(|r| r.status == ValidationStatus::Fail
+                && r.table_path.as_deref()
+                    .map(|p| p.contains("recompute"))
+                    .unwrap_or(false))
+            .collect();
+        assert!(view_failures.is_empty(),
+            "expected no failures on Cron view with interval_seconds, got: {:?}",
+            view_failures.iter().map(|r| &r.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn cron_view_rejects_both_schedule_and_interval() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_cron_view(&bundle_dir, r#"
+[api.views.recompute]
+view_type        = "Cron"
+schedule         = "*/5 * * * * *"
+interval_seconds = 300
+
+[api.views.recompute.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/recompute.ts"
+entrypoint = "tick"
+resources  = []
+"#);
+        let results = validate_structural(&bundle_dir);
+        assert!(results.iter().any(|r|
+            r.error_code.as_deref() == Some("S005")
+            && r.message.contains("declares both `schedule` and `interval_seconds`")
+        ), "expected S005 on schedule+interval_seconds mutex, got: {:?}",
+            results.iter().map(|r| &r.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn cron_view_rejects_neither_schedule_nor_interval() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_cron_view(&bundle_dir, r#"
+[api.views.recompute]
+view_type = "Cron"
+
+[api.views.recompute.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/recompute.ts"
+entrypoint = "tick"
+resources  = []
+"#);
+        let results = validate_structural(&bundle_dir);
+        assert!(results.iter().any(|r|
+            r.error_code.as_deref() == Some("S005")
+            && r.message.contains("requires exactly one of `schedule`")
+        ), "expected S005 on missing schedule+interval_seconds, got: {:?}",
+            results.iter().map(|r| &r.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn cron_view_rejects_invalid_cron_expression() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_cron_view(&bundle_dir, r#"
+[api.views.recompute]
+view_type = "Cron"
+schedule  = "not a cron expression"
+
+[api.views.recompute.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/recompute.ts"
+entrypoint = "tick"
+resources  = []
+"#);
+        let results = validate_structural(&bundle_dir);
+        assert!(results.iter().any(|r|
+            r.error_code.as_deref() == Some("S005")
+            && r.field.as_deref() == Some("schedule")
+            && r.message.contains("not a valid cron expression")
+        ), "expected S005 on invalid cron expression, got: {:?}",
+            results.iter().map(|r| &r.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn cron_view_rejects_forbidden_fields() {
+        // path / method / auth on a Cron view are meaningless — Cron views
+        // have no caller. Each is its own S005.
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_cron_view(&bundle_dir, r#"
+[api.views.recompute]
+view_type = "Cron"
+schedule  = "0 */5 * * * *"
+path      = "/cron/oops"
+method    = "POST"
+auth      = "session"
+
+[api.views.recompute.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/recompute.ts"
+entrypoint = "tick"
+resources  = []
+"#);
+        let results = validate_structural(&bundle_dir);
+        for forbidden in &["path", "method", "auth"] {
+            assert!(results.iter().any(|r|
+                r.error_code.as_deref() == Some("S005")
+                && r.field.as_deref() == Some(*forbidden)
+                && r.message.contains("not allowed on view_type=\"Cron\"")
+            ), "expected S005 on Cron view with forbidden field '{}', got: {:?}",
+                forbidden,
+                results.iter().map(|r| &r.message).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn cron_view_rejects_invalid_overlap_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_cron_view(&bundle_dir, r#"
+[api.views.recompute]
+view_type      = "Cron"
+schedule       = "0 */5 * * * *"
+overlap_policy = "abandon"
+
+[api.views.recompute.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/recompute.ts"
+entrypoint = "tick"
+resources  = []
+"#);
+        let results = validate_structural(&bundle_dir);
+        assert!(results.iter().any(|r|
+            r.error_code.as_deref() == Some("S005")
+            && r.field.as_deref() == Some("overlap_policy")
+            && r.message.contains("'abandon'")
+        ), "expected S005 on overlap_policy='abandon', got: {:?}",
+            results.iter().map(|r| &r.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn cron_only_fields_rejected_on_rest_view() {
+        // schedule / interval_seconds / overlap_policy / max_concurrent on a
+        // non-Cron view are silently no-ops at runtime — surface them.
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        std::fs::write(
+            bundle_dir.join("test-app/app.toml"),
+            r#"
+[data.dataviews.items]
+name = "items"
+datasource = "data"
+
+[api.views.items]
+path             = "items"
+method           = "GET"
+view_type        = "Rest"
+auth             = "none"
+schedule         = "0 */5 * * * *"
+interval_seconds = 60
+
+[api.views.items.handler]
+type     = "dataview"
+dataview = "items"
+"#,
+        ).unwrap();
+        let results = validate_structural(&bundle_dir);
+        for f in &["schedule", "interval_seconds"] {
+            assert!(results.iter().any(|r|
+                r.error_code.as_deref() == Some("S005")
+                && r.field.as_deref() == Some(*f)
+                && r.message.contains("only valid when view_type=\"Cron\"")
+            ), "expected S005 on Rest view with Cron-only field '{}', got: {:?}",
+                f,
+                results.iter().map(|r| &r.message).collect::<Vec<_>>());
+        }
     }
 
     // ── Multiple errors collected ─────────────────────────────────

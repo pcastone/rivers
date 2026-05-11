@@ -995,6 +995,42 @@ pub async fn load_and_wire_bundle(
 
     crate::task_enrichment::sync_from_app_context(ctx);
 
+    // Start the Cron view scheduler (CB-P1.14, Sprint 2026-05-09 Track 3).
+    // Walks every loaded app for `view_type = "Cron"` views, parses each
+    // schedule, and spawns one tokio task per view. Skipped if no Cron views
+    // are declared, and warns + skipped if storage_engine is not configured
+    // (multi-instance dedupe needs it). Per `rivers-cron-view-spec.md`.
+    if let Some(bundle_ref) = ctx.loaded_bundle.as_ref() {
+        let specs = crate::cron::collect_cron_specs(bundle_ref);
+        if !specs.is_empty() {
+            match ctx.storage_engine.as_ref() {
+                Some(storage) => {
+                    let node_id = config
+                        .app_id
+                        .as_deref()
+                        .unwrap_or("node-0")
+                        .to_string();
+                    let scheduler = crate::cron::CronScheduler::start(
+                        specs,
+                        ctx.pool.clone(),
+                        storage.clone(),
+                        node_id,
+                    );
+                    *ctx.cron_scheduler.lock().await = Some(scheduler);
+                }
+                None => {
+                    tracing::error!(
+                        target: "rivers.cron",
+                        cron_views = specs.len(),
+                        "Cron views declared but [storage_engine] not configured \
+                         — cron loops will NOT start (multi-instance dedupe requires \
+                         StorageEngine; see rivers-cron-view-spec.md §7.1)"
+                    );
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 

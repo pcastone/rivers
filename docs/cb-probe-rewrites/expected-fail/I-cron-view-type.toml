@@ -1,0 +1,29 @@
+# Case I — Scheduled-task primitive (CB-P1.14).
+#
+# SHIPPED in Rivers v0.61.0 (Sprint 2026-05-09 Track 3).
+#
+# `view_type = "Cron"` declares a fire-and-forget scheduled task. No path,
+# no method, no auth — Cron views aren't HTTP-addressable. One tokio task
+# per view; multi-instance deployments dedupe via StorageEngine
+# `set_if_absent` on a per-tick key (spec §5).
+#
+# Spec ref: rivers-cron-view-spec.md; CB filing
+# case-rivers-scheduled-task-primitive.md.
+#
+# Splice this fragment into app/app.toml; expected on v0.61.0+:
+# validate PASSES, run-probe.sh asserts the handler ticks under load.
+
+[api.views.case_i_cron]
+view_type        = "Cron"
+# 6-field cron expression: sec min hour dom month dow.
+# "0 */5 * * * *" = every 5 minutes, on second 0.
+schedule         = "0 */5 * * * *"
+# interval_seconds = 300                  # mutually exclusive with schedule
+overlap_policy   = "skip"
+
+[api.views.case_i_cron.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/cases.ts"
+entrypoint = "caseICronTick"
+resources  = []
