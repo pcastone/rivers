@@ -312,3 +312,97 @@ async fn identity_json_reaches_handler_dispatch_per_signal() {
         );
     }
 }
+
+// ── Single-handler form (CB-OTLP Track O3) ───────────────────────
+
+fn otlp_view_single_handler() -> ApiViewConfig {
+    serde_json::from_value(serde_json::json!({
+        "view_type": "OTLP",
+        "path": "/otel",
+        "handler": {
+            "type": "codecomponent",
+            "language": "javascript",
+            "module": "otel.js",
+            "entrypoint": "ingestAny",
+            "resources": []
+        }
+    }))
+    .expect("valid OTLP view config")
+}
+
+/// Single-handler form: only `handler:` is declared (no `handlers.*`).
+/// All three /v1/<signal> paths register through `ViewRouter::from_views`
+/// and route to the same handler entrypoint. The handler is expected to
+/// read `ctx.otel.kind` to discriminate (verified at the V8 layer by
+/// `execute_exposes_ctx_otel` in `rivers-engine-v8`).
+///
+/// Without a V8 engine loaded, dispatch reaches process_pool and fails;
+/// the framework returns 500 with "dispatch failed". The positive signal
+/// here is that all three paths reach that point — proving the
+/// single-handler fallback in `pick_handler` is wired correctly end-to-end.
+#[tokio::test]
+async fn single_handler_form_dispatches_all_three_signals() {
+    let ctx = otlp_ctx();
+    wire_view(&ctx, "otel_ingest", otlp_view_single_handler()).await;
+    let router = build_main_router(ctx);
+
+    for path in &["/otel/v1/metrics", "/otel/v1/logs", "/otel/v1/traces"] {
+        let req = otlp_post(path, "application/json", br#"{"resourceMetrics":[]}"#.to_vec());
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "single-handler form should reach dispatch for {}",
+            path
+        );
+        let body = body_to_json(resp).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("dispatch failed"),
+            "expected dispatch-stage error for {}, got: {}",
+            path,
+            body
+        );
+    }
+}
+
+/// The protobuf transcoder is path-aware (it dispatches to
+/// ExportMetricsServiceRequest vs ExportLogsServiceRequest vs
+/// ExportTraceServiceRequest based on the trailing /v1/<signal> segment).
+/// A single-handler view served through all three paths must therefore
+/// also route correctly through the transcoder for protobuf inputs.
+/// Each path returns 415 (we pass garbage bytes labeled protobuf) — that
+/// proves the transcoder *attempted* the per-signal decode for each path.
+#[tokio::test]
+async fn single_handler_form_routes_protobuf_per_signal() {
+    let ctx = otlp_ctx();
+    wire_view(&ctx, "otel_ingest", otlp_view_single_handler()).await;
+    let router = build_main_router(ctx);
+
+    for path in &["/otel/v1/metrics", "/otel/v1/logs", "/otel/v1/traces"] {
+        let req = otlp_post(
+            path,
+            "application/x-protobuf",
+            b"\x06\x06\x06garbage".to_vec(),
+        );
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "protobuf decode should fail for {}",
+            path
+        );
+        let body = body_to_json(resp).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("protobuf decode failed"),
+            "expected protobuf decode error for {}, got: {}",
+            path,
+            body
+        );
+    }
+}

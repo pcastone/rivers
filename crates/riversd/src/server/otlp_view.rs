@@ -608,4 +608,120 @@ mod tests {
             "application/json"
         );
     }
+
+    // ── pick_handler: single- vs multi-handler form (Track O3) ──────
+
+    fn matched_with(config: rivers_runtime::view::ApiViewConfig) -> crate::server::view_dispatch::MatchedRoute {
+        crate::server::view_dispatch::MatchedRoute {
+            config,
+            app_entry_point: String::new(),
+            app_id: String::new(),
+            path_params: std::collections::HashMap::new(),
+            guard_view_path: None,
+            view_id: "otel_ingest:metrics".into(),
+        }
+    }
+
+    fn cc_handler(entrypoint: &str) -> rivers_runtime::view::HandlerConfig {
+        rivers_runtime::view::HandlerConfig::Codecomponent {
+            language: "javascript".into(),
+            module: "otel.js".into(),
+            entrypoint: entrypoint.into(),
+            resources: vec![],
+        }
+    }
+
+    #[test]
+    fn pick_handler_prefers_multi_handler_form_when_signal_present() {
+        // Multi-handler form: handlers.{metrics,logs,traces} → each signal
+        // routes to its own entrypoint. Spec §3.1.
+        let mut handlers = std::collections::HashMap::new();
+        handlers.insert("metrics".to_string(), cc_handler("ingestMetrics"));
+        handlers.insert("logs".to_string(), cc_handler("ingestLogs"));
+        handlers.insert("traces".to_string(), cc_handler("ingestTraces"));
+        let cfg = serde_json::from_value::<rivers_runtime::view::ApiViewConfig>(
+            serde_json::json!({
+                "view_type": "OTLP",
+                "path": "/otel",
+                "handlers": {
+                    "metrics": { "type": "codecomponent", "language": "javascript", "module": "otel.js", "entrypoint": "ingestMetrics", "resources": [] },
+                    "logs":    { "type": "codecomponent", "language": "javascript", "module": "otel.js", "entrypoint": "ingestLogs", "resources": [] },
+                    "traces":  { "type": "codecomponent", "language": "javascript", "module": "otel.js", "entrypoint": "ingestTraces", "resources": [] }
+                }
+            })
+        ).unwrap();
+        let matched = matched_with(cfg);
+
+        for (signal, expected) in &[
+            ("metrics", "ingestMetrics"),
+            ("logs", "ingestLogs"),
+            ("traces", "ingestTraces"),
+        ] {
+            let h = pick_handler(&matched, signal).expect("handler present");
+            match h {
+                rivers_runtime::view::HandlerConfig::Codecomponent { entrypoint, .. } => {
+                    assert_eq!(entrypoint, expected,
+                        "signal '{}' routed to wrong handler", signal);
+                }
+                other => panic!("expected codecomponent, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn pick_handler_falls_back_to_single_handler_form() {
+        // Single-handler form: only `handler:` is declared, no `handlers.*`.
+        // All three signals route to the same handler; handler is expected
+        // to read ctx.otel.kind to discriminate. Spec §3.2.
+        let cfg = serde_json::from_value::<rivers_runtime::view::ApiViewConfig>(
+            serde_json::json!({
+                "view_type": "OTLP",
+                "path": "/otel",
+                "handler": { "type": "codecomponent", "language": "javascript", "module": "otel.js", "entrypoint": "ingestAny", "resources": [] }
+            })
+        ).unwrap();
+        let matched = matched_with(cfg);
+
+        for signal in &["metrics", "logs", "traces"] {
+            let h = pick_handler(&matched, signal).expect("single handler picked");
+            match h {
+                rivers_runtime::view::HandlerConfig::Codecomponent { entrypoint, .. } => {
+                    assert_eq!(entrypoint, "ingestAny",
+                        "single-handler form must dispatch to same entrypoint for all signals");
+                }
+                other => panic!("expected codecomponent, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn pick_handler_returns_signal_not_configured_on_partial_multi_form() {
+        // handlers.metrics declared, but no handlers.logs / handlers.traces.
+        // A request to /v1/logs picks the missing handler → SignalNotConfigured.
+        let cfg = serde_json::from_value::<rivers_runtime::view::ApiViewConfig>(
+            serde_json::json!({
+                "view_type": "OTLP",
+                "path": "/otel",
+                "handlers": {
+                    "metrics": { "type": "codecomponent", "language": "javascript", "module": "otel.js", "entrypoint": "ingestMetrics", "resources": [] }
+                }
+            })
+        ).unwrap();
+        let matched = matched_with(cfg);
+
+        // Metrics resolves.
+        assert!(pick_handler(&matched, "metrics").is_ok());
+
+        // Logs and traces don't.
+        for signal in &["logs", "traces"] {
+            let err = pick_handler(&matched, signal).unwrap_err();
+            match err {
+                OtlpError::SignalNotConfigured(s) => {
+                    assert_eq!(&s, signal,
+                        "SignalNotConfigured should carry the missing signal name");
+                }
+                other => panic!("expected SignalNotConfigured for '{}', got {:?}", signal, other),
+            }
+        }
+    }
 }
