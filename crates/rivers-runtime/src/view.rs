@@ -12,7 +12,7 @@ use serde::Deserialize;
 /// Declared in `app.toml` under `[api.views.{view_id}]`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ApiViewConfig {
-    /// "Rest" | "Websocket" | "ServerSentEvents" | "MessageConsumer"
+    /// "Rest" | "Websocket" | "ServerSentEvents" | "MessageConsumer" | "Mcp" | "Cron" | "OTLP"
     pub view_type: String,
 
     /// URL path pattern, e.g. "/api/contacts/:id"
@@ -22,7 +22,28 @@ pub struct ApiViewConfig {
     pub method: Option<String>,
 
     /// Handler definition — dataview or codecomponent.
+    ///
+    /// Defaults to `HandlerConfig::None` so `view_type = "OTLP"` views that
+    /// declare only the per-signal `handlers.{metrics,logs,traces}` table
+    /// (and no top-level `handler` block) deserialize without error. The
+    /// structural validator enforces that exactly one form is present
+    /// (`validate_otlp_view`, `[X-OTLP-2]` / `[X-OTLP-5]`).
+    #[serde(default = "default_handler")]
     pub handler: HandlerConfig,
+
+    /// Per-signal handler map for `view_type = "OTLP"`. Keys are
+    /// `"metrics"`, `"logs"`, `"traces"` per the OTLP/HTTP signal set;
+    /// values are normal `HandlerConfig` entries (codecomponent only in v1).
+    /// Mutually exclusive with the top-level `handler` block —
+    /// enforced by `validate_structural::validate_otlp_view` ([X-OTLP-5]).
+    /// CB-OTLP Track O2.
+    #[serde(default)]
+    pub handlers: Option<HashMap<String, HandlerConfig>>,
+
+    /// Maximum inbound body size in megabytes for `view_type = "OTLP"`.
+    /// Defaults to the OTLP/HTTP recommended 4 MB. CB-OTLP Track O2.
+    #[serde(default)]
+    pub max_body_mb: Option<u32>,
 
     /// Parameter mapping from HTTP params to DataView params.
     #[serde(default)]
@@ -225,6 +246,10 @@ pub struct GuardConfig {
 
 fn default_token_body_key() -> String {
     "token".to_string()
+}
+
+fn default_handler() -> HandlerConfig {
+    HandlerConfig::None {}
 }
 
 /// Handler definition — either a DataView reference, a CodeComponent, or none.

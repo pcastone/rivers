@@ -197,10 +197,38 @@ impl ViewRouter {
                 continue;
             }
 
+            // Cron views are fire-on-schedule, no HTTP route
+            if config.view_type == "Cron" {
+                continue;
+            }
+
             let path = match &config.path {
                 Some(p) => p.clone(),
                 None => continue,
             };
+
+            // OTLP views mount three POST routes (/v1/{metrics,logs,traces})
+            // underneath the declared root path per rivers-otlp-view-spec.md §5.
+            // Per-signal pick-handler logic in
+            // `crate::server::otlp_view::pick_handler` then chooses between
+            // single-`handler` and multi-`handlers.*` forms.
+            if config.view_type == "OTLP" {
+                let root = path.trim_end_matches('/');
+                for signal in &["metrics", "logs", "traces"] {
+                    let signal_path = format!("{}/v1/{}", root, signal);
+                    let segments = parse_path_pattern(&signal_path);
+                    routes.push(ViewRoute {
+                        view_id: format!("{}:{}", id, signal),
+                        method: "POST".to_string(),
+                        path_pattern: signal_path,
+                        segments,
+                        config: config.clone(),
+                        app_entry_point: String::new(),
+                        app_id: String::new(),
+                    });
+                }
+                continue;
+            }
 
             let method = config
                 .method

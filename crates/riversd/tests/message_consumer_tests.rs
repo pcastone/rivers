@@ -18,6 +18,8 @@ fn consumer_view(topic: &str, handler: &str) -> ApiViewConfig {
             entrypoint: handler.to_string(),
             resources: vec![],
         },
+        handlers: None,
+        max_body_mb: None,
         parameter_mapping: None,
         dataviews: vec![],
         primary: None,

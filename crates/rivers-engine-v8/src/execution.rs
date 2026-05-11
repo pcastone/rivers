@@ -273,6 +273,19 @@ fn inject_ctx_object<'s>(
         }
     }
 
+    // ctx.otel (from args if present — OTLP view dispatch envelope per
+    // `rivers-otlp-view-spec.md` §6.1). Carries { kind, payload, encoding }.
+    // Handlers may also return { rejected, errorMessage } as their return
+    // value to drive the framework's partialSuccess response shape.
+    if let Some(otel) = ctx.args.get("otel") {
+        let otel_json = serde_json::to_string(otel).unwrap_or_default();
+        let otel_src = v8_str(scope, &otel_json);
+        if let Some(parsed) = v8::json::parse(scope, otel_src) {
+            let otel_key = v8_str(scope, "otel");
+            obj.set(scope, otel_key.into(), parsed);
+        }
+    }
+
     // ctx.store (in-memory get/set/del)
     inject_store_methods(scope, obj);
 

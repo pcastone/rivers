@@ -878,6 +878,8 @@ mod tests {
             handler: rivers_runtime::view::HandlerConfig::Dataview {
                 dataview: "ds".to_string(),
             },
+            handlers: None,
+            max_body_mb: None,
             parameter_mapping: None,
             dataviews: vec![],
             primary: None,

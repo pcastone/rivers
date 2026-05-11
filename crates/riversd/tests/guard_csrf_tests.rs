@@ -22,6 +22,8 @@ fn make_view(view_type: &str, guard: bool, auth: Option<&str>) -> ApiViewConfig 
             entrypoint: "authenticate".to_string(),
             resources: vec![],
         },
+        handlers: None,
+        max_body_mb: None,
         parameter_mapping: None,
         dataviews: vec![],
         primary: None,
@@ -68,6 +70,8 @@ fn make_dataview_view() -> ApiViewConfig {
         handler: HandlerConfig::Dataview {
             dataview: "my_view".to_string(),
         },
+        handlers: None,
+        max_body_mb: None,
         parameter_mapping: None,
         dataviews: vec![],
         primary: None,

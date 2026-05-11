@@ -295,6 +295,8 @@ mod tests {
                 path: Some(format!("/{}", name)),
                 method: Some("GET".into()),
                 handler: rivers_runtime::view::HandlerConfig::None {},
+                handlers: None,
+                max_body_mb: None,
                 parameter_mapping: None,
                 dataviews: vec![],
                 primary: None,

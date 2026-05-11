@@ -16,6 +16,8 @@ fn rest_view(method: &str, path: &str, dataview: &str) -> ApiViewConfig {
         handler: HandlerConfig::Dataview {
             dataview: dataview.to_string(),
         },
+        handlers: None,
+        max_body_mb: None,
         parameter_mapping: None,
         dataviews: vec![],
         primary: None,
@@ -65,6 +67,8 @@ fn codecomponent_view(method: &str, path: &str) -> ApiViewConfig {
             entrypoint: "onRequest".to_string(),
             resources: vec![],
         },
+        handlers: None,
+        max_body_mb: None,
         parameter_mapping: None,
         dataviews: vec![],
         primary: None,
