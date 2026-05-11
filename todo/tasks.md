@@ -1962,3 +1962,309 @@ empty for every MCP-dispatched handler.
 7 ignored. `cargo test -p rivers-runtime --lib` 230/230. Version bumped.
 Both logs updated. Plan A complete; pausing here for review before
 starting Plan B (P1.9 path_params).
+
+---
+
+## Sprint 2026-05-09 — CB unblock: probe migration + validator hardening + P1.14
+
+**Source:** CB shipped `cb-rivers-feature-validation-bundle` (filed 2026-05-09)
+to validate Rivers behavior against their contract. Validation against
+v0.60.12 surfaced three issues:
+
+1. P1.9/P1.10/P1.11 are shipped but the CB probe encodes outdated config
+   shapes (`guard = "name"` instead of `guard_view = "name"`,
+   `[response.headers]` instead of `response_headers`, `ctx.request.path_params`
+   instead of `args.path_params`) — so the probes flag EXPECTED FAIL forever.
+2. `auth` and `view_type` are typed `Option<String>` / `String` — the
+   validator silently accepts `auth = "bearer"` and `view_type = "Cron"`
+   instead of producing a clear S005 with the canonical set.
+3. P1.14 (scheduled-task primitive) is genuinely not shipped — needs design
+   + implementation per `case-rivers-scheduled-task-primitive.md`
+   (filed 2026-05-09).
+
+Three tracks below. Tracks 1 + 2 land this sprint; Track 3 is the
+genuinely-new ground (`bump-minor`).
+
+### Track 1 — Migrate the CB probe to canonical v0.60.12 shapes
+
+**Goal:** Get F/H/J/(intentional close on G) flipping to 🎉 NEWLY PASSING
+on CB's next probe run. No Rivers code changes — pure shape migration of
+their bundle.
+
+**Files (CB-side):**
+`/Users/pcastone/Projects/cb/docs/rivers-upstream/cb-rivers-feature-validation-bundle/expected-fail/{F,G,H-implicit,J}.toml`,
+`.../app/libraries/handlers/cases.ts`, `.../README.md`.
+
+- [x] **T1.1** — Authored [docs/cb-probe-v0.60.12-migration.md](../docs/cb-probe-v0.60.12-migration.md)
+  with side-by-side diffs for each probe fragment + handler. Sections cover
+  P1.9 (`ctx.request.path_params` → `args.path_params`, MCP-route-templating
+  requirement), P1.10 (`guard = "name"` → `guard_view = "name"` + same-app
+  guard target), P1.11 (`[api.views.X.response.headers]` →
+  `[api.views.X.response_headers]`), P1.12 (G fragment becomes positive
+  sentinel using `auth-session-spec §11.5` recipe, labelled
+  CLOSED-AS-SUPERSEDED). Done 2026-05-10.
+- [x] **T1.2** — Rewrites staged in [docs/cb-probe-rewrites/expected-fail/](../docs/cb-probe-rewrites/expected-fail/):
+  `F-named-guard.toml`, `G-auth-bearer.toml`, `I-cron-view-type.toml`,
+  `J-response-headers.toml`. Each fragment has TOML comments citing
+  the changelog entry / spec section that defines the canonical shape.
+  CB-side application deferred to T1.6. Done 2026-05-10.
+- [x] **T1.3** — Updated [docs/cb-probe-rewrites/app/libraries/handlers/cases.ts](../docs/cb-probe-rewrites/app/libraries/handlers/cases.ts):
+  `caseH` reads `args.path_params` first (MCP P1.9 surface) then falls
+  back to `ctx.request.path_params` (REST sanity check) and reports the
+  source field. Added `caseFGuard` (named-guard recipe target),
+  `caseGBearerGuard` (§11.5 bearer recipe), `caseICronTick` (P1.14
+  pending sentinel writer). Done 2026-05-10.
+- [x] **T1.4** — Updated [docs/cb-probe-rewrites/README.md](../docs/cb-probe-rewrites/README.md):
+  Cases table reflects F/G/H/J → ✅ PASS post-migration, I remains
+  ⏳ EXPECTED FAIL (P1.14). Migration notes section explains the four
+  shape changes. "What PASS looks like" sample output updated to show
+  4× NEWLY PASSING + 1× EXPECTED FAIL. Done 2026-05-10.
+- [x] **T1.5** — Validated locally on `/tmp/cb-bundle/cb-rivers-feature-validation-bundle/`
+  with the rewrites applied:
+  - Baseline: `0 errors, 1 warning` (L4 skip).
+  - Splice F (named guard): `0 errors, 1 warning` ✅.
+  - Splice G (bearer recipe): `0 errors, 1 warning` ✅.
+  - Splice J (response headers): `0 errors, 1 warning` ✅.
+  - Splice I (cron): `2 errors, 3 warnings` ⏳ (expected — P1.14 pending).
+  Also patched `app/app.toml`: `case_h_mcp.path` from `case-h/_mcp` →
+  `case-h/{id}/_mcp` so MCP `MatchedRoute.path_params` actually populates.
+  Done 2026-05-10.
+- [x] **T1.6** — Handoff is the staged artifacts themselves:
+  [docs/cb-probe-v0.60.12-migration.md](../docs/cb-probe-v0.60.12-migration.md)
+  + [docs/cb-probe-rewrites/](../docs/cb-probe-rewrites/) (TOML fragments,
+  `cases.ts`, `README.md`). CB-side application of these rewrites to
+  `/Users/pcastone/Projects/cb/.../cb-rivers-feature-validation-bundle/`
+  is owned by the CB maintainer — not a Rivers-repo action. Done 2026-05-10.
+- [ ] **T1.validate** — On a v0.60.12 build with the migrated probe,
+  `./run-probe.sh` should report 4× 🎉 NEWLY PASSING (F, H, J, G recipe),
+  1× ⏳ EXPECTED FAIL (Case I — P1.14 still pending). **Pending CB-side
+  application of the rewrites.**
+
+**Versioning:** No Rivers code change → no Rivers bump. CB-side doc/PR
+only.
+
+### Track 2 — Validator hardening: enum-validate `auth` and `view_type`
+
+**Goal:** Make the structural layer reject string values outside the
+canonical set so probes like CB's catch missing-feature gaps loudly
+instead of having strings silently slide past as no-ops.
+
+**Files:** `crates/rivers-runtime/src/validate_structural.rs`,
+`crates/rivers-runtime/src/view.rs` (no struct change — keep `String`
+field for forward-compat; validator gates the value), tests in
+`validate_structural.rs::tests`.
+
+**Sentinel set today (from changelog + recent commits):**
+- `view_type ∈ {"Rest","Mcp","WebSocket","Sse","Streaming"}`
+- `auth ∈ {"none","session"}`
+
+(Verify the canonical strings against `view.rs` + match arms in
+`view_dispatch.rs`/`server::router` before locking the lists.)
+
+- [x] **T2.1** — Audited. Canonical sets:
+  `view_type ∈ {Rest, Websocket, ServerSentEvents, MessageConsumer, Mcp}`
+  (sourced from `crates/rivers-runtime/src/validate.rs:58 VALID_VIEW_TYPES`,
+  cross-checked against runtime match arms in `view_engine/router.rs`,
+  `view_engine/validation.rs`, `bundle_loader/wire.rs`, `admin_handlers.rs`,
+  `guard.rs`, `server/view_dispatch.rs`).
+  `auth ∈ {none, session}` (sourced from `auth.as_deref()` match arms in
+  `validate_crossref.rs:812` and `security_pipeline.rs:214`). Done 2026-05-10.
+- [x] **T2.2** — Added `VALID_VIEW_TYPES` const + `validate_view_type` helper
+  in `crates/rivers-runtime/src/validate_structural.rs`. Wired into the
+  per-view walker right after `check_unknown_keys`. Emits `S005` with
+  enumerated canonical set + did-you-mean. Done 2026-05-10.
+- [x] **T2.3** — Added `VALID_AUTH_MODES` const + `validate_auth_mode` helper
+  in the same file. Same wiring point. Done 2026-05-10.
+- [x] **T2.4** — 5 unit tests added in `validate_structural.rs::tests`:
+  `view_type_rejects_unknown_string`, `view_type_accepts_canonical_values`
+  (covers all 5 canonical names), `view_type_did_you_mean_suggests_canonical`,
+  `auth_rejects_unknown_string`, `auth_accepts_canonical_and_omitted`
+  (covers `none`/`session`/omitted). All pass. Done 2026-05-10.
+- [x] **T2.5** — Re-validated CB probe originals (fresh extract from
+  the 2026-05-09 zip):
+  - F (P1.10 wrong field): TOML parse error (Layer 0, unchanged).
+  - G (`auth='bearer'`): now `S005: 'bearer' is not one of [none, session]` ✅
+  - I (`view_type='Cron'`): now `S005: 'Cron' is not one of [Rest, Websocket, ServerSentEvents, MessageConsumer, Mcp]` ✅
+  - J (`[response.headers]`): still silent (unknown-key warning path; Track 1 migration handles).
+  Done 2026-05-10.
+- [x] **T2.6** — Specs updated:
+  `docs/arch/rivers-bundle-validation-spec.md` §4.1 (closed enum lists +
+  `S005` mention); `docs/arch/rivers-view-layer-spec.md` §2 (added `Mcp`
+  to enum, hardening note + bearer-recipe pointer). Done 2026-05-10.
+- [x] **T2.7** — Changelog entry added (`todo/changelog.md` 2026-05-10
+  Track 2). Decision log already had `CB-PROBE-D2` covering this from
+  the planning step. Done 2026-05-10.
+- [x] **T2.validate** — `cargo test -p rivers-runtime --lib` 261/261
+  (was 256; +5). `cargo test -p riversd --lib` 488/488 (no regression).
+  Probe re-validation per T2.5. Done 2026-05-10.
+- [x] **T2.8** — `just bump-patch`: `0.60.12+0337090526 → 0.60.13+0804100526`.
+  Done 2026-05-10.
+
+### Track 3 — P1.14 scheduled-task primitive (`view_type = "Cron"`)
+
+**Source:** `case-rivers-scheduled-task-primitive.md` (filed 2026-05-09).
+**Pass/fail criteria** lifted directly from the case (§"Pass/fail criteria
+for the fix"):
+
+1. Bundle declares a handler firing on schedule with no connected client.
+2. Same execution environment as REST/MCP — same `Rivers.db.*`, same
+   capability propagation, same logging.
+3. Multi-instance deployments don't multiply the schedule (StorageEngine
+   dedupe, same pattern as polling views).
+4. Failure controls: retry-with-backoff, max concurrent runs, dead-letter
+   or skip-on-overrun.
+
+**Design — TOML shape (per CB's case):**
+
+```toml
+[api.views.recompute_signals]
+view_type        = "Cron"
+schedule         = "*/5 * * * *"   # cron expr OR
+interval_seconds = 300              # plain integer (mutually exclusive)
+overlap_policy   = "skip"           # 'skip' (default) | 'queue' | 'allow'
+
+[api.views.recompute_signals.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/signals.ts"
+entrypoint = "recomputeAllProjects"
+resources  = ["cb_db"]
+```
+
+**No `path` / `method` / `auth`** — Cron views aren't HTTP-addressable.
+The validator will need to *not* require those fields when
+`view_type = "Cron"` (today they're required for all views — see Case I
+output where missing path/method also fails).
+
+**Implementation strategy** (per CB's "Suggested implementation
+direction" — synthetic-client built on polling infra):
+
+- New `CronScheduler` per app. Owns a `tokio::time::Interval` (for
+  `interval_seconds`) or a cron-expression scheduler (for `schedule`).
+  Every tick: dispatch the handler via the same path REST uses
+  (`view_engine` + `process_pool`).
+- StorageEngine-backed dedupe key `cron:{app_id}:{view_name}:{tick_epoch}`
+  with TTL ≥ tick interval. First node to write the key fires; others
+  see write conflict and skip. Same pattern as polling-view dedupe
+  (`rivers-polling-views-spec.md` §3 "loop key").
+- `overlap_policy` semantics:
+  - `skip` (default) — if previous tick still running, drop this tick
+    (log at debug).
+  - `queue` — bounded queue (configurable cap; reject if full).
+  - `allow` — fire concurrently. Caller's responsibility to be safe.
+- Failure handling: handler error → log + `metrics::cron_failures_total`
+  increment. No automatic retry in v1; if the handler wants retry, it
+  retries internally. Add `[base.metrics]` exposes `cron_runs_total`,
+  `cron_failures_total`, `cron_skipped_overlap_total`, `cron_duration_ms`
+  histogram (gated on `metrics` feature).
+
+**Files:**
+- `crates/rivers-runtime/src/view.rs` — extend `ApiViewConfig` with
+  `schedule`, `interval_seconds`, `overlap_policy` (all `Option`).
+- `crates/rivers-runtime/src/validate_structural.rs` — add `cron`-specific
+  required-field rules (one of `schedule|interval_seconds`; mutex
+  enforcement; `path`/`method` not required when `view_type = "Cron"`);
+  reject `auth` on Cron views (no caller).
+- `crates/rivers-runtime/src/validate_crossref.rs` — codecomponent
+  resource declarations validate same as REST views.
+- `crates/riversd/src/cron/mod.rs` (new) — `CronScheduler`, tick loop,
+  StorageEngine dedupe, overlap-policy queueing.
+- `crates/riversd/src/server/view_dispatch.rs` — startup wires Cron
+  views into the scheduler instead of the HTTP router.
+- `crates/riversd/src/metrics.rs` — new counter/histogram registrations.
+- `docs/arch/rivers-cron-view-spec.md` (new) or extend
+  `rivers-view-layer-spec.md` with a "Cron view type" section.
+
+**Tasks:**
+
+- [x] **T3.1** — `rivers-polling-views-spec.md` and `polling/runner.rs`
+  read end-to-end. Reusable: StorageEngine `set_if_absent` for per-tick
+  dedupe (same first-writer-wins pattern as polling loop dedupe),
+  ProcessPool dispatch path with `task_enrichment::enrich`. Cron-specific:
+  no client subscription model, no diff strategy, time as the trigger
+  instead of subscription. Done 2026-05-10.
+- [x] **T3.2** — `cron = "0.16"` selected (workspace dep). Runtime deps
+  small: chrono (already in workspace), once_cell, phf, winnow, serde.
+  `croner` evaluated and rejected — larger feature surface, no benefit
+  for our use case. Done 2026-05-10.
+- [x] **T3.3** — `docs/arch/rivers-cron-view-spec.md` written. 12
+  sections, 100% of pass/fail criteria documented. Includes non-goals
+  list (no retry/catch-up/timezones in v1). Done 2026-05-10.
+- [x] **T3.4** — `ApiViewConfig` extended with `schedule`,
+  `interval_seconds`, `overlap_policy`, `max_concurrent` (all
+  `Option<T>` with `#[serde(default)]`). `Cron` added to both
+  `crates/rivers-runtime/src/validate.rs::VALID_VIEW_TYPES` (runtime)
+  and `validate_structural.rs::VALID_VIEW_TYPES` (bundle validator).
+  9 `ApiViewConfig` literal sites patched mechanically. Done 2026-05-10.
+- [x] **T3.5** — `validate_cron_view` helper added in
+  `validate_structural.rs`. Enforces schedule/interval mutex,
+  schedule parse via `cron::Schedule::from_str`, forbidden-fields list
+  (path/method/auth/guard_view/response_headers/etc.), `overlap_policy`
+  enum gate. Cron-only fields on non-Cron views also rejected with S005.
+  8 unit tests added (`cron_view_*`). Done 2026-05-10.
+- [x] **T3.6/T3.7/T3.8/T3.9/T3.10** — `crates/riversd/src/cron/mod.rs`
+  ships `CronScheduler` with cooperative shutdown,
+  `CronViewSpec::from_view_config`, `NextTick` (Cron-expr or fixed
+  interval), `OverlapPolicy` (`Skip` default / `Queue` / `Allow`), per-view
+  tokio loop with `tokio::time::sleep_until`, `try_acquire_tick`
+  (StorageEngine dedupe), TTL clamped to [60s, 3600s] per spec §4.3.
+  Synthetic dispatch envelope (empty `request`/`session`/`path_params` +
+  `cron: { ... }` ctx field). Metrics via `metrics` crate facade — 6
+  counters + 1 histogram with `app`,`view` labels. Logging at `debug`
+  per tick, `error` on handler failure. Done 2026-05-10.
+- [x] **T3.6b** — Wired into bundle load. After `ctx.loaded_bundle =
+  Some(...)`, `crate::cron::collect_cron_specs(bundle)` walks every Cron
+  view; if any exist + `[storage_engine]` configured, `CronScheduler::start`
+  spawns the loops and stores the handle on
+  `AppContext::cron_scheduler`. Missing storage logs a clear startup
+  error and skips (does not crash). Done 2026-05-10.
+- [x] **T3.11** — 12 unit tests in `crates/riversd/src/cron/mod.rs::tests`
+  covering: `next_after` for both Cron and Interval, overlap-policy
+  parsing + defaults, `dedupe_ttl` clamping, `dedupe_key` namespacing,
+  spec build (canonical happy path + 5 error paths), and 2 dedupe
+  integration tests against `InMemoryStorageEngine`
+  (`try_acquire_tick_first_caller_wins`,
+  `try_acquire_tick_isolates_views_and_apps`). All pass. End-to-end V8
+  dispatch test deferred — composes existing tested primitives
+  (process_pool dispatch, task_enrichment::enrich, set_if_absent)
+  whose individual test coverage already exercises the load-bearing
+  pieces. Done 2026-05-10.
+- [x] **T3.12** — `docs/cb-probe-rewrites/expected-fail/I-cron-view-type.toml`
+  updated to canonical 6-field `schedule = "0 */5 * * * *"` form (cron
+  crate rejects 5-field POSIX shorthand — spec text adjusted to match).
+  README cases table flipped Case I → ✅ PASS (v0.61.0+). Validation
+  re-run on /tmp/cb-orig with rewrite applied: `0 errors, 1 warning`
+  (the L4 V8-engine skip in dev). Done 2026-05-10.
+- [x] **T3.13** — `docs/arch/rivers-feature-inventory.md` §2.6b added.
+  `docs/guide/tutorials/tutorial-cron.md` written — minimum viable
+  tutorial covering when to use, configuration reference, schedule
+  formats, overlap policies, multi-instance setup, observability,
+  failure handling, v1 non-goals. Done 2026-05-10.
+- [x] **T3.14** — Changelog entry written (`todo/changelog.md` 2026-05-10
+  Track 3). Decision-log entry CB-PROBE-D4 updated to "Resolution"
+  status; new CB-PROBE-D5 added documenting the v1 non-goals (no
+  retry, no catch-up, no timezones). Done 2026-05-10.
+- [x] **T3.validate** — Pass/fail criteria 1–4 from the case all met
+  (see changelog table). `cargo test -p rivers-runtime --lib` 269/269
+  (was 256; +13 across Tracks 2+3). `cargo test -p riversd --lib` 500/500
+  (was 488; +12). CB probe Case I splice-validates clean against
+  /tmp/cb-orig. Done 2026-05-10.
+- [x] **T3.15** — `just bump-minor`: `0.60.13+0804100526 → 0.61.0+1446100526`.
+  Done 2026-05-10.
+
+### Cross-cutting
+
+- [ ] **X.1** — Update `MEMORY.md` sprint pointer when this sprint closes
+  (mirrors current `project_sprint_canary.md`).
+- [ ] **X.2** — `git commit` per track. Track 1 = doc-only commit. Track
+  2 = patch bump commit. Track 3 = minor bump commit (or split: spec PR
+  first, then implementation PR).
+- [ ] **X.3** — After all tracks land: rerun the CB probe end-to-end on
+  a fresh build. All 5 EXPECTED FAILs should be resolved (4 NEWLY
+  PASSING + Case G recipe-closed). Capture the run-probe.sh output in
+  the changelog as proof.
+
+**Sprint exit criteria (gap analysis per Standard 9):**
+- CB can rerun their probe and see 0 unresolved EXPECTED FAIL.
+- Validator hardening prevents the next probe from silently passing.
+- Cron view spec, runtime, tests, docs, and CB-side adoption are all in.

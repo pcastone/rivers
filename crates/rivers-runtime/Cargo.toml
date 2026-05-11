@@ -33,6 +33,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
+# Cron expression parsing for `view_type = "Cron"` validator (CB-P1.14).
+cron = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 schemars = { workspace = true }

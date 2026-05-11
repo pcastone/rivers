@@ -174,7 +174,7 @@ Fail → app enters FAILED state, structured error logged
 **Per-app `app.toml` structural rules:**
 
 - `[data.dataviews.*]` — each DataView has `name` (string), `datasource` (string), `query` (string)
-- `[api.views.*]` — each view has `path` (string), `method` (string), `view_type` (string, must be `Rest`, `Websocket`, `ServerSentEvents`, or `MessageConsumer`)
+- `[api.views.*]` — each view has `path` (string), `method` (string), `view_type` (string, must be `Rest`, `Websocket`, `ServerSentEvents`, `MessageConsumer`, or `Mcp`); optional `auth` (string, must be `none` or `session` if present). Values outside these closed sets emit `S005` with a did-you-mean hint (Sprint 2026-05-09 Track 2).
 - Handler definitions: `type` is `"dataview"` or `"codecomponent"`; CodeComponent requires `language`, `module`, `entrypoint`
 - `nopassword = true` and `lockbox` are mutually exclusive — presence of both is a hard error
 - `nopassword` absent and `lockbox` absent is a hard error (for non-`nopassword` drivers)

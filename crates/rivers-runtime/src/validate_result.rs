@@ -618,6 +618,10 @@ pub mod error_codes {
     pub const W009: &str = "W009";
     /// View has both `guard = true` (server-wide auth gate) and `guard_view = "..."` (per-view gate).
     pub const W010: &str = "W010";
+    /// Cron views declared with a node-local storage backend (`memory` or
+    /// `sqlite`). Multi-instance dedupe does not work in this configuration —
+    /// every node fires every tick. CB-P1.14 / `rivers-cron-view-spec.md` §5.3.
+    pub const W011: &str = "W011";
 }
 
 // ── Tests ──────────────────────────────────────────────────────────

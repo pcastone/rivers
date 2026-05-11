@@ -52,6 +52,10 @@ fn consumer_view(topic: &str, handler: &str) -> ApiViewConfig {
         session: None,
         federation: vec![],
         response_headers: None,
+        schedule: None,
+        interval_seconds: None,
+        overlap_policy: None,
+        max_concurrent: None,
             guard_view: None,
     }
 }

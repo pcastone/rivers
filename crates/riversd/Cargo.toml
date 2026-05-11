@@ -94,6 +94,8 @@ base64 = { workspace = true, optional = true }
 reqwest = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true, optional = true }
+# Cron-view scheduler (CB-P1.14, Sprint 2026-05-09 Track 3).
+cron = { workspace = true }
 
 # Optional: static plugin deps (included with "static-plugins" feature)
 rivers-plugin-cassandra = { path = "../rivers-plugin-cassandra", optional = true, default-features = false }
@@ -111,7 +113,6 @@ rivers-plugin-neo4j = { path = "../rivers-plugin-neo4j", optional = true, defaul
 
 [dev-dependencies]
 async-trait = { workspace = true }
-chrono = { workspace = true }
 tempfile = { workspace = true }
 tower = { workspace = true }
 # Phase I8 — direct rusqlite handle for e2e durability assertions

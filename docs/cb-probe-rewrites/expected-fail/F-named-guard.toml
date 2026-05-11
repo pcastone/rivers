@@ -1,0 +1,50 @@
+# Case F — Per-view named guards (CB-P1.10).
+#
+# SHIPPED in Rivers v0.60.x (PRs #103, #107, #109).
+#
+# The shipped field is `guard_view = "name"`, NOT `guard = "name"`.
+# `guard: bool` already existed (server-wide auth gate, exactly one
+# per server) — `guard_view: Option<String>` is the per-view named
+# guard added by P1.10. Distinct fields, both can coexist.
+#
+# Spec ref: rivers-mcp-view-spec.md §13.5 + MCP-5;
+# rivers-view-layer-spec.md §14 (cross-cutting Named Guards section).
+#
+# Splice this fragment into app/app.toml; expected on v0.60.12+:
+# validate PASSES, run-probe.sh exercises both guard branches.
+
+# ── The guard target ────────────────────────────────────────────────
+# Validator (X014) requires: same app, view_type = Rest (or any view
+# with a codecomponent handler), entrypoint returns { allow: bool }.
+
+[api.views.case_f_advisor_guard]
+path      = "case-f/_guard"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.case_f_advisor_guard.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/cases.ts"
+entrypoint = "caseFGuard"
+resources  = []
+
+# ── The protected MCP view ──────────────────────────────────────────
+# `guard_view = "..."` runs the named view's codecomponent as a pre-flight.
+# `{ allow: true }` proceeds; anything else → HTTP 401 (per MCP-27).
+
+[api.views.case_f_named_guard]
+path       = "case-f/named-guard"
+method     = "POST"
+view_type  = "Mcp"
+auth       = "none"
+guard_view = "case_f_advisor_guard"
+
+[api.views.case_f_named_guard.handler]
+type = "none"
+
+[api.views.case_f_named_guard.tools.case_f_tool]
+dataview    = "case_a_dv"
+description = "Case F: tool body only fires if guard returns { allow: true }."
+hints       = { read_only = true }

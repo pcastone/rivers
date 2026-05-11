@@ -110,6 +110,15 @@ Extracted from all specification documents. Top-level features with granular sub
 - Fire-and-forget or acknowledgment-based consumption
 - Auto-exempt from session requirements; opt-in via `auth = "session"` (MessageConsumer session exemption)
 
+### 2.6b Cron Views (CB-P1.14, Sprint 2026-05-09 Track 3)
+- Time-driven scheduled tasks — fire on schedule with no client present
+- 6-field cron expression (`0 */5 * * * *`) or fixed `interval_seconds`
+- `overlap_policy = "skip" | "queue" | "allow"` for tick collision control
+- Multi-instance dedupe via StorageEngine `set_if_absent` (one node fires per tick)
+- No `path` / `method` / `auth` — Cron views aren't HTTP-addressable
+- Same execution environment as REST/MCP — `Rivers.db.*` capability propagation works
+- Spec: `docs/arch/rivers-cron-view-spec.md`
+
 ### 2.7 Streaming REST
 - POST with streaming response body
 - Wire formats: NDJSON (`application/x-ndjson`) and SSE (`text/event-stream`)

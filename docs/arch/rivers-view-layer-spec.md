@@ -70,6 +70,7 @@ pub enum ApiViewType {
     Websocket,
     ServerSentEvents,
     MessageConsumer,
+    Mcp,
 }
 ```
 
@@ -79,6 +80,14 @@ pub enum ApiViewType {
 | `Websocket` | WS upgrade | Bidirectional | GET only |
 | `ServerSentEvents` | HTTP long-lived | Server → Client | GET only |
 | `MessageConsumer` | EventBus event | Event → Handler | No HTTP route |
+| `Mcp` | HTTP (JSON-RPC + SSE) | Bidirectional via session | POST only — see `rivers-mcp-view-spec.md` |
+
+`view_type` is a closed enum at structural validation. Values outside the
+list above emit `S005` with a did-you-mean hint (Sprint 2026-05-09 Track 2).
+The same hardening applies to `auth` — accepted values are `"none"` and
+`"session"` only. Bearer-token authentication is not a built-in `auth`
+mode; use the `guard_view` named-guard recipe in `rivers-auth-session-spec.md`
+§11.5.
 
 ---
 
