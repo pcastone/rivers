@@ -4,6 +4,35 @@ Per CLAUDE.md Workflow rule 5: every decision during implementation is logged he
 
 ---
 
+## 2026-05-10 — Cron view capability propagation (v0.61.0 → v0.61.1)
+
+CB filed `cb-rivers-cron-capability-bug` against v0.61.0 — Cron handlers
+fail with `CapabilityError: datasource '<name>' not declared in view
+config` at every tick, even when the validator reports the resource as
+resolved. Same exact shape as the MCP-view bug fixed in v0.60.12
+(P1.13): the dispatcher builds a `TaskContextBuilder` and forgets to
+call `wire_datasources` before `enrich`. Track 3 of the v0.61.0 sprint
+shipped Cron without a datasource-using test scenario, so the omission
+slid past CI.
+
+| File | Decision | Spec ref | Resolution |
+|------|----------|----------|------------|
+| `crates/riversd/src/task_enrichment.rs` | Add a new entry point — `wire_datasources_from_shared(builder, dv_namespace)` — instead of plumbing `DataViewExecutor` through `CronScheduler::start`. Cron loops live on detached `tokio::task`s for the bundle's lifetime; they have no `AppContext` handle and no good way to refresh one on reload. The executor is already snapshotted into `SHARED_TASK_CAPABILITIES` at every bundle load/reload (line 996 of `bundle_loader/load.rs`), so reading from there is correct *and* hot-reload-safe. | `rivers-cron-view-spec.md` §3.1; mirrors REST/MCP datasource wiring | Reuses the existing `wire_datasources(builder, executor, dv_namespace)` body — the new function is a thin shim, no duplicated logic. |
+| `crates/riversd/src/cron/mod.rs::CronViewSpec` | Add `entry_point: String` field alongside the existing `app_id: String`. Keep `app_id` (manifest UUID) for storage dedupe and metric labels — those have been wired against the UUID since v0.61.0 and changing them would break the dedupe key shape. The new `entry_point` is what gets passed to `enrich` and `wire_datasources_from_shared`. | RT-CTX-APP-ID parity (2026-05-05 canary sprint correction; mcp/dispatch.rs line 597-604) | Surgical addition — no rename, no behavior change for dedupe/metrics. |
+| `crates/riversd/src/cron/mod.rs::dispatch_tick` | Call `wire_datasources_from_shared(builder, entry_point)` after the storage wiring and before `enrich`. Then pass `entry_point` (NOT `app_id`) to `enrich` for parity with mcp/dispatch.rs line 604. | spec §4 (tick lifecycle) | One-line shim per logical step. Three `spec.entry_point.clone()` sites in `run_cron_loop` (Queue/Skip/Allow) match the existing `spec.app_id.clone()` pattern. |
+| Test coverage | Add two unit tests in `task_enrichment.rs::tests` that exercise `wire_datasources_from_shared` directly — one with a populated snapshot, one with the default (empty) snapshot. Did NOT add a Cron-integration test that drives V8: the dispatch wiring is now isomorphic with REST/MCP, and the existing direct-dispatch e2e test in `sprint_2026_05_09_e2e.rs::track3_direct_dispatch_handler_writes_to_store` already proves the V8 path from a `TaskContextBuilder`. The bug was strictly in the builder construction. | `rivers-cron-view-spec.md` §13 | Two tests, no V8 boot, runs in <10ms total. |
+| Workspace version | Patch bump `0.61.0 → 0.61.1`. | CLAUDE.md bump rules | Filling a documented-but-missing capability path (validator passes, runtime errors). Patch, not minor — the Cron primitive itself shipped in 0.61.0; this fixes a propagation gap. |
+
+**Reuse-vs-new judgement:** the `wire_datasources` function is the
+existing pattern. Reusing it via a small `_from_shared` shim was correct
+— rewriting it to walk SHARED_TASK_CAPABILITIES internally would have
+broken the explicit-executor callers (REST/MCP/SSE/WS) that still need
+to pass an executor they hold a reference to. The shim adds one tested
+branch (shared-state read) to the existing four (sql/filesystem/broker/
+empty-driver).
+
+---
+
 ## 2026-05-08 — P1.13 follow-up: close MCP HttpToken gap + canary regression coverage
 
 | File | Decision | Spec ref | Resolution |

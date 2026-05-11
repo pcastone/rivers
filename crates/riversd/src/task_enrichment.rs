@@ -131,6 +131,31 @@ pub fn wire_datasources(
     builder
 }
 
+/// Wire per-app datasource tokens and configs using the executor cached in
+/// `SHARED_TASK_CAPABILITIES`.
+///
+/// Used by dispatch paths that have no direct handle on `AppContext` (Cron
+/// loops live on their own `tokio::task`s spawned at bundle load time). For
+/// REST/MCP/SSE/WS, callers still pass the executor explicitly via
+/// [`wire_datasources`].
+///
+/// CB-cron-cap-fix (2026-05-10): introduced so the Cron tick dispatcher can
+/// propagate `[api.views.X.handler] resources` into the task capability set
+/// the same way REST/MCP do. Without this, `Rivers.db.query` from inside a
+/// Cron handler fails with `CapabilityError: datasource '<name>' not
+/// declared in view config`.
+pub fn wire_datasources_from_shared(
+    builder: TaskContextBuilder,
+    dv_namespace: &str,
+) -> TaskContextBuilder {
+    let executor = SHARED_TASK_CAPABILITIES
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .dataview_executor
+        .clone();
+    wire_datasources(builder, executor.as_deref(), dv_namespace)
+}
+
 /// Enrich a TaskContextBuilder with all capabilities available from shared state.
 ///
 /// New capabilities wired here automatically become available to every dispatch site.
@@ -535,5 +560,45 @@ mod tests {
             task.datasources.keys().collect::<Vec<_>>(),
             task.datasource_configs.keys().collect::<Vec<_>>(),
         );
+    }
+
+    /// CB-cron-cap-fix (2026-05-10): `wire_datasources_from_shared` reads
+    /// the executor stashed in `SHARED_TASK_CAPABILITIES` and wires
+    /// per-app datasources. Cron dispatch uses this because it has no
+    /// direct `AppContext` handle — without it, every Cron handler that
+    /// calls `Rivers.db.*` fails with CapabilityError.
+    #[test]
+    fn wire_datasources_from_shared_uses_snapshot_executor() {
+        let executor = p113_executor_with("myapp:cb_db", "sqlite", "/tmp/cb.db");
+
+        let previous = replace_shared_capabilities(SharedTaskCapabilities {
+            dataview_executor: Some(executor),
+            ..SharedTaskCapabilities::default()
+        });
+
+        let task = wire_datasources_from_shared(p113_seed_builder(), "myapp")
+            .build()
+            .expect("task ctx builds");
+
+        assert!(
+            task.datasource_configs.contains_key("cb_db"),
+            "shared-state path must wire app-scoped datasources just like the explicit path"
+        );
+
+        replace_shared_capabilities(previous);
+    }
+
+    /// No executor in shared state → no-op (must not panic). Mirrors the
+    /// `None` branch of `wire_datasources`.
+    #[test]
+    fn wire_datasources_from_shared_is_noop_when_unset() {
+        let previous = replace_shared_capabilities(SharedTaskCapabilities::default());
+
+        let task = wire_datasources_from_shared(p113_seed_builder(), "myapp")
+            .build()
+            .expect("task ctx builds");
+        assert!(task.datasource_configs.is_empty());
+
+        replace_shared_capabilities(previous);
     }
 }
