@@ -1,5 +1,45 @@
 # Changelog
 
+## 2026-05-11 — CB-OTLP Track O1: validator-side acceptance of `view_type = "OTLP"`
+
+CB filed `cb-rivers-otlp-feature-request.zip` (2026-05-11) asking for a
+first-class OTLP/HTTP view type. Track O1 lands the **validator half** of
+that ask: `riverpackage validate` now accepts `view_type = "OTLP"` as a
+canonical value, walks the OTLP-view config, and rejects every shape the
+spec (`docs/arch/rivers-otlp-view-spec.md`) forbids with a marked
+`[X-OTLP-N]` S005 message. No dispatcher changes — the runtime still
+treats `OTLP` as unknown until O2 lands. Goal of O1 alone: when an
+operator writes a mis-configured OTLP view, `riverpackage validate` gives
+them an actionable error instead of a generic "unknown view type".
+
+| File | Change | Spec ref | Resolution |
+|------|--------|----------|------------|
+| `crates/rivers-runtime/src/validate_structural.rs` | Added `"OTLP"` to `VALID_VIEW_TYPES`. Added `"handlers"` + `"max_body_mb"` to `VIEW_FIELDS`. Extended the per-view-type `required` override to skip `path`/`method`/`handler` requirement for OTLP (it has its own handler shape). Added per-view dispatch branch for OTLP at the existing `view_type` switch — mirrors the Cron branch shape. Added new `validate_otlp_view` helper enforcing all X-OTLP-1..6 rules + `W-OTLP-1` warning. Also added "OTLP-only fields on non-OTLP views" rejection symmetric to the existing "Cron-only fields" guard. | `rivers-otlp-view-spec.md` §9 | New helper modeled on `validate_cron_view`. All structural errors emitted as `S005` with `[X-OTLP-N]` markers in the message for spec traceability — no new error codes were added except `W012` for the large-body warning. |
+| `crates/rivers-runtime/src/validate_result.rs` | Added `pub const W012: &str = "W012"` for the OTLP large-body warning. | spec §9 W-OTLP-1 | Existing W001-W011 numbering continued. |
+| `crates/rivers-runtime/src/validate_structural.rs` (tests) | 14 new unit tests in the existing `#[cfg(test)] mod tests` block. Covers multi-handler happy path, single-handler happy path, metrics-only form, X-OTLP-1 (all three signal suffixes), X-OTLP-2 (missing handler + unknown signal name), X-OTLP-3 (`auth=session` and `auth=bearer`), X-OTLP-4 (`streaming=true`), X-OTLP-5 (both handler forms), X-OTLP-6 (4 forbidden fields), W-OTLP-1 (max_body_mb=64), max_body_mb=0 hard fail, OTLP-only fields on Rest view, and a `view_type="OTL"` typo regression confirming the OTLP validator does NOT run on typo'd view types. All 14 green; full `cargo test -p rivers-runtime --lib` = 284/284 (was 270, +14). | spec §9 | `write_otlp_view` test helper added, mirrors `write_cron_view`. |
+| `docs/arch/rivers-feature-inventory.md` | New §2.6c — short feature-inventory entry pointing at the spec. | spec §1 | Mirrors §2.6b Cron entry. |
+| `docs/arch/rivers-bundle-validation-spec.md` | Added `OTLP` to the closed set of valid `view_type` values at §3. Filled in W005-W011 in the warnings catalog (previously stopped at W004 despite the runtime having W001-W011). Added W012 for `[W-OTLP-1]`. New §11.5.1 documenting the X-OTLP-N marker convention with a marker-to-rule table. | spec §9; validation spec §11 | Doc was already drift from runtime — opportunity-of-passing filled the W005-W011 gap. |
+
+**Scope:** Track O1 only. The dispatcher (Track O2), single-handler
+discriminator coverage tests (O3), bearer auth (O4 — deferred to P1.12),
+and observability/tutorial/version-bump (O5) are tracked in `todo/tasks.md`
+under "Sprint 2026-05-XX — `view_type = "OTLP"`".
+
+**Spec correction surfaced during O1.1:**
+`rivers-otlp-view-spec.md` §8 assumed CB-P1.12 (`auth = "bearer"`) was
+pending. The validator-code comments at `validate_structural.rs:126-130`
+make clear P1.12 was *closed* by routing bearer-style auth through
+`guard_view` rather than adding `"bearer"` to `VALID_AUTH_MODES`. The
+validator therefore rejects `auth = "bearer"` on OTLP views with
+`[X-OTLP-3]` and a message pointing the operator at `guard_view`. The
+spec §8 needs amendment to reflect this — captured as a follow-up below.
+
+**Follow-up captured (not in this commit):**
+- `rivers-otlp-view-spec.md` §8 to be amended: replace "auth = bearer
+  gated on P1.12 pending" wording with the project's resolved pattern
+  (use `guard_view` for bearer-style auth on OTLP views). Drop W-OTLP-2
+  from §9.
+
 ## 2026-05-10 — Cron view: propagate handler `resources` as task capabilities (v0.61.1)
 
 CB filed `cb-rivers-cron-capability-bug` — a Cron view with

@@ -174,7 +174,7 @@ Fail → app enters FAILED state, structured error logged
 **Per-app `app.toml` structural rules:**
 
 - `[data.dataviews.*]` — each DataView has `name` (string), `datasource` (string), `query` (string)
-- `[api.views.*]` — each view has `path` (string), `method` (string), `view_type` (string, must be `Rest`, `Websocket`, `ServerSentEvents`, `MessageConsumer`, or `Mcp`); optional `auth` (string, must be `none` or `session` if present). Values outside these closed sets emit `S005` with a did-you-mean hint (Sprint 2026-05-09 Track 2).
+- `[api.views.*]` — each view has `path` (string), `method` (string), `view_type` (string, must be `Rest`, `Websocket`, `ServerSentEvents`, `MessageConsumer`, `Mcp`, `Cron`, or `OTLP`); optional `auth` (string, must be `none` or `session` if present — `OTLP` views accept only `none`). Values outside these closed sets emit `S005` with a did-you-mean hint (Sprint 2026-05-09 Track 2; `Cron` added Track 3; `OTLP` added Sprint 2026-05-XX Track O1).
 - Handler definitions: `type` is `"dataview"` or `"codecomponent"`; CodeComponent requires `language`, `module`, `entrypoint`
 - `nopassword = true` and `lockbox` are mutually exclusive — presence of both is a hard error
 - `nopassword` absent and `lockbox` absent is a hard error (for non-`nopassword` drivers)
@@ -752,6 +752,30 @@ The `--lint` flag is removed from `riversctl doctor`. `doctor` retains its syste
 | `W002` | `Layer 4 skipped — engine dylib not available for {engine}` |
 | `W003` | `Layer 4 skipped — riversd.toml not found` |
 | `W004` | `{app}: no views defined — check [api.views.*] (not [views.*])` |
+| `W005` | `{file}: skip_introspect = true on a DataView with a GET query — likely a misconfiguration` |
+| `W006` | `{file}: subscribable = true on an MCP resource whose bound DataView has no GET method` |
+| `W007` | `{file}: cursor_key is set but the query has no ORDER BY clause (cursor pagination requires deterministic ordering)` |
+| `W008` | `{file}: transaction=true on a DataView backed by a driver that does not support transactions` |
+| `W009` | `{file}: guard_view target has auth = "session" — sessions don't exist when the guard runs` |
+| `W010` | `{file}: view has both guard = true (server-wide auth gate) and guard_view = "..." (per-view gate)` |
+| `W011` | `Cron views declared with a node-local storage backend ({backend}); multi-instance dedupe does not work` |
+| `W012` | `OTLP view: {field} = {value} is unusually large (OTLP/HTTP recommends 4); accepting but flagging` |
+
+### 11.5.1 X-OTLP-N marker convention
+
+OTLP-view-specific structural failures are emitted as `S005` (the existing invalid-value code) with a `[X-OTLP-N]` marker prepended to the message. The markers correspond to spec rules in `docs/arch/rivers-otlp-view-spec.md` §9 and let docs/agents grep for specific OTLP failure modes without introducing per-rule error codes:
+
+| Marker | Condition |
+|---|---|
+| `[X-OTLP-1]` | `path` ends with `/v1/{metrics,logs,traces}` — operator is mounting OTLP under a non-OTLP view type |
+| `[X-OTLP-2]` | Neither `handlers.{metrics,logs,traces}` nor a single `handler` declared, OR an unknown handler signal name |
+| `[X-OTLP-3]` | `auth` is anything other than `"none"` (OTLP is stateless; use `guard_view` for bearer-style auth) |
+| `[X-OTLP-4]` | `streaming = true` (OTLP/HTTP is unary) |
+| `[X-OTLP-5]` | Both single `handler` and `handlers.*` declared (mutually exclusive) |
+| `[X-OTLP-6]` | A field from another view type's domain is declared on an OTLP view |
+| `[W-OTLP-1]` | `max_body_mb > 16` — emitted as `W012`, not `S005` |
+
+`[X-OTLP-7]` and `[X-OTLP-8]` (Layer 3 module/entrypoint resolution for the `handlers.*` table) land when the dispatcher ships — see `rivers-otlp-view-spec.md` §14.3.
 
 ### 11.6 Gate 2 live check errors
 

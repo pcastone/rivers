@@ -119,6 +119,17 @@ Extracted from all specification documents. Top-level features with granular sub
 - Same execution environment as REST/MCP — `Rivers.db.*` capability propagation works
 - Spec: `docs/arch/rivers-cron-view-spec.md`
 
+### 2.6c OTLP Views (CB-OTLP, Sprint 2026-05-XX)
+- Declarative OpenTelemetry OTLP/HTTP endpoint — framework owns wire format, handler owns business logic
+- Content-Type negotiation between `application/json` and `application/x-protobuf` (reuses P1.6 transcoder)
+- Auto-decompression of `Content-Encoding: gzip` / `deflate` with `max_body_mb × 1.5` amplification cap
+- Operator declares `path = "<prefix>"`; framework mounts `/v1/{metrics,logs,traces}` underneath
+- Multi-handler form (`handlers.{metrics,logs,traces}`) or single-handler form with `ctx.otel.kind` discriminator
+- Framework emits OTLP-spec partial-success response (`{partialSuccess: {rejected<X>: N, errorMessage: "..."}}`)
+- Validator codes `[X-OTLP-1..6]` (errors) and `[W-OTLP-1]` (warning) — see `docs/arch/rivers-bundle-validation-amendments.md`
+- Track O1 (validator + inventory entry) shipped first; Track O2 (dispatcher + gzip + response wrap) follows
+- Spec: `docs/arch/rivers-otlp-view-spec.md`
+
 ### 2.7 Streaming REST
 - POST with streaming response body
 - Wire formats: NDJSON (`application/x-ndjson`) and SSE (`text/event-stream`)
