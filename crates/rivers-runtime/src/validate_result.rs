@@ -622,6 +622,10 @@ pub mod error_codes {
     /// `sqlite`). Multi-instance dedupe does not work in this configuration —
     /// every node fires every tick. CB-P1.14 / `rivers-cron-view-spec.md` §5.3.
     pub const W011: &str = "W011";
+    /// OTLP view declared `max_body_mb` greater than 16. OTLP/HTTP recommends
+    /// 4; values that large are almost certainly a misconfiguration. Accepted
+    /// but flagged. CB-OTLP / `rivers-otlp-view-spec.md` §9 (W-OTLP-1).
+    pub const W012: &str = "W012";
 }
 
 // ── Tests ──────────────────────────────────────────────────────────

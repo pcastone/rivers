@@ -2268,3 +2268,141 @@ direction" — synthetic-client built on polling infra):
 - CB can rerun their probe and see 0 unresolved EXPECTED FAIL.
 - Validator hardening prevents the next probe from silently passing.
 - Cron view spec, runtime, tests, docs, and CB-side adoption are all in.
+
+---
+
+## Sprint 2026-05-XX — `view_type = "OTLP"` (CB OTLP feature request)
+
+> **Source:** `cb-rivers-otlp-feature-request.zip` (filed 2026-05-11)
+> **Spec:** `docs/arch/rivers-otlp-view-spec.md`
+> **Goal:** ship a first-class OTLP/HTTP view type that handles JSON + protobuf + gzip/deflate, dispatches per-signal handlers, and emits OTLP partial-success responses.
+> **Lever:** P1.6 protobuf transcoder already exists at `crates/riversd/src/otlp_transcoder.rs` — most work is declarative plumbing, not parser work.
+> **Sequence:** Tracks are independently shippable. Track O1 (validator) alone gives operators an actionable error.
+
+**Confirmed from source (per Standard 1):**
+- P1.6 transcoder is wired at `crates/riversd/src/server/view_dispatch.rs:239-275` for protobuf decode → JSON re-encode on `/v1/{traces,metrics,logs}` paths.
+- View-type dispatch switch is at `view_dispatch.rs:196-209` (`match view_type` with arms for SSE, Websocket, Mcp; default falls through to REST).
+- Cron view validator emits S005 via `validate_structural::validate_cron_view` — same layer the OTLP validator hooks into.
+- No `flate2` direct dep in `crates/riversd/Cargo.toml` today — needs verification (may be transitive via tonic).
+
+**Inferred / to confirm:**
+- Whether to add a new `TaskKind::Otlp` variant or reuse `TaskKind::Rest` for OTLP handler dispatch — leaning reuse-Rest for v1, mark as decision-log entry in O5.3.
+- Where the `OtelContext` shape lives in `SerializedTaskContext` (`crates/rivers-engine-sdk`) — needs a code read before O2.
+
+---
+
+### Track O1 — Validator + feature-inventory stub
+
+**Files:** `crates/rivers-runtime/src/bundle_loader/validate_structural.rs` (or sibling), `crates/rivers-runtime/src/bundle_loader/validate_crossref.rs`, `docs/arch/rivers-feature-inventory.md`
+
+Goal: surfacing the gap in `riverpackage validate` even before the dispatcher lands. Operators trying to declare `view_type = "OTLP"` today get a generic "unknown view type" rather than an actionable error.
+
+- [x] **O1.1** — Read existing validators. **Findings (2026-05-11):**
+  - Cron analogue: `crates/rivers-runtime/src/validate_structural.rs:996-1171` (`fn validate_cron_view`).
+  - Dispatch site: `validate_structural.rs:805-828` — branches on `view_type == "Cron"`.
+  - Constants to edit: `VALID_VIEW_TYPES` (line 119-121, add `"OTLP"`), `VIEW_FIELDS` (line 97-111, add `"handlers"` + `"max_body_mb"`), `VIEW_REQUIRED` override (line 798, add OTLP branch — same shape as Cron, skip path/method req).
+  - Error-code convention: **single `S005`** for all structural issues with descriptive messages. Spec's `X-OTLP-N` codes are documentation labels, NOT runtime codes — embed `[X-OTLP-N]` markers in S005 messages for traceability. Same pattern Cron uses.
+  - Test helpers: `create_valid_bundle(dir)` at line 1443 and `write_cron_view(dir, body)` at line 2447 — pattern to mirror with `write_otlp_view`.
+  - **Spec correction surfaced:** `VALID_AUTH_MODES = ["none", "session"]` (line 131). The comment at line 126-130 says CB-P1.12 was *resolved* (not pending) by using `guard_view` instead of `auth = "bearer"`. The OTLP spec §8 assumed P1.12 was pending and would add `"bearer"`. **Adjustment:** OTLP views accept only `auth = "none"` (X-OTLP-3 rejects anything else, including `"session"` and `"bearer"`). Drop W-OTLP-2 entirely. Bearer-style auth on OTLP views is achieved via `guard_view` per project convention. Spec amendment goes in §14 changelog.
+  - **O1.3 scope adjustment:** X-OTLP-7/8 (module exists, entrypoint exported) require the `handlers.*` field to be parsed into `ApiViewConfig` — which is O2 work. Layer 1 can only verify the value is a string at TOML level. **Defer O1.3 to land with O2** (when there's a parsed `handlers` field for `validate_crossref` to walk). Marked accordingly below.
+- [x] **O1.2** — `validate_otlp_view` added to `validate_structural.rs:1200-1422`. Emits all S005 errors with `[X-OTLP-N]` markers in the message (decision CB-OTLP-D1); W-OTLP-1 emitted as new `W012` code. Per CB-OTLP-D2: `auth = "bearer"` rejected with `[X-OTLP-3]` (P1.12 was resolved via `guard_view`, not by accepting bearer in `VALID_AUTH_MODES`). W-OTLP-2 dropped entirely.
+  - **Validated:** 14 unit tests added (3 happy paths + 11 negative); `cargo test -p rivers-runtime --lib` = **284/284 green** (was 270). Includes `typo_otl_still_produces_unknown_view_type_error` which subsumes O1.4's regression test.
+- [!] **O1.3 (DEFERRED to O2 sprint)** — Cross-ref validation hook for X-OTLP-7/8. Blocked: requires `handlers: HashMap<String, HandlerConfig>` to land on `ApiViewConfig` first (an O2 data-model change). At Layer 1 today, all we can do is assert each handler's `module` field is a string — which is generic S004 territory, not OTLP-specific. Will reopen when O2 lands the parsed `handlers` field.
+- [x] **O1.4** — Done as part of O1.2. Dispatch wired at `validate_structural.rs:812-817` (`else if view_type == "OTLP"` branch). Typo regression test `typo_otl_still_produces_unknown_view_type_error` asserts the generic unknown-view-type S005 fires on `view_type = "OTL"` and that no `[X-OTLP-*]` markers appear (proving the OTLP validator does NOT run).
+- [x] **O1.5** — §2.6c entry added to `docs/arch/rivers-feature-inventory.md` between §2.6b (Cron) and §2.7 (Streaming REST). 9 bullets covering content-type negotiation, gzip, path mounting, both handler forms, partial-success response, X-OTLP-N codes, and the Track O1/O2 staging.
+- [x] **O1.6** — Validator code registry updated in `docs/arch/rivers-bundle-validation-spec.md`:
+  - `OTLP` added to the canonical `view_type` set at §3.
+  - W005-W011 backfilled in the §11.5 warnings catalog (existing doc drift — W001-W011 were in code but doc stopped at W004).
+  - W012 added for `[W-OTLP-1]`.
+  - New §11.5.1 documents the `[X-OTLP-N]` marker-on-S005 convention with a table mapping each marker to its spec rule.
+  - X-OTLP-7/8 (Layer 3) explicitly noted as deferred to O2 (see §14.3 of the OTLP spec).
+
+**Track O1 exit:** `riverpackage validate` on a mis-declared OTLP view emits an actionable X-OTLP-N error. No runtime behavior changes yet.
+
+---
+
+### Track O2 — Dispatcher (multi-handler form)
+
+**Files:** `crates/riversd/src/server/otlp_view.rs` (new), `crates/riversd/src/server/view_dispatch.rs`, `crates/riversd/src/lib.rs` (module declaration), `crates/riversd/Cargo.toml` (`flate2` dep if not transitive)
+
+- [ ] **O2.1** — Verify `flate2` availability. `cargo tree -p riversd | grep flate2` and/or check `Cargo.lock`. If absent, add `flate2 = "1"` to `riversd`'s dependencies.
+  - **Validate:** `cargo build -p riversd` green; binary size delta logged in task entry.
+- [ ] **O2.2** — Read `rivers-engine-sdk` `SerializedTaskContext` to locate where to plumb the new `otel` field on the dispatch envelope. Decide: extend `SerializedTaskContext` with an optional `otel: Option<OtelContext>` field, OR pass via a side channel. Default to extending — matches how `request` is plumbed today.
+  - **Validate:** decision recorded in this task entry; file paths + struct names listed.
+- [ ] **O2.3** — Define `OtelContext` shape in engine-sdk (or wherever O2.2 lands it): `{ kind: String, payload: serde_json::Value, encoding: String }`. Implement `Serialize` + `Deserialize`.
+  - **Validate:** 1 unit test round-trips JSON.
+- [ ] **O2.4** — New file `crates/riversd/src/server/otlp_view.rs` skeleton. Public entry: `pub async fn execute_otlp_view(ctx: AppContext, request: Request, matched: MatchedRoute) -> Response`. Wire into `view_dispatch.rs:196` match as `"OTLP" => execute_otlp_view(...).await`.
+  - **Validate:** `cargo build -p riversd` green; route matches but returns 501-not-yet-implemented placeholder when hit.
+- [ ] **O2.5** — Inside `execute_otlp_view`: implement size pre-check against `max_body_mb` (default 4). Return `413` with `{error: "..."}` if exceeded.
+  - **Validate:** unit test calls `execute_otlp_view` with a 5MB body under default config → 413.
+- [ ] **O2.6** — Implement decompression: gzip/deflate via `flate2::read::GzDecoder` / `flate2::read::DeflateDecoder`. Bounded read up to `max_body_mb * 1.5`. Return `415` for unknown `Content-Encoding`, `413` for post-decompression overrun.
+  - **Validate:** unit tests for gzip happy path, deflate happy path, unknown encoding `br` → 415, zip-bomb (1KB gzipped → 100MB inflated) → 413.
+- [ ] **O2.7** — Implement Content-Type negotiation. `application/json` → `serde_json::from_slice`; `application/x-protobuf` → call existing `crate::otlp_transcoder::transcode_otlp_protobuf` and parse the returned JSON bytes. Other → 415. Map transcoder errors:
+  - `UnknownSignal` → `404` (caller declared OTLP view but path isn't /v1/{metrics,logs,traces})
+  - `DecodeFailed` → `415` with the existing CB-observed error body shape
+  - **Validate:** unit tests for JSON happy, protobuf happy (use a small captured `ExportMetricsServiceRequest` test fixture), malformed JSON → 400, malformed protobuf → 415.
+- [ ] **O2.8** — Implement path routing. Extract the trailing segment (`metrics` | `logs` | `traces`) from `request.uri().path()`. Match against the view's declared `handlers.*` — if present, dispatch; if absent and a single `handler` is declared, dispatch to that with `ctx.otel.kind` set; otherwise 404.
+  - **Validate:** unit tests for metrics-only view returning 404 on /v1/logs; all-three view dispatching to correct handler.
+- [ ] **O2.9** — Build `OtelContext` and the full dispatch envelope. Call `process_pool::dispatch_codecomponent` (or whatever the canonical entry is — confirm by reading the REST dispatch path) with the OTLP handler's config. Reuse `TaskKind::Rest` for v1 (decision per the source preamble).
+  - **Validate:** 1 integration test boots a bundle with an OTLP view + a stub TS handler that echoes `ctx.otel.kind`, POSTs JSON, asserts handler ran and saw correct kind.
+- [ ] **O2.10** — Implement response wrapping. After handler returns, read `ctx.otel.rejected` and `ctx.otel.errorMessage` from the result envelope. Emit:
+  - `200 {}` when rejected == 0 or absent
+  - `200 {partialSuccess: {<rejected-field>: N, errorMessage: "..."}}` when rejected > 0, where `<rejected-field>` ∈ {rejectedDataPoints, rejectedLogRecords, rejectedSpans} selected from `ctx.otel.kind`
+  - `500 {error: "..."}` on handler exception
+  - **Validate:** unit tests for each branch; the partialSuccess field name selection.
+- [ ] **O2.11** — Wire per-app log routing + trace_id generation. Reuse the existing `uuid::Uuid::new_v4()` pattern from `view_dispatch.rs:277`. INFO log at request start; WARN on partial success; ERROR on framework reject or handler exception.
+  - **Validate:** integration test asserts `log/apps/<app>.log` contains expected INFO+WARN entries after a partial-success request.
+
+**Track O2 exit:** end-to-end JSON + protobuf + gzip OTLP ingest works. CB's run-probe.sh passes all 3 tests against this build.
+
+---
+
+### Track O3 — Single-handler discriminator form
+
+Validator already handles this in O1.2/O1.4 (X-OTLP-5). Dispatcher already handles it in O2.8. This track is purely about tests + tutorial coverage.
+
+- [ ] **O3.1** — Integration test: bundle with single `handler` and `ctx.otel.kind` switch. POST to each of `/v1/{metrics,logs,traces}` and assert the same handler ran with the right `kind`.
+  - **Validate:** test green.
+- [ ] **O3.2** — Negative test: bundle with both `handler` and `handlers.metrics` declared fails preflight with X-OTLP-5. (Already covered by O1.2 but assert via `riverpackage validate` CLI as well.)
+  - **Validate:** CLI exit code non-zero, stderr contains "X-OTLP-5".
+
+---
+
+### Track O4 — Auth (deferred — gated on P1.12)
+
+- [ ] **O4.1 (DEFERRED — P1.12 dependency)** — Wire `auth = "bearer"` resolution before handler dispatch. Reuse the P1.12 bearer pipeline (entry point TBD when P1.12 lands). Populate `ctx.session` on success; return 401 with the existing error shape on failure.
+- [ ] **O4.2 (DEFERRED)** — Flip W-OTLP-2 off in O1.2 once P1.12 lands. Update spec §8 to remove the "pending" caveat.
+
+---
+
+### Track O5 — Observability, docs, version bump
+
+- [ ] **O5.1** — Metrics: add the 7 metrics from spec §11 to the existing `metrics` module. Wire emission points into the dispatcher. Names: `otlp_requests_total`, `otlp_decode_failures_total`, `otlp_partial_success_total`, `otlp_rejected_points_total`, `otlp_request_bytes`, `otlp_decoded_bytes`, `otlp_dispatch_duration_ms`.
+  - **Validate:** scrape `/metrics` after a handful of OTLP requests; all 7 metrics present with labels.
+- [ ] **O5.2** — Tutorial: `docs/guide/tutorials/tutorial-otlp.md` mirroring the cron tutorial shape. Cover: when to use, multi-handler form, single-handler form, content-type/compression behavior, partial-success response, observability.
+  - **Validate:** tutorial renders; commands match working bundle.
+- [ ] **O5.3** — Decision-log entry CB-OTLP-D1 in `todo/changedecisionlog.md`: TaskKind reuse vs new variant, why JSON-only response in v1, why path-tail dispatch over per-signal `path` declarations.
+  - **Validate:** entry committed.
+- [ ] **O5.4** — Changelog entry in `todo/changelog.md` summarizing the sprint.
+  - **Validate:** entry committed.
+- [ ] **O5.5** — Version bump. `view_type = "OTLP"` is a genuinely new conceptual capability → `just bump-minor`.
+  - **Validate:** workspace `Cargo.toml` reflects the new minor; `cargo build` green at new version.
+- [ ] **O5.6** — Run CB's `run-probe.sh` end-to-end against the bumped build. Test 1 (JSON), Test 2 (protobuf), Test 3 (gzip) should all PASS. Capture output, attach to changelog entry.
+  - **Validate:** all 3 tests PASS; output captured.
+
+---
+
+### Track O6 — Cross-cutting
+
+- [ ] **O6.1** — `git commit` per track (O1 = patch-bump-OK; O2 = minor-bump; O3-O5 = build-only bumps if no additional public-API change). Split into multiple PRs if the diff gets unwieldy — spec PR (already in flight) + O1 PR + O2 PR + O3+O5 PR is a reasonable shape.
+- [ ] **O6.2** — Update `MEMORY.md` sprint pointer to point at this sprint once it closes.
+- [ ] **O6.3** — Notify CB team via the existing rivers-upstream channel that the feature has landed; point them at the spec + tutorial.
+
+---
+
+**Sprint exit criteria (gap analysis per Standard 9):**
+- `riverpackage validate` rejects mis-declared OTLP views with actionable X-OTLP-N errors.
+- CB's `run-probe.sh` Test 1 (JSON), Test 2 (protobuf), Test 3 (gzip) all PASS.
+- Multi-handler form, single-handler form, and metrics-only form all work end-to-end.
+- Spec, feature inventory, tutorial, decision log, and changelog all updated.
+- `auth = "bearer"` track explicitly deferred to P1.12 sprint (not blocking this sprint's close).

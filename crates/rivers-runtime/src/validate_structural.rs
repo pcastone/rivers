@@ -108,6 +108,8 @@ const VIEW_FIELDS: &[&str] = &[
     "response_headers", "guard_view",
     // Cron view fields (CB-P1.14 Track 3)
     "schedule", "interval_seconds", "overlap_policy", "max_concurrent",
+    // OTLP view fields (CB-OTLP Track O1 — docs/arch/rivers-otlp-view-spec.md)
+    "handlers", "max_body_mb",
 ];
 const VIEW_REQUIRED: &[&str] = &["path", "method", "view_type", "handler"];
 
@@ -117,7 +119,7 @@ const VIEW_REQUIRED: &[&str] = &["path", "method", "view_type", "handler"];
 /// layer instead of letting them slip through to runtime as silent no-ops.
 /// Sprint 2026-05-09 Track 2 + Track 3 (added `Cron`).
 const VALID_VIEW_TYPES: &[&str] = &[
-    "Rest", "Websocket", "ServerSentEvents", "MessageConsumer", "Mcp", "Cron",
+    "Rest", "Websocket", "ServerSentEvents", "MessageConsumer", "Mcp", "Cron", "OTLP",
 ];
 
 /// Canonical `overlap_policy` values for Cron views (CB-P1.14 Track 3).
@@ -792,11 +794,14 @@ fn validate_view(
     // MessageConsumer views are event-driven — no HTTP route, so path/method
     // are forbidden by the runtime validator (see crates/riversd/src/
     // view_engine/validation.rs). Cron views are time-driven, same shape:
-    // no HTTP route. Restrict the required-fields check to the common
-    // view_type + handler pair for those views.
+    // no HTTP route. OTLP views have their own handler shape (single `handler`
+    // OR `handlers.{metrics,logs,traces}` table) and forbid `method`, so the
+    // shared `VIEW_REQUIRED` check is replaced by per-view rules below.
     let view_type = table.get("view_type").and_then(|v| v.as_str()).unwrap_or("");
     let required: &[&str] = if view_type == "MessageConsumer" || view_type == "Cron" {
         &["view_type", "handler"]
+    } else if view_type == "OTLP" {
+        &["view_type", "path"]
     } else {
         VIEW_REQUIRED
     };
@@ -805,6 +810,10 @@ fn validate_view(
     // Cron-view-specific structural rules (CB-P1.14, Track 3).
     if view_type == "Cron" {
         validate_cron_view(table, file, table_path, app_name, results);
+    } else if view_type == "OTLP" {
+        // OTLP-view-specific structural rules (CB-OTLP Track O1 —
+        // docs/arch/rivers-otlp-view-spec.md §9).
+        validate_otlp_view(table, file, table_path, app_name, results);
     } else {
         // Cron-only fields on non-Cron views are no-ops at runtime — flag as
         // S005 so the misuse surfaces at validation rather than silently.
@@ -816,6 +825,24 @@ fn validate_view(
                         file,
                         format!(
                             "{}.{} is only valid when view_type=\"Cron\"",
+                            table_path, f
+                        ),
+                    )
+                    .with_table_path(table_path)
+                    .with_field(*f)
+                    .with_app(app_name),
+                );
+            }
+        }
+        // OTLP-only fields on non-OTLP views — same rationale.
+        for f in &["handlers", "max_body_mb"] {
+            if table.contains_key(*f) {
+                results.push(
+                    ValidationResult::fail(
+                        error_codes::S005,
+                        file,
+                        format!(
+                            "{}.{} is only valid when view_type=\"OTLP\"",
                             table_path, f
                         ),
                     )
@@ -1163,6 +1190,275 @@ fn validate_cron_view(
                     )
                     .with_table_path(table_path)
                     .with_field("overlap_policy")
+                    .with_app(app_name),
+                );
+            }
+        }
+    }
+}
+
+/// Walks `[api.views.<name>]` when `view_type = "OTLP"` and enforces structural
+/// rules from `docs/arch/rivers-otlp-view-spec.md` §9. CB-OTLP Track O1.
+///
+/// All errors are emitted as `S005` with a `[X-OTLP-N]` marker in the message
+/// so the spec-doc traceability codes remain searchable. Layer 1 only —
+/// X-OTLP-7/8 (module exists, entrypoint exported) require the parsed
+/// `handlers` field and live in `validate_crossref` once O2 lands it.
+///
+/// Rules enforced here:
+/// - **X-OTLP-1** — `path` ends with `/v1/{metrics,logs,traces}`. Implies the
+///   operator is mounting OTLP under a non-OTLP view type.
+/// - **X-OTLP-2** — neither `handler` nor any `handlers.*` declared.
+/// - **X-OTLP-3** — `auth` is anything other than `"none"`. OTLP clients are
+///   stateless; `"session"` and `"bearer"` are both rejected. Bearer-style
+///   auth uses `guard_view` per the existing project pattern.
+/// - **X-OTLP-4** — `streaming = true`. OTLP/HTTP is unary.
+/// - **X-OTLP-5** — both `handler` and `handlers.*` declared (mutually exclusive).
+/// - **X-OTLP-6** — any forbidden field declared (see `OTLP_FORBIDDEN`).
+/// - **W-OTLP-1** — `max_body_mb > 16`. OTLP/HTTP recommends 4. Warning, not
+///   error, because some operators may legitimately accept large batches.
+fn validate_otlp_view(
+    table: &toml::value::Table,
+    file: &str,
+    table_path: &str,
+    app_name: &str,
+    results: &mut Vec<ValidationResult>,
+) {
+    // X-OTLP-6: forbidden fields. These have no meaning on an OTLP view —
+    // method is hard-coded POST; streaming is forbidden by spec; the other
+    // fields belong to other view types.
+    const OTLP_FORBIDDEN: &[&str] = &[
+        "method",
+        "streaming_format", "stream_timeout_ms",
+        "polling",
+        "websocket_mode", "max_connections",
+        "sse_tick_interval_ms", "sse_trigger_events", "sse_event_buffer_size",
+        "session_revalidation_interval_s",
+        "tools", "resources", "prompts", "instructions", "session", "federation",
+        "schedule", "interval_seconds", "overlap_policy", "max_concurrent",
+        "primary", "dataviews",
+    ];
+    for f in OTLP_FORBIDDEN {
+        if table.contains_key(*f) {
+            results.push(
+                ValidationResult::fail(
+                    error_codes::S005,
+                    file,
+                    format!(
+                        "[X-OTLP-6] {}.{} is not allowed on view_type=\"OTLP\"",
+                        table_path, f
+                    ),
+                )
+                .with_table_path(table_path)
+                .with_field(*f)
+                .with_app(app_name),
+            );
+        }
+    }
+
+    // X-OTLP-1: path ends with one of the OTLP signal suffixes. The framework
+    // mounts /v1/{metrics,logs,traces} under the declared root prefix; if the
+    // operator already wrote one of those suffixes the mount would be doubled.
+    if let Some(p) = table.get("path").and_then(|v| v.as_str()) {
+        let trimmed = p.trim_end_matches('/');
+        for suffix in &["/v1/metrics", "/v1/logs", "/v1/traces"] {
+            if trimmed.ends_with(suffix) {
+                results.push(
+                    ValidationResult::fail(
+                        error_codes::S005,
+                        file,
+                        format!(
+                            "[X-OTLP-1] {}.path '{}' must not end with '{}' — the OTLP view mounts /v1/{{metrics,logs,traces}} under the declared root; use path = \"otel\" (or similar prefix)",
+                            table_path, p, suffix
+                        ),
+                    )
+                    .with_table_path(table_path)
+                    .with_field("path")
+                    .with_app(app_name),
+                );
+                break;
+            }
+        }
+    }
+
+    // X-OTLP-3: auth must be "none" only. Session is rejected because OTLP is
+    // stateless; bearer is rejected because the project resolved P1.12 by
+    // routing bearer auth through `guard_view` rather than adding "bearer" to
+    // VALID_AUTH_MODES.
+    if let Some(au_val) = table.get("auth") {
+        match au_val.as_str() {
+            Some("none") => {}
+            Some(other) => {
+                results.push(
+                    ValidationResult::fail(
+                        error_codes::S005,
+                        file,
+                        format!(
+                            "[X-OTLP-3] {}.auth '{}' is not allowed on view_type=\"OTLP\" — only \"none\" is accepted; use `guard_view = \"...\"` for bearer-style auth",
+                            table_path, other
+                        ),
+                    )
+                    .with_table_path(table_path)
+                    .with_field("auth")
+                    .with_app(app_name),
+                );
+            }
+            None => {
+                results.push(
+                    ValidationResult::fail(
+                        error_codes::S004,
+                        file,
+                        format!("{}.auth must be a string", table_path),
+                    )
+                    .with_table_path(table_path)
+                    .with_field("auth")
+                    .with_app(app_name),
+                );
+            }
+        }
+    }
+
+    // X-OTLP-4: streaming = true. OTLP/HTTP is unary — no chunked response.
+    if let Some(s) = table.get("streaming").and_then(|v| v.as_bool()) {
+        if s {
+            results.push(
+                ValidationResult::fail(
+                    error_codes::S005,
+                    file,
+                    format!(
+                        "[X-OTLP-4] {}.streaming = true is not allowed on view_type=\"OTLP\" — OTLP/HTTP is unary",
+                        table_path
+                    ),
+                )
+                .with_table_path(table_path)
+                .with_field("streaming")
+                .with_app(app_name),
+            );
+        }
+    }
+
+    // X-OTLP-2 / X-OTLP-5: handler discriminator.
+    let has_handler = table.contains_key("handler");
+    let handlers_tbl = table.get("handlers").and_then(|v| v.as_table());
+    let has_any_signal_handler = handlers_tbl
+        .map(|t| t.contains_key("metrics") || t.contains_key("logs") || t.contains_key("traces"))
+        .unwrap_or(false);
+
+    match (has_handler, has_any_signal_handler) {
+        (true, true) => {
+            results.push(
+                ValidationResult::fail(
+                    error_codes::S005,
+                    file,
+                    format!(
+                        "[X-OTLP-5] {} declares both `handler` and `handlers.*` — exactly one form is allowed for view_type=\"OTLP\"",
+                        table_path
+                    ),
+                )
+                .with_table_path(table_path)
+                .with_app(app_name),
+            );
+        }
+        (false, false) => {
+            results.push(
+                ValidationResult::fail(
+                    error_codes::S005,
+                    file,
+                    format!(
+                        "[X-OTLP-2] {} requires either a single `handler` block or at least one of `handlers.{{metrics,logs,traces}}` for view_type=\"OTLP\"",
+                        table_path
+                    ),
+                )
+                .with_table_path(table_path)
+                .with_app(app_name),
+            );
+        }
+        _ => {}
+    }
+
+    // If the multi-handler form is present, validate each signal sub-table the
+    // same way the single `handler` table is validated above the call site
+    // (HANDLER_FIELDS / HANDLER_REQUIRED). Also reject unknown signal names.
+    if let Some(t) = handlers_tbl {
+        for (signal_name, signal_val) in t {
+            let signal_path = format!("{}.handlers.{}", table_path, signal_name);
+            if !matches!(signal_name.as_str(), "metrics" | "logs" | "traces") {
+                results.push(
+                    ValidationResult::fail(
+                        error_codes::S005,
+                        file,
+                        format!(
+                            "[X-OTLP-2] {} is not a recognised OTLP signal — only 'metrics', 'logs', and 'traces' are valid handler keys",
+                            signal_path
+                        ),
+                    )
+                    .with_table_path(&signal_path)
+                    .with_app(app_name),
+                );
+                continue;
+            }
+            if let Some(signal_table) = signal_val.as_table() {
+                check_unknown_keys(signal_table, HANDLER_FIELDS, file, &signal_path, results);
+                check_required_fields(signal_table, HANDLER_REQUIRED, file, &signal_path, results);
+            } else {
+                results.push(
+                    ValidationResult::fail(
+                        error_codes::S004,
+                        file,
+                        format!("{} must be a table", signal_path),
+                    )
+                    .with_table_path(&signal_path)
+                    .with_app(app_name),
+                );
+            }
+        }
+    }
+
+    // W-OTLP-1: max_body_mb > 16 is a warning. Spec recommends 4; values above
+    // 16 are almost certainly a misconfiguration. Allowed but flagged. Emitted
+    // as W012 per `validate_result::error_codes`.
+    if let Some(mb_val) = table.get("max_body_mb") {
+        match mb_val.as_integer() {
+            Some(n) if n > 16 => {
+                let _ = file; // warnings carry no file per existing convention
+                results.push(
+                    ValidationResult::warn(
+                        error_codes::W012,
+                        format!(
+                            "[W-OTLP-1] {}.max_body_mb = {} is unusually large (OTLP/HTTP recommends 4); accepting but flagging",
+                            table_path, n
+                        ),
+                    )
+                    .with_table_path(table_path)
+                    .with_field("max_body_mb")
+                    .with_app(app_name),
+                );
+            }
+            Some(n) if n < 1 => {
+                results.push(
+                    ValidationResult::fail(
+                        error_codes::S005,
+                        file,
+                        format!(
+                            "{}.max_body_mb must be >= 1, got {}",
+                            table_path, n
+                        ),
+                    )
+                    .with_table_path(table_path)
+                    .with_field("max_body_mb")
+                    .with_app(app_name),
+                );
+            }
+            Some(_) => {}
+            None => {
+                results.push(
+                    ValidationResult::fail(
+                        error_codes::S004,
+                        file,
+                        format!("{}.max_body_mb must be a positive integer", table_path),
+                    )
+                    .with_table_path(table_path)
+                    .with_field("max_body_mb")
                     .with_app(app_name),
                 );
             }
@@ -2685,6 +2981,453 @@ dataview = "items"
                 f,
                 results.iter().map(|r| &r.message).collect::<Vec<_>>());
         }
+    }
+
+    // ── CB-OTLP Track O1: OTLP view validation (rivers-otlp-view-spec.md §9) ─
+
+    fn write_otlp_view(dir: &Path, body: &str) {
+        std::fs::write(
+            dir.join("test-app/app.toml"),
+            format!(r#"
+[data.dataviews.items]
+name       = "items"
+datasource = "data"
+
+{}
+"#, body),
+        ).unwrap();
+    }
+
+    #[test]
+    fn otlp_view_accepts_multi_handler_form() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_otlp_view(&bundle_dir, r#"
+[api.views.otel_ingest]
+path      = "otel"
+view_type = "OTLP"
+auth      = "none"
+
+[api.views.otel_ingest.handlers.metrics]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "ingestMetrics"
+resources  = []
+
+[api.views.otel_ingest.handlers.logs]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "ingestLogs"
+resources  = []
+
+[api.views.otel_ingest.handlers.traces]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "ingestTraces"
+resources  = []
+"#);
+        let results = validate_structural(&bundle_dir);
+        let view_failures: Vec<_> = results.iter()
+            .filter(|r| r.status == ValidationStatus::Fail
+                && r.table_path.as_deref()
+                    .map(|p| p.contains("otel_ingest"))
+                    .unwrap_or(false))
+            .collect();
+        assert!(view_failures.is_empty(),
+            "expected no failures on canonical OTLP multi-handler view, got: {:?}",
+            view_failures.iter().map(|r| &r.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn otlp_view_accepts_single_handler_form() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_otlp_view(&bundle_dir, r#"
+[api.views.otel_ingest]
+path      = "otel"
+view_type = "OTLP"
+
+[api.views.otel_ingest.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "ingestAny"
+resources  = []
+"#);
+        let results = validate_structural(&bundle_dir);
+        let view_failures: Vec<_> = results.iter()
+            .filter(|r| r.status == ValidationStatus::Fail
+                && r.table_path.as_deref()
+                    .map(|p| p.contains("otel_ingest"))
+                    .unwrap_or(false))
+            .collect();
+        assert!(view_failures.is_empty(),
+            "expected no failures on canonical OTLP single-handler view, got: {:?}",
+            view_failures.iter().map(|r| &r.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn otlp_view_accepts_metrics_only_form() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_otlp_view(&bundle_dir, r#"
+[api.views.metrics_only]
+path      = "otel"
+view_type = "OTLP"
+
+[api.views.metrics_only.handlers.metrics]
+type       = "codecomponent"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "ingestMetrics"
+"#);
+        let results = validate_structural(&bundle_dir);
+        let view_failures: Vec<_> = results.iter()
+            .filter(|r| r.status == ValidationStatus::Fail
+                && r.table_path.as_deref()
+                    .map(|p| p.contains("metrics_only"))
+                    .unwrap_or(false))
+            .collect();
+        assert!(view_failures.is_empty(),
+            "expected no failures on metrics-only OTLP view, got: {:?}",
+            view_failures.iter().map(|r| &r.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn otlp_view_rejects_path_ending_in_signal_x_otlp_1() {
+        for suffix in &["/v1/metrics", "/v1/logs", "/v1/traces"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let bundle_dir = create_valid_bundle(tmp.path());
+            let body = format!(r#"
+[api.views.bad]
+path      = "otel{}"
+view_type = "OTLP"
+
+[api.views.bad.handler]
+type       = "codecomponent"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "ingestAny"
+"#, suffix);
+            write_otlp_view(&bundle_dir, &body);
+            let results = validate_structural(&bundle_dir);
+            assert!(results.iter().any(|r|
+                r.error_code.as_deref() == Some("S005")
+                && r.message.contains("[X-OTLP-1]")
+                && r.field.as_deref() == Some("path")
+            ), "expected [X-OTLP-1] on OTLP path ending in '{}', got: {:?}",
+                suffix,
+                results.iter().map(|r| &r.message).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn otlp_view_rejects_missing_handler_x_otlp_2() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_otlp_view(&bundle_dir, r#"
+[api.views.no_handler]
+path      = "otel"
+view_type = "OTLP"
+"#);
+        let results = validate_structural(&bundle_dir);
+        assert!(results.iter().any(|r|
+            r.error_code.as_deref() == Some("S005")
+            && r.message.contains("[X-OTLP-2]")
+            && r.message.contains("requires either a single `handler`")
+        ), "expected [X-OTLP-2] when no handler declared, got: {:?}",
+            results.iter().map(|r| &r.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn otlp_view_rejects_unknown_signal_x_otlp_2() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_otlp_view(&bundle_dir, r#"
+[api.views.otel_ingest]
+path      = "otel"
+view_type = "OTLP"
+
+[api.views.otel_ingest.handlers.bogus]
+type       = "codecomponent"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "x"
+"#);
+        let results = validate_structural(&bundle_dir);
+        assert!(results.iter().any(|r|
+            r.error_code.as_deref() == Some("S005")
+            && r.message.contains("[X-OTLP-2]")
+            && r.message.contains("is not a recognised OTLP signal")
+        ), "expected [X-OTLP-2] on unknown signal 'bogus', got: {:?}",
+            results.iter().map(|r| &r.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn otlp_view_rejects_auth_session_x_otlp_3() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_otlp_view(&bundle_dir, r#"
+[api.views.otel_ingest]
+path      = "otel"
+view_type = "OTLP"
+auth      = "session"
+
+[api.views.otel_ingest.handler]
+type       = "codecomponent"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "x"
+"#);
+        let results = validate_structural(&bundle_dir);
+        assert!(results.iter().any(|r|
+            r.error_code.as_deref() == Some("S005")
+            && r.message.contains("[X-OTLP-3]")
+            && r.field.as_deref() == Some("auth")
+        ), "expected [X-OTLP-3] on auth='session', got: {:?}",
+            results.iter().map(|r| &r.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn otlp_view_rejects_auth_bearer_x_otlp_3() {
+        // "bearer" is not in VALID_AUTH_MODES; the OTLP validator rejects it
+        // with the OTLP-specific [X-OTLP-3] message before the generic auth
+        // validator runs, so the project's existing guard_view pattern is
+        // surfaced in the error.
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_otlp_view(&bundle_dir, r#"
+[api.views.otel_ingest]
+path      = "otel"
+view_type = "OTLP"
+auth      = "bearer"
+
+[api.views.otel_ingest.handler]
+type       = "codecomponent"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "x"
+"#);
+        let results = validate_structural(&bundle_dir);
+        assert!(results.iter().any(|r|
+            r.error_code.as_deref() == Some("S005")
+            && r.message.contains("[X-OTLP-3]")
+            && r.message.contains("guard_view")
+        ), "expected [X-OTLP-3] on auth='bearer' pointing at guard_view, got: {:?}",
+            results.iter().map(|r| &r.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn otlp_view_rejects_streaming_x_otlp_4() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_otlp_view(&bundle_dir, r#"
+[api.views.otel_ingest]
+path      = "otel"
+view_type = "OTLP"
+streaming = true
+
+[api.views.otel_ingest.handler]
+type       = "codecomponent"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "x"
+"#);
+        let results = validate_structural(&bundle_dir);
+        assert!(results.iter().any(|r|
+            r.error_code.as_deref() == Some("S005")
+            && r.message.contains("[X-OTLP-4]")
+            && r.field.as_deref() == Some("streaming")
+        ), "expected [X-OTLP-4] on streaming=true, got: {:?}",
+            results.iter().map(|r| &r.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn otlp_view_rejects_both_handler_forms_x_otlp_5() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_otlp_view(&bundle_dir, r#"
+[api.views.otel_ingest]
+path      = "otel"
+view_type = "OTLP"
+
+[api.views.otel_ingest.handler]
+type       = "codecomponent"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "ingestAny"
+
+[api.views.otel_ingest.handlers.metrics]
+type       = "codecomponent"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "ingestMetrics"
+"#);
+        let results = validate_structural(&bundle_dir);
+        assert!(results.iter().any(|r|
+            r.error_code.as_deref() == Some("S005")
+            && r.message.contains("[X-OTLP-5]")
+            && r.message.contains("declares both `handler` and `handlers.*`")
+        ), "expected [X-OTLP-5] on both handler forms, got: {:?}",
+            results.iter().map(|r| &r.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn otlp_view_rejects_forbidden_fields_x_otlp_6() {
+        // method, streaming_format, websocket_mode, tools, schedule are all
+        // unrelated view-type fields with no meaning on OTLP. Each must
+        // surface its own [X-OTLP-6].
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_otlp_view(&bundle_dir, r#"
+[api.views.otel_ingest]
+path             = "otel"
+view_type        = "OTLP"
+method           = "POST"
+streaming_format = "ndjson"
+websocket_mode   = "Broadcast"
+schedule         = "0 * * * * *"
+
+[api.views.otel_ingest.handler]
+type       = "codecomponent"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "x"
+"#);
+        let results = validate_structural(&bundle_dir);
+        for forbidden in &["method", "streaming_format", "websocket_mode", "schedule"] {
+            assert!(results.iter().any(|r|
+                r.error_code.as_deref() == Some("S005")
+                && r.message.contains("[X-OTLP-6]")
+                && r.field.as_deref() == Some(*forbidden)
+            ), "expected [X-OTLP-6] on OTLP view with forbidden field '{}', got: {:?}",
+                forbidden,
+                results.iter().map(|r| &r.message).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn otlp_view_warns_on_large_max_body_mb_w_otlp_1() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_otlp_view(&bundle_dir, r#"
+[api.views.otel_ingest]
+path        = "otel"
+view_type   = "OTLP"
+max_body_mb = 64
+
+[api.views.otel_ingest.handler]
+type       = "codecomponent"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "x"
+"#);
+        let results = validate_structural(&bundle_dir);
+        assert!(results.iter().any(|r|
+            r.status == ValidationStatus::Warn
+            && r.error_code.as_deref() == Some("W012")
+            && r.message.contains("[W-OTLP-1]")
+            && r.field.as_deref() == Some("max_body_mb")
+        ), "expected W012 [W-OTLP-1] on max_body_mb=64, got: {:?}",
+            results.iter().map(|r| (r.status, &r.message)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn otlp_view_rejects_invalid_max_body_mb() {
+        // < 1 is a hard error, not a warning.
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_otlp_view(&bundle_dir, r#"
+[api.views.otel_ingest]
+path        = "otel"
+view_type   = "OTLP"
+max_body_mb = 0
+
+[api.views.otel_ingest.handler]
+type       = "codecomponent"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "x"
+"#);
+        let results = validate_structural(&bundle_dir);
+        assert!(results.iter().any(|r|
+            r.status == ValidationStatus::Fail
+            && r.error_code.as_deref() == Some("S005")
+            && r.field.as_deref() == Some("max_body_mb")
+            && r.message.contains("must be >= 1")
+        ), "expected S005 on max_body_mb=0, got: {:?}",
+            results.iter().map(|r| &r.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn otlp_only_fields_rejected_on_rest_view() {
+        // handlers / max_body_mb on a non-OTLP view are no-ops at runtime —
+        // surface them.
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        std::fs::write(
+            bundle_dir.join("test-app/app.toml"),
+            r#"
+[data.dataviews.items]
+name = "items"
+datasource = "data"
+
+[api.views.items]
+path        = "items"
+method      = "GET"
+view_type   = "Rest"
+auth        = "none"
+max_body_mb = 4
+
+[api.views.items.handler]
+type     = "dataview"
+dataview = "items"
+
+[api.views.items.handlers.metrics]
+type = "codecomponent"
+"#,
+        ).unwrap();
+        let results = validate_structural(&bundle_dir);
+        for f in &["handlers", "max_body_mb"] {
+            assert!(results.iter().any(|r|
+                r.error_code.as_deref() == Some("S005")
+                && r.field.as_deref() == Some(*f)
+                && r.message.contains("only valid when view_type=\"OTLP\"")
+            ), "expected S005 on Rest view with OTLP-only field '{}', got: {:?}",
+                f,
+                results.iter().map(|r| &r.message).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn typo_otl_still_produces_unknown_view_type_error() {
+        // A typo like `view_type = "OTL"` must NOT be handled by the OTLP
+        // validator — it must fall through to the generic unknown-view-type
+        // path so the existing did-you-mean hint kicks in.
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle_dir = create_valid_bundle(tmp.path());
+        write_otlp_view(&bundle_dir, r#"
+[api.views.bad]
+path      = "otel"
+view_type = "OTL"
+
+[api.views.bad.handler]
+type       = "codecomponent"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "x"
+"#);
+        let results = validate_structural(&bundle_dir);
+        // Expect the generic unknown-view-type S005 (no [X-OTLP-N] marker).
+        assert!(results.iter().any(|r|
+            r.error_code.as_deref() == Some("S005")
+            && r.field.as_deref() == Some("view_type")
+            && r.message.contains("'OTL'")
+            && r.message.contains("is not one of")
+        ), "expected generic S005 on view_type='OTL', got: {:?}",
+            results.iter().map(|r| &r.message).collect::<Vec<_>>());
+        // Must NOT have any [X-OTLP-N] errors — the OTLP validator must not
+        // have run on this view.
+        let otlp_specific: Vec<_> = results.iter()
+            .filter(|r| r.message.contains("[X-OTLP-"))
+            .collect();
+        assert!(otlp_specific.is_empty(),
+            "OTLP validator should not run on typo'd view_type, got OTLP-specific errors: {:?}",
+            otlp_specific.iter().map(|r| &r.message).collect::<Vec<_>>());
     }
 
     // ── Multiple errors collected ─────────────────────────────────

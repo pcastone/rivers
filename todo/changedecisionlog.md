@@ -6,6 +6,30 @@ readers.
 
 ---
 
+### CB-OTLP-D1 — 2026-05-11 — Track O1: OTLP errors use S005 + `[X-OTLP-N]` markers, not new per-rule codes
+
+**File affected:** `crates/rivers-runtime/src/validate_structural.rs`, `crates/rivers-runtime/src/validate_result.rs`
+**Spec reference:** `rivers-otlp-view-spec.md` §9; `rivers-bundle-validation-spec.md` §11.5.1
+**Decision:** All OTLP-view structural failures emit the existing `S005` error code with a `[X-OTLP-N]` marker prepended to the human-readable message, rather than introducing 6 new error codes (`O001`-`O006`). The warning case `W-OTLP-1` was given its own code (`W012`) because the existing warning catalog numbers each warning individually and there was no "generic warning code" to piggyback on.
+
+Rationale: the existing cron validator (`validate_cron_view`) uses the same pattern — every cron-specific rule emits `S005` with descriptive text. New per-rule codes would have to be registered in `validate_result::error_codes`, documented in `bundle-validation-spec §11`, and asserted in tests as separate strings — for no functional gain over `r.message.contains("[X-OTLP-N]")`. Markers stay searchable in docs and probes.
+
+**Resolution method:** Read `validate_cron_view` and surrounding tests; confirmed the project precedent during O1.1. CB's request bundle uses `X-OTLP-N` as documentation labels (not wire codes) anyway.
+
+---
+
+### CB-OTLP-D2 — 2026-05-11 — `auth = "bearer"` on OTLP views rejected; spec §8 to be amended
+
+**File affected:** `crates/rivers-runtime/src/validate_structural.rs` (`validate_otlp_view`), `docs/arch/rivers-otlp-view-spec.md` (§8 follow-up)
+**Spec reference:** `rivers-otlp-view-spec.md` §8 (to be amended); existing project resolution at `validate_structural.rs:126-130`
+**Decision:** The OTLP spec §8 calls for accepting `auth = "bearer"` with a runtime warning pending CB-P1.12. The validator code comments at `VALID_AUTH_MODES` (`validate_structural.rs:126-130`) make clear that P1.12 was *resolved* — not by adding `"bearer"` to the auth allowlist, but by routing bearer-style auth through `guard_view` (the per-view named-guard pattern). To stay consistent with that resolution: OTLP views accept only `auth = "none"` at structural validation; `auth = "bearer"` is rejected with an `[X-OTLP-3]` message that points the operator at `guard_view = "..."`.
+
+**Implication:** Spec §8 needs amendment to drop the "P1.12 pending" language and document the `guard_view` pattern as the way to do bearer auth on OTLP views. Captured as a follow-up in the changelog entry; deferred to spec-amendment commit.
+
+**Resolution method:** Read `VALID_AUTH_MODES` comment block during O1.1; cross-referenced `cb-rivers-feature-request.md` (claimed P1.12 still pending) against the actual code state.
+
+---
+
 ### Sprint 2026-05-09 — CB unblock plan (probe-derived)
 
 **CB-PROBE-D1 — Probe shape mismatch is a CB-side migration, not a Rivers code fix**
