@@ -19,7 +19,7 @@ use std::io::Read;
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use axum::response::IntoResponse;
-use flate2::read::{DeflateDecoder, GzDecoder};
+use flate2::read::{GzDecoder, ZlibDecoder};
 use rivers_runtime::process_pool::{Entrypoint, TaskContextBuilder};
 use rivers_runtime::view::HandlerConfig;
 use serde_json::{json, Value};
@@ -247,8 +247,13 @@ pub(crate) fn decompress_body(
                 .map_err(|e| OtlpError::DecompressionFailed(format!("gzip: {}", e)))?;
         }
         Some("deflate") => {
+            // RFC 9110 §8.4.1.2: Content-Encoding `deflate` means the
+            // zlib data format (RFC 1950) — NOT raw RFC 1951 DEFLATE.
+            // flate2::ZlibDecoder reads the 2-byte zlib header + checksum;
+            // DeflateDecoder would reject the zlib wrapper as a "corrupt
+            // deflate stream". CB-OTLP Track O5.6 caught the divergence.
             let limited = (&body[..]).take(cap_bytes.saturating_add(1));
-            let mut decoder = DeflateDecoder::new(limited);
+            let mut decoder = ZlibDecoder::new(limited);
             decoder
                 .read_to_end(&mut decoded)
                 .map_err(|e| OtlpError::DecompressionFailed(format!("deflate: {}", e)))?;
@@ -389,10 +394,16 @@ pub(crate) async fn execute_otlp_view(
     let raw_cap: u64 = (max_body_mb as u64) * 1024 * 1024;
     let decompressed_cap: u64 = raw_cap.saturating_mul(DECOMPRESSED_AMPLIFICATION_FACTOR);
 
-    // ── 1. Read body bounded by raw_cap + 1 (so we can detect overruns) ──
-    let body_bytes = match axum::body::to_bytes(request.into_body(), raw_cap as usize + 1).await {
+    // ── 1. Read body. We give axum a generous absolute ceiling (the spec's
+    //      max + 16 MiB headroom) so an oversized request gets *read* and
+    //      we can emit a clean 413, instead of axum aborting the connection
+    //      before our error response goes out. The real OTLP-level size
+    //      check runs immediately after on the returned bytes.
+    let axum_ceiling = (raw_cap as usize).saturating_add(16 * 1024 * 1024);
+    let body_bytes = match axum::body::to_bytes(request.into_body(), axum_ceiling).await {
         Ok(b) => b,
         Err(_) => {
+            // Truly enormous body (over axum's ceiling). Still a 413.
             let err = OtlpError::BodyTooLarge {
                 observed: 0,
                 limit_bytes: raw_cap,
@@ -652,8 +663,11 @@ mod tests {
 
     #[test]
     fn decompress_deflate_round_trips() {
+        // RFC 9110: Content-Encoding `deflate` = zlib format (RFC 1950),
+        // NOT raw RFC 1951 deflate. Use ZlibEncoder to produce the
+        // wire-format the framework actually accepts.
         let mut enc =
-            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(b"abc").unwrap();
         let df = enc.finish().unwrap();
         let got = decompress_body(&df, Some("deflate"), 1024).unwrap();

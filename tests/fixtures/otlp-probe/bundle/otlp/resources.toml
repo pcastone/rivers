@@ -1,0 +1,7 @@
+[[datasources]]
+name       = "probe_db"
+driver     = "sqlite"
+x-type     = "sqlite"
+database   = "data/probe.db"
+required   = true
+nopassword = true

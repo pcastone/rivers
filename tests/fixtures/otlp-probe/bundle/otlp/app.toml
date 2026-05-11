@@ -1,0 +1,29 @@
+# OTLP smoke probe — targets the new view_type = "OTLP" (CB-OTLP).
+# Single view registers /otlp/v1/{metrics,logs,traces}.
+
+[api.views.otel_ingest]
+path        = "/otlp"
+view_type   = "OTLP"
+auth        = "none"
+max_body_mb = 2
+
+[api.views.otel_ingest.handlers.metrics]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "ingestMetrics"
+resources  = ["probe_db"]
+
+[api.views.otel_ingest.handlers.logs]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "ingestLogs"
+resources  = ["probe_db"]
+
+[api.views.otel_ingest.handlers.traces]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "ingestTraces"
+resources  = ["probe_db"]

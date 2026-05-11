@@ -1,0 +1,6 @@
+appName    = "otlp"
+version    = "1.0.0"
+type       = "app-service"
+appId      = "0a7c5e4e-0000-4000-8000-000000000001"
+entryPoint = "otlp"
+source     = "https://test.rivers.local"

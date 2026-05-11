@@ -35,7 +35,12 @@ pub(super) fn inject_ctx_object(
 ) -> Result<(), TaskError> {
     let global = scope.get_current_context().global(scope);
 
-    // Build ctx JSON and parse into V8
+    // Build ctx JSON and parse into V8. Every key that needs to surface
+    // as `ctx.<key>` to the handler must appear here — the V8 isolate sees
+    // ctx as a plain object built from this literal. CB-OTLP Track O5.6:
+    // `otel` is the OTLP-view dispatch envelope (`{kind, payload, encoding}`),
+    // exposed alongside `request`/`session` so handlers can read
+    // `ctx.otel.payload` etc. — see `rivers-otlp-view-spec.md` §6.1.
     let ctx_json = serde_json::json!({
         "trace_id": task.trace_id,
         "app_id": task.app_id,
@@ -43,6 +48,7 @@ pub(super) fn inject_ctx_object(
         "env": task.runtime_env,
         "request": task.args.get("request").cloned().unwrap_or(serde_json::Value::Null),
         "session": task.args.get("session").cloned().unwrap_or(serde_json::Value::Null),
+        "otel":    task.args.get("otel").cloned().unwrap_or(serde_json::Value::Null),
         "data": {},
         "resdata": null,
     });

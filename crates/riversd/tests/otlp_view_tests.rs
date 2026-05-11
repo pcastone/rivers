@@ -277,6 +277,8 @@ async fn gzipped_json_reaches_handler_dispatch() {
 }
 
 /// Same as gzipped path but with deflate, to exercise the second decoder.
+/// Per RFC 9110 §8.4.1.2 the `deflate` Content-Encoding is the zlib
+/// format (RFC 1950), NOT raw RFC 1951 — use ZlibEncoder.
 #[tokio::test]
 async fn deflate_encoded_json_decodes_and_dispatches() {
     let ctx = otlp_ctx();
@@ -284,7 +286,7 @@ async fn deflate_encoded_json_decodes_and_dispatches() {
     let router = build_main_router(ctx);
 
     let payload = br#"{"resourceLogs":[]}"#;
-    let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
     enc.write_all(payload).unwrap();
     let df = enc.finish().unwrap();
 
