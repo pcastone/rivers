@@ -69,9 +69,13 @@ impl OverlapPolicy {
 /// last-mile defensive check).
 #[derive(Debug, Clone)]
 pub struct CronViewSpec {
-    /// App that owns this view (used for the StorageEngine dedupe key,
-    /// per-app log routing, and capability namespace).
+    /// App that owns this view (manifest UUID — used for the StorageEngine
+    /// dedupe key and metric labels). NOT the capability namespace key.
     pub app_id: String,
+    /// Entry-point slug (`manifest.entry_point` or `manifest.app_name`) —
+    /// used as `dv_namespace` for datasource wiring and keystore lookup.
+    /// Mirrors how REST/MCP/SSE dispatchers resolve per-app capabilities.
+    pub entry_point: String,
     /// View name as declared in `[api.views.<name>]`.
     pub view_name: String,
     /// Resolved schedule.
@@ -89,6 +93,7 @@ impl CronViewSpec {
     /// is not actually a Cron view.
     pub fn from_view_config(
         app_id: &str,
+        entry_point: &str,
         view_name: &str,
         cfg: &ApiViewConfig,
     ) -> Result<Option<Self>, CronSpecError> {
@@ -115,6 +120,7 @@ impl CronViewSpec {
 
         Ok(Some(CronViewSpec {
             app_id: app_id.to_string(),
+            entry_point: entry_point.to_string(),
             view_name: view_name.to_string(),
             schedule,
             overlap: OverlapPolicy::from_str_or_default(cfg.overlap_policy.as_deref()),
@@ -253,11 +259,16 @@ pub fn collect_cron_specs(bundle: &rivers_runtime::LoadedBundle) -> Vec<CronView
     let mut out = Vec::new();
     for app in &bundle.apps {
         let app_id = &app.manifest.app_id;
+        let entry_point = app
+            .manifest
+            .entry_point
+            .as_deref()
+            .unwrap_or(&app.manifest.app_name);
         for (view_name, view_cfg) in &app.config.api.views {
             if view_cfg.view_type != "Cron" {
                 continue;
             }
-            match CronViewSpec::from_view_config(app_id, view_name, view_cfg) {
+            match CronViewSpec::from_view_config(app_id, entry_point, view_name, view_cfg) {
                 Ok(Some(spec)) => out.push(spec),
                 Ok(None) => {} // not a Cron view (shouldn't happen given the filter above)
                 Err(e) => {
@@ -378,11 +389,12 @@ async fn run_cron_loop(
         let pool = pool.clone();
         let storage = storage.clone();
         let app_id = spec.app_id.clone();
+        let entry_point = spec.entry_point.clone();
         let view = spec.view_name.clone();
         let entry = spec.entrypoint.clone();
         tokio::spawn(async move {
             while let Some(job) = rx.recv().await {
-                dispatch_tick(&pool, storage.clone(), &app_id, &view, &entry, job).await;
+                dispatch_tick(&pool, storage.clone(), &app_id, &entry_point, &view, &entry, job).await;
             }
         });
         Some(tx)
@@ -499,10 +511,11 @@ async fn run_cron_loop(
                 let pool = pool.clone();
                 let storage = storage.clone();
                 let app_id = spec.app_id.clone();
+                let entry_point = spec.entry_point.clone();
                 let view = spec.view_name.clone();
                 let entry = spec.entrypoint.clone();
                 tokio::spawn(async move {
-                    dispatch_tick(&pool, storage, &app_id, &view, &entry, job).await;
+                    dispatch_tick(&pool, storage, &app_id, &entry_point, &view, &entry, job).await;
                 });
             }
             OverlapPolicy::Queue => {
@@ -524,10 +537,11 @@ async fn run_cron_loop(
                 let pool = pool.clone();
                 let storage = storage.clone();
                 let app_id = spec.app_id.clone();
+                let entry_point = spec.entry_point.clone();
                 let view = spec.view_name.clone();
                 let entry = spec.entrypoint.clone();
                 tokio::spawn(async move {
-                    dispatch_tick(&pool, storage, &app_id, &view, &entry, job).await;
+                    dispatch_tick(&pool, storage, &app_id, &entry_point, &view, &entry, job).await;
                 });
             }
         }
@@ -554,6 +568,7 @@ async fn dispatch_tick(
     pool: &ProcessPoolManager,
     storage: Arc<dyn StorageEngine>,
     app_id: &str,
+    entry_point: &str,
     view_name: &str,
     entrypoint: &Entrypoint,
     job: TickJob,
@@ -586,7 +601,15 @@ async fn dispatch_tick(
         .args(args)
         .trace_id(trace_id)
         .storage(storage);
-    let builder = crate::task_enrichment::enrich(builder, app_id, TaskKind::Rest);
+    // CB-cron-cap-fix: wire per-app datasource tokens/configs so handlers
+    // reached via Cron dispatch can call `Rivers.db.query(...)` against
+    // their declared datasources — same capability shape REST/MCP use.
+    // Same omission MCP carried before v0.60.12 (P1.13).
+    let builder = crate::task_enrichment::wire_datasources_from_shared(builder, entry_point);
+    // RT-CTX-APP-ID parity: enrich keys on the entry-point slug (used for
+    // keystore lookup and surfaced as `ctx.app_id` to handlers), not the
+    // manifest UUID. Mirrors mcp/dispatch.rs and view_engine/pipeline.rs.
+    let builder = crate::task_enrichment::enrich(builder, entry_point, TaskKind::Rest);
 
     let result = match builder.build() {
         Ok(ctx) => pool.dispatch("default", ctx).await,
@@ -800,7 +823,7 @@ mod tests {
         // Build a Rest view config — should yield Ok(None).
         // We only need view_type and handler set; default rest of the fields.
         let cfg = make_rest_view_config();
-        let spec = CronViewSpec::from_view_config("app1", "v", &cfg).unwrap();
+        let spec = CronViewSpec::from_view_config("app1", "app1", "v", &cfg).unwrap();
         assert!(spec.is_none());
     }
 
@@ -811,7 +834,7 @@ mod tests {
         cfg.handler = rivers_runtime::view::HandlerConfig::Dataview {
             dataview: "irrelevant".to_string(),
         };
-        let err = CronViewSpec::from_view_config("app1", "v", &cfg).unwrap_err();
+        let err = CronViewSpec::from_view_config("app1", "app1", "v", &cfg).unwrap_err();
         assert!(matches!(err, CronSpecError::HandlerNotCodecomponent));
     }
 
@@ -820,7 +843,7 @@ mod tests {
         let mut cfg = make_cron_view_config_skeleton();
         cfg.schedule = None;
         cfg.interval_seconds = None;
-        let err = CronViewSpec::from_view_config("app1", "v", &cfg).unwrap_err();
+        let err = CronViewSpec::from_view_config("app1", "app1", "v", &cfg).unwrap_err();
         assert!(matches!(err, CronSpecError::NoSchedule));
     }
 
@@ -829,14 +852,14 @@ mod tests {
         let mut cfg = make_cron_view_config_skeleton();
         cfg.schedule = Some("0 */5 * * * *".to_string());
         cfg.interval_seconds = Some(300);
-        let err = CronViewSpec::from_view_config("app1", "v", &cfg).unwrap_err();
+        let err = CronViewSpec::from_view_config("app1", "app1", "v", &cfg).unwrap_err();
         assert!(matches!(err, CronSpecError::ScheduleAndIntervalBothSet));
     }
 
     #[test]
     fn cron_view_spec_parses_canonical() {
         let cfg = make_cron_view_config(NextTick::Interval(std::time::Duration::from_secs(300)));
-        let spec = CronViewSpec::from_view_config("app1", "v", &cfg)
+        let spec = CronViewSpec::from_view_config("app1", "app1", "v", &cfg)
             .unwrap()
             .unwrap();
         assert_eq!(spec.app_id, "app1");

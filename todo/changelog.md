@@ -1,5 +1,37 @@
 # Changelog
 
+## 2026-05-10 — Cron view: propagate handler `resources` as task capabilities (v0.61.1)
+
+CB filed `cb-rivers-cron-capability-bug` — a Cron view with
+`[api.views.X.handler] resources = ["my_db"]` passes the validator but
+the handler errors at tick time with `CapabilityError: datasource
+'my_db' not declared in view config`. Same `resources = [...]`
+declaration works fine for REST and MCP-view handlers. Root cause:
+v0.61.0 Cron dispatcher built the `TaskContextBuilder` without calling
+`wire_datasources` — the exact same shape of bug MCP carried before
+v0.60.12 (P1.13). It also passed the manifest UUID to `enrich` where
+every other dispatch path passes the entry-point slug (RT-CTX-APP-ID
+parity).
+
+| File | Change | Spec ref | Resolution |
+|------|--------|----------|------------|
+| `crates/riversd/src/task_enrichment.rs` | Added `wire_datasources_from_shared(builder, dv_namespace)` — reads the snapshotted executor from `SHARED_TASK_CAPABILITIES` and calls `wire_datasources`. Cron loops live on their own `tokio::task`s without an `AppContext` handle, so they need a way to wire datasources from shared state. | `rivers-cron-view-spec.md` §3.1 | New helper + two unit tests covering both the populated and empty branches. |
+| `crates/riversd/src/cron/mod.rs` | `CronViewSpec` gained an `entry_point: String` field (entry-point slug used as `dv_namespace`). `collect_cron_specs` resolves it via `manifest.entry_point.as_deref().unwrap_or(&manifest.app_name)` — same pattern bundle_diff/wire use. `from_view_config` takes it as a new `&str` parameter. | spec §3.1 | Signature change cascades into existing test helpers; the second `&str` arg is `entry_point`. |
+| `crates/riversd/src/cron/mod.rs` | `dispatch_tick` takes `entry_point: &str`. It now calls `wire_datasources_from_shared(builder, entry_point)` and passes `entry_point` (not the manifest UUID) to `enrich`. Mirrors `mcp/dispatch.rs:585-604` exactly. | spec §4 (tick lifecycle), MCP analogous fix | Both `run_cron_loop` spawn sites (Skip/Allow) plus the Queue consumer task clone `spec.entry_point` alongside `spec.app_id`. |
+| `crates/riversd/tests/sprint_2026_05_09_e2e.rs` | Updated four `from_view_config(...)` test call sites for the new 4-arg signature. | — | Tests still compile-clean; behavior unchanged for callers that don't use datasources. |
+| `Cargo.toml` (workspace) | Bumped 0.61.0 → 0.61.1 (patch — code fix closing a documented-but-missing capability path, per CLAUDE.md versioning rules). | CLAUDE.md versioning | `just bump-patch`. |
+
+**Backstop test:** `wire_datasources_from_shared_uses_snapshot_executor`
+in `task_enrichment.rs` exercises the exact code path Cron dispatch
+takes — seeds `SHARED_TASK_CAPABILITIES` with a sqlite-driver-flavored
+executor, calls the helper, and asserts the resulting task carries
+`datasource_configs["cb_db"]`. If the helper ever silently regresses to
+ignoring the shared snapshot, this test fails before any handler tick
+fires.
+
+**End-to-end repro:** CB's `cb-rivers-cron-capability-bug/run-probe.sh`
+should now produce REST-path PASS + Cron-path PASS.
+
 ## 2026-05-10 — Sprint 2026-05-09 Track 3 follow-ups: graceful shutdown, W011 warning, hard-fail on missing storage
 
 Three small gaps in the initial Track 3 ship, addressed before merge:

@@ -180,7 +180,7 @@ resources  = []
 "#,
     );
 
-    let spec = CronViewSpec::from_view_config("app1", "recompute", &cfg)
+    let spec = CronViewSpec::from_view_config("app1", "app1", "recompute", &cfg)
         .expect("spec build")
         .expect("spec is Some for Cron view");
     assert_eq!(spec.app_id, "app1");
@@ -207,7 +207,7 @@ entrypoint = "t"
 resources  = []
 "#,
     );
-    let spec = CronViewSpec::from_view_config("a", "v", &cfg).unwrap().unwrap();
+    let spec = CronViewSpec::from_view_config("a", "a", "v", &cfg).unwrap().unwrap();
     assert_eq!(spec.entrypoint.language, "javascript");
 }
 
@@ -321,7 +321,7 @@ async fn track3_cron_handler_runs_and_writes_to_store() {
         entrypoint: "tick".to_string(),
         resources: vec![],
     };
-    let spec = CronViewSpec::from_view_config("e2e_app", "tick_view", &cfg)
+    let spec = CronViewSpec::from_view_config("e2e_app", "e2e_app", "tick_view", &cfg)
         .unwrap()
         .unwrap();
 
@@ -510,7 +510,7 @@ fn build_cron_spec_with_interval(
         entrypoint: "tick".to_string(),
         resources: vec![],
     };
-    CronViewSpec::from_view_config(app_id, view_name, &cfg)
+    CronViewSpec::from_view_config(app_id, app_id, view_name, &cfg)
         .expect("spec build ok")
         .expect("spec is Some")
 }
