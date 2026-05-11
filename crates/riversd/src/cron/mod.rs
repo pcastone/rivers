@@ -277,6 +277,12 @@ pub fn collect_cron_specs(bundle: &rivers_runtime::LoadedBundle) -> Vec<CronView
 
 /// Public handle for the cron scheduler. Owns the per-view loops via
 /// `tokio::task::JoinHandle`; shutdown cooperatively notifies all loops.
+///
+/// Wired into riversd's graceful-shutdown path at
+/// `crates/riversd/src/server/lifecycle.rs` — after `axum::serve` returns
+/// (no_ssl path) or after `wait_for_drain` (TLS path), the scheduler is
+/// `take`n out of `AppContext::cron_scheduler` and `.shutdown().await`ed
+/// before per-app logs flush.
 pub struct CronScheduler {
     /// Handles to per-view loops. `JoinHandle::abort` is the fallback if a
     /// loop ignores the shutdown notify.

@@ -257,9 +257,11 @@ First-writer-wins. Other nodes get `Ok(false)` and skip. Identical pattern to po
 
 ### 5.3 Backend implications
 
-- **`in_memory` StorageEngine** — node-local. Multi-instance dedupe **does not work**; every node fires every tick. Acceptable for single-node dev only. Validator emits `W011` warning if Cron views are declared with in-memory storage.
-- **`sqlite`** — node-local file. Same caveat as in-memory unless the SQLite file is on a shared filesystem (uncommon, fragile). Same `W011`.
+- **`memory` StorageEngine** — node-local. Multi-instance dedupe **does not work**; every node fires every tick. Acceptable for single-node dev only. `riversd` emits `W011` at startup if Cron views are declared with this backend.
+- **`sqlite`** — node-local file. Same caveat as `memory` unless the SQLite file is on a shared filesystem (uncommon, fragile). Same `W011`.
 - **`redis`** — shared across cluster. Required for multi-instance Cron deployments.
+
+The backend string values match the riversd config: `[storage_engine] backend ∈ {"memory", "sqlite", "redis"}`.
 
 ### 5.4 Clock skew tolerance
 
@@ -354,10 +356,10 @@ Enforced at config load time (Layer 1 + Layer 3).
 
 ### 8.3 Cluster (startup)
 
-| Rule | Severity |
-|---|---|
-| Cron views declared, `[storage_engine]` not configured | error (server refuses to start) |
-| Cron views declared, storage backend in `{in_memory, sqlite}` | warning `W011` (logged at startup) |
+| Rule | Severity | Surface |
+|---|---|---|
+| Cron views declared, `[storage_engine]` not configured | error | `ServerError::Config` returned from `load_and_wire_bundle` — server refuses to start |
+| Cron views declared, storage backend `∈ {memory, sqlite}` | warning | `tracing::warn!` at startup with `code = "W011"` — multi-instance dedupe broken |
 
 ---
 

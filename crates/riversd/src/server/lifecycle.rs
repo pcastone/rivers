@@ -320,12 +320,21 @@ pub async fn run_server_no_ssl(
         None
     };
 
+    // Clone the cron scheduler handle out of ctx before `build_main_router`
+    // consumes it — we want to drain the scheduler after axum::serve returns.
+    let cron_scheduler = ctx.cron_scheduler.clone();
     let router = build_main_router(ctx);
 
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal(shutdown_rx))
         .await
         .map_err(|e| ServerError::Serve(format!("server error: {e}")))?;
+
+    // Stop the cron scheduler — cooperative notify + per-loop join. Runs
+    // before admin abort so the cron loops can complete in-flight ticks.
+    if let Some(scheduler) = cron_scheduler.lock().await.take() {
+        scheduler.shutdown().await;
+    }
 
     // Abort admin server if running
     if let Some(handle) = admin_handle {
@@ -764,6 +773,12 @@ pub async fn run_server_with_listener_and_log(
     // Graceful shutdown sequence per spec §13
     shutdown_clone.mark_draining();
     shutdown_clone.wait_for_drain().await;
+
+    // Stop the cron scheduler — cooperative notify, then per-loop join
+    // (with a 5s timeout fallback inside `CronScheduler::shutdown`).
+    if let Some(scheduler) = ctx.cron_scheduler.lock().await.take() {
+        scheduler.shutdown().await;
+    }
 
     // Flush per-app logs before exit
     if let Some(router) = rivers_runtime::rivers_core::app_log_router::global_router() {

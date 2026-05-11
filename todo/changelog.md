@@ -1,5 +1,39 @@
 # Changelog
 
+## 2026-05-10 — Sprint 2026-05-09 Track 3 follow-ups: graceful shutdown, W011 warning, hard-fail on missing storage
+
+Three small gaps in the initial Track 3 ship, addressed before merge:
+
+| File | Change | Spec ref |
+|------|--------|----------|
+| `crates/riversd/src/server/lifecycle.rs` | `CronScheduler::shutdown()` wired into both server paths (no_ssl + TLS). No_ssl: clone the `Arc<Mutex<Option<CronScheduler>>>` out of `ctx` before `build_main_router` consumes it; after `axum::serve` returns, `.lock().await.take()` and `.shutdown().await`. TLS: same shape after `wait_for_drain`. Loops exit cooperatively instead of being aborted on tokio-runtime drop. | spec §4 (tick lifecycle) |
+| `crates/riversd/src/bundle_loader/load.rs` | Missing-storage path now returns `ServerError::Config` with a clear remediation message instead of `tracing::error!` + continuing. Server refuses to start when Cron views are declared but `[storage_engine]` is not. | spec §7.1, §8.3 |
+| `crates/riversd/src/bundle_loader/load.rs` | New `W011` warning at startup when `[storage_engine].backend ∈ {"memory", "sqlite"}` and any Cron view is declared. `tracing::warn!` with `code = "W011"` field. Operators see the multi-instance-dedupe gap loudly. | spec §5.3, §8.3 |
+| `crates/rivers-runtime/src/validate_result.rs` | `W011` added to the error-code catalog. | |
+| `docs/arch/rivers-cron-view-spec.md` §5.3 + §8.3 | Backend names aligned to the actual riversd config (`memory`/`sqlite`/`redis`, not `in_memory`). Surface column added to §8.3 startup-rule table to spell out where each rule fires. | |
+| `crates/riversd/src/cron/mod.rs` | Doc comment on `CronScheduler` references the shutdown-wiring site. | |
+| `Cargo.toml` (workspace) | Build-stamp-only bump. | CLAUDE.md versioning |
+
+**Why these were follow-ups vs in the initial ship:** all three were
+discovered post-implementation while answering "are there any deferred
+items?" The graceful-shutdown wiring closes a real (if low-blast-radius)
+gap; the storage-missing path was a spec/impl mismatch; the W011 warning
+surfaces an operator footgun that was silently happening.
+
+**Tests:** No new tests. The shutdown path is the harder one to assert in
+unit form (graceful-shutdown coordination needs a running server); the
+two bundle-load gates are linear control flow with no branching beyond
+the assertions themselves. `cargo test --workspace --lib` 1514/0/23
+ignored — no regressions. Sprint e2e suite 10/10 + 15/15 — no
+regressions.
+
+**No version-number bump** — these are bug fixes / spec-compliance
+tightenings that further fulfill the v0.61.0 minor bump's "genuinely new
+conceptual capability" promise; the build-stamp refresh covers the PR
+hygiene rule.
+
+---
+
 ## 2026-05-10 — Sprint 2026-05-09 Track 3: P1.14 cron view (`view_type = "Cron"`)
 
 Closes the last outstanding ask from CB's 2026-05-09 probe filing
