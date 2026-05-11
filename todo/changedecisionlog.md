@@ -6,6 +6,30 @@ readers.
 
 ---
 
+### CB-OTLP-D3 — 2026-05-11 — Track O2: OTLP dispatcher reuses `TaskKind::Rest` (no new variant)
+
+**File affected:** `crates/riversd/src/server/otlp_view.rs`
+**Spec reference:** `rivers-otlp-view-spec.md` §14.1 (Code Reuse table)
+**Decision:** OTLP handler dispatch goes through `process_pool::dispatch` with `TaskKind::Rest`, not a new `TaskKind::Otlp` variant. The dispatch payload differs from REST (carries `ctx.otel` alongside `ctx.request`), but the *capability surface* the handler sees is identical: `Rivers.db.*`, `Rivers.crypto.*`, `Rivers.log.*`, `Rivers.keystore` — same wire_datasources path, same task_enrichment::enrich, same TaskContextBuilder. A new TaskKind variant would have meant patching the engine ABI, every gating site in `host_callbacks`, and the polling/MCP/SSE switches that already enumerate the closed set. No capability difference justified that churn.
+
+**Trade-off:** Per-signal Prometheus metrics that label by `task_kind` (none currently exist) would lump OTLP work in with REST. Mitigated by the dedicated `rivers_otlp_*` metric family (Track O5.1, 7 metrics with `view`/`signal`/`encoding` labels) — operators slice by view/signal, not by task_kind.
+
+**Resolution method:** Read existing TaskKind sites (`process_pool::TaskKind` enum + every match in `task_enrichment`, `cron`, `mcp::dispatch`, `view_engine::pipeline`); confirmed no capability-gating site needed a new arm.
+
+---
+
+### CB-OTLP-D4 — 2026-05-11 — Track O2: protobuf-out negotiation deferred; OTLP responses are always JSON
+
+**File affected:** `crates/riversd/src/server/otlp_view.rs` (response shaping)
+**Spec reference:** `rivers-otlp-view-spec.md` §7 + §13 non-goals
+**Decision:** Even when the inbound request was `application/x-protobuf`, the response is `application/json` (an empty `{}` or a `{partialSuccess: {...}}` envelope). The OTLP/HTTP spec allows protobuf responses, but every real-world client we sampled (OTel SDK JS/Python/Go, OTel Collector) accepts JSON responses without complaint. Symmetrically encoding the response shaved an entire prost roundtrip without measurable benefit.
+
+**Reversibility:** trivial — add a content-negotiation step on the response side; the prost types are already wired for protobuf-in.
+
+**Resolution method:** Sampled the OTel SDK accept-header behavior in their respective sources; confirmed all SDKs send `Accept: application/json` or accept-anything. Added the carve-out to spec §13 non-goals.
+
+---
+
 ### CB-OTLP-D1 — 2026-05-11 — Track O1: OTLP errors use S005 + `[X-OTLP-N]` markers, not new per-rule codes
 
 **File affected:** `crates/rivers-runtime/src/validate_structural.rs`, `crates/rivers-runtime/src/validate_result.rs`

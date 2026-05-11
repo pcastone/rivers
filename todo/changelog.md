@@ -1,5 +1,50 @@
 # Changelog
 
+## 2026-05-11 — CB-OTLP Tracks O2 + O3 + O5: dispatcher, per-signal coverage, metrics, tutorial
+
+Builds on Track O1 (validator). With this entry CB-OTLP is feature-complete
+modulo the deferred items (Track O4 bearer auth via guard_view per
+CB-OTLP-D2; CB probe rerun pending infra). Operators can declare a working
+`view_type = "OTLP"` view, ingest JSON or protobuf with optional gzip/
+deflate compression, dispatch per-signal handlers, surface OTLP
+partial-success responses, and observe the whole pipeline through seven
+new Prometheus metrics.
+
+| File | Change | Spec ref | Resolution |
+|------|--------|----------|------------|
+| `crates/riversd/Cargo.toml` | Added `flate2 = "1"` direct dep. Was available transitively via reqwest/tower-http; required as a direct dep to import `flate2::read::{GzDecoder, DeflateDecoder}`. | spec §4.2 | O2.1 |
+| `crates/rivers-engine-v8/src/execution.rs` | Mirror the existing `ctx.request`/`ctx.session`/`ctx.ws` injection block to expose `ctx.otel` to JS handlers when the `args` payload carries an `otel` key. 8 lines. No `SerializedTaskContext` schema change. | spec §6.1 | O2.2 — `execute_exposes_ctx_otel` + `execute_otel_handler_can_return_partial_success` tests verify. |
+| `crates/rivers-runtime/src/view.rs` | `ApiViewConfig` gained `handlers: Option<HashMap<String, HandlerConfig>>` and `max_body_mb: Option<u32>`. `handler` field defaulted (via `#[serde(default = "default_handler")]`) to `HandlerConfig::None{}` so OTLP views with only `handlers.*` deserialize cleanly. | spec §3 | O2.3 |
+| ~23 existing test-helper struct-literal sites | Added `handlers: None, max_body_mb: None,` mechanically via one-off Python script. No semantic change. | — | O2.3 |
+| `crates/riversd/src/view_engine/router.rs` | `ViewRouter::from_views` registers three POST routes per OTLP view (one per signal under the declared root path). Also added explicit `Cron` skip parity with `MessageConsumer`. | spec §5 | O2 — required to actually match `/otel/v1/<signal>` paths. |
+| `crates/riversd/src/server/otlp_view.rs` | **New ~700-line module.** Pure helpers (`decompress_body`, `decode_body`, `signal_from_path`, `rejected_field_for_signal`, `shape_response_body`, `pick_handler`, `decode_failure_reason`, `strip_signal_suffix`) plus the orchestrator `execute_otlp_view`. Internal `otlp_metrics` submodule wraps the seven Prometheus metric points. | spec §§4-7, §11 | O2.4 + O2.5 + O5.1 |
+| `crates/riversd/src/server/mod.rs` + `view_dispatch.rs` | Module declaration + `"OTLP" => execute_otlp_view(...).await` branch in the view_type switch. | spec §1 | O2.5 |
+| `crates/riversd/tests/otlp_view_tests.rs` | **New integration test file** (12 tests). Exercises router → view-match → body extraction → decompression → transcode → signal-route → dispatch-reach. Tests that POST identity / gzip / deflate JSON to each signal, that oversized bodies → 413, unsupported encodings → 415, malformed payloads → 400/415, single-handler form dispatches all three signals, single-handler protobuf path covers per-signal transcoder routing. | spec §4-7 | O2.7 + O3.2 |
+| Same module (`server/otlp_view.rs`) — test submodule | Unit tests for `pick_handler` (multi-form per-signal, single-form fall-through, partial-multi-form → `SignalNotConfigured`) plus `strip_signal_suffix` and `decode_failure_reason` coverage. | spec §3 + §11 | O3.1 + O5.1 |
+| `docs/guide/tutorials/tutorial-otlp.md` | **New tutorial.** When to use, multi-handler / single-handler forms, partial signals, configuration reference, validator codes, wire-format details (Content-Type, Content-Encoding, size limits), auth via guard_view, observability (the 7 metrics with reason-label catalog), failure semantics, v1 non-goals. | spec §§3-13 | O5.2 |
+| `todo/changedecisionlog.md` | Added CB-OTLP-D3 (TaskKind::Rest reuse vs new variant) and CB-OTLP-D4 (JSON-only responses; protobuf-out deferred). D1+D2 already shipped with O1. | — | O5.3 |
+
+**Test totals:**
+- `rivers-runtime --lib`: 284/284 (unchanged — O1 covers structural validation)
+- `rivers-engine-v8 --lib`: 24/24 (+2 ctx.otel tests in O2)
+- `riversd --lib`: 524/524 (+22 unit tests in server::otlp_view across O2+O3+O5)
+- `riversd --test otlp_view_tests`: 12/12 (new integration suite, O2+O3)
+
+**Validator-vs-runtime parity follow-up (still open):** spec §8 still
+describes `auth = "bearer"` as P1.12-pending. The implementation
+landed in O1 with `[X-OTLP-3]` rejecting any auth value other than
+`"none"`, per CB-OTLP-D2 (use `guard_view` for bearer-style auth). Spec
+§8 amendment to remove "P1.12 pending" wording is captured as a
+follow-up — not in this commit train.
+
+**End-to-end smoke (O5.6) is deferred:** the integration tests prove
+the framework REACHES handler dispatch but no V8 engine is loaded in
+the unit-test harness, so the "JS handler reads ctx.otel.kind and the
+framework shapes a `partialSuccess` response from the return value"
+path is verified piecewise (V8 layer + framework layer in isolation),
+not end-to-end. CB's `run-probe.sh` is the canonical end-to-end smoke;
+recommend running it against a built riversd before merging the PR.
+
 ## 2026-05-11 — CB-OTLP Track O1: validator-side acceptance of `view_type = "OTLP"`
 
 CB filed `cb-rivers-otlp-feature-request.zip` (2026-05-11) asking for a

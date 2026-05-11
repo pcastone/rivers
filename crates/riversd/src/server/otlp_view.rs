@@ -27,6 +27,92 @@ use serde_json::{json, Value};
 use crate::server::context::AppContext;
 use crate::server::view_dispatch::MatchedRoute;
 
+// ── Prometheus metrics (CB-OTLP Track O5, spec §11) ──────────────
+//
+// Metric names follow the existing `rivers_*` prefix used elsewhere
+// (`rivers_http_*`, `rivers_cron_*`, etc.). Registration is automatic via
+// the `metrics` crate facade when riversd is built with the `metrics`
+// feature — same pattern as `cron::cron_metrics`.
+
+mod otlp_metrics {
+    use metrics::{counter, histogram};
+
+    /// Strip the per-signal suffix from a router-internal view id (e.g.
+    /// `"otel_ingest:metrics"` → `"otel_ingest"`). The router registers one
+    /// route per signal underneath each OTLP view; the metric `view` label
+    /// should be the operator-facing view name, not the synthesised id.
+    pub fn strip_signal_suffix(view_id: &str) -> &str {
+        view_id.rsplit_once(':').map(|(v, _)| v).unwrap_or(view_id)
+    }
+
+    pub fn record_request(view: &str, signal: &str, encoding: &str, status: u16) {
+        counter!(
+            "rivers_otlp_requests_total",
+            "view" => view.to_string(),
+            "signal" => signal.to_string(),
+            "encoding" => encoding.to_string(),
+            "status" => status.to_string(),
+        )
+        .increment(1);
+    }
+
+    pub fn record_decode_failure(view: &str, signal: &str, reason: &str) {
+        counter!(
+            "rivers_otlp_decode_failures_total",
+            "view" => view.to_string(),
+            "signal" => signal.to_string(),
+            "reason" => reason.to_string(),
+        )
+        .increment(1);
+    }
+
+    pub fn record_partial_success(view: &str, signal: &str) {
+        counter!(
+            "rivers_otlp_partial_success_total",
+            "view" => view.to_string(),
+            "signal" => signal.to_string(),
+        )
+        .increment(1);
+    }
+
+    pub fn record_rejected_points(view: &str, signal: &str, n: u64) {
+        counter!(
+            "rivers_otlp_rejected_points_total",
+            "view" => view.to_string(),
+            "signal" => signal.to_string(),
+        )
+        .increment(n);
+    }
+
+    pub fn observe_request_bytes(view: &str, signal: &str, encoding: &str, n: usize) {
+        histogram!(
+            "rivers_otlp_request_bytes",
+            "view" => view.to_string(),
+            "signal" => signal.to_string(),
+            "encoding" => encoding.to_string(),
+        )
+        .record(n as f64);
+    }
+
+    pub fn observe_decoded_bytes(view: &str, signal: &str, n: usize) {
+        histogram!(
+            "rivers_otlp_decoded_bytes",
+            "view" => view.to_string(),
+            "signal" => signal.to_string(),
+        )
+        .record(n as f64);
+    }
+
+    pub fn observe_dispatch_duration_ms(view: &str, signal: &str, ms: f64) {
+        histogram!(
+            "rivers_otlp_dispatch_duration_ms",
+            "view" => view.to_string(),
+            "signal" => signal.to_string(),
+        )
+        .record(ms);
+    }
+}
+
 /// Default body-size cap (megabytes) when the view does not set `max_body_mb`.
 /// Matches the OTLP/HTTP recommendation per `rivers-otlp-view-spec.md` §4.3.
 const DEFAULT_MAX_BODY_MB: u32 = 4;
@@ -263,6 +349,21 @@ pub(crate) fn pick_handler<'a>(
     Ok(&matched.config.handler)
 }
 
+/// Map an `OtlpError` to the `reason` label used by
+/// `rivers_otlp_decode_failures_total`. Each reason corresponds to a
+/// rejection class enumerated in `rivers-otlp-view-spec.md` §11.
+fn decode_failure_reason(err: &OtlpError) -> &'static str {
+    match err {
+        OtlpError::BodyTooLarge { .. } => "size_pre",
+        OtlpError::UnsupportedEncoding(_) => "encoding",
+        OtlpError::UnsupportedContentType(_) => "content_type",
+        OtlpError::DecompressionFailed(_) => "decompress",
+        OtlpError::JsonParseFailed(_) => "json",
+        OtlpError::ProtobufDecodeFailed(_) => "protobuf",
+        OtlpError::UnknownSignal(_) | OtlpError::SignalNotConfigured(_) => "signal",
+    }
+}
+
 /// Execute an OTLP/HTTP request against the matched OTLP view.
 pub(crate) async fn execute_otlp_view(
     ctx: AppContext,
@@ -276,6 +377,14 @@ pub(crate) async fn execute_otlp_view(
         .filter_map(|(k, v)| v.to_str().ok().map(|val| (k.to_string(), val.to_string())))
         .collect();
 
+    let view_name = otlp_metrics::strip_signal_suffix(&matched.view_id).to_string();
+
+    // The signal is determined by the request path — we resolve it early so
+    // metric labels are populated even when we reject the request before
+    // dispatch. If the path doesn't match a canonical signal we use
+    // "unknown" as a placeholder so we still emit a request counter.
+    let kind_for_metrics: &str = signal_from_path(&path).unwrap_or("unknown");
+
     let max_body_mb = matched.config.max_body_mb.unwrap_or(DEFAULT_MAX_BODY_MB);
     let raw_cap: u64 = (max_body_mb as u64) * 1024 * 1024;
     let decompressed_cap: u64 = raw_cap.saturating_mul(DECOMPRESSED_AMPLIFICATION_FACTOR);
@@ -284,46 +393,71 @@ pub(crate) async fn execute_otlp_view(
     let body_bytes = match axum::body::to_bytes(request.into_body(), raw_cap as usize + 1).await {
         Ok(b) => b,
         Err(_) => {
-            return OtlpError::BodyTooLarge {
+            let err = OtlpError::BodyTooLarge {
                 observed: 0,
                 limit_bytes: raw_cap,
-            }
-            .into_response();
+            };
+            otlp_metrics::record_decode_failure(&view_name, kind_for_metrics, decode_failure_reason(&err));
+            otlp_metrics::record_request(&view_name, kind_for_metrics, "unknown", err.status().as_u16());
+            return err.into_response();
         }
     };
     if body_bytes.len() as u64 > raw_cap {
-        return OtlpError::BodyTooLarge {
+        let err = OtlpError::BodyTooLarge {
             observed: body_bytes.len(),
             limit_bytes: raw_cap,
-        }
-        .into_response();
+        };
+        otlp_metrics::record_decode_failure(&view_name, kind_for_metrics, decode_failure_reason(&err));
+        otlp_metrics::record_request(&view_name, kind_for_metrics, "unknown", err.status().as_u16());
+        return err.into_response();
     }
 
     // ── 2. Decompress per Content-Encoding ──
     let encoding_header = headers.get("content-encoding").map(|s| s.as_str());
     let decompressed = match decompress_body(&body_bytes, encoding_header, decompressed_cap) {
         Ok(b) => b,
-        Err(e) => return e.into_response(),
+        Err(e) => {
+            otlp_metrics::record_decode_failure(&view_name, kind_for_metrics, decode_failure_reason(&e));
+            otlp_metrics::record_request(&view_name, kind_for_metrics, "unknown", e.status().as_u16());
+            return e.into_response();
+        }
     };
 
     // ── 3. Decode per Content-Type (json passthrough or protobuf transcode) ──
     let content_type_header = headers.get("content-type").map(|s| s.as_str());
     let (payload, encoding_label) = match decode_body(&decompressed, content_type_header, &path) {
         Ok(p) => p,
-        Err(e) => return e.into_response(),
+        Err(e) => {
+            otlp_metrics::record_decode_failure(&view_name, kind_for_metrics, decode_failure_reason(&e));
+            otlp_metrics::record_request(&view_name, kind_for_metrics, "unknown", e.status().as_u16());
+            return e.into_response();
+        }
     };
 
-    // ── 4. Signal routing ──
+    // ── 4. Signal routing (now strict — path must match a canonical signal) ──
     let kind = match signal_from_path(&path) {
         Ok(k) => k,
-        Err(e) => return e.into_response(),
+        Err(e) => {
+            otlp_metrics::record_decode_failure(&view_name, kind_for_metrics, decode_failure_reason(&e));
+            otlp_metrics::record_request(&view_name, kind_for_metrics, encoding_label, e.status().as_u16());
+            return e.into_response();
+        }
     };
 
     // ── 5. Pick handler ──
     let handler = match pick_handler(&matched, kind) {
         Ok(h) => h,
-        Err(e) => return e.into_response(),
+        Err(e) => {
+            otlp_metrics::record_decode_failure(&view_name, kind, decode_failure_reason(&e));
+            otlp_metrics::record_request(&view_name, kind, encoding_label, e.status().as_u16());
+            return e.into_response();
+        }
     };
+
+    // Pre-dispatch byte-size observations (records inbound shape regardless
+    // of handler outcome).
+    otlp_metrics::observe_request_bytes(&view_name, kind, encoding_label, body_bytes.len());
+    otlp_metrics::observe_decoded_bytes(&view_name, kind, decompressed.len());
 
     let (module, entrypoint, language, _resources) = match handler {
         HandlerConfig::Codecomponent {
@@ -391,9 +525,10 @@ pub(crate) async fn execute_otlp_view(
     drop(dv_guard);
 
     let task_ctx = match builder.build() {
-        Ok(t) => t,
+        Ok(e) => e,
         Err(e) => {
             tracing::error!(trace_id = %trace_id, kind = %kind, "OTLP task build failed: {}", e);
+            otlp_metrics::record_request(&view_name, kind, encoding_label, 500);
             return Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .header("content-type", "application/json")
@@ -409,6 +544,7 @@ pub(crate) async fn execute_otlp_view(
         Ok(r) => r,
         Err(e) => {
             tracing::error!(trace_id = %trace_id, kind = %kind, "OTLP handler error: {}", e);
+            otlp_metrics::record_request(&view_name, kind, encoding_label, 500);
             return Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .header("content-type", "application/json")
@@ -418,16 +554,31 @@ pub(crate) async fn execute_otlp_view(
                 .unwrap_or_else(|_| Response::new(Body::empty()));
         }
     };
-    let dispatch_ms = dispatch_start.elapsed().as_millis() as u64;
+    let dispatch_ms = dispatch_start.elapsed().as_millis() as f64;
+    otlp_metrics::observe_dispatch_duration_ms(&view_name, kind, dispatch_ms);
     tracing::info!(
         trace_id = %trace_id,
         kind = %kind,
         encoding = %encoding_label,
         body_bytes = body_bytes.len(),
         decoded_bytes = decompressed.len(),
-        duration_ms = dispatch_ms,
+        duration_ms = dispatch_ms as u64,
         "OTLP request handled"
     );
+
+    // Handler-reported rejection metrics — only meaningful when the handler
+    // ran to completion and returned a numeric `rejected`.
+    let rejected = result
+        .value
+        .get("rejected")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if rejected > 0 {
+        otlp_metrics::record_partial_success(&view_name, kind);
+        otlp_metrics::record_rejected_points(&view_name, kind, rejected);
+    }
+
+    otlp_metrics::record_request(&view_name, kind, encoding_label, 200);
 
     let response_body = shape_response_body(&result.value, kind);
     Response::builder()
@@ -692,6 +843,70 @@ mod tests {
                 other => panic!("expected codecomponent, got {:?}", other),
             }
         }
+    }
+
+    #[test]
+    fn strip_signal_suffix_handles_synthesised_and_bare_ids() {
+        // Router-internal IDs are `<view>:<signal>` (see view_engine::router
+        // from_views — registers 3 routes per OTLP view). The metric `view`
+        // label should be the operator-facing view name without the suffix.
+        assert_eq!(
+            otlp_metrics::strip_signal_suffix("otel_ingest:metrics"),
+            "otel_ingest"
+        );
+        assert_eq!(
+            otlp_metrics::strip_signal_suffix("otel_ingest:traces"),
+            "otel_ingest"
+        );
+        // Bare id with no signal suffix (defensive — not produced by our
+        // router but exercised here so the helper is forgiving).
+        assert_eq!(otlp_metrics::strip_signal_suffix("bare"), "bare");
+        // Multi-colon: only the last `:` is the signal separator.
+        assert_eq!(
+            otlp_metrics::strip_signal_suffix("ns:view:logs"),
+            "ns:view"
+        );
+    }
+
+    #[test]
+    fn decode_failure_reason_covers_every_error_variant() {
+        // Each OtlpError variant must map to a stable `reason` label so
+        // operators can build alerts on specific failure classes.
+        assert_eq!(
+            decode_failure_reason(&OtlpError::BodyTooLarge {
+                observed: 0,
+                limit_bytes: 0
+            }),
+            "size_pre"
+        );
+        assert_eq!(
+            decode_failure_reason(&OtlpError::UnsupportedEncoding("br".into())),
+            "encoding"
+        );
+        assert_eq!(
+            decode_failure_reason(&OtlpError::UnsupportedContentType("text/plain".into())),
+            "content_type"
+        );
+        assert_eq!(
+            decode_failure_reason(&OtlpError::DecompressionFailed("oops".into())),
+            "decompress"
+        );
+        assert_eq!(
+            decode_failure_reason(&OtlpError::JsonParseFailed("oops".into())),
+            "json"
+        );
+        assert_eq!(
+            decode_failure_reason(&OtlpError::ProtobufDecodeFailed("oops".into())),
+            "protobuf"
+        );
+        assert_eq!(
+            decode_failure_reason(&OtlpError::UnknownSignal("/v1/wat".into())),
+            "signal"
+        );
+        assert_eq!(
+            decode_failure_reason(&OtlpError::SignalNotConfigured("logs".into())),
+            "signal"
+        );
     }
 
     #[test]
