@@ -674,6 +674,60 @@ fn check_view_refs(
             }
         }
 
+        // CB-OTLP Track O1.3: also walk per-signal `handlers.*` for resource
+        // cross-ref. The map keys are guaranteed to be one of
+        // {metrics, logs, traces} by the structural validator; we still
+        // tolerate unknown keys defensively (skip them — structural will
+        // have already flagged them as `[X-OTLP-2]`).
+        if let Some(ref otlp_handlers) = view.handlers {
+            for (signal, h) in otlp_handlers {
+                if let HandlerConfig::Codecomponent { resources, .. } = h {
+                    for res in resources {
+                        if resource_ds_names.contains(res.as_str()) {
+                            results.push(
+                                ValidationResult::pass(
+                                    format!("{}/app.toml", app_name),
+                                    format!(
+                                        "View '{}' handlers.{} resource '{}' resolved",
+                                        view_name, signal, res,
+                                    ),
+                                )
+                                .with_app(app_name)
+                                .with_crossref(
+                                    format!(
+                                        "api.views.{}.handlers.{}.resources",
+                                        view_name, signal
+                                    ),
+                                    res.as_str(),
+                                    "datasource",
+                                ),
+                            );
+                        } else {
+                            results.push(
+                                ValidationResult::fail(
+                                    error_codes::X003,
+                                    format!("{}/app.toml", app_name),
+                                    format!(
+                                        "View '{}' handlers.{} resource '{}' not declared in {}/resources.toml",
+                                        view_name, signal, res, app_name,
+                                    ),
+                                )
+                                .with_app(app_name)
+                                .with_crossref(
+                                    format!(
+                                        "api.views.{}.handlers.{}.resources",
+                                        view_name, signal
+                                    ),
+                                    res.as_str(),
+                                    "datasource",
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         // X014: `guard_view = "name"` cross-reference + chain validation.
         //
         // Walks the chain starting at the protected view's `guard_view`
@@ -1829,6 +1883,140 @@ mod tests {
             .find(|r| r.error_code.as_deref() == Some(error_codes::X003))
             .unwrap();
         assert!(fail.message.contains("missing-db"));
+    }
+
+    // ── X003 — CB-OTLP Track O1.3 — per-signal handlers.{metrics,logs,traces} ──
+
+    fn otlp_view_with_handlers(
+        metrics_res: Vec<String>,
+        logs_res: Vec<String>,
+        traces_res: Vec<String>,
+    ) -> ApiViewConfig {
+        let mut hs: HashMap<String, HandlerConfig> = HashMap::new();
+        hs.insert(
+            "metrics".into(),
+            HandlerConfig::Codecomponent {
+                language: "javascript".into(),
+                module: "handlers/otel.js".into(),
+                entrypoint: "ingestMetrics".into(),
+                resources: metrics_res,
+            },
+        );
+        hs.insert(
+            "logs".into(),
+            HandlerConfig::Codecomponent {
+                language: "javascript".into(),
+                module: "handlers/otel.js".into(),
+                entrypoint: "ingestLogs".into(),
+                resources: logs_res,
+            },
+        );
+        hs.insert(
+            "traces".into(),
+            HandlerConfig::Codecomponent {
+                language: "javascript".into(),
+                module: "handlers/otel.js".into(),
+                entrypoint: "ingestTraces".into(),
+                resources: traces_res,
+            },
+        );
+        let mut v = make_view_codecomponent(vec![]);
+        // OTLP view: handlers.* is the dispatch target; the top-level
+        // `handler:` is None so the runtime only sees the per-signal map.
+        v.view_type = "OTLP".into();
+        v.path = Some("/otel".into());
+        v.method = None;
+        v.handler = HandlerConfig::None {};
+        v.handlers = Some(hs);
+        v
+    }
+
+    #[test]
+    fn x003_otlp_handlers_resources_resolve() {
+        // Each per-signal handler declares a resource that IS declared in
+        // resources.toml — all three should pass.
+        let mut datasources = HashMap::new();
+        datasources.insert("telemetry-db".into(), make_ds_config("telemetry-db", "faker"));
+
+        let mut views = HashMap::new();
+        views.insert(
+            "otel_ingest".into(),
+            otlp_view_with_handlers(
+                vec!["telemetry-db".into()],
+                vec!["telemetry-db".into()],
+                vec!["telemetry-db".into()],
+            ),
+        );
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("telemetry-db", "faker")],
+            vec![],
+            datasources,
+            HashMap::new(),
+            views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(!has_fail(&results, error_codes::X003),
+            "no X003 expected when handlers.* resources are declared");
+        // Three pass rows, one per signal.
+        let pass_rows: Vec<_> = results.iter()
+            .filter(|r| r.status == ValidationStatus::Pass
+                && r.message.contains("handlers.")
+                && r.message.contains("telemetry-db"))
+            .collect();
+        assert_eq!(pass_rows.len(), 3,
+            "expected one pass per signal, got: {:?}",
+            pass_rows.iter().map(|r| &r.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn x003_otlp_handlers_resource_not_declared() {
+        // handlers.logs declares a resource missing from resources.toml.
+        // X003 should fire with a path label pointing at handlers.logs.
+        let mut datasources = HashMap::new();
+        datasources.insert("telemetry-db".into(), make_ds_config("telemetry-db", "faker"));
+
+        let mut views = HashMap::new();
+        views.insert(
+            "otel_ingest".into(),
+            otlp_view_with_handlers(
+                vec!["telemetry-db".into()],
+                vec!["nope-db".into()],
+                vec!["telemetry-db".into()],
+            ),
+        );
+
+        let app = make_app(
+            "test-app",
+            "app-service",
+            "00000000-0000-0000-0000-000000000001",
+            vec![make_resource_ds("telemetry-db", "faker")],
+            vec![],
+            datasources,
+            HashMap::new(),
+            views,
+        );
+        let bundle = make_bundle(vec![app]);
+        let results = validate_crossref(&bundle);
+
+        assert!(has_fail(&results, error_codes::X003));
+        let fail = results
+            .iter()
+            .find(|r| {
+                r.error_code.as_deref() == Some(error_codes::X003)
+                    && r.message.contains("handlers.logs")
+            })
+            .unwrap_or_else(|| panic!(
+                "expected X003 with handlers.logs in the message; got: {:?}",
+                results.iter().map(|r| &r.message).collect::<Vec<_>>()
+            ));
+        assert!(fail.message.contains("nope-db"),
+            "X003 message should name the missing resource: {}", fail.message);
     }
 
     // ── X004: Invalidates targets ───────────────────────────────────
