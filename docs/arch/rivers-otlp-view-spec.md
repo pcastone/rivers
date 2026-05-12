@@ -5,7 +5,7 @@
 **Status:** Design / Pre-Implementation
 **Patches:** `rivers-view-layer-spec.md`, `rivers-feature-inventory.md`, `rivers-httpd-spec.md`
 **Source ask:** CB OTLP feature request bundle (`cb-rivers-otlp-feature-request.zip`, filed 2026-05-11)
-**Depends on:** P1.6 protobuf transcoder (shipped — [otlp_transcoder.rs](../../crates/riversd/src/otlp_transcoder.rs)); P1.12 `auth = "bearer"` (pending)
+**Depends on:** P1.6 protobuf transcoder (shipped — [otlp_transcoder.rs](../../crates/riversd/src/otlp_transcoder.rs)). Bearer-token auth uses the P1.10 `guard_view` pattern (see §8) — there is no dependency on a `auth = "bearer"` mode.
 
 ---
 
@@ -52,7 +52,7 @@ The cost calculus favors implementing it cleanly rather than continuing to ask e
 ### 1.3 Ownership boundary
 
 - **Framework MUST** — content-type negotiation between JSON and protobuf, gzip/deflate decompression, path-based dispatch to per-signal handlers, partial-success response wrapping, body-size enforcement.
-- **Developer MUST** — per-signal handler bodies (or one handler with a `kind` discriminator), declaring `auth` (when P1.12 lands), declaring resources.
+- **Developer MUST** — per-signal handler bodies (or one handler with a `kind` discriminator), declaring `auth = "none"` (the only accepted value — bearer-style auth uses `guard_view`, see §8), declaring resources.
 - **Framework MUST NOT** — interpret payload semantics beyond decoding the envelope, persist telemetry on the developer's behalf, transform individual data points.
 
 ### 1.4 Precedent in the codebase
@@ -120,7 +120,8 @@ Inbound POST /otel/v1/metrics
 [api.views.otel_ingest]
 path         = "otel"            # framework mounts /otel/v1/{metrics,logs,traces}
 view_type    = "OTLP"
-auth         = "bearer"          # if/when P1.12 lands; "none" otherwise
+auth         = "none"            # the only accepted value (see §8)
+# guard_view = "bearer_check"    # optional — bearer-token preflight
 max_body_mb  = 4                 # OTLP spec default; optional, defaults below
 
 [api.views.otel_ingest.handlers.metrics]
@@ -153,7 +154,7 @@ Partial declarations are allowed: an operator may declare only `handlers.metrics
 [api.views.otel_ingest]
 path         = "otel"
 view_type    = "OTLP"
-auth         = "bearer"
+auth         = "none"
 
 [api.views.otel_ingest.handler]
 type       = "codecomponent"
@@ -174,7 +175,8 @@ The same handler receives all three signal types with `ctx.otel.kind ∈ {"metri
 | `view_type` | yes | — | Must be `"OTLP"` |
 | `path` | yes | — | Root prefix; framework mounts `/v1/{metrics,logs,traces}` underneath |
 | `handlers.metrics` ∨ `handlers.logs` ∨ `handlers.traces` ∨ `handler` | exactly one form, at least one signal | — | Per-signal table or single discriminator handler |
-| `auth` | optional | `"none"` | `"none"` or `"bearer"` only (bearer is P1.12-gated) |
+| `auth` | optional | `"none"` | Must be `"none"` — bearer-style auth uses `guard_view` (see §8) |
+| `guard_view` | optional | — | Name of another view in the same app whose codecomponent runs as a preflight (P1.10); the canonical way to do bearer/HMAC auth on OTLP views |
 | `max_body_mb` | optional | `4` | Per the OTLP/HTTP spec recommendation |
 
 ### 3.4 Forbidden fields
@@ -295,7 +297,7 @@ Handlers receive the standard `ctx` shape plus an `otel` field:
 - `ctx.otel.payload` — the decoded OTLP envelope. Always JSON-shaped (protobuf inputs are transcoded first). For metrics it's `ExportMetricsServiceRequest`, for logs `ExportLogsServiceRequest`, for traces `ExportTraceServiceRequest`. Field naming matches the prost-derived JSON (camelCase keys per the canonical OTLP JSON encoding).
 - `ctx.otel.encoding` — `"json"` if the inbound `Content-Type` was JSON; `"protobuf"` if it was transcoded. Useful for diagnostics and metrics; handlers usually ignore it.
 - `ctx.request.body` is **also** set to `ctx.otel.payload` for handler-code compatibility with REST views.
-- `ctx.session` is populated when `auth = "bearer"` is configured and P1.12 has resolved the token; `null` otherwise.
+- `ctx.session` is `null` for OTLP views — they don't carry sessions. A `guard_view` codecomponent (see §8) can populate principal info on `ctx.request.headers` or via the named-guard envelope before the OTLP handler dispatches.
 
 ### 6.2 Outbound context (what the handler can set)
 
@@ -374,18 +376,49 @@ Content-Type: application/json
 
 ## 8. Auth
 
-`auth = "bearer"` is the only authenticated mode supported for OTLP views. Session auth is rejected at validation (X-OTLP-3) — OTLP clients are stateless and do not carry cookies.
+OTLP views accept **only** `auth = "none"` at the view level. Session auth is rejected at validation (`[X-OTLP-3]`) — OTLP clients are stateless and do not carry cookies. The structural validator also rejects `auth = "bearer"` with `[X-OTLP-3]` and points the operator at `guard_view` (see below) — there is no first-class `auth = "bearer"` mode on any view type.
 
-Bearer auth depends on Rivers P1.12 (per `cb-rivers-feature-request.md`). Until P1.12 lands, the spec calls for `auth = "bearer"` to validate and parse but emit a runtime warning at startup that bearer enforcement is not yet active (matches the pattern used for other pending features). Operators can deploy handlers using the in-handler bearer shim today; switching to `auth = "bearer"` requires no handler changes once P1.12 lands.
+### 8.1 Bearer-token auth via `guard_view`
 
-When `auth = "bearer"` is active, the framework:
+Rivers does not implement bearer-token authentication as an `auth` mode; the project's canonical pattern for bearer auth is a per-view named guard (CB-P1.10, closed-as-superseded for CB-P1.12). The operator declares a `guard_view` whose codecomponent reads `Authorization: Bearer <token>` from `ctx.request.headers`, validates it, and returns `{ allow: true }` to admit the request or any other value to reject with `401`.
 
-1. Reads `Authorization: Bearer <token>` from the request headers.
-2. Resolves the token via the existing P1.12 bearer-auth pipeline.
-3. Populates `ctx.session` with the resolved principal before handler dispatch.
-4. Returns `401 {error: "missing or invalid bearer token"}` on failure.
+Spec reference: `docs/arch/rivers-auth-session-spec.md` §11.5 ("Bearer-token authentication via a named guard") — full recipe with TOML config, TypeScript handler, and operational notes.
 
-`auth = "none"` (the default) skips all of the above — useful for in-cluster ingest where the network boundary provides isolation.
+```toml
+[api.views.otel_ingest]
+path        = "/otel"
+view_type   = "OTLP"
+auth        = "none"          # required for OTLP views
+guard_view  = "bearer_check"  # per-view preflight reads Authorization
+
+[api.views.otel_ingest.handlers.metrics]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/handlers/otel.ts"
+entrypoint = "ingestMetrics"
+resources  = ["telemetry_db"]
+
+# … handlers.logs and handlers.traces …
+
+# The guard view — a regular REST view whose codecomponent runs as a
+# preflight before any OTLP request reaches the per-signal handlers.
+[api.views.bearer_check]
+path      = "/_internal/bearer-check"
+method    = "POST"
+view_type = "Rest"
+auth      = "none"
+
+[api.views.bearer_check.handler]
+type       = "codecomponent"
+language   = "typescript"
+module     = "libraries/guards/bearer.ts"
+entrypoint = "checkBearer"
+resources  = ["auth_db"]
+```
+
+### 8.2 Why not `auth = "bearer"`
+
+CB-P1.12 originally asked for a first-class `auth = "bearer"` view mode. The team closed it as superseded by CB-P1.10 (named guards) — every config knob a `bearer` mode would have needed (token table, hash column, hash algorithm, claims projection, last-used update, audit fields) is a one-liner inside the guard codecomponent. The recipe gives operators more flexibility than a frozen framework primitive would, and stays the single canonical answer across MCP, OTLP, and any future protocol-specific view types. Decision recorded as CB-OTLP-D2 in `todo/changedecisionlog.md`.
 
 ---
 
@@ -405,7 +438,6 @@ Validation runs at the `validate_structural` and `validate_crossref` layers in t
 | X-OTLP-8 | syntax (L4) | A declared `handlers.{signal}` handler's `entrypoint` is not exported from `module`. Emitted as the existing `C002` code (same as single-`handler` form), available when the engine dylib is loaded. | error |
 | X003 | crossref (L3) | A declared `handlers.{signal}` handler's `resources` entry is not declared in `resources.toml`. Reuses the existing `X003` code with `handlers.<signal>` in the message. | error |
 | W-OTLP-1 | structural | `max_body_mb > 16` — likely a misconfiguration; OTLP recommends 4 | warning |
-| W-OTLP-2 | structural | `auth = "bearer"` declared while P1.12 has not yet landed | warning (suppressed once P1.12 ships) |
 
 ---
 
@@ -415,7 +447,8 @@ Validation runs at the `validate_structural` and `validate_crossref` layers in t
 [api.views.<name>]
 view_type    = "OTLP"                # required
 path         = "<prefix>"            # required; framework appends /v1/<signal>
-auth         = "none" | "bearer"     # optional, default "none"
+auth         = "none"                # optional, default "none" (only accepted value)
+guard_view   = "<view-name>"         # optional — bearer-style auth preflight (P1.10)
 max_body_mb  = <integer>             # optional, default 4
 
 # Multi-handler form (any subset of the three signals)
@@ -614,11 +647,12 @@ Requests to `/otel/v1/logs` and `/otel/v1/traces` return `404 {error: "OTLP sign
 
 ### 14.3 Sequencing relative to current sprint
 
-This is **not** on the current sprint per [project_sprint_cb_unblock](file:///Users/pcastone/.claude/projects/-Users-pcastone-Projects-rust-rivers-pub/memory/project_sprint_cb_unblock.md) (probe migration + validator hardening + cron view). Suggested sequencing for the next sprint:
+**Shipped in v0.62.0** (commits `51f524d`..`4d7b01f` on `main`). Sequenced as five tracks, each independently shippable:
 
-1. Land the validator (`validate_otlp_view`) and feature-inventory stub behind a config flag — this alone surfaces the gap clearly in `riverpackage validate`.
-2. Land the dispatcher (`otlp_view.rs`) with multi-handler form. Protobuf path reuses P1.6; gzip is the only net-new wire-format work.
-3. Land the single-handler discriminator form.
-4. Wire `auth = "bearer"` once P1.12 lands.
+1. **O1** — Validator + feature-inventory entry (PR #116). Closes the "Rivers gives no actionable error for OTLP misconfiguration" gap on its own.
+2. **O2** — Dispatcher (`otlp_view.rs`) with multi-handler form, V8 `ctx.otel` injection, body-extraction → decompression → transcode → routing → response shaping (PR #117 commit `997c267`).
+3. **O3** — Single-handler discriminator coverage + `pick_handler` unit tests (PR #117 commit `d7c3bd3`).
+4. **O5** — Prometheus metrics, tutorial, `v0.62.0` minor bump (PR #117 commit `26dfa1c`).
+5. **O5.6 + O1.3** — End-to-end smoke fixture (`tests/fixtures/otlp-probe/`) that caught 5 dispatcher bugs; per-signal `handlers.*` validation across L2/L3/L4 (PR #117 commits `9e56f37` + `e011663`).
 
-Each step is independently shippable. Step 1 alone closes the "Rivers gives no actionable error for OTLP misconfiguration" gap.
+No `auth = "bearer"` sequencing — bearer auth was resolved via `guard_view` per CB-OTLP-D2 (CB-P1.12 closed-as-superseded). See §8.
